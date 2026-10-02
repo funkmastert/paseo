@@ -44,20 +44,29 @@ const LSOF = [
 ].join("\n");
 
 describe("listProcessesInside", () => {
-  test("finds a process by its cwd or by any file it has open inside, once each", async () => {
-    const scan = await listProcessesInside("/wt/feature", {
-      runLsof: async () => LSOF,
-      selfPid: 99,
-      platform: "darwin",
-    });
-    expect(scan).toEqual({
-      kind: "scanned",
-      processes: [
-        { pid: 10, command: "zsh", path: "/wt/feature" },
-        { pid: 11, command: "bun", path: "/wt/feature/Clone/server.log" },
-      ],
-    });
-  });
+  // directoryForms resolves `directory` through node:path's native resolve() before comparing it
+  // against the raw lsof-reported paths above. The injected `platform: "darwin"` only decides the
+  // win32 short-circuit, not which path module parses the rest — on an actual Windows host,
+  // resolve("/wt/feature") drive-prefixes and backslash-ifies it, so it stops matching these
+  // literal POSIX fixture paths. A real win32 daemon never reaches this code at all (the
+  // short-circuit above), so this never occurs outside a test fixture running on the "wrong" host.
+  test.skipIf(process.platform === "win32")(
+    "finds a process by its cwd or by any file it has open inside, once each",
+    async () => {
+      const scan = await listProcessesInside("/wt/feature", {
+        runLsof: async () => LSOF,
+        selfPid: 99,
+        platform: "darwin",
+      });
+      expect(scan).toEqual({
+        kind: "scanned",
+        processes: [
+          { pid: 10, command: "zsh", path: "/wt/feature" },
+          { pid: 11, command: "bun", path: "/wt/feature/Clone/server.log" },
+        ],
+      });
+    },
+  );
 
   test("a sibling whose name starts the same is not inside", async () => {
     const scan = await listProcessesInside("/wt/feature", {

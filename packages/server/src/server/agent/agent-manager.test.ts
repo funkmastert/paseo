@@ -745,7 +745,9 @@ test("uses an injected timeline store without making it a production requirement
     );
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -837,7 +839,9 @@ test("emits agent state for lastActivitySummary only when the summary text actua
     expect(manager.getAgent(agent.id)?.lastActivitySummary).toBe("[Read] src/other.ts");
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -896,7 +900,9 @@ test("an accepted turn publishes one running state, carrying the prompt's activi
     expect(running).toEqual(["[User] Second prompt keeps streaming."]);
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -990,7 +996,9 @@ test("streamed assistant/reasoning deltas never update lastActivitySummary, but 
     expect(manager.getAgent(agent.id)?.lastActivitySummary).toBe("[Read] src/index.ts");
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1057,7 +1065,9 @@ test("rewind clears the stale activity summary from the emitted state", async ()
     expect(emittedSummaries[emittedSummaries.length - 1]).toBeUndefined();
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1114,7 +1124,9 @@ test("emits agent state for mcp_server_statuses only when the statuses actually 
     expect(manager.getAgent(agent.id)?.mcpServerStatuses).toEqual(second);
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1167,7 +1179,9 @@ test("rewind clears the stale mcp_server_statuses from the emitted state (KTD8)"
     expect(manager.getAgent(agent.id)?.mcpServerStatuses).toBeUndefined();
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1211,7 +1225,7 @@ describe("model divergence tracking", () => {
     } finally {
       // setAgentModel persists; let the write land before the directory goes.
       await agent.manager.flush();
-      rmSync(workdir, { recursive: true, force: true });
+      rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
     }
   }
 
@@ -1358,7 +1372,7 @@ test("usage_updated emits once per distinct usage and skips the snapshot write",
     // Live-only: the stored record is byte-identical to before the ticks.
     expect(await storage.get(agentId)).toEqual(recordBefore);
   } finally {
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1388,7 +1402,7 @@ test("turn_completed with a positive turnTokenDelta updates the token-rate bucke
       const agent = manager.getAgent(agentId);
       return { emits, tokenRateBuckets: agent?.tokenRateBuckets, totalTokens: agent?.totalTokens };
     } finally {
-      rmSync(workdir, { recursive: true, force: true });
+      rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
     }
   }
 
@@ -1427,7 +1441,7 @@ test("turn_completed ignores a zero or negative turnTokenDelta", async () => {
     expect(agent?.tokenRateBuckets).toBeUndefined();
     expect(agent?.totalTokens).toBeUndefined();
   } finally {
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1476,7 +1490,9 @@ test("reloading an agent keeps its spend and the governor's fired stages", async
     expect(manager.getSpendGovernorState(agent.id)).toBe(governorState);
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1542,7 +1558,9 @@ test("rewind clears the token-rate buckets and total from the emitted state", as
     expect(emittedTotals[emittedTotals.length - 1]).toBeUndefined();
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1600,7 +1618,9 @@ test("rewind clears tokenBurnAlert and tokenBurnMonitorState from the live agent
     expect(manager.getTokenBurnMonitorState(agent.id)).toBeUndefined();
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1618,7 +1638,7 @@ test("listAgentsForTokenBurnMonitor exposes a lean, scope-neutral view including
       totalTokens: undefined,
     });
   } finally {
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1657,7 +1677,7 @@ test("setTokenBurnAlert emits state and projects tokenBurnAlert on the wire payl
 
     unsubscribe();
   } finally {
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1708,7 +1728,9 @@ test("retries provider history hydration after a stream failure", async () => {
     });
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1735,7 +1757,7 @@ test("a steer the turn cannot take waits for it instead of interrupting it", asy
     );
   } finally {
     await manager.closeAgent(agentId);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1777,7 +1799,9 @@ test("a message sent with no behavior steers into the running turn", async () =>
     expect(session.startPrompts).toEqual(["initial"]);
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1834,7 +1858,9 @@ test("a message waiting for a busy agent is on its record until the turn it wait
     );
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1920,7 +1946,7 @@ test("messages a busy agent was waiting for are delivered, in order, by the next
   } finally {
     await secondDaemon.closeAgent(agent.id).catch(() => undefined);
     await firstDaemon.closeAgent(agent.id).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -1933,7 +1959,7 @@ test("an explicit interrupt still replaces the running turn", async () => {
     expect(session.interruptCount).toBe(1);
   } finally {
     await manager.closeAgent(agentId);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2015,7 +2041,7 @@ test("orders an accepted steer before output emitted while acknowledgement is pe
   } finally {
     release.resolve();
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2071,7 +2097,9 @@ test("orders buffered pre-steer output before an immediately accepted steer", as
     ]);
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2147,7 +2175,7 @@ test("orders a concurrent replacement after a pending accepted steer", async () 
   } finally {
     release.resolve();
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2214,7 +2242,7 @@ test("a waiting message never replaces a newer turn that started while it waited
       consumeB ?? Promise.resolve(),
       new Promise((resolve) => setTimeout(resolve, 100)),
     ]);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2255,7 +2283,9 @@ test("an autonomous turn that cannot take a steer is never interrupted by it", a
     expect(session.interruptCount).toBe(0);
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2311,7 +2341,7 @@ test("a message sent while another message's turn is still starting joins it", a
   } finally {
     startGate.resolve();
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2337,7 +2367,7 @@ test("messages waiting on a busy agent are delivered in the order they were sent
     expect(session.interruptCount).toBe(0);
   } finally {
     await manager.closeAgent(agentId);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2379,7 +2409,9 @@ test("steers a tracked autonomous turn without creating a replacement run", asyn
     );
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2408,7 +2440,7 @@ test("a slash command sent into a running turn waits for it instead of interrupt
     );
   } finally {
     await manager.closeAgent(agentId);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2431,7 +2463,7 @@ test("a provider that cannot steer gets the message after its turn, not an inter
     );
   } finally {
     await manager.closeAgent(agentId);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2471,7 +2503,7 @@ test("ambiguous steer failure leaves the active turn untouched", async () => {
     );
   } finally {
     if (agentId) await manager.closeAgent(agentId);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2511,7 +2543,7 @@ test("steering records concurrent early echoes as canonical submitted prompts", 
     expect(rows.filter((item) => item.clientMessageId === "client-two")).toHaveLength(1);
   } finally {
     if (agentId) await manager.closeAgent(agentId);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2614,7 +2646,7 @@ async function createControlledInterruptFixture(options: {
     },
     async cleanup() {
       await manager.closeAgent(agent.id);
-      rmSync(workdir, { recursive: true, force: true });
+      rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
     },
   };
 }
@@ -2927,7 +2959,7 @@ test("does not persist an initializing session after shutdown closes it", async 
       record: { lastStatus: "closed" },
     });
   } finally {
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -2976,7 +3008,7 @@ test("reload leaves a closed durable snapshot when shutdown starts during the sw
     client.finishClosing();
     await manager.flush().catch(() => undefined);
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -3025,7 +3057,7 @@ test("reload does not create a replacement when the closed snapshot cannot be pe
     client.finishClosing();
     await manager.flushForShutdown().catch(() => undefined);
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -3125,7 +3157,7 @@ test("createAgent forwards request env into the spawned provider process", async
       agentId: "00000000-0000-4000-8000-00000000e001",
     });
   } finally {
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -3632,7 +3664,7 @@ test("reload releases the original writer before resuming the same session", asy
   } finally {
     await client.current?.close();
     await storage.flush();
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -3665,7 +3697,7 @@ test("opening during reload waits for the replacement", async () => {
   } finally {
     client.finishClosing();
     await storage.flush();
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -3689,7 +3721,7 @@ test("closing during reload leaves the replacement closed", async () => {
   } finally {
     client.finishClosing();
     await storage.flush();
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -3717,7 +3749,7 @@ test("retrying a timed-out reload waits for the original close to finish", async
   } finally {
     client.finishClosing();
     await storage.flush();
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -3760,7 +3792,7 @@ test("failed reload retains the closed agent for a later resume", async () => {
     await manager.closeAgent(created.id);
   } finally {
     await storage.flush();
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -3836,7 +3868,7 @@ test.each(["hang", "reject"])(
     } finally {
       await manager.flush();
       await storage.flush();
-      rmSync(workdir, { recursive: true, force: true });
+      rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
     }
   },
 );
@@ -4084,7 +4116,7 @@ test("createAgent passes persistSession to provider create options", async () =>
 
   expect(client.lastCreateOptions).toEqual({ persistSession: false });
 
-  rmSync(workdir, { recursive: true, force: true });
+  rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });
 
 test("createAgent persists workspaceId on the stored record and emits it in the snapshot", async () => {
@@ -4116,7 +4148,7 @@ test("createAgent persists workspaceId on the stored record and emits it in the 
     const record = await storage.get(agent.id);
     expect(record?.workspaceId).toBe("wks_owner");
   } finally {
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -4470,7 +4502,9 @@ test("a session's needs-auth for a server its launch brokered is dropped; other 
     ]);
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    // Windows can hold a just-closed agent's file handle open briefly; retry instead of failing
+    // on an ENOTEMPTY from that race.
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -4808,7 +4842,7 @@ test("createAgent closes and rejects a provider session that cannot honor MCP se
     expect(manager.getAgent(agentId)).toBeNull();
     expect(await storage.get(agentId)).toBeNull();
   } finally {
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -4853,7 +4887,7 @@ test("resumeAgentFromPersistence closes and rejects a session that cannot honor 
     expect(manager.getAgent(agentId)).toBeNull();
     expect(await storage.get(agentId)).toBeNull();
   } finally {
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -4904,7 +4938,7 @@ test("reloadAgentSession preserves the live session when its replacement cannot 
       disabledTools: ["list_agents"],
     });
   } finally {
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -5032,7 +5066,7 @@ test("createAgent allows best-effort internal MCP when the provider session repo
     headers: { Authorization: "Bearer cap-token" },
   });
 
-  rmSync(workdir, { recursive: true, force: true });
+  rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });
 
 test("uses each provider's current policy for new sessions and snapshots it by agent", async () => {
@@ -5148,7 +5182,7 @@ test("uses each provider's current policy for new sessions and snapshots it by a
   await manager.archiveAgent(claudeAgent.id);
   expect(manager.getPaseoToolPolicy(claudeAgent.id)).toBeUndefined();
 
-  rmSync(workdir, { recursive: true, force: true });
+  rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });
 
 test("keeps the global Paseo-tools gate outside provider policy and MCP injection", async () => {
@@ -5211,7 +5245,7 @@ test("keeps the global Paseo-tools gate outside provider policy and MCP injectio
   expect(catalogFactoryCalls).toBe(0);
   expect(disabledManager.getPaseoToolPolicy(disabledAgent.id)).toEqual({ enabled: false });
 
-  rmSync(workdir, { recursive: true, force: true });
+  rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });
 
 test("resumeAgentFromPersistence replaces stored internal paseo MCP with current runtime URL", async () => {
@@ -5658,7 +5692,7 @@ test("retires loaded agents when their plugin provider is replaced", async () =>
     await manager.closeAgent(created.id).catch(() => undefined);
     await manager.flush().catch(() => undefined);
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -5716,7 +5750,7 @@ test("a prompt after provider replacement reopens the stale session", async () =
     await manager.closeAgent(created.id).catch(() => undefined);
     await manager.flush().catch(() => undefined);
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -5790,7 +5824,7 @@ test("a replacement prompt recovers when the retired session fails to start", as
     await manager.closeAgent(created.id).catch(() => undefined);
     await manager.flush().catch(() => undefined);
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -8843,7 +8877,7 @@ test("waitForAgentRunStart ignores a prior turn error while the next run starts"
   } finally {
     releaseRetryStart.resolve();
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -9524,7 +9558,7 @@ test("failed replacement cancellation preserves an autonomous running state", as
       activeForegroundTurnId: null,
     });
   } finally {
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -10521,7 +10555,7 @@ test("acknowledged cancellation settles a pending run before it has a turn id", 
     if (manager.getAgent("00000000-0000-4000-8000-000000000132")) {
       await manager.closeAgent("00000000-0000-4000-8000-000000000132");
     }
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -10680,7 +10714,7 @@ test("native archive and restore release the loaded session writer", async () =>
     expect(client.session?.closed).toBe(false);
   } finally {
     for (const agent of manager.listAgents()) await manager.closeAgent(agent.id);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -12090,7 +12124,7 @@ test("closeAgent persists one final closed snapshot", async () => {
     applySnapshotSpy.mockRestore();
     await manager.flush().catch(() => undefined);
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -12139,7 +12173,7 @@ test("idle agents remain resident until an explicit lifecycle action closes them
     await Promise.all(manager.listAgents().map((agent) => manager.closeAgent(agent.id))).catch(
       () => undefined,
     );
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -12176,7 +12210,7 @@ test("archiving a closed parent still cascades to its managed children", async (
   } finally {
     await manager.flush().catch(() => undefined);
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -12206,7 +12240,7 @@ test("ensureUnarchivedAgentLoaded does not resume an archived agent", async () =
     expect(manager.getAgent(agent.id)).toBeNull();
   } finally {
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -12249,7 +12283,7 @@ test("ensureUnarchivedAgentLoaded closes a runtime archived while it resumes", a
   } finally {
     resumeAllowed.resolve();
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -12298,7 +12332,7 @@ test("ensureUnarchivedAgentLoaded fences an archived agent after joining a share
   } finally {
     resumeAllowed.resolve();
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -12365,7 +12399,7 @@ test("a shared agent load upgrades provider history hydration to broadcast", asy
     historyAllowed.resolve();
     await manager.flush().catch(() => undefined);
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -12428,7 +12462,7 @@ test("explicit close cancels running provider subagents before resume", async ()
       () => undefined,
     );
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -12484,7 +12518,7 @@ test("load waits for an in-flight explicit close and creates one resumed runtime
     closeAllowed.resolve();
     await manager.closeAgent("00000000-0000-4000-8000-000000000216").catch(() => undefined);
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -12523,7 +12557,7 @@ test("concurrent explicit closes tear down the runtime once", async () => {
     expect(closeCount).toBe(1);
   } finally {
     closeAllowed.resolve();
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -12561,7 +12595,7 @@ test("provider close failure still persists and emits a resumable closed agent",
   } finally {
     await manager.closeAgent("00000000-0000-4000-8000-000000000217").catch(() => undefined);
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -12928,7 +12962,7 @@ test("canonical submitted prompt keeps wire identity while rewind resolves provi
   } finally {
     await manager.flush().catch(() => undefined);
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
@@ -13012,7 +13046,7 @@ test("authoritative timeline records a daemon-handled submitted prompt before it
   } finally {
     await manager.flush().catch(() => undefined);
     await storage.flush().catch(() => undefined);
-    rmSync(workdir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 

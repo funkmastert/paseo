@@ -7,6 +7,7 @@ import { buildCheck } from "./build.js";
 import { configCheck } from "./config.js";
 import { diskCheck } from "./disk.js";
 import { readRawConfig } from "./facts.js";
+import { linkCommand, moveAsideCommand } from "./helpers.js";
 import { mcpGatewayCheck } from "./mcp-gateway.js";
 import { pluginCheck } from "./plugins.js";
 import { DOCTOR_CHECKS, runDoctorChecks } from "./runner.js";
@@ -38,8 +39,15 @@ describe("account CLAUDE.md and projects/ links", () => {
       (f) => f.id === "account.claude-md" && f.title.includes(".claude-leader"),
     );
     expect(missing?.status).toBe("fail");
+    // makeContext defaults to a simulated "darwin" regardless of the real host, but the fixture's
+    // own temp-dir path is the real host's — quote() single-quotes it when that real path (e.g. a
+    // Windows CI runner's) carries characters a genuine darwin path never would.
     expect(missing?.fix).toBe(
-      `ln -s ${path.join(fx.home, ".claude", "CLAUDE.md")} ${path.join(fx.home, ".claude-leader", "CLAUDE.md")}`,
+      linkCommand(
+        path.join(fx.home, ".claude", "CLAUDE.md"),
+        path.join(fx.home, ".claude-leader", "CLAUDE.md"),
+        { directory: false, platform: "darwin" },
+      ),
     );
     expect(missing?.why).toMatch(/global CLAUDE\.md/);
   });
@@ -85,10 +93,17 @@ describe("account CLAUDE.md and projects/ links", () => {
     expect(projects?.status).toBe("fail");
     expect(projects?.detail).toMatch(/1 project folder/);
     expect(projects?.fix).toContain(
-      `mv ${path.join(dir, "projects")} ${path.join(dir, "projects.pre-symlink")}`,
+      moveAsideCommand(
+        path.join(dir, "projects"),
+        path.join(dir, "projects.pre-symlink"),
+        "darwin",
+      ),
     );
     expect(projects?.fix).toContain(
-      `ln -s ${path.join(fx.home, ".claude", "projects")} ${path.join(dir, "projects")}`,
+      linkCommand(path.join(fx.home, ".claude", "projects"), path.join(dir, "projects"), {
+        directory: true,
+        platform: "darwin",
+      }),
     );
     expect(projects?.fix).toContain("cp -Rn");
     expect(projects?.why).toMatch(/No conversation found/);
@@ -141,7 +156,9 @@ describe("account login", () => {
     const status = (dir: string) => findings.find((f) => f.title.includes(`${dir} (`))?.status;
     expect(status(".claude-leader")).toBe("fail");
     expect(status(".claude-personal")).toBe("warn");
-    expect(status("/.claude")).toBe("fail");
+    // Looks for the account's own ".claude" and not ".claude-leader"/".claude-personal" by
+    // requiring the path separator right before it — native, not a hardcoded "/".
+    expect(status(`${path.sep}.claude`)).toBe("fail");
     expect(findings.find((f) => f.title.includes(".claude-leader"))?.fix).toBe(
       `CLAUDE_CONFIG_DIR=${path.join(fx.home, ".claude-leader")} claude /login`,
     );
@@ -479,7 +496,9 @@ describe("skills drift", () => {
     expect(drifted?.detail).toContain("missing here: beta");
     expect(drifted?.detail).toContain("different content: alpha");
     expect(drifted?.detail).toContain("only here: stray");
-    expect(drifted?.fix).toContain(`ln -s ${canonical} ${path.join(copy, "skills")}`);
+    expect(drifted?.fix).toContain(
+      linkCommand(canonical, path.join(copy, "skills"), { directory: true, platform: "darwin" }),
+    );
   });
 
   it("lints canonical skills: bad frontmatter, dead symlink, a path in a directory that is gone", async () => {

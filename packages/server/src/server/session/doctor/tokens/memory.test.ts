@@ -18,7 +18,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(root, { recursive: true, force: true });
+  // Windows can hold a just-closed file handle open briefly (antivirus, indexing); retry instead
+  // of failing the whole suite on an EBUSY from a spawned git process's own cleanup race.
+  rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });
 
 describe("stableAuditKey", () => {
@@ -82,7 +84,7 @@ describe("stableAuditKey", () => {
   it("falls back to the absolute path outside a git repository", async () => {
     const file = path.join(root, "CLAUDE.md");
     writeFileSync(file, "no git here");
-    expect(await stableAuditKey(file)).toBe(realpathSync(file));
+    expect(await stableAuditKey(file)).toBe(realpathSync.native(file));
   });
 });
 

@@ -130,7 +130,9 @@ function backupRefs(cwd: string): string[] {
 beforeEach(() => {
   vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
   vi.stubEnv("GIT_CONFIG_SYSTEM", "/dev/null");
-  root = realpathSync(mkdtempSync(join(tmpdir(), "work-snapshot-sweep-")));
+  // .native, not the plain JS walker: on a GitHub-hosted Windows runner TEMP is an 8.3 short
+  // name that only .native (and git's own internal resolution) expands.
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), "work-snapshot-sweep-")));
   remote = join(root, "remote.git");
   git(root, "init", "-q", "--bare", "-b", "main", remote);
   const seed = join(root, "seed");
@@ -316,29 +318,38 @@ describe("AgentWorkSnapshotSweep", () => {
     expect(backupRefs(repo)).toEqual([]);
   });
 
-  test("worktrees under /tmp go first when the per-sweep cap bites", async () => {
-    const tmpParent = realpathSync(mkdtempSync("/tmp/work-snapshot-sweep-"));
-    cleanup.push(tmpParent);
-    // Not `root`: on Linux tmpdir() is /tmp, so both repos would rank as /tmp.
-    const elsewhereParent = realpathSync(mkdtempSync(join(homedir(), ".work-snapshot-sweep-")));
-    cleanup.push(elsewhereParent);
-    const elsewhere = makeRepo(elsewhereParent, "elsewhere");
-    const inTmp = makeRepo(tmpParent, "in-tmp");
-    writeFileSync(join(elsewhere, "README.md"), "wip\n");
-    writeFileSync(join(inTmp, "README.md"), "wip\n");
-    const { sweep } = harness({
-      agents: [
-        view({ id: "a", cwd: elsewhere, archived: true }),
-        view({ id: "b", cwd: inTmp, archived: true }),
-      ],
-      config: { maxPerSweep: 1 },
-    });
+  // "/tmp" is a stand-in for "the OS temp directory", true on POSIX but not on Windows (the real
+  // tmpdir() there is under AppData\Local\Temp; a literal "/tmp" lands on whatever drive the
+  // runner happens to resolve it to, unrelated to tmpdir()), so the ranking this asserts doesn't
+  // hold there.
+  test.skipIf(process.platform === "win32")(
+    "worktrees under /tmp go first when the per-sweep cap bites",
+    async () => {
+      const tmpParent = realpathSync.native(mkdtempSync("/tmp/work-snapshot-sweep-"));
+      cleanup.push(tmpParent);
+      // Not `root`: on Linux tmpdir() is /tmp, so both repos would rank as /tmp.
+      const elsewhereParent = realpathSync.native(
+        mkdtempSync(join(homedir(), ".work-snapshot-sweep-")),
+      );
+      cleanup.push(elsewhereParent);
+      const elsewhere = makeRepo(elsewhereParent, "elsewhere");
+      const inTmp = makeRepo(tmpParent, "in-tmp");
+      writeFileSync(join(elsewhere, "README.md"), "wip\n");
+      writeFileSync(join(inTmp, "README.md"), "wip\n");
+      const { sweep } = harness({
+        agents: [
+          view({ id: "a", cwd: elsewhere, archived: true }),
+          view({ id: "b", cwd: inTmp, archived: true }),
+        ],
+        config: { maxPerSweep: 1 },
+      });
 
-    const report = await sweep.tick();
+      const report = await sweep.tick();
 
-    expect(report?.snapshots.map((entry) => entry.worktreePath)).toEqual([inTmp]);
-    expect(backupRefs(elsewhere)).toEqual([]);
-  });
+      expect(report?.snapshots.map((entry) => entry.worktreePath)).toEqual([inTmp]);
+      expect(backupRefs(elsewhere)).toEqual([]);
+    },
+  );
 
   test("orphaned worktrees under the Paseo root with no active workspace are snapshotted", async () => {
     const worktrees = join(root, "worktrees", "hash1");

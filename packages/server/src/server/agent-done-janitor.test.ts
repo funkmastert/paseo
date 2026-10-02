@@ -1846,17 +1846,22 @@ describe("AgentDoneJanitor empty projects", () => {
     expect(h.removedProjects).toEqual([]);
   });
 
-  test("a root that fails to stat for any reason but ENOENT is kept", async () => {
-    // ENOTDIR: a parent is a file.
-    writeFileSync(join(dir, "a-file"), "x");
-    const h = projectsHarness({
-      projects: [project("under-a-file", { rootPath: join(dir, "a-file", "child") })],
-    });
+  // ENOTDIR (a parent component is a file) only exists as a distinct errno on POSIX; Windows
+  // reports the same fixture as ENOENT, so this would assert the opposite of what it means to.
+  test.skipIf(process.platform === "win32")(
+    "a root that fails to stat for any reason but ENOENT is kept",
+    async () => {
+      // ENOTDIR: a parent is a file.
+      writeFileSync(join(dir, "a-file"), "x");
+      const h = projectsHarness({
+        projects: [project("under-a-file", { rootPath: join(dir, "a-file", "child") })],
+      });
 
-    await h.janitor.tick();
+      await h.janitor.tick();
 
-    expect(h.removedProjects).toEqual([]);
-  });
+      expect(h.removedProjects).toEqual([]);
+    },
+  );
 
   test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     "an unreadable parent (EACCES) keeps the project",
@@ -2154,7 +2159,9 @@ describe("probeProjectRoot", () => {
     expect(await probeProjectRoot(join(dir, "nope"))).toEqual({ kind: "missing" });
   });
 
-  test("ENOTDIR is unknown, not missing", async () => {
+  // ENOTDIR only exists as a distinct errno on POSIX; Windows reports this same fixture
+  // (a parent component is a file) as ENOENT.
+  test.skipIf(process.platform === "win32")("ENOTDIR is unknown, not missing", async () => {
     writeFileSync(join(dir, "f"), "x");
     expect(await probeProjectRoot(join(dir, "f", "child"))).toEqual({
       kind: "unknown",

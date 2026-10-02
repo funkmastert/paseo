@@ -72,7 +72,7 @@ function pruneSharpLibvips(nodeModules, platform, arch) {
   }
 }
 
-function pruneNativeModules(appOutDir, platform, arch, executableName) {
+function getResourcesDir(appOutDir, platform, executableName) {
   const resourcesDir =
     platform === "darwin"
       ? path.join(appOutDir, `${executableName}.app`, "Contents", "Resources")
@@ -89,6 +89,27 @@ function pruneNativeModules(appOutDir, platform, arch, executableName) {
     );
   }
 
+  return resourcesDir;
+}
+
+// bin/paseo and bin/paseo.cmd are checked in with the upstream "Paseo" brand
+// hardcoded (Helper.app name on macOS, main executable name on every
+// platform). A rebranded fork (executableName != "Paseo") ships them
+// unmodified via extraResources, so the shim looks for an executable that
+// was never packaged. Patch the literal brand token post-copy instead of
+// templating the scripts, since this must stay a no-op for upstream.
+function patchCliShim(resourcesDir, platform, executableName) {
+  const shimPath = path.join(resourcesDir, "bin", platform === "win32" ? "paseo.cmd" : "paseo");
+  if (!fs.existsSync(shimPath)) return;
+
+  const original = fs.readFileSync(shimPath, "utf8");
+  const patched = original.replaceAll("Paseo", executableName);
+  if (patched !== original) {
+    fs.writeFileSync(shimPath, patched);
+  }
+}
+
+function pruneNativeModules(resourcesDir, platform, arch) {
   const nodeModules = path.join(resourcesDir, "app.asar.unpacked", "node_modules");
   if (!fs.existsSync(nodeModules)) return;
 
@@ -123,8 +144,10 @@ exports.default = async function afterPack(context) {
   const platform = context.electronPlatformName;
   const arch = ARCH_MAP[context.arch] || process.arch;
   const executableName = resolveExecutableNameFromContext(context);
+  const resourcesDir = getResourcesDir(context.appOutDir, platform, executableName);
 
-  pruneNativeModules(context.appOutDir, platform, arch, executableName);
+  pruneNativeModules(resourcesDir, platform, arch);
+  patchCliShim(resourcesDir, platform, executableName);
 
   if (platform === "linux" || platform === "win32") {
     if (arch !== process.arch) {

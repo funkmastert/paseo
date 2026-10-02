@@ -21,8 +21,6 @@ const desktopPackagePath = new URL("packages/desktop/package.json", repoRoot);
 // .real.e2e.test.ts / .local.e2e.test.ts if they need live provider
 // credentials or a local-only resource (docs/testing.md's naming table).
 const UNWIRED_SERVER_E2E_BACKLOG = new Set([
-  "packages/server/src/server/agent-account-failover-monitor.e2e.test.ts",
-  "packages/server/src/server/agent-done-janitor.e2e.test.ts",
   "packages/server/src/server/agent/activity-summary-recovery.e2e.test.ts",
   "packages/server/src/server/agent/agent-mcp.e2e.test.ts",
   "packages/server/src/server/agent/mcp-parity.e2e.test.ts",
