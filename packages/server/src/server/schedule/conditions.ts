@@ -119,6 +119,26 @@ function evaluateLeaf(
       }
       return { fire: false, reason: "no child has finished since the target last acted" };
     }
+    case "ownsOpenItems":
+    case "itemOverdue":
+    case "idleWithClaimableGate":
+    case "contextAbove":
+      return evaluateItemOrContextLeaf(leaf, input);
+  }
+}
+
+/**
+ * OR-B2's four leaves that read the work queue and the context-usage cache, split out so
+ * `evaluateLeaf`'s own switch stays under the complexity limit.
+ */
+function evaluateItemOrContextLeaf(
+  leaf: Extract<
+    ScheduleConditionLeaf,
+    { type: "ownsOpenItems" | "itemOverdue" | "idleWithClaimableGate" | "contextAbove" }
+  >,
+  input: ConditionInput,
+): ConditionVerdict {
+  switch (leaf.type) {
     case "ownsOpenItems": {
       if (input.openItems === undefined) {
         return { fire: false, reason: "no work-queue source is wired" };
@@ -168,7 +188,10 @@ function evaluateLeaf(
           reason: `context usage ${input.contextUsagePercent.toFixed(0)}% is at or above ${percent}%`,
         };
       }
-      return { fire: false, reason: `context usage ${input.contextUsagePercent.toFixed(0)}% is below ${percent}%` };
+      return {
+        fire: false,
+        reason: `context usage ${input.contextUsagePercent.toFixed(0)}% is below ${percent}%`,
+      };
     }
   }
 }
