@@ -336,6 +336,20 @@ describe("JevService: lanes, budgets and circuits", () => {
     expect(service.status().lanes.control.exhausted).toBe(false);
   });
 
+  it("status says the agent tools are served only once bootstrap says it registers them", () => {
+    const { service } = makeHarness({});
+    expect(service.status().agentTools.served).toBe(false);
+    let served = true;
+    service.setAgentToolsServed(() => served);
+    expect(service.status().agentTools.served).toBe(true);
+    served = false;
+    expect(service.status().agentTools.served).toBe(false);
+    service.setAgentToolsServed(() => {
+      throw new Error("config unreadable");
+    });
+    expect(service.status().agentTools.served).toBe(false);
+  });
+
   it("a full agentTools lane leaves a spawn hint answered", async () => {
     const { service, home, transport } = makeHarness({
       config: { agentTools: { maxConcurrent: 1 } },
@@ -347,6 +361,28 @@ describe("JevService: lanes, budgets and circuits", () => {
     expect(hint.kind).toBe("shadow");
     transport.release();
     expect((await held).kind).toBe("answered");
+  });
+
+  it("readCheck is shadow by default on its own reads lane and cap", async () => {
+    expect(JEV_FEATURE_LANES.readCheck).toBe("reads");
+    const { service, home } = makeHarness({ config: { maxUsdPerDay: 0.000_000_1 } });
+    const readCheck = spawnHint(home, { feature: "readCheck", callSite: "read-check.shadow" });
+    // The control lane's cap is spent; the reads lane's is not.
+    expect(kindAndReason(await service.decide(spawnHint(home)))).toBe("unavailable:daily-budget");
+    expect((await service.decide(readCheck)).kind).toBe("shadow");
+    expect(service.status().lanes.reads.maxUsdPerDay).toBe(0.25);
+  });
+
+  it("shadow: true answers shadow on a live feature, and never makes a shadow feature live", async () => {
+    const live = makeHarness({ config: { readCheck: { shadow: false } } });
+    const input = spawnHint(live.home, { feature: "readCheck", callSite: "read-check.shadow" });
+    expect((await live.service.decide(input)).kind).toBe("answered");
+    expect((await live.service.decide({ ...input, shadow: true })).kind).toBe("shadow");
+
+    const shadow = makeHarness();
+    expect((await shadow.service.decide({ ...spawnHint(shadow.home), shadow: true })).kind).toBe(
+      "shadow",
+    );
   });
 
   it("an away-reply decision and an Ask JEV question never share a lane's slots", async () => {
@@ -637,6 +673,24 @@ describe("JevService: spend is reserved before a call is sent", () => {
     expect(transport.sends).toBeLessThanOrEqual(20);
   });
 
+  it("isActive with a caller answers false once that caller's hour is spent, and only for it", async () => {
+    const transport = costReportingTransport(0.05);
+    const { service, home } = makeHarness({
+      transport,
+      key: FAKE_KEY,
+      extra: { scopeChecker: OPEN_SCOPE },
+    });
+    expect(service.isActive("agentTools", { callerAgentId: "agent-A" })).toBe(true);
+    expect((await service.decide(toolsCall(home, 1, { callerAgentId: "agent-A" }))).kind).toBe(
+      "answered",
+    );
+    expect(service.isActive("agentTools", { callerAgentId: "agent-A" })).toBe(false);
+    expect(service.isActive("agentTools", { callerAgentId: "agent-B" })).toBe(true);
+    expect(service.isActive("agentTools")).toBe(true);
+    // Other lanes never read the caller's tools budget.
+    expect(service.isActive("spawnHint", { callerAgentId: "agent-A" })).toBe(true);
+  });
+
   it("agentTools calls that name no agent share one unattributed hourly cap", async () => {
     const transport = costReportingTransport(0.03);
     const { service, home } = makeHarness({
@@ -798,8 +852,14 @@ describe("JevService: ledger, audit, status", () => {
     expect(status.features.agentTools.shadow).toBe(false);
     expect(status.features.askJev.shadow).toBe(false);
     expect(status.features.awayReply.shadow).toBe(true);
+    expect(status.features.readCheck.shadow).toBe(true);
     expect(status.features.titleRefresh.shadow).toBe(false);
-    expect(Object.keys(status.lanes).sort()).toEqual(["agentTools", "control", "interactive"]);
+    expect(Object.keys(status.lanes).sort()).toEqual([
+      "agentTools",
+      "control",
+      "interactive",
+      "reads",
+    ]);
     const everyFeature = Object.keys(JEV_FEATURE_LANES).sort();
     expect(everyFeature).toEqual([
       "agentTools",
@@ -807,6 +867,7 @@ describe("JevService: ledger, audit, status", () => {
       "awayReply",
       "compactionTiming",
       "notificationTriage",
+      "readCheck",
       "remediationTriage",
       "spawnHint",
       "stallJudgment",

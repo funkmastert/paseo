@@ -1675,6 +1675,31 @@ export const ProjectRemoveRequestSchema = z.object({
   requestId: z.string(),
 });
 
+// COMPAT(deviceManagement): added in v0.8.x — the Devices section's three human actions
+// (docs/device-leases.md). Gated on server_info.features.deviceManagement; an older daemon
+// answers an unknown request type with an unknown_schema rpc_error.
+
+export const DeviceLeaseReleaseRequestSchema = z.object({
+  type: z.literal("device.lease.release.request"),
+  requestId: z.string(),
+  deviceId: z.string(),
+});
+
+export const DeviceReserveSetRequestSchema = z.object({
+  type: z.literal("device.reserve.set.request"),
+  requestId: z.string(),
+  deviceId: z.string(),
+  reserved: z.boolean(),
+});
+
+export const DeviceShutdownRequestSchema = z.object({
+  type: z.literal("device.shutdown.request"),
+  requestId: z.string(),
+  deviceId: z.string(),
+  // The second tap: shutting down a device a mid-turn agent holds needs this set to proceed.
+  confirmMidTurnHolder: z.boolean().optional(),
+});
+
 export const WorkspaceTitleSetRequestSchema = z.object({
   type: z.literal("workspace.title.set.request"),
   workspaceId: z.string(),
@@ -3816,6 +3841,9 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ProjectRenameRequestSchema,
   ProjectIconSetRequestSchema,
   ProjectRemoveRequestSchema,
+  DeviceLeaseReleaseRequestSchema,
+  DeviceReserveSetRequestSchema,
+  DeviceShutdownRequestSchema,
   WorkspaceTitleSetRequestSchema,
   WorkspacePinSetRequestSchema,
   WorkspaceLabelListRequestSchema,
@@ -4358,6 +4386,10 @@ export const ServerInfoStatusPayloadSchema = z
         jevAsk: z.boolean().optional(),
         // COMPAT(jevSavings): added in v0.8.x, remove gate after 2027-03-30.
         jevSavings: z.boolean().optional(),
+        // COMPAT(deviceManagement): added in v0.8.x, remove gate after 2027-09-30. The Devices
+        // section's release/reserve/shutdown actions (docs/device-leases.md); an older daemon
+        // only supports the read-only device_status_update the deviceLeases flag above gates.
+        deviceManagement: z.boolean().optional(),
       })
       .optional(),
   })
@@ -6775,6 +6807,15 @@ export const DeviceStatusEntrySchema = z.object({
   // only asks others has to say which is which, or the whole readout is a half-truth.
   provider: z.string().optional(),
   enforcement: z.enum(["observes", "asks", "refuses"]).optional(),
+  // COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30.
+  // Independent of `attribution`: a reserved device can still show its current holder.
+  reserved: z.boolean().optional(),
+  // COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30.
+  // A simulator's name from simctl; absent for an emulator, whose deviceId is its AVD name.
+  name: z.string().optional(),
+  // COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30.
+  // How long the device has been up, from `ps` — set even when `heldForSeconds` is lease age.
+  runningForSeconds: z.number().optional(),
 });
 
 // COMPAT(deviceLeaseEnforcement): added in v0.8.2, remove optional parsing after 2027-09-19.
@@ -6802,6 +6843,34 @@ export const DeviceStatusBlockedSchema = z.object({
   at: z.string(),
 });
 
+// COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30. A
+// refusal by the physical install gate. No platform: an untargeted command may span both.
+export const PhysicalDeviceStatusBlockedSchema = z.object({
+  agentId: z.string(),
+  command: z.string(),
+  message: z.string(),
+  dryRun: z.boolean(),
+  at: z.string(),
+});
+
+// COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30. A
+// connected physical device — a USB Android phone, an iPhone paired with or without a cable.
+// No slot/headroom fields: a phone costs the Mac no memory (docs/device-leases.md, Physical
+// devices).
+export const PhysicalDeviceStatusEntrySchema = z.object({
+  id: z.string(),
+  platform: z.enum(["ios", "android"]),
+  name: z.string().optional(),
+  transport: z.enum(["usb", "network"]),
+  connected: z.boolean(),
+  /** Seconds until an unplugged device's lease releases on its own. Absent when connected. */
+  graceRemainingSeconds: z.number().optional(),
+  agentId: z.string().optional(),
+  heldForSeconds: z.number().optional(),
+  reason: z.string().optional(),
+  reserved: z.boolean(),
+});
+
 // COMPAT(deviceLeases): added in v0.8.1, remove gating when all clients read device status.
 // Copies mcp_status_update's pattern exactly: new session message, SessionEventSubscriptionSchema
 // entry, feature flag, permission mapping to daemon.read, subscription-gated emission.
@@ -6819,6 +6888,45 @@ export const DeviceStatusUpdateMessageSchema = z.object({
     // COMPAT(deviceLeaseEnforcement): added in v0.8.2, remove optional parsing after 2027-09-19.
     enforcement: z.array(DeviceStatusProviderEnforcementSchema).optional(),
     generatedAt: z.string(),
+    // COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30.
+    physicalDevices: z.array(PhysicalDeviceStatusEntrySchema).optional(),
+    // COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30.
+    // The physical install gate's recent refusals (and dry-run would-have-refused records).
+    physicalBlocked: z.array(PhysicalDeviceStatusBlockedSchema).optional(),
+  }),
+});
+
+// COMPAT(deviceManagement): added in v0.8.x — the Devices section's three human actions
+// (docs/device-leases.md). Gated on server_info.features.deviceManagement; an older daemon
+// answers an unknown request type with an unknown_schema rpc_error. Request schemas live up
+// near ProjectRemoveRequestSchema (module-evaluation order: the inbound union below references
+// them before this point in the file); the responses stay here next to DeviceStatus*.
+
+export const DeviceLeaseReleaseResponseSchema = z.object({
+  type: z.literal("device.lease.release.response"),
+  payload: z.object({
+    requestId: z.string(),
+    deviceId: z.string(),
+    released: z.boolean(),
+  }),
+});
+
+export const DeviceReserveSetResponseSchema = z.object({
+  type: z.literal("device.reserve.set.response"),
+  payload: z.object({
+    requestId: z.string(),
+    deviceId: z.string(),
+    reserved: z.boolean(),
+  }),
+});
+
+export const DeviceShutdownResponseSchema = z.object({
+  type: z.literal("device.shutdown.response"),
+  payload: z.object({
+    requestId: z.string(),
+    deviceId: z.string(),
+    status: z.enum(["shut-down", "not-running", "needs-confirmation", "failed"]),
+    message: z.string().optional(),
   }),
 });
 
@@ -7509,6 +7617,9 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ProjectRenameResponseSchema,
   ProjectIconSetResponseSchema,
   ProjectRemoveResponseSchema,
+  DeviceLeaseReleaseResponseSchema,
+  DeviceReserveSetResponseSchema,
+  DeviceShutdownResponseSchema,
   WorkspaceTitleSetResponseSchema,
   WorkspacePinSetResponseSchema,
   WorkspaceRecoveryInspectResponseSchema,
@@ -7773,7 +7884,14 @@ export type McpGatewayStatusEntry = z.infer<typeof McpGatewayStatusEntrySchema>;
 export type McpStatusUpdateMessage = z.infer<typeof McpStatusUpdateMessageSchema>;
 export type DeviceStatusUpdateMessage = z.infer<typeof DeviceStatusUpdateMessageSchema>;
 export type DeviceStatusEntry = z.infer<typeof DeviceStatusEntrySchema>;
+export type PhysicalDeviceStatusEntry = z.infer<typeof PhysicalDeviceStatusEntrySchema>;
 export type DeviceStatusProviderEnforcement = z.infer<typeof DeviceStatusProviderEnforcementSchema>;
+export type DeviceLeaseReleaseRequest = z.infer<typeof DeviceLeaseReleaseRequestSchema>;
+export type DeviceLeaseReleaseResponse = z.infer<typeof DeviceLeaseReleaseResponseSchema>;
+export type DeviceReserveSetRequest = z.infer<typeof DeviceReserveSetRequestSchema>;
+export type DeviceReserveSetResponse = z.infer<typeof DeviceReserveSetResponseSchema>;
+export type DeviceShutdownRequest = z.infer<typeof DeviceShutdownRequestSchema>;
+export type DeviceShutdownResponse = z.infer<typeof DeviceShutdownResponseSchema>;
 export type McpGatewayAuthStartResponseMessage = z.infer<
   typeof McpGatewayAuthStartResponseMessageSchema
 >;

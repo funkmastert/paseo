@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useMemo, useState } from "react";
-import { Text, View } from "react-native";
+import { ChevronRight } from "lucide-react-native";
+import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
@@ -23,17 +24,22 @@ import {
 /**
  * The strip without its data source, so a capture can hand it rows directly — the poll behind
  * AccountBudgetStrip needs a live host, and its hooks reach the app graph a browser capture cannot
- * bundle. Keep this module free of imports that do. Every account is always on screen: on a phone each is one
- * compact row rather than a fold that shows one of them.
+ * bundle. Keep this module free of imports that do (`expo-router`'s `router` singleton pulls in
+ * the whole navigation stack, which the capture's esbuild loader cannot parse). Navigation is the
+ * caller's job, passed in as `onOpenJevDashboard`. Every account is always on screen: on a phone
+ * each is one compact row rather than a fold that shows one of them.
  */
 export function AccountBudgetStripView({
   rows,
   serverId,
   fetchedAt,
+  onOpenJevDashboard,
 }: {
   rows: AccountBudgetRowViewModel[];
   serverId: string;
   fetchedAt: Date | null;
+  /** Absent in a capture or a test: the row renders without the chevron and never presses. */
+  onOpenJevDashboard?: (serverId: string) => void;
 }) {
   const isCompact = useIsCompactFormFactor();
   if (rows.length === 0) return null;
@@ -45,7 +51,12 @@ export function AccountBudgetStripView({
             {index > 0 && row.section !== rows[index - 1].section ? (
               <View style={styles.sectionRule} testID="orchestration-account-section-rule" />
             ) : null}
-            <AccountBudgetRow row={row} serverId={serverId} compact={isCompact} />
+            <AccountBudgetRow
+              row={row}
+              serverId={serverId}
+              compact={isCompact}
+              onOpenJevDashboard={onOpenJevDashboard}
+            />
           </Fragment>
         ))}
       </View>
@@ -97,6 +108,7 @@ function AccountUsageIcon({ providerId, serverId, size, color = "" }: AccountUsa
 }
 
 const ThemedAccountUsageIcon = withUnistyles(AccountUsageIcon);
+const ThemedChevronRight = withUnistyles(ChevronRight);
 
 const mutedIconColor = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
@@ -169,9 +181,9 @@ function isAlert(detail: AccountDetailViewModel): boolean {
 
 /**
  * Neither a phone nor a desktop panel has room for a feature-by-feature list beside every other
- * account's figures: a warning stays in view, and the rest (JEV's features and what each did
- * today) opens on a tap. The dashboard (docs/jev.md, "The JEV dashboard") is where that detail
- * belongs full-time; this stays a fold until it ships.
+ * account's figures, so a warning stays in view and everything else folds. JEV's per-feature lines
+ * moved to the dashboard (docs/jev.md, "The JEV dashboard"), so its own details are alerts only
+ * today; the fold stays for a provider whose details are a mix again.
  */
 function FoldableDetails({
   providerId,
@@ -182,7 +194,10 @@ function FoldableDetails({
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  const toggle = useCallback(() => setOpen((value) => !value), []);
+  const toggle = useCallback((event: { stopPropagation?: () => void }) => {
+    event.stopPropagation?.();
+    setOpen((value) => !value);
+  }, []);
   const alerts = details.filter(isAlert);
   const rest = details.filter((detail) => !isAlert(detail));
   return (
@@ -280,10 +295,12 @@ function AccountBudgetRow({
   row,
   serverId,
   compact,
+  onOpenJevDashboard,
 }: {
   row: AccountBudgetRowViewModel;
   serverId: string;
   compact: boolean;
+  onOpenJevDashboard?: (serverId: string) => void;
 }) {
   const roleLabel = useAccountRoleLabel(row.role);
   const worst = useMemo(() => selectAccountWorstWindow(row), [row]);
@@ -293,10 +310,18 @@ function AccountBudgetRow({
     worst && (worst.usedPct >= NEAR_CAP_PCT || worstAtRisk)
       ? formatResetLabel(worst.window.resetsAt)
       : null;
+  // The JEV row is the only one that opens anywhere; the dashboard has no bearing on any other
+  // account's row (docs/jev.md, "The JEV dashboard" → "Links with feature 11").
+  const isJev = row.providerId === "jev" && onOpenJevDashboard != null;
+  const openJevDashboard = useCallback(() => {
+    onOpenJevDashboard?.(serverId);
+  }, [onOpenJevDashboard, serverId]);
   return (
-    <View
+    <Pressable
       style={compact ? styles.compactRow : styles.row}
       testID={`orchestration-account-${row.providerId}`}
+      onPress={isJev ? openJevDashboard : undefined}
+      disabled={!isJev}
     >
       <View style={styles.header}>
         <ThemedAccountUsageIcon
@@ -319,10 +344,11 @@ function AccountBudgetRow({
             {`${worst.window.label} ${formatPct(worst.usedPct)}`}
           </Text>
         ) : null}
+        {isJev ? <ThemedChevronRight size={14} uniProps={mutedIconColor} /> : null}
       </View>
       {row.usage ? <AccountPresence providerId={row.providerId} usage={row.usage} /> : null}
       <AccountBudgetBody row={row} worst={worst} reset={reset} compact={compact} />
-    </View>
+    </Pressable>
   );
 }
 

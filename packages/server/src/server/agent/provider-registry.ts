@@ -26,6 +26,7 @@ import {
 } from "./create-agent-mode.js";
 import { normalizeAgentModelDefinition } from "./agent-sdk-types.js";
 import { runProviderRefreshActivity } from "./provider-refresh-deadline.js";
+import type { FileReadObserver } from "../jev/read-check/observer.js";
 import type { DeviceLaunchGate } from "./device-lease-manager.js";
 import type { WorkspaceGitService } from "../workspace-git-service.js";
 import type { ManagedProcessRegistry } from "../managed-processes/managed-processes.js";
@@ -113,6 +114,8 @@ export interface BuildProviderRegistryOptions {
   deviceLaunchGate?: DeviceLaunchGate;
   /** The catastrophe gate's kill switch (docs/catastrophe-gate.md). Absent means on. */
   isCatastropheGateEnabled?: () => boolean;
+  /** Feature 16's read check (docs/jev.md). Claude only; absent means no read-check hook. */
+  fileReadObserver?: FileReadObserver;
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   managedProcesses?: ManagedProcessRegistry;
   isDev?: boolean;
@@ -127,6 +130,7 @@ interface ProviderClientFactoryOptions extends Pick<
   | "ompRuntime"
   | "deviceLaunchGate"
   | "isCatastropheGateEnabled"
+  | "fileReadObserver"
 > {
   openCodeBridge?: OpenCodeBridge;
   providerParams?: unknown;
@@ -211,6 +215,7 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
       configDir: runtimeSettings?.env?.CLAUDE_CONFIG_DIR,
       deviceLaunchGate: options?.deviceLaunchGate,
       isCatastropheGateEnabled: options?.isCatastropheGateEnabled,
+      fileReadObserver: options?.fileReadObserver,
     }),
   codex: (logger, runtimeSettings, options) =>
     new CodexAppServerAgentClient(logger, runtimeSettings, {
@@ -789,6 +794,7 @@ function buildResolvedBuiltinProviders(
     | "openCodeBridge"
     | "deviceLaunchGate"
     | "isCatastropheGateEnabled"
+    | "fileReadObserver"
   >,
   isDev: boolean,
 ): Map<string, ResolvedProvider> {
@@ -823,6 +829,7 @@ function buildResolvedBuiltinProviders(
           openCodeBridge: options.openCodeBridge,
           deviceLaunchGate: options.deviceLaunchGate,
           isCatastropheGateEnabled: options.isCatastropheGateEnabled,
+          fileReadObserver: options.fileReadObserver,
           providerParams: override?.params,
         }),
       contract: PROVIDER_CONTRACTS[definition.id] ?? UNSUPPORTED_PROVIDER_CONTRACT,
@@ -837,7 +844,11 @@ function addDerivedProviders(
   providerOverrides: Record<string, ProviderOverride>,
   options: Pick<
     BuildProviderRegistryOptions,
-    "managedProcesses" | "openCodeBridge" | "deviceLaunchGate" | "isCatastropheGateEnabled"
+    | "managedProcesses"
+    | "openCodeBridge"
+    | "deviceLaunchGate"
+    | "isCatastropheGateEnabled"
+    | "fileReadObserver"
   >,
 ): void {
   for (const [providerId, override] of Object.entries(providerOverrides)) {
@@ -941,6 +952,7 @@ function addDerivedProviders(
           // the same devices, so it is gated identically.
           deviceLaunchGate: options.deviceLaunchGate,
           isCatastropheGateEnabled: options.isCatastropheGateEnabled,
+          fileReadObserver: options.fileReadObserver,
           providerParams,
           customProvider: {
             id: providerId,
@@ -969,6 +981,7 @@ export function buildProviderRegistry(
       openCodeBridge: options?.openCodeBridge,
       deviceLaunchGate: options?.deviceLaunchGate,
       isCatastropheGateEnabled: options?.isCatastropheGateEnabled,
+      fileReadObserver: options?.fileReadObserver,
     },
     options?.isDev === true,
   );
@@ -977,6 +990,7 @@ export function buildProviderRegistry(
     openCodeBridge: options?.openCodeBridge,
     deviceLaunchGate: options?.deviceLaunchGate,
     isCatastropheGateEnabled: options?.isCatastropheGateEnabled,
+    fileReadObserver: options?.fileReadObserver,
   });
 
   return Object.fromEntries(

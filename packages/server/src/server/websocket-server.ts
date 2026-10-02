@@ -805,11 +805,6 @@ export class VoiceAssistantWebSocketServer {
       },
       // JEV's spend and features, from memory. A daemon built without JEV reports no row.
       readJevStatus: () => this.jev?.status() ?? null,
-      readJevDecisions: () => {
-        const service = this.jev;
-        if (!service) return [];
-        return this.agentManager.listAgents().flatMap((agent) => service.listDecisions(agent.id));
-      },
     });
 
     this.wss = this.createWebSocketServer(server, wsConfig, auth);
@@ -1764,6 +1759,8 @@ export class VoiceAssistantWebSocketServer {
         jevAsk: true,
         // COMPAT(jevSavings): added in v0.8.x, remove gate after 2027-03-30.
         jevSavings: true,
+        // COMPAT(deviceManagement): added in v0.8.x, remove gate after 2027-09-30.
+        deviceManagement: true,
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported
         // daemon floor is >= v0.2.0.

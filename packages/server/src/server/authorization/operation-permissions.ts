@@ -73,6 +73,9 @@ const INBOUND_PERMISSION = {
   "daemon.get_status.request": "daemon.read",
   "daemon.update.request": "daemon.manage",
   delete_agent_request: "workspace.write",
+  "device.lease.release.request": "daemon.manage",
+  "device.reserve.set.request": "daemon.manage",
+  "device.shutdown.request": "daemon.manage",
   "diagnostics.request": "daemon.read",
   dictation_stream_cancel: "workspace.write",
   dictation_stream_chunk: "workspace.write",
@@ -363,6 +366,9 @@ const OUTBOUND_PERMISSION = {
   // permission mapping (KTD7).
   mcp_status_update: "daemon.read",
   device_status_update: "daemon.read",
+  "device.lease.release.response": "daemon.manage",
+  "device.reserve.set.response": "daemon.manage",
+  "device.shutdown.response": "daemon.manage",
   // U6: same daemon.manage tier as the other daemon-mutating auth/config RPCs (set_daemon_config,
   // plugin management, restart) rather than a workspace-scoped permission — the gateway itself
   // is a daemon-global resource, not tied to any one workspace.

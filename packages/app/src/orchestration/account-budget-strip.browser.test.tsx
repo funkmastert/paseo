@@ -89,8 +89,9 @@ const OPENAI_USAGE: ProviderUsage = {
   details: [{ id: "status", label: "Status", value: "active" }],
 };
 
-// JEV as its fetcher reports it on a day the control lane ran out: the spent lane first, then each
-// feature with its mode and what it did or would have done.
+// JEV as its fetcher reports it on a day the control lane ran out: the spent lane, nothing else.
+// Per-feature lines moved to the JEV dashboard (docs/jev.md, "The JEV dashboard" → "Links with
+// feature 11"); the strip's own details are lane alerts only.
 const JEV_USAGE: ProviderUsage = {
   providerId: "jev",
   displayName: "JEV",
@@ -114,35 +115,9 @@ const JEV_USAGE: ProviderUsage = {
     {
       id: "lane:control:spent",
       label: "Control budget spent",
-      value:
-        "Spawn hint, Remediation triage, Finish triage, Stall judgment, Away reply off until midnight",
+      value: "Spawn hint, Remediation triage, Away reply off until local midnight",
       tone: "warning",
     },
-    {
-      id: "feature:spawnHint",
-      label: "Spawn hint",
-      value: "Shadow · 14 creates answered 11 mechanical, 3 hard · $0.004",
-    },
-    {
-      id: "feature:remediationTriage",
-      label: "Remediation triage",
-      value:
-        "Shadow · 3× would have: no remediation agent; sent to a person of 5 decisions · $0.002",
-    },
-    {
-      id: "feature:notificationTriage",
-      label: "Finish triage",
-      value: "Shadow · 22 decisions, none would change anything · $0.009",
-    },
-    { id: "feature:stallJudgment", label: "Stall judgment", value: "Shadow" },
-    { id: "feature:compactionTiming", label: "Compaction timing", value: "Off" },
-    {
-      id: "feature:awayReply",
-      label: "Away reply",
-      value: "Dry run · 2× would reply of 3 decisions",
-    },
-    { id: "feature:agentTools", label: "Agent tools", value: "Live · 96 calls today · $0.041" },
-    { id: "feature:askJev", label: "Ask JEV", value: "Live · 2 questions today" },
   ],
 };
 
@@ -177,18 +152,20 @@ const FIXTURE_ROWS = buildAccountBudgetRows(
 
 const FETCHED_AT = new Date(FIXTURE_NOW_MS - 90_000);
 
-function openJevDetails(container: HTMLElement) {
-  const toggle = container.querySelector<HTMLElement>(
-    '[data-testid="orchestration-account-details-toggle-jev"]',
-  );
-  expect(toggle?.textContent).toBe("Show 8 more");
-  act(() => toggle?.click());
-  expect(toggle?.textContent).toBe("Show less");
+function click(element: Element | null | undefined): void {
+  act(() => {
+    (element as HTMLElement)?.click();
+  });
 }
 
-function Strip() {
+function Strip({ onOpenJevDashboard }: { onOpenJevDashboard?: (serverId: string) => void }) {
   return (
-    <AccountBudgetStripView rows={FIXTURE_ROWS} serverId="fixture-host" fetchedAt={FETCHED_AT} />
+    <AccountBudgetStripView
+      rows={FIXTURE_ROWS}
+      serverId="fixture-host"
+      fetchedAt={FETCHED_AT}
+      onOpenJevDashboard={onOpenJevDashboard}
+    />
   );
 }
 
@@ -201,9 +178,9 @@ describe.each([
   { name: "phone", width: 390, compact: true },
   { name: "desktop", width: 760, compact: false },
 ])("account budget strip on $name", ({ name, width, compact }) => {
-  function mountStrip() {
+  function mountStrip(onOpenJevDashboard?: (serverId: string) => void) {
     layout.compact = compact;
-    return mount(<Strip />, width);
+    return mount(<Strip onOpenJevDashboard={onOpenJevDashboard} />, width);
   }
 
   it("shows the Claude pool, then the OpenAI account set apart from it", () => {
@@ -246,30 +223,19 @@ describe.each([
       '[data-testid="orchestration-account-detail-lane:control:spent"]',
     );
     expect(spent?.textContent).toContain("Control budget spent");
-    expect(spent?.textContent).toContain("off until midnight");
+    expect(spent?.textContent).toContain("off until local midnight");
   });
 
-  it("lists each JEV feature with its mode and what it would have done", () => {
-    const container = mountStrip();
-    openJevDetails(container);
-    const detail = (id: string) =>
-      container.querySelector(`[data-testid="orchestration-account-detail-feature:${id}"]`)
-        ?.textContent;
-    expect(detail("spawnHint")).toBe(
-      "Spawn hintShadow · 14 creates answered 11 mechanical, 3 hard · $0.004",
-    );
-    expect(detail("awayReply")).toBe("Away replyDry run · 2× would reply of 3 decisions");
-    expect(detail("compactionTiming")).toBe("Compaction timingOff");
-    expect(detail("askJev")).toBe("Ask JEVLive · 2 questions today");
-  });
-
-  it("keeps the spent lane in view whether or not the feature list is open", () => {
+  it("shows the spent lane with no per-feature list and no fold toggle", () => {
     const container = mountStrip();
     const shown = (id: string) =>
       container.querySelector(`[data-testid="orchestration-account-detail-${id}"]`) !== null;
     expect(shown("lane:control:spent")).toBe(true);
-    // The feature list folds behind a toggle on every form factor.
+    // Per-feature lines moved to the JEV dashboard; there's nothing left to fold.
     expect(shown("feature:spawnHint")).toBe(false);
+    expect(
+      container.querySelector('[data-testid="orchestration-account-details-toggle-jev"]'),
+    ).toBeNull();
   });
 
   it("keeps another provider's details off the strip", () => {
@@ -314,14 +280,32 @@ describe.each([
     expect(overflowing.map((node) => node.getAttribute("data-testid") ?? node.tagName)).toEqual([]);
   });
 
-  it("captures the strip with JEV's features open", async () => {
-    await page.viewport(width + 24, 1400);
-    const container = mountStrip();
-    openJevDetails(container);
-    await page.screenshot({
-      element: container,
-      path: `../../../../.artifacts/orchestration-account-strip-${name}-jev-open.png`,
-    });
+  // Pressability and the chevron are driven by the same `isJev` gate in AccountBudgetRow
+  // (account-budget-strip-view.tsx), so asserting `aria-disabled` here also covers the chevron:
+  // the icon library renders nothing in this harness (no unistyles runtime), so it can't be
+  // queried directly.
+  it("is pressable only on the JEV row, and only when a dashboard handler is given", () => {
+    const disabled = (container: HTMLElement, id: string) =>
+      container
+        .querySelector(`[data-testid="orchestration-account-${id}"]`)
+        ?.getAttribute("aria-disabled");
+    const withHandler = mountStrip(vi.fn());
+    expect(disabled(withHandler, "jev")).toBeNull();
+    expect(disabled(withHandler, "codex")).toBe("true");
+    expect(disabled(withHandler, "claude")).toBe("true");
+
+    const withoutHandler = mountStrip();
+    expect(disabled(withoutHandler, "jev")).toBe("true");
+  });
+
+  it("opens the JEV dashboard for this host when its row is pressed", () => {
+    const onOpenJevDashboard = vi.fn();
+    const container = mountStrip(onOpenJevDashboard);
+    click(container.querySelector('[data-testid="orchestration-account-jev"]'));
+    expect(onOpenJevDashboard).toHaveBeenCalledExactlyOnceWith("fixture-host");
+
+    click(container.querySelector('[data-testid="orchestration-account-codex"]'));
+    expect(onOpenJevDashboard).toHaveBeenCalledOnce();
   });
 
   it("captures the strip", async () => {

@@ -22,6 +22,8 @@ None of them is sufficient alone, and the split is the design:
 
 **Checkout is how an agent claims intent and waits.** The cap is usually right and the work is usually right; it is just early. `device_checkout` blocks until a slot frees rather than refusing, so an agent that asks first never has to handle a failure. It also records _why_ the device is wanted, which is what the status UI shows.
 
+Before it allocates anything, checkout looks for a device already running that nobody holds: the one the caller names, one matched by name in the reason text (only when the match is unambiguous), or otherwise the longest-idle one. That binding is immediate — `running` with a `deviceId` set, never `starting` — so a reused device can never expire as `never-started`, and the caller learns the device's real identity and how to target it (UDID, or the AVD name plus its adb serial) back in the checkout response. A slot is allocated only when nothing suitable is running, or the caller named a device that isn't. A device [reserved for Tyler](#reservations) is never offered, named or not.
+
 **The gate is what makes checkout worth calling.** A lease an agent can skip is a convention, not a control. The gate refuses the shell command itself — as far as the provider lets it, which is not equally far for all of them.
 
 ## Counting
@@ -66,6 +68,16 @@ Cores bind here, not memory: memory alone would allow 9. That is why a naive RAM
 
 A free slot is not the same as room to use it. Independently of the count, a launch is refused when swap is at or above `maxSwapUsedRatio` (0.85) or free memory is below `minAvailableBytes` (0.5 GiB). On the day this was written the machine was at 96% swap and 0.4 GB free **with a slot nominally free**, and one more device then is catastrophic.
 
+### The guaranteed floor
+
+Swap sits around 90% most days on the machine this cap was built for. A headroom rule with no floor refuses every device launch on a day like that, stranding mobile work before it starts — the cap exists to keep the machine usable, not to keep it idle.
+
+So the first running (or pending) device on each platform — one iOS, one Android — is exempt from the headroom check. `isPlatformFloorUnfilled` (`device-lease-registry.ts`) asks whether occupancy for that platform is still zero; if so, `tryGrant` skips `evaluateMemoryHeadroom` entirely and only the slot cap applies. The floor still costs a slot — it is not a bypass of the count, only of the swap/free-memory gate — and 1 iOS + 1 Android always fits inside `totalSlots`/`slotsPerPlatform` at their derived minimums.
+
+"First" means what the process scan and the lease table together already know about, not what this one grant is about to add: a platform with a device already running, held or not, or a lease still waiting to become one, is past its floor. Checkout reusing an already-running device (below) means the floor mostly matters when nothing of that platform is running at all — the case a plain headroom rule handles worst.
+
+The floor applies wherever `tryGrant` is the path: `device_checkout`, the launch gate, and the gate's dry-run reporting (a floor launch is never recorded as a would-have-refused). The Devices section's copy says so too: "1 Android and 1 iOS always allowed; more depend on memory."
+
 Free memory here means free + speculative + purgeable pages, deliberately not the file cache: macOS keeps most of RAM mapped to files, and counting that would report tens of gigabytes "available" on a machine that is swapping 20 GiB. It is a floor rather than a comfort margin, because the same design keeps free pages low on a perfectly healthy machine — 2.8 GiB right after a restart. Swap pressure is the signal that usually fires first. No signal at all (a host where memory can't be read) is never a reason to refuse.
 
 ## Enforcement
@@ -90,14 +102,21 @@ Neither Codex's approval response nor ACP's carries a sentence back to the model
 
 **observes** means nothing intercepts. The device is still counted — see below — and never refused.
 
-`agent/device-launch-commands.ts` decides what counts as a device launch, for every tier: `xcrun simctl boot`, `open -a Simulator`, `xcodebuild -destination 'platform=iOS Simulator…'`, `emulator -avd <name>` / `emulator @<name>`, and `expo run:*` / `react-native run-*`. Matching is on argv tokens of the command actually being run, with quotes honoured, so `grep -rn 'simctl boot' docs/` is not a device launch. Commands that _use_ a device without booting one — `adb install`, `./gradlew installDebug`, `xcrun simctl launch` — are deliberately absent: they need a device that already exists, so gating them would refuse work that costs no slot.
+`agent/device-launch-commands.ts` decides what counts as a device launch, for every tier: `xcrun simctl boot`, `open -a Simulator`, `xcodebuild -destination 'platform=iOS Simulator…'`, `emulator -avd <name>` / `emulator @<name>`, and `expo run:*` / `react-native run-*` (their `--device`, `--udid`, `--simulator` or `--deviceId` value is the target). Matching is on argv tokens of the command actually being run, with quotes honoured, so `grep -rn 'simctl boot' docs/` is not a device launch. Commands that _use_ a device without booting one — `adb install`, `./gradlew installDebug`, `xcrun simctl launch` — are deliberately absent: they need a device that already exists, so gating them would refuse work that costs no slot.
+
+The gate refuses only a launch that boots a **new** device when the cap or headroom has no room for it. A false refusal costs more than a missed device: the agent stalls or works around the gate, while a missed device is still counted by the next scan.
+
+A target resolves against what is running by UDID, AVD name, simulator name (from `simctl list`) or adb serial. A target that names a connected physical device is left to [the install gate](#what-the-gate-checks): no simulator boots.
 
 What happens on a match:
 
-- **The target is already running** (`simctl boot <udid>` for a booted device) → allowed. It costs no slot.
-- **The agent already holds a slot on that platform** → allowed. This is the good path, and the agent never sees the gate. It covers both the lease it checked out and has not booted yet, and the device it already booted: a rebuild loop runs `expo run:ios` over and over, and a runner that names no device reuses the booted one rather than starting a second. A launch that names a device the scan has not seen is a new device and still goes to the cap.
+- **The target is already running** (`simctl boot <udid>` for a booted device, `expo run:ios --device 'iPhone 17 Pro'` for a booted simulator of that name) → allowed, and a lease binds to it when nobody holds it and it isn't reserved, so it shows a holder.
+- **The agent already holds a slot on that platform** → allowed. This is the good path, and the agent never sees the gate. It covers both the lease it checked out and has not booted yet, and the device it already booted: a rebuild loop runs `expo run:ios` over and over.
+- **The launch names no device and a device of the platform is up** → allowed. A runner with no target, and `open -a Simulator`, use the device that is running; they boot nothing. The agent's lease binds to the free device it will most likely land on, and the agent is told which one and how to target it. When every running device of the platform is another agent's or reserved, the launch is still allowed and takes no slot, and the agent is warned that it will probably install onto someone else's device and told to check out its own. The gate cannot stop that: Expo and the React Native CLI pick the booted device themselves.
 - **A slot is free** → allowed, and the gate takes a lease on the agent's behalf. A device booted without asking still fills a slot and still shows a holder, so the count is never quietly wrong.
-- **No slot, or no headroom** → denied, with who holds the slots and for how long, how many are running without a lease, and what to do instead — call `device_checkout` and wait.
+- **No slot, or no headroom** → denied, with who holds the slots and for how long, how many are running without a lease, a free running device when there is one, and what to do instead — call `device_checkout` and wait. The [guaranteed floor](#the-guaranteed-floor) means this can only be a headroom refusal when a platform already has its first device.
+
+Picking a device and leasing it happen in one serialized decision with no await in between, so two launches landing together never both get the same device.
 
 The gate fails open on every uncertainty: an unreadable hook input, a cap that throws, a `ps` that times out, a session the bridge cannot resolve to an agent. A device cap that breaks tool calls is worse than one that misses a device, and the process scan catches whatever booted a sweep later.
 
@@ -105,7 +124,9 @@ The gate fails open on every uncertainty: an unreadable hook input, a cap that t
 
 Nothing about the tier changes the count. Occupancy is the union of running devices and outstanding leases, so a simulator a Pi agent booted fills a slot for everyone — the next Claude agent is refused by it, and the cap holds in aggregate even where it could not hold at the launch.
 
-What the tier changes is who knows. A running device with no lease that sits inside an agent's process tree is **charged** to that agent: the daemon tells it, once per device, over the steer path, that it is holding a slot other agents are queueing for, that nothing has been shut down, and what to call next time. Only a mid-turn agent is told — steering an idle one would start a turn nobody asked for — and dry run tells nobody, because dry run refuses nothing and so has nothing to explain.
+A running device with no lease that sits inside a live agent's process tree is **that agent's**: checkout and the gate never hand it to anyone else, and no other agent's pending lease binds to it. After the sweep has charged it (below), the sweep leases it to that agent, so it stays held once the shell that started it exits and process attribution is gone.
+
+What the tier changes is who knows. Such a device is **charged** to its agent: the daemon tells it, once per device, over the steer path, that it is holding a slot other agents are queueing for, that nothing has been shut down, and what to call next time. Only a mid-turn agent is told — steering an idle one would start a turn nobody asked for — and dry run tells nobody, because dry run refuses nothing and so has nothing to explain.
 
 That message only reaches Android. `launchd_sim` is reparented to pid 1 the moment CoreSimulator boots it, so an unleased iOS simulator has no owner `ps` can name. It is not guessed at: it stays unattributed, keeps its slot, and appears in the status UI as pressure nobody is accountable for.
 
@@ -131,13 +152,21 @@ Leases live in memory. After a daemon restart the count comes from the process s
 
 ## Waiting
 
-`device_checkout` with `wait` (the default) parks the agent until a slot frees, up to `queueTimeoutMinutes` (20). Waiters are served oldest first. A freed slot is noticed two ways: immediately on a check-in, and by re-scanning every few seconds while anybody is queued — a device stopping is not something anything notifies the daemon about, so the drain takes its own `ps` rather than reusing the sweep's. That is the one place the cap pays for a second scan, and only while somebody is waiting. A canceled turn takes its agent out of the queue.
+`device_checkout` with `wait` (the default) parks the agent until a slot frees, up to `queueTimeoutMinutes` (20). Waiters are served oldest first. A checkout that names a running device another agent holds waits for that device and gets it when it is checked in; without `wait` it returns `unavailable`, naming the holder. It never hands back a different device instead. A named device reserved for Tyler is `unavailable` straight away. A freed slot is noticed two ways: immediately on a check-in, and by re-scanning every few seconds while anybody is queued — a device stopping is not something anything notifies the daemon about, so the drain takes its own `ps` rather than reusing the sweep's. That is the one place the cap pays for a second scan, and only while somebody is waiting. A canceled turn takes its agent out of the queue.
 
-## Status
+## Status and management
 
-`device_status` (any provider) and the sidebar strip both read one snapshot: how many devices are running against the cap, which agent holds each and for how long, what is still booting, who is waiting, and what the cap refused recently. A device with no lease shows its own uptime from `ps`, so "running for 2h14m" is answerable for a device nobody checked out.
+`device_status` (any provider) and the Devices section of the app both read one snapshot: how many devices are running against the cap, which agent holds each and for how long, how long each has been running, what is still booting, who is waiting, and what both gates refused recently. A simulator row carries its `simctl` name; uptime comes from `ps`, so "running for 2h14m" is answerable for a device nobody checked out.
 
-The UI is a status readout, not a control panel. It renders nothing when no device is running and nobody is waiting.
+It still renders nothing when no device is running and nobody is waiting — but it is a control panel now, not only a readout. It leads with a mode header, "Enforcing" or "Dry run — counting only, nothing is refused" (or "Off" when `enabled` is false), with an "Enforce" switch (on = enforcing) that flips `dryRun` through the same `set_daemon_config_request` path the rest of the daemon's config uses (wire field `deviceLeases`, flat — not nested under `agents`, unlike the on-disk `agents.deviceLeases` path in `persisted-config.ts`) — no dedicated RPC needed for that. A config edit doesn't otherwise make the daemon push a fresh `device_status_update` on its own, so the RPC handler calls `DeviceLeaseManager.refreshSnapshot()` whenever the patch touches `deviceLeases`; without it the switch would look stuck until the next resource-monitor sweep (up to a minute). Each device row shows its holder — an agent's title, tappable to open it — or "Free — the next agent that asks gets this", or "Reserved for you"; how long it has been held, and how long it has been running. Per-device actions: release the lease, reserve or unreserve, and shut down. A failed action shows a toast. In dry run the refusal count reads "would have been refused".
+
+### Reservations
+
+A device Tyler booted by hand for himself needs to be protectable — checkout and the gate reusing "whatever is running" would otherwise hand his own simulator to the next agent that asks. "Reserve for me" in the Devices section persists that (`device-reservation-store.ts`, a small JSON file under `$PASEO_HOME`, atomic-written like the other small daemon stores) so it survives a restart, unlike leases. `device.reserve.set` toggles it; checkout and the gate both exclude a reserved device from reuse, named explicitly or not — but reserving one does not evict whoever already holds it, it only stops the _next_ handover. A runner that names no device can still land on a reserved simulator when it is the only one booted (see [Enforcement](#enforcement)); the agent is warned, not stopped.
+
+### Shutdown
+
+An explicit human action from the Devices section, never something the daemon does on its own: `xcrun simctl shutdown <udid>` or `adb -s <serial> emu kill`. The serial is re-resolved from `adb devices` and `emu avd name` on every shutdown, never taken from a cache: an emulator that restarted gets a new console port, and a stale serial would kill whichever emulator took the old one. `device.shutdown` refuses a device a mid-turn agent holds (by lease or by process tree) unless the request sets `confirmMidTurnHolder`, which is the UI's second confirm tap; an idle holder or no holder at all shuts down on the first. Nothing here reaps — see [why a lease does not own disk cleanup](#why-a-lease-does-not-own-disk-cleanup).
 
 ## Config
 
@@ -168,6 +197,51 @@ Device cap would have refused a device launch
 ## Why a lease does not own disk cleanup
 
 An `xcodebuild test` run clones simulators onto disk and deletes them when it ends; a killed run leaves them. `agent-gone` is the right signal for that, but a lease is the wrong owner — it is released the moment the device stops, which is the event that was supposed to take the clone with it. [The artifact janitor](artifact-janitor.md) keeps its own cleanup obligations and reads the same agent list this registry does. All it needs from here is `listLeasedDeviceIds`, so it never deletes a device somebody is holding.
+
+## Physical devices
+
+A USB Pixel, an iPhone paired over the network with no cable — leased too, but not through the cap above. A phone costs the Mac no memory, so there is no slot cap or memory-headroom check for one; the point is narrower: stop one agent's `adb install` from overwriting another agent's install on the same phone.
+
+### Why they bypass the cap
+
+`PhysicalDeviceLeaseManager` (`physical-device-lease-manager.ts`) is a separate manager from `DeviceLeaseManager`, not another job inside it. It shares two things with the emulator cap rather than duplicating them: the `agents.deviceLeases` enabled/dryRun toggle — one switch for the whole feature — and the reservation store, since a reservation is just a device id, physical or not.
+
+### Detection sources
+
+Connections change constantly, so this is live detection, not a `ps` sample. It runs only while `deviceLeases.enabled` is true, and only once the daemon is listening (`physical-device-detection.ts`): with the feature off, no daemon holds an adb child or polls devicectl. The child's pid is written to `$PASEO_HOME/adb-track-devices.pid`, and the next start kills a child a crashed worker left behind (an orphaned `adb track-devices` lives until its next write, which is the next device event).
+
+- **Android**: a daemon-owned `adb track-devices -l` child (`AdbTrackDevicesService`). adb's host protocol frames every response with a 4-hex-character length prefix; the CLI subcommand relays that framing unmodified, one frame per connect/disconnect, each frame the full current device list rather than a diff. The child restarts with backoff if it or the adb server dies, and the phone list empties until the new child reports, which starts the grace period below. An ENOENT (adb not installed) turns detection off instead of retrying forever. A phone on USB and wireless debugging at once is one device: the mDNS serial carries the USB serial.
+- **iOS**: polling `xcrun devicectl list devices --json-output <file>` (`DevicectlPollingService`) — devicectl has no watch mode. Only `reality: "physical"` entries count; simulators are the process scan's job. macOS only, and an ENOENT (Xcode command line tools missing) stops polling for good.
+
+devicectl lists every **paired** device, reachable or not. `connectionProperties.transportType` is `wired` (USB), `localNetwork` (Wi-Fi) or `sameMachine` (simulators); a paired iPhone that can't be reached has no transport and a `tunnelState` of `unavailable`. So a device is connected when it has a `wired` or `localNetwork` transport and its tunnel is not `unavailable`. `tunnelState` is otherwise about devicectl's own tunnel session: a reachable Wi-Fi iPhone reads `disconnected` while the table says "available (paired)".
+
+### The grace period
+
+A disconnected device keeps its lease for `graceMinutes` (30) — phones get unplugged and re-paired constantly, and dropping the holder on the first missed poll would hand a mid-session device to the next agent that asks. The clock starts at the sweep that first notices the disconnect, not retroactively at the real disconnect time (nothing was watching before that sweep ran), the same way the emulator cap's `pendingTtlMinutes` works. Reconnecting inside the window keeps the same holder; past it, the lease releases as `device-disconnected`.
+
+### What the gate checks
+
+`gateInstall` is the enforcement point — the physical-device analog of the emulator cap's `gateLaunch`, called from the same PreToolUse hook. It refuses one thing: installing over another agent's device (or Tyler's reserved one). `device-install-commands.ts` recognizes the commands that install, uninstall, wipe or launch on a device that already exists: `adb install`/`install-multiple`/`uninstall`, `adb shell am start|start-activity`, `adb shell pm clear|install|uninstall`, gradle `install*`/`uninstall*`/`connected*AndroidTest` (with or without a `:module:` prefix), `expo run:android|ios --device`, `react-native run-android --deviceId`/`run-ios --udid|--device`, `devicectl device install|uninstall|process launch --device`, `xcodebuild test|test-without-building -destination` naming a physical id or name, `ios-deploy --bundle|--uninstall_only`, `flutter run -d`.
+
+Never matched: anything that only reads or only builds — `adb devices`, `logcat`, `shell pm list|path`, `shell getprop`, screenshots, `am broadcast`, `am instrument`, `xcodebuild build|archive` (any destination, `generic/platform=iOS` included), `ios-deploy --detect`. `adb shell am force-stop` changes app state without installing: it is refused only on a device another agent holds, and never takes a lease.
+
+Resolving a command's target:
+
+- a free, unreserved device → leased to the agent on the spot, command proceeds
+- held by another agent → refused (or recorded, in dry run), naming the holder
+- reserved for Tyler → refused, except for the agent already holding it: reserving does not evict a holder
+- untargeted, with more than one connected device of the command's platform → refused with the exact targeting fix for each device (`ANDROID_SERIAL=<serial>`, `adb -s`, `--device`, `-destination 'id=…'`, `ios-deploy --id`); `gradlew installDebug` with no `ANDROID_SERIAL` would install on all of them
+- untargeted plain `adb` with more than one adb target (phones plus emulators) → allowed: adb refuses to pick one on its own, and an `ANDROID_SERIAL` exported in the agent's shell, which the gate can't see, makes it a good command
+- untargeted, with exactly one connected device → that one is the target
+- names a device the gate doesn't currently see connected → nothing to protect; allowed through, and the command fails on its own
+
+`ANDROID_SERIAL`, `adb -s`, `--device`, `--deviceId`, `--udid`, and `-destination 'id=…'|'name=…'` are all recognized as targets. A target matches a device by serial or UDID, model name (adb's `Pixel_9_Pro_XL` matches "Pixel 9 Pro XL"), the name its owner gave an iPhone, or devicectl's CoreDevice identifier, case-insensitively.
+
+### Checkout
+
+`device_checkout` takes `kind: "physical"` (default is `"simulator"`, the emulator cap) and an optional `device` naming one (serial, UDID, name or CoreDevice identifier). Waiting works as for the emulator cap: with `wait` (the default) the agent is parked until the device, or any free one, is checked in, its holder ends, or a disconnect's grace period runs out. A named device another agent holds is reported with its holder. `device_checkin` without `kind` checks in both kinds. The response names the serial/UDID and exactly how to target it (`adb -s <serial> …` / `ANDROID_SERIAL=<serial>`, or `--device <udid>` / `-destination 'id=<udid>'`).
+
+"Reserved for you" applies the same way it does to a simulator or emulator — checkout and the install gate both exclude a reserved device, named explicitly or not.
 
 ## Why this is not part of the resource monitor
 

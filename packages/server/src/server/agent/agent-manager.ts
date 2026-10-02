@@ -1,5 +1,6 @@
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
-import type { DeviceStatusSnapshot } from "./device-lease-manager.js";
+import type { DeviceShutdownResult, DeviceStatusSnapshot } from "./device-lease-manager.js";
+import type { PhysicalDeviceStatusSnapshot } from "./physical-device-lease-manager.js";
 import type { PromptInterception } from "./agent-refocus.js";
 import {
   describeHookAgent,
@@ -20,6 +21,7 @@ import {
   hasOpenAgentTab,
   isDelegatedAgent,
   isOpenAgentTabLabel,
+  JEV_TOOLS_LABEL,
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import type { Logger } from "pino";
@@ -180,12 +182,37 @@ function submittedPromptText(prompt: AgentPromptInput): string {
 }
 
 /**
- * How the AgentManager reaches the device cap: read a snapshot, hear about changes. Narrow on
- * purpose — nothing here can acquire or release a slot.
+ * How the AgentManager reaches the device cap: read a snapshot, hear about changes, and the
+ * three actions the Devices UI takes on a device — release, reserve, shut down. Everything an
+ * agent itself does (checkout, checkin, the launch gate) goes through the MCP tools and the
+ * provider gate directly; this is only the human-initiated surface.
  */
 export interface DeviceLeaseStatusSource {
   getSnapshot(): Promise<DeviceStatusSnapshot>;
   subscribe(listener: () => void): () => void;
+  /** Pushes a fresh `device_status_update` now, instead of waiting for the next resource-monitor
+   * sweep — for a config writer (the dry-run switch) whose effect nothing else would notice. */
+  refreshSnapshot(): void;
+  releaseLeaseForDevice(deviceId: string): Promise<boolean>;
+  reserveDevice(deviceId: string): Promise<void>;
+  unreserveDevice(deviceId: string): Promise<void>;
+  shutdownDevice(input: {
+    deviceId: string;
+    confirmMidTurnHolder?: boolean;
+  }): Promise<DeviceShutdownResult>;
+}
+
+/**
+ * The physical-device analog of DeviceLeaseStatusSource. Separate rather than folded into it:
+ * physical devices have no slot cap and no shutdown action, and their reservation store is the
+ * same instance the emulator cap uses — reserve/unreserve above already reach a physical device
+ * id without this interface's help, which is why it's narrower (no reserve/unreserve of its own).
+ */
+export interface PhysicalDeviceLeaseStatusSource {
+  getSnapshot(): Promise<PhysicalDeviceStatusSnapshot>;
+  subscribe(listener: () => void): () => void;
+  releaseLeaseForDevice(deviceId: string): boolean;
+  refreshSnapshot(): void;
 }
 
 export class AgentManagerShuttingDownError extends Error {
@@ -393,6 +420,8 @@ export interface ResourceMonitorAgentSummary {
   isRunning: boolean;
   /** The `paseo.parent-agent-id` label: set on a child agent, null on a root. */
   parentAgentId: string | null;
+  /** What Tyler sees in the sidebar; the device cap names agents by it. */
+  title?: string | null;
 }
 
 /**
@@ -1126,12 +1155,21 @@ function validateAgentId(agentId: string, source: string): string {
   return result.data;
 }
 
+/**
+ * Labels no patch may set, only the agent's create config. `paseo.jev-tools` decides the D8
+ * experiment arm (JevToolsEligibility pins it from the agent's stored labels on every daemon
+ * restart), so a patch that could write it would let an agent grant itself the tools by setting
+ * the label and waiting for a restart, bypassing the classifier's own assignment.
+ */
+const PROTECTED_LABEL_KEYS: ReadonlySet<string> = new Set([JEV_TOOLS_LABEL]);
+
 function applyLabelPatch(
   labels: Record<string, string>,
   patch: AgentLabelPatch,
 ): Record<string, string> {
   const nextLabels = { ...labels };
   for (const [key, value] of Object.entries(patch)) {
+    if (PROTECTED_LABEL_KEYS.has(key)) continue;
     if (value === null) {
       delete nextLabels[key];
     } else {
@@ -1280,6 +1318,7 @@ export class AgentManager {
   private mcpGatewayAuthToken: string | null = null;
   private mcpGatewayBaseUrl: string | null = null;
   private deviceLeaseStatusSource: DeviceLeaseStatusSource | null = null;
+  private physicalDeviceLeaseStatusSource: PhysicalDeviceLeaseStatusSource | null = null;
   private finishObligations: FinishObligationService | null = null;
   private childAdmission: ChildAdmissionController | null = null;
   /** What each admitted stream started with, for a caller that has to retry the same turn. */
@@ -1293,6 +1332,7 @@ export class AgentManager {
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private readonly paseoToolPolicies = new Map<string, ProviderPaseoToolsPolicy | undefined>();
+  private readonly launchEnvs = new Map<string, Readonly<Record<string, string>>>();
   /** Per agent, the gateway servers its current launch was given (docs/mcp-gateway.md). */
   private readonly brokeredMcpServerNames = new Map<string, ReadonlySet<string>>();
   private readonly resolvePaseoToolPolicy: (
@@ -1509,6 +1549,10 @@ export class AgentManager {
     this.deviceLeaseStatusSource = source;
   }
 
+  setPhysicalDeviceLeaseStatusSource(source: PhysicalDeviceLeaseStatusSource | null): void {
+    this.physicalDeviceLeaseStatusSource = source;
+  }
+
   /**
    * The durable finish-report ledger (docs/finish-reports.md), set by bootstrap. Hung off the
    * manager so `setupFinishNotification` reaches it from every call site without a new
@@ -1596,6 +1640,50 @@ export class AgentManager {
   /** Subscribes to device-cap changes; returns an unsubscribe function. No-ops when unwired. */
   onDeviceStatusChange(listener: () => void): () => void {
     return this.deviceLeaseStatusSource?.subscribe(listener) ?? (() => {});
+  }
+
+  /** Called after a daemon-config patch touches `agents.deviceLeases`, so the dry-run switch
+   * (or any other writer) is reflected without waiting on the next sweep. */
+  refreshDeviceStatus(): void {
+    this.deviceLeaseStatusSource?.refreshSnapshot();
+    this.physicalDeviceLeaseStatusSource?.refreshSnapshot();
+  }
+
+  /** Current physical-device snapshot, or null when no detection is wired. */
+  async getPhysicalDeviceStatusSnapshot(): Promise<PhysicalDeviceStatusSnapshot | null> {
+    return (await this.physicalDeviceLeaseStatusSource?.getSnapshot()) ?? null;
+  }
+
+  /** Subscribes to physical-device changes; returns an unsubscribe function. No-ops when unwired. */
+  onPhysicalDeviceStatusChange(listener: () => void): () => void {
+    return this.physicalDeviceLeaseStatusSource?.subscribe(listener) ?? (() => {});
+  }
+
+  /** Releases whoever's lease is bound to this device — tries the emulator cap first, then
+   * physical devices, since the Devices UI's "Release" action doesn't know which kind a row is.
+   * False when nobody held it in either, or neither is wired. */
+  async releaseDeviceLease(deviceId: string): Promise<boolean> {
+    const released = (await this.deviceLeaseStatusSource?.releaseLeaseForDevice(deviceId)) ?? false;
+    if (released) return true;
+    return this.physicalDeviceLeaseStatusSource?.releaseLeaseForDevice(deviceId) ?? false;
+  }
+
+  async setDeviceReservation(deviceId: string, reserved: boolean): Promise<void> {
+    if (!this.deviceLeaseStatusSource) return;
+    if (reserved) await this.deviceLeaseStatusSource.reserveDevice(deviceId);
+    else await this.deviceLeaseStatusSource.unreserveDevice(deviceId);
+  }
+
+  async shutdownDevice(input: {
+    deviceId: string;
+    confirmMidTurnHolder?: boolean;
+  }): Promise<DeviceShutdownResult> {
+    return (
+      (await this.deviceLeaseStatusSource?.shutdownDevice(input)) ?? {
+        status: "failed",
+        message: "The device cap is not wired up.",
+      }
+    );
   }
 
   /** The daemon's own reachable base URL for brokered gateway routes (KTD1), known once listening. */
@@ -1721,6 +1809,15 @@ export class AgentManager {
 
   getPaseoToolPolicy(agentId: string): ProviderPaseoToolsPolicy | undefined {
     return this.paseoToolPolicies.get(agentId);
+  }
+
+  /**
+   * The env the agent's provider was last launched with (`buildLaunchContext`): its create env
+   * after the plugins' `agent.session_open` transform, plus `PASEO_AGENT_ID` and `PASEO_AGENT_CWD`.
+   * What `ask_jev`'s command runs with, so it sees what the agent's own Bash sees.
+   */
+  getAgentLaunchEnv(agentId: string): Readonly<Record<string, string>> | undefined {
+    return this.launchEnvs.get(agentId);
   }
 
   /**
@@ -1872,6 +1969,7 @@ export class AgentManager {
       internal: agent.internal ?? false,
       isRunning: agent.lifecycle === "running",
       parentAgentId: getParentAgentIdFromLabels(agent.labels),
+      title: agent.config.title ?? null,
     }));
   }
 
@@ -2607,7 +2705,12 @@ export class AgentManager {
       storedConfig.cwd,
       paseoToolPolicy,
       options?.env,
-      { reason: "create", purpose: "interactive", workspaceId: options.workspaceId ?? null },
+      {
+        reason: "create",
+        purpose: "interactive",
+        workspaceId: options.workspaceId ?? null,
+        ...(options.labels ? { labels: options.labels } : {}),
+      },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const createOptions = this.buildCreateSessionOptions(options);
@@ -2732,6 +2835,7 @@ export class AgentManager {
         reason: "resume",
         purpose: resumeOptions?.purpose ?? "interactive",
         workspaceId: options?.workspaceId ?? null,
+        ...(options?.labels ? { labels: options.labels } : {}),
       },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
@@ -2901,7 +3005,12 @@ export class AgentManager {
       storedConfig.cwd,
       paseoToolPolicy,
       undefined,
-      { reason: "refresh", purpose: "interactive", workspaceId: existing.workspaceId },
+      {
+        reason: "refresh",
+        purpose: "interactive",
+        workspaceId: existing.workspaceId,
+        labels: existing.labels,
+      },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     if (
@@ -3631,6 +3740,11 @@ export class AgentManager {
   }
 
   private async writeLabels(agentId: string, patch: AgentLabelPatch): Promise<WriteLabelsResult> {
+    for (const key of Object.keys(patch)) {
+      if (PROTECTED_LABEL_KEYS.has(key)) {
+        this.logger.warn({ agentId, label: key }, "refused to patch a protected agent label");
+      }
+    }
     const liveAgent = this.agents.get(agentId);
     if (liveAgent) {
       liveAgent.labels = applyLabelPatch(liveAgent.labels, patch);
@@ -5603,6 +5717,7 @@ export class AgentManager {
   private discardRetainedAgentState(agentId: string): void {
     this.timelineStore.delete(agentId);
     this.paseoToolPolicies.delete(agentId);
+    this.launchEnvs.delete(agentId);
     for (const event of this.providerSubagents.deleteParent(agentId)) {
       this.dispatch({ type: "provider_subagent", event });
     }
@@ -7349,6 +7464,8 @@ export class AgentManager {
       reason: PluginSessionOpenRequest["reason"];
       purpose: PluginSessionOpenRequest["purpose"];
       workspaceId?: string | null;
+      /** The agent's labels: at create the agent is not in the manager yet for the catalog to read. */
+      labels?: Readonly<Record<string, string>>;
     },
   ): Promise<AgentLaunchContext> {
     if (this.pluginLifecycle) {
@@ -7372,6 +7489,7 @@ export class AgentManager {
         PASEO_AGENT_CWD: cwd,
       },
     };
+    this.launchEnvs.set(agentId, { ...context.env });
     if (
       this.paseoToolsEnabled &&
       isPaseoToolPolicyEnabled(paseoToolPolicy) &&
@@ -7381,6 +7499,8 @@ export class AgentManager {
       context.paseoTools = await this.paseoToolCatalogFactory({
         callerAgentId: agentId,
         paseoToolPolicy,
+        callerCwd: cwd,
+        ...(opening?.labels ? { callerLabels: opening.labels } : {}),
       });
     }
     return context;

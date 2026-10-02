@@ -20,6 +20,7 @@ import {
   resolveDeviceLaunchEnforcement,
 } from "../device-launch-enforcement.js";
 import type { DeviceLeaseManager, DeviceStatusSnapshot } from "../device-lease-manager.js";
+import type { PhysicalDeviceLeaseManager } from "../physical-device-lease-manager.js";
 import type { PaseoToolConfig, PaseoToolExecutionContext, PaseoToolResult } from "./types.js";
 
 export interface RegisterDeviceLeaseToolsOptions {
@@ -30,12 +31,20 @@ export interface RegisterDeviceLeaseToolsOptions {
     handler: (input: any, context: PaseoToolExecutionContext) => Promise<PaseoToolResult>,
   ) => void;
   manager: Pick<DeviceLeaseManager, "checkout" | "checkin" | "getSnapshot">;
+  /** Physical devices (docs/device-leases.md, Physical devices) — `device_checkout` routes to
+   * this instead when the caller asks for `kind: "physical"`. Absent on a daemon that hasn't
+   * wired physical detection in (tests, an older build). */
+  physicalManager?: Pick<PhysicalDeviceLeaseManager, "checkout" | "checkin" | "getSnapshot">;
   callerAgentId?: string;
   /** Throws when the caller is gone, so it is resolved lazily at each call, not at register. */
   resolveCallerProvider?: () => string | undefined;
+  /** The caller provider's `extends`, when it has one — a claude-backup-style custom provider
+   * enforces exactly like its base (device-launch-enforcement.ts). */
+  resolveCallerExtendsProviderId?: () => string | undefined;
 }
 
 const PlatformSchema = z.enum(["ios", "android"]);
+const KindSchema = z.enum(["simulator", "physical"]);
 
 const NO_AGENT_MESSAGE =
   "Device checkout needs to know which agent is asking, and this session has no agent id.";
@@ -67,7 +76,10 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
       return undefined;
     }
     if (!provider) return undefined;
-    const enforcement = resolveDeviceLaunchEnforcement(provider);
+    const enforcement = resolveDeviceLaunchEnforcement(
+      provider,
+      options.resolveCallerExtendsProviderId?.(),
+    );
     return { tier: enforcement.tier, detail: describeDeviceLaunchEnforcement(enforcement) };
   };
 
@@ -98,16 +110,50 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
           .optional()
           .describe("Wait for a slot instead of returning immediately. Defaults to true."),
         timeoutMinutes: z.number().positive().max(120).optional(),
+        device: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe(
+            "Use this specific already-running device (its UDID or AVD name, or — for kind " +
+              '"physical" — its serial/UDID) instead of letting the cap pick one. For a ' +
+              "simulator/emulator, naming one that isn't running boots a new device instead.",
+          ),
+        kind: KindSchema.optional().describe(
+          'Defaults to "simulator" (a booted iOS simulator or Android emulator, counted against ' +
+            'the slot cap). "physical" checks out a connected USB/network device instead — no ' +
+            "slot cap, but it protects against another agent overwriting your install.",
+        ),
       },
     },
     async (input, context) => {
       if (!callerAgentId) return toResult({ error: NO_AGENT_MESSAGE }, true);
+      if (input.kind === "physical") {
+        if (!options.physicalManager) {
+          return toResult(
+            { error: "Physical device detection is not available on this daemon." },
+            true,
+          );
+        }
+        const result = await options.physicalManager.checkout({
+          agentId: callerAgentId,
+          platform: input.platform,
+          wait: input.wait ?? true,
+          ...(input.reason ? { reason: input.reason } : {}),
+          ...(input.device ? { device: input.device } : {}),
+          ...(input.timeoutMinutes ? { timeoutMs: input.timeoutMinutes * 60_000 } : {}),
+          ...(context.signal ? { signal: context.signal } : {}),
+        });
+        return toResult(result, result.status === "unavailable");
+      }
       const result = await manager.checkout({
         agentId: callerAgentId,
         platform: input.platform,
         wait: input.wait ?? true,
         ...(input.reason ? { reason: input.reason } : {}),
         ...(input.timeoutMinutes ? { timeoutMs: input.timeoutMinutes * 60_000 } : {}),
+        ...(input.device ? { device: input.device } : {}),
         // A canceled turn must not leave an agent queued for a slot it will never use.
         ...(context.signal ? { signal: context.signal } : {}),
       });
@@ -123,16 +169,26 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
         "Give back a device slot as soon as you are finished with the device, so a waiting agent can have it. " +
         "Shut the device down too — the slot is also freed automatically when the device stops or the agent ends.",
       inputSchema: {
-        leaseId: z.string().optional().describe("Defaults to every slot this agent holds."),
+        leaseId: z
+          .string()
+          .optional()
+          .describe("Defaults to every slot and physical device this agent holds."),
+        kind: KindSchema.optional().describe(
+          "Only check in this kind. Defaults to both: simulator/emulator slots and physical devices.",
+        ),
       },
     },
     async (input) => {
       if (!callerAgentId) return toResult({ error: NO_AGENT_MESSAGE }, true);
-      const released = await manager.checkin({
+      const request = {
         agentId: callerAgentId,
         ...(input.leaseId ? { leaseId: input.leaseId } : {}),
-      });
-      return toResult({ released });
+      };
+      // Lease ids are disjoint across the two managers, so asking both is safe.
+      const simulator = input.kind === "physical" ? 0 : await manager.checkin(request);
+      const physical =
+        input.kind === "simulator" ? 0 : ((await options.physicalManager?.checkin(request)) ?? 0);
+      return toResult({ released: simulator + physical });
     },
   );
 
@@ -143,15 +199,19 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
       description:
         "Every iOS simulator and Android emulator running on this machine, who holds each one and for how long, " +
         "and how they count against the cap. Counted from the process list, so devices nobody checked out are included. " +
+        "Also includes connected physical devices (USB/network) and who holds each — no slot cap for those. " +
         "Also says what the cap can and cannot do about your own device launches, which depends on which agent you are.",
       inputSchema: {},
     },
     async () => {
       const snapshot = await manager.getSnapshot();
+      const physical = await options.physicalManager?.getSnapshot();
       const enforcement = describeCallerEnforcement();
       return toResult({
         summary: summarize(snapshot),
         ...snapshot,
+        ...(physical ? { physicalDevices: physical.devices } : {}),
+        ...(physical && physical.blocked.length > 0 ? { physicalBlocked: physical.blocked } : {}),
         ...(enforcement ? { yourEnforcement: enforcement } : {}),
       });
     },

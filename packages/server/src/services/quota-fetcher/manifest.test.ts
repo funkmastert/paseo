@@ -230,15 +230,13 @@ describe("the JEV fetcher", () => {
     await expect(jev.fetchUsage()).resolves.toBeNull();
   });
 
-  it("reads the status and decisions it is given on every fetch", async () => {
+  it("reads the status it is given on every fetch", async () => {
     const jevService = createTestJevService();
     try {
-      const readJevDecisions = vi.fn(() => []);
       const jev = findFetcher(
         createProviderUsageFetchers({
           logger: createLogger(),
           readJevStatus: () => jevService.status(),
-          readJevDecisions,
         }),
         "jev",
       );
@@ -247,7 +245,6 @@ describe("the JEV fetcher", () => {
         status: "available",
         planLabel: "fake backend",
       });
-      expect(readJevDecisions).toHaveBeenCalledTimes(1);
     } finally {
       rmSync(jevService.paseoHome, { recursive: true, force: true });
     }

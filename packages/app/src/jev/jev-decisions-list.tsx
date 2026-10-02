@@ -1,4 +1,4 @@
-import { Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet } from "react-native-unistyles";
 import { StatusBadge } from "@/components/ui/status-badge";
@@ -13,8 +13,18 @@ const TAG_KEYS: Record<JevDecisionTag, string> = {
 /**
  * An agent's JEV decisions for the context meter's popover, without a data source, so a capture
  * can hand it a view directly. Renders nothing when there are none: most agents never have one.
+ * `onOpenAllActivity` is a plain callback, not a navigation import, so this stays capture-safe —
+ * the caller (`jev-decisions-section.tsx`) wires it to `router.push`.
  */
-export function JevDecisionsList({ view, now }: { view: JevDecisionsView; now?: Date }) {
+export function JevDecisionsList({
+  view,
+  now,
+  onOpenAllActivity,
+}: {
+  view: JevDecisionsView;
+  now?: Date;
+  onOpenAllActivity?: () => void;
+}) {
   const { t } = useTranslation();
   if (view.lines.length === 0) return null;
   return (
@@ -28,6 +38,11 @@ export function JevDecisionsList({ view, now }: { view: JevDecisionsView; now?: 
       </View>
       {view.hidden > 0 ? (
         <Text style={styles.muted}>{t("contextWindow.jevOlder", { count: view.hidden })}</Text>
+      ) : null}
+      {onOpenAllActivity ? (
+        <Pressable onPress={onOpenAllActivity} testID="jev-all-activity-link">
+          <Text style={styles.link}>{t("contextWindow.jevAllActivity")}</Text>
+        </Pressable>
       ) : null}
     </>
   );
@@ -105,5 +120,10 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
     lineHeight: theme.fontSize.sm * 1.4,
+  },
+  link: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    marginTop: theme.spacing[1],
   },
 }));

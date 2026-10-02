@@ -103,8 +103,11 @@ describe("redactJevRequest: line-shaped patterns in a state string", () => {
     );
   });
 
-  it("leaves an assignment whose value is shorter than 8 characters", () => {
-    expect(sentText("DB_PWD=abc123 and password: none")).toBe("DB_PWD=abc123 and password: none");
+  it("leaves a value under 8 characters, or under 4 when a password is set with `=`", () => {
+    expect(sentText("API_TOKEN=abc123")).toBe("API_TOKEN=abc123");
+    expect(sentText("DB_PWD=abc\npassword: none")).toBe("DB_PWD=abc\npassword: none");
+    expect(sentText("DB_PWD=none")).toBe("DB_PWD=none");
+    expect(sentText("DB_PWD=abc123")).toBe("DB_PWD=[redacted:assignment]");
   });
 
   it("redacts every listed token prefix, in either case", () => {
@@ -648,5 +651,46 @@ describe("redactJevRequest: an argv held as an array", () => {
     [["the", "token", "expired", "yesterday"]],
   ])("leaves %j unchanged", (argv) => {
     expect(sentArgv(argv)).toEqual({ argv });
+  });
+});
+
+describe("redactJevRequest: what a .env or a tfstate leaks (read-check review)", () => {
+  it("redacts a short PIN or one-time code under its name", () => {
+    expect(sentText("ADMIN_PIN=482913\nadminPin: 4829\nSTEP_OTP=771203")).toBe(
+      "ADMIN_PIN=[redacted:assignment]\nadminPin: [redacted:assignment]\nSTEP_OTP=[redacted:assignment]",
+    );
+    expect(sentText("SPIN_COUNT=482913")).toBe("SPIN_COUNT=482913");
+  });
+
+  it("redacts the password of a user:password pair", () => {
+    expect(sentText("SMTP_LOGIN=ops@example.com:Hunter22pw")).toBe(
+      "SMTP_LOGIN=[email]:[redacted:assignment]",
+    );
+    expect(sentText("relay with ops@example.com:Hunter22pw today")).toBe(
+      "relay with [email]:[redacted:userinfo] today",
+    );
+    expect(sentText("FTP_LOGIN=deploy:Hunter22pw")).toBe("FTP_LOGIN=deploy:[redacted:assignment]");
+  });
+
+  it("redacts a base64 key as an assignment's whole value, whatever the name", () => {
+    expect(sentText("INTERNAL_BLOB=Zm9vYmFyYmF6cXV4MTIzNDU2")).toBe(
+      "INTERNAL_BLOB=[redacted:entropy]",
+    );
+    expect(sentText("FACTORY=AbstractFactoryBuilder")).toBe("FACTORY=AbstractFactoryBuilder");
+    expect(sentText("STRIPE_ACCOUNT=acct_1Nq2b3C4d5E6f7G8")).toBe(
+      "STRIPE_ACCOUNT=acct_1Nq2b3C4d5E6f7G8",
+    );
+  });
+
+  it("redacts Terraform outputs marked sensitive or under a secret-shaped key", () => {
+    const tfstate =
+      '{"outputs":{"admin_token":{"value":"c0ffee-1234-beef","sensitive":true},' +
+      '"db_url":{"value":"postgres://db.internal","type":"string","sensitive":true},' +
+      '"region":{"value":"us-west-2","type":"string"}}}';
+    expect(sentText(tfstate)).toBe(
+      '{"outputs":{"admin_token":{"value":"[redacted:assignment]","sensitive":true},' +
+        '"db_url":{"value":"[redacted:assignment]","type":"string","sensitive":true},' +
+        '"region":{"value":"us-west-2","type":"string"}}}',
+    );
   });
 });

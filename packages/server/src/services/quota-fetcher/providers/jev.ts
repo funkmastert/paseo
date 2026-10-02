@@ -51,12 +51,14 @@ const LANE_LABELS: Readonly<Record<JevLane, string>> = {
   control: "Control",
   agentTools: "Agent tools",
   interactive: "Ask JEV",
+  reads: "Read check",
 };
 
 const LANE_BALANCE_IDS: Readonly<Record<JevLane, string>> = {
   control: "control-today",
   agentTools: "tools-today",
   interactive: "ask-today",
+  reads: "reads-today",
 };
 
 // The spawn hint's note carries its answers as "task_class mechanical 0.91, reasoning 0.6"
@@ -66,8 +68,6 @@ const TASK_CLASS_VERDICT = /(?:^|,\s*)task_class\s+(\S+)/;
 export interface JevUsageFetcherOptions {
   /** Null when this daemon has no JEV service. */
   readStatus: () => JevStatus | null;
-  /** Every decision the host holds for its agents, any day; the fetcher keeps today's. */
-  readDecisions?: () => readonly JevDecisionRecord[];
   now?: () => number;
 }
 
@@ -77,19 +77,17 @@ export class JevUsageFetcher implements ProviderUsageFetcher {
   readonly live = true;
 
   private readonly readStatus: () => JevStatus | null;
-  private readonly readDecisions: () => readonly JevDecisionRecord[];
   private readonly now: () => number;
 
   constructor(options: JevUsageFetcherOptions) {
     this.readStatus = options.readStatus;
-    this.readDecisions = options.readDecisions ?? (() => []);
     this.now = options.now ?? Date.now;
   }
 
   async fetchUsage(): Promise<ProviderUsage | null> {
     const status = this.readStatus();
     if (!status) return null;
-    return buildJevUsage(status, this.readDecisions(), this.now());
+    return buildJevUsage(status, this.now());
   }
 }
 
@@ -98,11 +96,7 @@ export class JevUsageFetcher implements ProviderUsageFetcher {
  * nobody opted in, or JEV is switched off, so no card should appear anywhere a `ProviderUsage` is
  * shown, not just on the strip (`provider.ts`: "Null means the provider reports nothing at all").
  */
-export function buildJevUsage(
-  status: JevStatus,
-  decisions: readonly JevDecisionRecord[],
-  nowMs: number,
-): ProviderUsage | null {
+export function buildJevUsage(status: JevStatus, nowMs: number): ProviderUsage | null {
   if (status.reason !== null && HIDDEN_REASONS.has(status.reason)) return null;
   const base = {
     providerId: PROVIDER_ID,
@@ -121,7 +115,6 @@ export function buildJevUsage(
     };
   }
   const lanes = Object.keys(status.lanes) as JevLane[];
-  const today = decisionsToday(decisions, nowMs);
   return {
     ...base,
     status: "available",
@@ -129,7 +122,9 @@ export function buildJevUsage(
       ...lanes.map((lane) => laneBalance(lane, status.lanes[lane])),
       callsBalance(status, lanes),
     ],
-    details: [...laneAlerts(status, lanes), ...featureDetails(status, today)],
+    // Per-feature lines moved to the JEV dashboard (docs/jev.md, "The JEV dashboard" →
+    // "Links with feature 11"); the strip keeps only lane spend/calls/alerts.
+    details: laneAlerts(status, lanes),
     error: null,
   };
 }
@@ -224,58 +219,6 @@ function featureLabel(feature: string): string {
   return JEV_FEATURE_LABELS[feature] ?? feature;
 }
 
-/** The host's local midnight before `nowMs`: the ledger's day. */
-function startOfLocalDay(nowMs: number): number {
-  const now = new Date(nowMs);
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-}
-
-function decisionsToday(
-  decisions: readonly JevDecisionRecord[],
-  nowMs: number,
-): Map<string, JevDecisionRecord[]> {
-  const since = startOfLocalDay(nowMs);
-  const byFeature = new Map<string, JevDecisionRecord[]>();
-  for (const decision of decisions) {
-    const at = Date.parse(decision.at);
-    if (!Number.isFinite(at) || at < since) continue;
-    const list = byFeature.get(decision.feature) ?? [];
-    list.push(decision);
-    byFeature.set(decision.feature, list);
-  }
-  return byFeature;
-}
-
-/** One line per feature: whether it is live, in shadow or off, then what it did today. */
-function featureDetails(
-  status: JevStatus,
-  today: ReadonlyMap<string, JevDecisionRecord[]>,
-): ProviderUsageDetail[] {
-  return orderedFeatures(status).map((feature) => {
-    const featureStatus = status.features[feature];
-    const id = `feature:${feature}`;
-    const label = featureLabel(feature);
-    if (!featureStatus?.enabled) return { id, label, value: "Off" };
-    const mode = featureStatus.shadow ? shadowWord(feature) : "Live";
-    const totals = status.todayByFeature[feature];
-    const summary = summarizeFeatureDay(
-      feature,
-      featureStatus.shadow,
-      today.get(feature) ?? [],
-      totals,
-    );
-    const parts = [mode];
-    if (summary) parts.push(summary);
-    if (totals && totals.usd > 0) parts.push(formatUsd(totals.usd));
-    return { id, label, value: parts.join(" · ") };
-  });
-}
-
-/** Feature 14's shadow is its dry run, and the strip says so in its own word. */
-function shadowWord(feature: JevFeatureId): string {
-  return feature === "awayReply" ? "Dry run" : "Shadow";
-}
-
 /**
  * What a feature did today, from its decision notes, or null when it did nothing. In shadow the
  * notes are how Tyler decides to turn a feature live, so the line leads with what it would have
@@ -342,13 +285,4 @@ function summarizeWouldHave(records: readonly JevDecisionRecord[]): string {
 
 function plural(count: number, word: string): string {
   return count === 1 ? word : `${word}s`;
-}
-
-// Sub-cent spend is the normal case for JEV (about $0.0002 a call): one or two calls would read
-// "$0.000" at three places, so it keeps four under a cent, matching `formatJevCost`
-// (app/src/jev/jev-decisions-model.ts).
-function formatUsd(usd: number): string {
-  if (usd >= 0.1) return `$${usd.toFixed(2)}`;
-  if (usd >= 0.01) return `$${usd.toFixed(3)}`;
-  return `$${usd.toFixed(4)}`;
 }

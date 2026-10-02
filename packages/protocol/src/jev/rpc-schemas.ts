@@ -138,7 +138,12 @@ export const JevStatusSchema = z.object({
   features: z.record(z.string(), JevFeatureStatusSchema),
   lanes: z.record(z.string(), JevLaneStatusSchema),
   spawnHint: z.object({ applyHard: z.boolean(), applyRole: z.boolean() }),
-  agentTools: z.object({ assignShare: z.number() }),
+  agentTools: z.object({
+    assignShare: z.number(),
+    // Absent from a daemon without the JEV agent tools: true when this daemon lists them to the
+    // agents labelled `on`. The account-pool plugin gives no create an arm until it is.
+    served: z.boolean().optional(),
+  }),
   todayByFeature: z.record(z.string(), JevSpendTotalsSchema),
   last7Days: z.array(JevDaySpendSchema),
 });
@@ -295,7 +300,7 @@ export const JevSavingsFeatureSummarySchema = z.object({
   benefit: z.string(),
   asked: z.number(),
   // Keyed by reason: "below-floor" | "excluded" | "inactive" | "not-text" | "secret-path" |
-  // "outside-cwd" | "dedup" | "repeat"
+  // "outside-cwd" | "outside-repo" | "compound" | "saturated" | "dedup" | "repeat" | "changed"
   notAsked: z.record(z.string(), z.number()),
   live: JevSavingsModeTotalsSchema,
   shadow: JevSavingsModeTotalsSchema,

@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   describeDeviceLaunchEnforcement,
   resolveDeviceLaunchEnforcement,
+  resolveProviderExtends,
 } from "./device-launch-enforcement.js";
 
 describe("resolveDeviceLaunchEnforcement", () => {
@@ -45,6 +46,38 @@ describe("resolveDeviceLaunchEnforcement", () => {
 
   test("a custom ACP provider is gated like the ACP providers it shares a client with", () => {
     expect(resolveDeviceLaunchEnforcement("some-acp-agent", "acp").tier).toBe("asks");
+  });
+});
+
+describe("resolveProviderExtends", () => {
+  test("reads extends off a claude-backup-style provider entry", () => {
+    const providers = { "claude-backup": { extends: "claude" } };
+    expect(resolveProviderExtends("claude-backup", providers)).toBe("claude");
+    // Which is what makes it enforce like claude, not like an unknown provider.
+    expect(
+      resolveDeviceLaunchEnforcement(
+        "claude-backup",
+        resolveProviderExtends("claude-backup", providers),
+      ).tier,
+    ).toBe("refuses");
+  });
+
+  test("a provider entry with no extends resolves to undefined", () => {
+    expect(resolveProviderExtends("claude", { claude: {} })).toBeUndefined();
+  });
+
+  test("a provider id absent from the config resolves to undefined", () => {
+    expect(resolveProviderExtends("claude-backup", {})).toBeUndefined();
+    expect(resolveProviderExtends("claude-backup", undefined)).toBeUndefined();
+    expect(
+      resolveProviderExtends(undefined, { "claude-backup": { extends: "claude" } }),
+    ).toBeUndefined();
+  });
+
+  test("a malformed provider entry fails closed to undefined rather than throwing", () => {
+    expect(
+      resolveProviderExtends("claude-backup", { "claude-backup": "not-an-object" }),
+    ).toBeUndefined();
   });
 });
 

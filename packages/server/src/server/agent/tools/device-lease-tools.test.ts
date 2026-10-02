@@ -153,6 +153,25 @@ describe("registerDeviceLeaseTools", () => {
     expect(payload).toEqual({ released: 1 });
   });
 
+  test("check-in without a kind releases physical leases too", async () => {
+    const tools = new Map<string, Handler>();
+    const checkin = vi.fn(async () => 0);
+    const physicalCheckin = vi.fn(async () => 1);
+    registerDeviceLeaseTools({
+      registerTool: (name: string, _config: PaseoToolConfig, handler: Handler) => {
+        tools.set(name, handler);
+      },
+      manager: { checkout: vi.fn(), checkin, getSnapshot: vi.fn() },
+      physicalManager: { checkout: vi.fn(), checkin: physicalCheckin, getSnapshot: vi.fn() },
+      callerAgentId: "agent-1",
+    });
+
+    const { payload } = await call(tools, "device_checkin", { leaseId: "physical-3" });
+
+    expect(physicalCheckin).toHaveBeenCalledWith({ agentId: "agent-1", leaseId: "physical-3" });
+    expect(payload).toEqual({ released: 1 });
+  });
+
   test("status reports the count from the process scan, unleased devices included", async () => {
     const { tools } = registerFor("agent-1");
 

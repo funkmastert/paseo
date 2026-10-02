@@ -31,6 +31,7 @@ import type {
   AgentProviderRuntimeSettingsMap,
   ProviderOverride,
 } from "./provider-launch-config.js";
+import type { FileReadObserver } from "../jev/read-check/observer.js";
 import type { DeviceLaunchGate } from "./device-lease-manager.js";
 import {
   buildProviderRegistry,
@@ -120,6 +121,7 @@ export interface ProviderSnapshotManagerOptions {
   deviceLaunchGate?: DeviceLaunchGate;
   /** The catastrophe gate's kill switch (docs/catastrophe-gate.md). Absent means on. */
   isCatastropheGateEnabled?: () => boolean;
+  fileReadObserver?: FileReadObserver;
   isDev?: boolean;
   extraClients?: Partial<Record<AgentProvider, AgentClient>>;
   refreshTimeoutMs?: number;
@@ -251,6 +253,7 @@ export class ProviderSnapshotManager {
   private readonly managedProcesses?: ManagedProcessRegistry;
   private readonly deviceLaunchGate?: DeviceLaunchGate;
   private readonly isCatastropheGateEnabled?: () => boolean;
+  private readonly fileReadObserver?: FileReadObserver;
   private readonly openCodeBridge?: OpenCodeBridge;
   private readonly isDev: boolean;
   private readonly extraClients: Partial<Record<AgentProvider, AgentClient>>;
@@ -271,6 +274,7 @@ export class ProviderSnapshotManager {
     this.managedProcesses = options.managedProcesses;
     this.deviceLaunchGate = options.deviceLaunchGate;
     this.isCatastropheGateEnabled = options.isCatastropheGateEnabled;
+    this.fileReadObserver = options.fileReadObserver;
     this.openCodeBridge = options.openCodeBridge;
     this.isDev = options.isDev === true;
     this.extraClients = options.extraClients ?? {};
@@ -701,6 +705,7 @@ export class ProviderSnapshotManager {
       openCodeBridge: this.openCodeBridge,
       deviceLaunchGate: this.deviceLaunchGate,
       isCatastropheGateEnabled: this.isCatastropheGateEnabled,
+      fileReadObserver: this.fileReadObserver,
       isDev: this.isDev,
     });
 

@@ -123,6 +123,7 @@ describe("JevLanes", () => {
     control: 4,
     agentTools: 1,
     interactive: 1,
+    reads: 1,
     perGroup: 2,
     requestsPerSecond: 10,
   };
@@ -156,6 +157,7 @@ describe("JevLanes", () => {
       control: 4,
       agentTools: 4,
       interactive: 4,
+      reads: 1,
       perGroup: 2,
       requestsPerSecond: 10,
     };
@@ -206,6 +208,7 @@ describe("JevLanes", () => {
       control: 1,
       agentTools: 1,
       interactive: 1,
+      reads: 1,
       perGroup: 1,
       requestsPerSecond: 10,
     };
@@ -227,6 +230,7 @@ describe("JevLanes", () => {
       control: 4,
       agentTools: 4,
       interactive: 4,
+      reads: 1,
       perGroup: 4,
       requestsPerSecond: 1,
     };
@@ -260,12 +264,56 @@ describe("JevLanes", () => {
     expect(await toolPromise).toEqual({ ok: true });
   });
 
+  test("takeRateToken serves a waiting reads request only once no other lane waits", async () => {
+    const lanes = new JevLanes();
+    const rateLimits: JevLaneLimits = {
+      control: 4,
+      agentTools: 4,
+      interactive: 4,
+      reads: 4,
+      perGroup: 4,
+      requestsPerSecond: 1,
+    };
+    expect(
+      (await lanes.takeRateToken("control", { deadlineAt: 100_000, limits: rateLimits })).ok,
+    ).toBe(true);
+
+    const readsPromise = lanes.takeRateToken("reads", { deadlineAt: 100_000, limits: rateLimits });
+    const readsFlag = settledFlag(readsPromise);
+    await Promise.resolve();
+    const toolPromise = lanes.takeRateToken("agentTools", {
+      deadlineAt: 100_000,
+      limits: rateLimits,
+    });
+    const toolFlag = settledFlag(toolPromise);
+    await Promise.resolve();
+
+    // The reads waiter came first, and still waits behind agent tools.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(toolFlag.settled).toBe(true);
+    expect(readsFlag.settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await readsPromise).toEqual({ ok: true });
+  });
+
+  test("the reads lane has its own slots and circuit", async () => {
+    const lanes = new JevLanes();
+    const oneEach: JevLaneLimits = { ...limits, control: 1, reads: 1 };
+    await lanes.acquireSlot("control", { deadlineAt: 100_000, limits: oneEach });
+    const read = await lanes.acquireSlot("reads", { deadlineAt: 100_000, limits: oneEach });
+    expect(read.ok).toBe(true);
+    expect(lanes.inFlight("reads")).toBe(1);
+    expect(lanes.circuits.reads.state(Date.now())).toBe("closed");
+  });
+
   test("takeRateToken serves a waiting interactive request before a waiting agentTools one", async () => {
     const lanes = new JevLanes();
     const rateLimits: JevLaneLimits = {
       control: 4,
       agentTools: 4,
       interactive: 4,
+      reads: 1,
       perGroup: 4,
       requestsPerSecond: 1,
     };
@@ -304,6 +352,7 @@ describe("JevLanes", () => {
       control: 1,
       agentTools: 1,
       interactive: 1,
+      reads: 1,
       perGroup: 1,
       requestsPerSecond: 10,
     };
@@ -326,6 +375,7 @@ describe("JevLanes", () => {
       control: 1,
       agentTools: 1,
       interactive: 1,
+      reads: 1,
       perGroup: 1,
       requestsPerSecond: 10,
     };

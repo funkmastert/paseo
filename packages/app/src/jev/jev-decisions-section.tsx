@@ -1,4 +1,6 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
+import { router } from "expo-router";
+import { buildJevDashboardRoute } from "@/utils/host-routes";
 import { JevDecisionsList } from "./jev-decisions-list";
 import { buildJevDecisionsView } from "./jev-decisions-model";
 import { useAgentJevDecisions } from "./use-agent-jev-decisions";
@@ -18,5 +20,10 @@ export function JevDecisionsSection({
     () => buildJevDecisionsView(data?.decisions ?? [], data?.status ?? null),
     [data],
   );
-  return <JevDecisionsList view={view} />;
+  const openAllActivity = useCallback(() => {
+    if (!serverId || !agentId) return;
+    router.push(buildJevDashboardRoute(serverId, agentId));
+  }, [serverId, agentId]);
+  if (view.lines.length === 0) return null;
+  return <JevDecisionsList view={view} onOpenAllActivity={openAllActivity} />;
 }

@@ -1192,6 +1192,7 @@ export const fr: TranslationResources = {
       search: "Rechercher",
       schedules: "Planifications",
       askJev: "Demander à JEV",
+      jevDashboard: "Tableau de bord JEV",
     },
     worktreeSetup: {
       title: "Configurer les scripts d'arbre de travail",
@@ -2046,6 +2047,53 @@ export const fr: TranslationResources = {
     },
     expand: "Développer l'état des appareils",
     collapse: "Réduire l'état des appareils",
+    free: "Libre — le prochain agent qui le demande l'obtient",
+    reservedForYou: "Réservé pour vous",
+    runningFor: "En cours depuis {{duration}}",
+    heldFor: "Réservé depuis {{duration}}",
+    enforce: "Appliquer",
+    openAgent: "Ouvrir {{agent}}",
+    actionFailed: "L’action sur l’appareil a échoué : {{message}}",
+    mode: {
+      off: "Désactivé",
+      offDescription: "Rien n'est compté ni refusé.",
+      dryRun: "Simulation",
+      dryRunDescription: "Comptage seulement — rien n'est refusé.",
+      enforcing: "Appliqué",
+      enforcingDescription: "Refuse les lancements d'appareils au-delà du plafond.",
+    },
+    floorNote: "1 Android et 1 iOS toujours autorisés ; au-delà, cela dépend de la mémoire.",
+    actions: {
+      menuLabel: "Actions sur l'appareil",
+      release: "Libérer la réservation",
+      reserve: "Réserver pour moi",
+      unreserve: "Annuler la réservation",
+      shutdown: "Éteindre",
+    },
+    confirmShutdown: {
+      title: "Éteindre cet appareil ?",
+      message: "Cela éteint l'appareil. Rien d'autre sur la machine n'est affecté.",
+      midTurnTitle: "Cet appareil est en cours d'utilisation",
+      midTurnMessage:
+        "{{agent}} utilise cet appareil en ce moment. L'éteindre interrompra ce tour. Éteindre quand même ?",
+      confirmLabel: "Éteindre",
+    },
+    blocked_one: "{{count}} refus récent",
+    blocked_other: "{{count}} refus récents",
+    blockedDryRun_one: "{{count}} lancement aurait été refusé",
+    blockedDryRun_other: "{{count}} lancements auraient été refusés",
+    physical: {
+      sectionTitle: "Physique",
+      platform: {
+        ios: "iPhone",
+        android: "Téléphone Android",
+      },
+      transport: {
+        usb: "USB",
+        network: "Wi-Fi",
+      },
+      disconnected: "Déconnecté — se libère dans {{duration}}",
+    },
   },
   mcpStatus: {
     collapsedSummary: {
@@ -2137,6 +2185,7 @@ export const fr: TranslationResources = {
     jevShadow: "Mode fantôme",
     jevDryRun: "Simulation",
     jevOlder: "{{count}} plus anciennes",
+    jevAllActivity: "Toute l'activité JEV",
   },
   review: {
     comment: {

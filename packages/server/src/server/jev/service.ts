@@ -65,6 +65,7 @@ export const JEV_FEATURE_LANES: Record<JevFeatureId, JevLane> = {
   titleRefresh: "control",
   agentTools: "agentTools",
   askJev: "interactive",
+  readCheck: "reads",
 };
 
 /** Features whose answers always go to the caller: an agent or a person asked, so it gets one. */
@@ -146,6 +147,11 @@ export interface JevServiceRuntime extends JevService {
   stop(): Promise<void>;
   /** The push for a lane's first spent budget of the day (`jev_budget_exhausted`). */
   setBudgetNoticeSender(send: ((event: JevBudgetExhaustedEvent) => void) | null): void;
+  /**
+   * Whether this daemon lists the JEV agent tools to agents labelled `on`, read on every
+   * `status()` as `agentTools.served`. Bootstrap sets it where it wires the tools; unset is false.
+   */
+  setAgentToolsServed(read: () => boolean): void;
 }
 
 interface Snapshot {
@@ -288,6 +294,7 @@ function laneLimits(config: ResolvedJevConfig): JevLaneLimits {
     control: config.maxConcurrent,
     agentTools: config.agentTools.maxConcurrent,
     interactive: config.askJev.maxConcurrent,
+    reads: config.readCheck.maxConcurrent,
     perGroup: config.agentTools.maxConcurrentPerCall,
     requestsPerSecond: config.maxRequestsPerSecond,
   };
@@ -301,6 +308,8 @@ function laneCapUsd(config: ResolvedJevConfig, lane: JevLane): number {
       return config.agentTools.maxUsdPerDay;
     case "interactive":
       return config.askJev.maxUsdPerDay;
+    case "reads":
+      return config.readCheck.maxUsdPerDay;
   }
 }
 
@@ -973,7 +982,7 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     );
     const shadow =
       !JEV_FEATURES_WITHOUT_SHADOW.has(ctx.input.feature) &&
-      featureConfig(ctx.config, ctx.input.feature).shadow;
+      (ctx.input.shadow === true || featureConfig(ctx.config, ctx.input.feature).shadow);
     return { kind: shadow ? "shadow" : "answered", callId: ctx.callId, answers, meta };
   }
 
@@ -1013,9 +1022,28 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     }
   }
 
-  function isActive(feature: JevFeatureId): boolean {
+  function isActive(feature: JevFeatureId, caller: { callerAgentId?: string } = {}): boolean {
     try {
-      return gateReason(readSnapshot(false), feature) === null;
+      const snap = readSnapshot(false);
+      if (gateReason(snap, feature) !== null) return false;
+      const agentId = caller.callerAgentId;
+      if (agentId === undefined || JEV_FEATURE_LANES[feature] !== "agentTools" || !snap.config) {
+        return true;
+      }
+      // The caller's hourly bucket, as `reserve` judges it with no estimate: spent is spent.
+      const spent =
+        ledger.spentByAgentLastHourUsd(agentId) + reservations.reservedForAgentUsd(agentId);
+      return spent < snap.config.agentTools.maxUsdPerAgentPerHour;
+    } catch {
+      return false;
+    }
+  }
+
+  let readAgentToolsServed: () => boolean = () => false;
+
+  function agentToolsServed(): boolean {
+    try {
+      return readAgentToolsServed() === true;
     } catch {
       return false;
     }
@@ -1069,12 +1097,16 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
         control: laneStatus("control"),
         agentTools: laneStatus("agentTools"),
         interactive: laneStatus("interactive"),
+        reads: laneStatus("reads"),
       },
       spawnHint: {
         applyHard: config?.spawnHint.applyHard ?? false,
         applyRole: config?.spawnHint.applyRole ?? false,
       },
-      agentTools: { assignShare: config?.agentTools.assignShare ?? 0 },
+      agentTools: {
+        assignShare: config?.agentTools.assignShare ?? 0,
+        served: agentToolsServed(),
+      },
       todayByFeature: Object.fromEntries(
         JEV_FEATURES.map((feature) => [feature, ledger.featureTotalsToday(feature)]),
       ) as JevStatus["todayByFeature"],
@@ -1113,6 +1145,9 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     },
     setBudgetNoticeSender(send) {
       sendBudgetNotice = send;
+    },
+    setAgentToolsServed(read) {
+      readAgentToolsServed = read;
     },
   };
 }

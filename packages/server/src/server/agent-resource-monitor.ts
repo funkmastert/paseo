@@ -326,6 +326,11 @@ export interface AgentResourceMonitorOptions {
   holdChildAdmission?: (held: boolean, reason: string) => void;
   /** Injectable so tests never renice a real pid. Defaults to utils/process-priority.ts's. */
   lowerProcessPriority?: (pid: number, nice: number) => LowerPriorityResult;
+  /**
+   * Processes the daemon runs as an agent's own work (`ask_jev`'s command), by agent: extra roots
+   * of each agent's tree (agent/agent-side-processes.ts). Absent: none.
+   */
+  readAgentSideProcesses?: () => ReadonlyMap<string, readonly number[]>;
 }
 
 interface ResolvedReaperConfig extends BuildDaemonReaperConfig {
@@ -664,6 +669,7 @@ export class AgentResourceMonitor {
   private readonly sweepTestArtifacts: AgentResourceMonitorOptions["sweepTestArtifacts"];
   private readonly holdChildAdmission: AgentResourceMonitorOptions["holdChildAdmission"];
   private readonly lowerProcessPriority: (pid: number, nice: number) => LowerPriorityResult;
+  private readonly readAgentSideProcesses: () => ReadonlyMap<string, readonly number[]>;
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Machine-level legs have no agent to attach state to, so this monitor instance — a
    * bootstrap-time singleton — owns it directly instead of round-tripping through AgentManager. */
@@ -729,6 +735,7 @@ export class AgentResourceMonitor {
     this.holdChildAdmission = options.holdChildAdmission;
     this.lowerProcessPriority =
       options.lowerProcessPriority ?? ((pid, nice) => lowerProcessPriorityDefault(pid, nice));
+    this.readAgentSideProcesses = options.readAgentSideProcesses ?? (() => new Map());
   }
 
   start(): void {
@@ -827,6 +834,7 @@ export class AgentResourceMonitor {
     const attribution = attributeProcessTrees(
       cpu.rows,
       agents.map((agent) => agent.id),
+      { extraRoots: this.readAgentSideProcesses() },
     );
     const sample: AttributedProcessSample = {
       rows: cpu.rows,

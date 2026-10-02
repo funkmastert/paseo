@@ -91,6 +91,9 @@ import {
 } from "../../worktree/commands.js";
 import { registerBrowserTools } from "../../browser-tools/tools.js";
 import { registerDeviceLeaseTools } from "./device-lease-tools.js";
+import { registerJevTools, type JevToolsDependencies } from "./jev-tools.js";
+import { isDefaultAgentCreateConfigUnattended } from "../create-agent-mode.js";
+import { resolveProviderExtends } from "../device-launch-enforcement.js";
 import { registerCoordinationTools } from "./coordination-tools.js";
 import {
   COMPACT_ACTIVITY_LIMIT,
@@ -99,6 +102,7 @@ import {
 } from "./tool-output-projection.js";
 import type { BrowserToolsBroker } from "../../browser-tools/broker.js";
 import type { DeviceLeaseManager } from "../device-lease-manager.js";
+import type { PhysicalDeviceLeaseManager } from "../physical-device-lease-manager.js";
 import type {
   PaseoToolCatalog,
   PaseoToolConfig,
@@ -158,6 +162,14 @@ export interface PaseoToolHostDependencies {
   browserToolsBroker?: BrowserToolsBroker | null;
   /** The device cap (docs/device-leases.md). Absent means no checkout tools are offered. */
   deviceLeaseManager?: Pick<DeviceLeaseManager, "checkout" | "checkin" | "getSnapshot"> | null;
+  /** The JEV agent tools (docs/jev.md, "Features 4–6"). Absent means no JEV tools are offered. */
+  jevTools?: JevToolsDependencies | null;
+  /** Physical devices (docs/device-leases.md, Physical devices). Absent means `device_checkout`
+   * only offers simulators/emulators. */
+  physicalDeviceLeaseManager?: Pick<
+    PhysicalDeviceLeaseManager,
+    "checkout" | "checkin" | "getSnapshot"
+  > | null;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
   paseoHome?: string;
   worktreesRoot?: string;
@@ -1296,11 +1308,61 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     registerDeviceLeaseTools({
       registerTool,
       manager: options.deviceLeaseManager,
+      ...(options.physicalDeviceLeaseManager
+        ? { physicalManager: options.physicalDeviceLeaseManager }
+        : {}),
       callerAgentId,
       // The cap binds different providers to different degrees, and the agent asking is the
       // one that needs to know which it is (docs/device-leases.md).
       resolveCallerProvider: () => resolveCallerAgent()?.provider,
+      resolveCallerExtendsProviderId: () =>
+        resolveProviderExtends(resolveCallerAgent()?.provider, daemonConfigStore?.get().providers),
     });
+  }
+
+  // Only for callers `JevToolsEligibility` decided at first sight (labelled `on`, Read allowed,
+  // D7 ok), primed before this build, so a reload, resume or relabel lists the same tools. The
+  // caller is read without `resolveCallerAgent`, which throws for an agent missing from the
+  // manager: a failed lookup withholds the JEV tools, never the rest of the catalog.
+  if (options.jevTools && callerAgentId) {
+    const jevTools = options.jevTools;
+    try {
+      if (jevTools.eligibility.eligible(callerAgentId)) {
+        registerJevTools({
+          registerTool,
+          deps: jevTools,
+          callerAgentId,
+          readCallerAgent: () => {
+            const agent = agentManager.getAgent(callerAgentId);
+            if (!agent) return null;
+            return {
+              id: agent.id,
+              provider: agent.provider,
+              cwd: agent.cwd,
+              launchEnv: agentManager.getAgentLaunchEnv(agent.id) ?? null,
+              labels: agent.labels,
+              providerOptions: agent.config?.providerOptions,
+              // Same lookup bootstrap.ts used for the now-removed tool-use.jsonl adapter
+              // (`readAgentModel`): the running model, falling back to the configured one.
+              model: agent.runtimeInfo?.model ?? agent.config?.model ?? null,
+              contextTokens: agent.lastUsage?.contextWindowUsedTokens ?? null,
+              unattended: isDefaultAgentCreateConfigUnattended({
+                modeId: agent.currentModeId,
+                config: agent.config,
+                features: agent.features,
+                availableModes: agent.availableModes ?? [],
+              }),
+            };
+          },
+          logger: childLogger,
+        });
+      }
+    } catch (error) {
+      childLogger.warn(
+        { err: error, agentId: callerAgentId },
+        "JEV tools withheld: reading the caller failed",
+      );
+    }
   }
 
   registerCoordinationTools({

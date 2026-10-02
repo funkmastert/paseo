@@ -65,6 +65,7 @@ const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
     stallJudgment: { enabled: false, shadow: true },
     awayReply: { enabled: false, shadow: true },
     askJev: { enabled: false, shadow: false },
+    readCheck: { enabled: false, shadow: true },
     titleRefresh: { enabled: false, shadow: false },
   },
   lanes: {
@@ -113,9 +114,24 @@ const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
       circuit: "closed",
       resetsAt: new Date(0).toISOString(),
     },
+    reads: {
+      today: {
+        calls: 0,
+        answered: 0,
+        failed: 0,
+        unavailable: 0,
+        inputTokens: 0,
+        usd: 0,
+        usdSource: "none",
+      },
+      maxUsdPerDay: 0,
+      exhausted: false,
+      circuit: "closed",
+      resetsAt: new Date(0).toISOString(),
+    },
   },
   spawnHint: { applyHard: false, applyRole: false },
-  agentTools: { assignShare: 0 },
+  agentTools: { assignShare: 0, served: false },
   todayByFeature: {
     spawnHint: {
       calls: 0,
@@ -181,6 +197,15 @@ const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
       usdSource: "none",
     },
     askJev: {
+      calls: 0,
+      answered: 0,
+      failed: 0,
+      unavailable: 0,
+      inputTokens: 0,
+      usd: 0,
+      usdSource: "none",
+    },
+    readCheck: {
       calls: 0,
       answered: 0,
       failed: 0,

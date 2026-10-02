@@ -146,6 +146,10 @@ import {
   type PaseoToolHostDependencies,
 } from "./agent/tools/paseo-tools.js";
 import type { PaseoToolRuntimeContext } from "./agent/tools/types.js";
+import { JevToolsEligibility, type JevToolsDependencies } from "./agent/tools/jev-tools.js";
+import { JevToolUseLog } from "./agent/tools/jev-tool-use-log.js";
+import { AgentSideProcesses } from "./agent/agent-side-processes.js";
+import { createCatastropheCommandGate } from "./jev/command-gate.js";
 import { createAgentProviderRuntime } from "./agent/provider-runtime.js";
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
 import { WorkspaceReconciliationService } from "./workspace-reconciliation-service.js";
@@ -298,9 +302,24 @@ import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
 import { isPaseoOwnedWorktreeCwd, resolvePaseoWorktreesBaseRoot } from "../utils/worktree.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
 import { createSaturationLedger } from "./agent/saturation-ledger.js";
-import { DeviceLeaseManager, type DeviceLeaseAgentSummary } from "./agent/device-lease-manager.js";
+import {
+  DeviceLeaseManager,
+  type DeviceLaunchGate,
+  type DeviceLeaseAgentSummary,
+} from "./agent/device-lease-manager.js";
+import { resolveProviderExtends } from "./agent/device-launch-enforcement.js";
+import { DeviceReservationStore } from "./agent/device-reservation-store.js";
 import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
 import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
+import { PhysicalDeviceLeaseManager } from "./agent/physical-device-lease-manager.js";
+import { physicalDeviceMatches, type PhysicalDevice } from "./agent/physical-device-registry.js";
+import {
+  AdbTrackDevicesService,
+  createAdbTrackDevicesPidFile,
+} from "./agent/adb-track-devices-service.js";
+import { toPhysicalAndroidDevices } from "./agent/device-adb-track.js";
+import { PhysicalDeviceDetection } from "./agent/physical-device-detection.js";
+import { DevicectlPollingService } from "./agent/devicectl-polling-service.js";
 import {
   createPromptQueue,
   formatSystemNotificationPrompt,
@@ -345,7 +364,10 @@ import { buildJevBudgetExhaustedNotificationPayload } from "@getpaseo/protocol/j
 import { resolveJevAgentCwds } from "./jev/agent-cwds.js";
 import type { JevService, JevTransport } from "./jev/contract.js";
 import { createAwayReplyJob, type AwayReplyJob } from "./away-reply/job.js";
-import { createFakeJevTransport } from "./jev/fake.js";
+import { createJevConfigReader } from "./jev/config.js";
+import { createFakeJevTransport, withJevTransportDelay } from "./jev/fake.js";
+import { createReadCheckAgentSource } from "./jev/read-check/agent-source.js";
+import { ReadCheckObserver } from "./jev/read-check/observer.js";
 import { captureJevKeyFromEnv } from "./jev/key.js";
 import { collectJevSecretValues, isSecretEnvName } from "./jev/secret-sources.js";
 import {
@@ -1460,10 +1482,50 @@ function captureDaemonJevKey(config: PaseoDaemonConfig): {
   };
 }
 
-/** Tests inject a transport; `PASEO_JEV_BACKEND=fake` picks the fake on a scratch daemon. */
+/**
+ * Tests inject a transport; `PASEO_JEV_BACKEND=fake` picks the fake on a scratch daemon, and
+ * `PASEO_JEV_FAKE_DELAY_MS` slows it, to measure what a slow JEV costs a caller.
+ */
 function resolveJevTransportOverride(config: PaseoDaemonConfig): JevTransport | undefined {
   if (config.jevOverrides?.transport) return config.jevOverrides.transport;
-  return process.env.PASEO_JEV_BACKEND === "fake" ? createFakeJevTransport() : undefined;
+  if (process.env.PASEO_JEV_BACKEND !== "fake") return undefined;
+  const delayMs = Number(process.env.PASEO_JEV_FAKE_DELAY_MS ?? 0);
+  const fake = createFakeJevTransport();
+  return Number.isFinite(delayMs) && delayMs > 0 ? withJevTransportDelay(fake, delayMs) : fake;
+}
+
+/**
+ * The read check's observer. `PASEO_READ_CHECK_HOOKS=off` at daemon start leaves `hooks` unset, so
+ * no Claude session registers a read-check hook at all: the measured baseline, and a way out that
+ * needs no config schema.
+ */
+function createDaemonReadCheckObserver(input: {
+  jev: JevService;
+  paseoHome: string;
+  logger: Logger;
+  getAgentManager: () => AgentManager;
+}): { observer: ReadCheckObserver; hooks: ReadCheckObserver | undefined } {
+  const readCheckConfig = createJevConfigReader({
+    paseoHome: input.paseoHome,
+    homeDir: homedir(),
+    logger: input.logger,
+  });
+  const observer = new ReadCheckObserver({
+    jev: input.jev,
+    savings: input.jev.savings,
+    readConfig: () => {
+      const read = readCheckConfig.read();
+      return read.ok && read.config.enabled ? read.config.readCheck : null;
+    },
+    agents: createReadCheckAgentSource(input.getAgentManager),
+    homeDir: homedir(),
+    paseoHome: input.paseoHome,
+    logger: input.logger,
+  });
+  return {
+    observer,
+    hooks: process.env.PASEO_READ_CHECK_HOOKS === "off" ? undefined : observer,
+  };
 }
 
 export async function createPaseoDaemon(
@@ -1943,11 +2005,25 @@ export async function createPaseoDaemon(
   let listDeviceLeaseAgents: () => readonly DeviceLeaseAgentSummary[] = () => [];
   let sendDeviceLeaseMessageToAgent: (agentId: string, body: string) => Promise<void> = async () =>
     undefined;
+  const deviceReservationStore = new DeviceReservationStore(
+    logger,
+    path.join(config.paseoHome, "device-reservations.json"),
+  );
+  // What physical detection (below) currently sees. Read by the cap too: a runner that names a
+  // connected phone boots no simulator.
+  let androidPhysicalDevices: PhysicalDevice[] = [];
+  let androidEmulatorCount = 0;
+  let iosPhysicalDevices: PhysicalDevice[] = [];
   const deviceLeaseManager = new DeviceLeaseManager({
     processSampler,
     readDaemonConfig: () => ({ deviceLeases: daemonConfigStore.get().deviceLeases }),
     listAgents: () => listDeviceLeaseAgents(),
     sendSystemMessageToAgent: (agentId, body) => sendDeviceLeaseMessageToAgent(agentId, body),
+    reservations: deviceReservationStore,
+    isPhysicalDeviceTarget: (target) =>
+      [...androidPhysicalDevices, ...iosPhysicalDevices].some((device) =>
+        physicalDeviceMatches(device, target),
+      ),
     logger: logger.child({ module: "device-leases" }),
   });
   deviceLeaseManager.reportMode();
@@ -1969,11 +2045,87 @@ export async function createPaseoDaemon(
     paseoHome: config.paseoHome,
     logger: logger.child({ module: "work-snapshots" }),
   });
-  const deviceLaunchGate = createArtifactAwareLaunchGate({
+  const agentSideProcesses = new AgentSideProcesses();
+  const emulatorLaunchGate = createArtifactAwareLaunchGate({
     janitor: testArtifactJanitor,
     inner: deviceLeaseManager,
     logger: logger.child({ module: "artifact-janitor" }),
   });
+
+  // Feature 16, the file-read check (docs/jev.md). The Claude hooks hand it every Read, Bash and
+  // edit call; in shadow, the default, it answers in the same tick and judges after the read ran.
+  const readCheckObserver = createDaemonReadCheckObserver({
+    jev,
+    paseoHome: config.paseoHome,
+    logger,
+    getAgentManager: () => agentManager,
+  });
+  // Physical devices (docs/device-leases.md, Physical devices): leased outside the slot cap and
+  // headroom entirely — a phone costs the Mac no memory — so this is a separate manager, not
+  // another job inside DeviceLeaseManager. Live detection feeds it rather than a `ps` sample:
+  // a daemon-owned `adb track-devices -l` child for Android, `devicectl list devices
+  // --json-output` polling for iOS. Both share the same enabled/dryRun toggle and reservation
+  // store as the emulator cap — one feature, one switch. Detection runs only while that switch
+  // is on, and only once the daemon is up (`syncPhysicalDetection` in start()).
+  const physicalDeviceLeaseManager = new PhysicalDeviceLeaseManager({
+    listConnectedDevices: () => [...androidPhysicalDevices, ...iosPhysicalDevices],
+    countAndroidEmulators: () => androidEmulatorCount,
+    listAgents: () => listDeviceLeaseAgents(),
+    reservations: deviceReservationStore,
+    readDaemonConfig: () => ({ deviceLeases: daemonConfigStore.get().deviceLeases }),
+    logger: logger.child({ module: "physical-devices" }),
+  });
+  const adbTrackDevicesService = new AdbTrackDevicesService({
+    onDevicesChanged: (devices) => {
+      androidPhysicalDevices = toPhysicalAndroidDevices(devices);
+      androidEmulatorCount = devices.filter(
+        (device) => !device.physical && device.state === "device",
+      ).length;
+    },
+    pidFile: createAdbTrackDevicesPidFile(path.join(config.paseoHome, "adb-track-devices.pid")),
+    logger: logger.child({ module: "adb-track-devices" }),
+  });
+  const devicectlPollingService = new DevicectlPollingService({
+    onDevicesChanged: (devices) => {
+      iosPhysicalDevices = devices.map((device) => ({
+        id: device.udid,
+        platform: "ios",
+        transport: device.transport === "network" ? "network" : "usb",
+        name: device.name,
+        aliases: [device.identifier, device.deviceName].filter(
+          (alias): alias is string => alias !== undefined,
+        ),
+      }));
+    },
+    logger: logger.child({ module: "devicectl-polling" }),
+  });
+  const physicalDeviceDetection = new PhysicalDeviceDetection({
+    adb: adbTrackDevicesService,
+    devicectl: devicectlPollingService,
+    isEnabled: () => daemonConfigStore.get().deviceLeases?.enabled === true,
+    onStopped: () => {
+      androidPhysicalDevices = [];
+      androidEmulatorCount = 0;
+      iosPhysicalDevices = [];
+    },
+    logger: logger.child({ module: "physical-devices" }),
+  });
+  daemonConfigStore.onChange(() => physicalDeviceDetection.sync());
+
+  // The gate a provider's PreToolUse hook actually calls: the emulator/simulator slot cap (plus
+  // the artifact janitor's disk guard) first, then the physical-device install gate — disjoint
+  // command shapes in practice (booting a device vs. installing on one that already exists), so
+  // order only matters for which denial wins when a chained command line hits both.
+  const deviceLaunchGate: DeviceLaunchGate = {
+    async gateLaunch(input) {
+      const capDecision = await emulatorLaunchGate.gateLaunch(input);
+      if (capDecision.decision === "deny") return capDecision;
+      return await physicalDeviceLeaseManager.gateInstall(input);
+    },
+    async explainRefusalToAgent(input) {
+      await deviceLeaseManager.explainRefusalToAgent(input);
+    },
+  };
 
   // The catastrophe gate (docs/catastrophe-gate.md). Read on every gated call, so a reload of
   // `agents.catastropheGate.enabled` reaches running agents without restarting them.
@@ -1997,6 +2149,7 @@ export async function createPaseoDaemon(
       managedProcesses,
       deviceLaunchGate,
       isCatastropheGateEnabled,
+      fileReadObserver: readCheckObserver.hooks,
       isDev: config.isDev === true,
       extraClients: config.agentClients,
     },
@@ -2049,11 +2202,19 @@ export async function createPaseoDaemon(
   // Same reassignable-closure trick as handleAgentTurnFinished above: the device cap was built
   // before AgentManager because the providers need its gate, and it only reads the agent list.
   listDeviceLeaseAgents = () =>
-    agentManager.listAgentsForResourceMonitor().map((agent) => ({
-      agentId: agent.id,
-      provider: agent.provider,
-      isRunning: agent.isRunning,
-    }));
+    agentManager.listAgentsForResourceMonitor().map((agent) => {
+      const summary: DeviceLeaseAgentSummary = {
+        agentId: agent.id,
+        provider: agent.provider,
+        isRunning: agent.isRunning,
+        extendsProviderId: resolveProviderExtends(
+          agent.provider,
+          daemonConfigStore.get().providers,
+        ),
+      };
+      if (agent.title) summary.title = agent.title;
+      return summary;
+    });
   // The cap's only lever over a provider it cannot refuse: tell the agent about a device it
   // took without asking. Same steer path the resource monitor uses (agent-prompt.ts).
   sendDeviceLeaseMessageToAgent = async (agentId, body) => {
@@ -2072,6 +2233,17 @@ export async function createPaseoDaemon(
   agentManager.setDeviceLeaseStatusSource({
     getSnapshot: () => deviceLeaseManager.getSnapshot(),
     subscribe: (listener) => deviceLeaseManager.subscribe(listener),
+    refreshSnapshot: () => deviceLeaseManager.refreshSnapshot(),
+    releaseLeaseForDevice: (deviceId) => deviceLeaseManager.releaseLeaseForDevice(deviceId),
+    reserveDevice: async (deviceId) => deviceLeaseManager.reserveDevice(deviceId),
+    unreserveDevice: async (deviceId) => deviceLeaseManager.unreserveDevice(deviceId),
+    shutdownDevice: (input) => deviceLeaseManager.shutdownDevice(input),
+  });
+  agentManager.setPhysicalDeviceLeaseStatusSource({
+    getSnapshot: () => physicalDeviceLeaseManager.getSnapshot(),
+    subscribe: (listener) => physicalDeviceLeaseManager.subscribe(listener),
+    releaseLeaseForDevice: (deviceId) => physicalDeviceLeaseManager.releaseLeaseForDevice(deviceId),
+    refreshSnapshot: () => physicalDeviceLeaseManager.refreshSnapshot(),
   });
   const syncPluginProviders = () => {
     agentManager.updateProviderRegistry(
@@ -2642,6 +2814,27 @@ export async function createPaseoDaemon(
   );
   logger.info({ elapsed: elapsed() }, "Preparing voice and MCP runtime");
 
+  // The JEV agent tools (docs/jev.md, "Features 4–6"): one command gate and one D8 use log for the
+  // daemon. `ask_jev`'s command asks the catastrophe gate as a Bash call would, failing closed.
+  const jevToolsDependencies: JevToolsDependencies = {
+    jev,
+    commandGate: createCatastropheCommandGate({
+      isEnabled: () => daemonConfigStore.get().catastropheGate?.enabled !== false,
+    }),
+    // The device cap the agent's own Bash goes through (docs/device-leases.md).
+    deviceGate: deviceLaunchGate,
+    eligibility: new JevToolsEligibility({ jev }),
+    // `command` runs as the daemon's child; the resource monitor charges it to the agent.
+    agentSideProcesses,
+    providerRuntimeSettings: config.agentProviderSettings,
+    paseoHome: config.paseoHome,
+    worktreesRoot: config.worktreesRoot,
+    useLog: new JevToolUseLog({ dir: path.join(config.paseoHome, "jev"), logger }),
+    // Direct now (docs/jev.md, "Hooking in the features already built"): `recordToolUseSavings`
+    // is called beside the use-log append, so `startSavingsAdapters` no longer tails
+    // `tool-use.jsonl`.
+    savings: jev.savings,
+  };
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,
   ): PaseoToolHostDependencies => ({
@@ -2698,6 +2891,8 @@ export async function createPaseoDaemon(
     browserToolsEnabled: browserToolsPolicy.isEnabled(),
     browserToolsBroker,
     deviceLeaseManager,
+    jevTools: jevToolsDependencies,
+    physicalDeviceLeaseManager,
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
@@ -2715,7 +2910,14 @@ export async function createPaseoDaemon(
   const setAgentProviderToolsEnabled = (enabled: boolean) => {
     agentProviderRuntime.setPaseoToolCatalog(enabled ? createAgentToolCatalog({}) : null);
   };
-  agentManager.setPaseoToolCatalogFactory(createAgentToolCatalog);
+  // The JEV tools' eligibility is decided before the first catalog an agent sees, from its launch
+  // labels at create (the agent is not in the manager yet), and pinned (docs/jev.md).
+  agentManager.setPaseoToolCatalogFactory(async (runtime) => {
+    await jevToolsDependencies.eligibility.primeFromRuntime(runtime, (id) =>
+      agentManager.getAgent(id),
+    );
+    return createAgentToolCatalog(runtime);
+  });
   agentManager.setPaseoToolsEnabled(config.mcpInjectIntoAgents !== false);
   setAgentProviderToolsEnabled(config.mcpEnabled !== false && config.mcpInjectIntoAgents !== false);
 
@@ -2750,11 +2952,17 @@ export async function createPaseoDaemon(
   });
 
   let mcpEnabled = config.mcpEnabled ?? true;
+  // `jev.status` says the agent tools are served while agents can reach them: the agent MCP
+  // endpoint is on and Paseo's tools are injected into agents. The plugin labels no create until.
+  jev.setAgentToolsServed(() => mcpEnabled && config.mcpInjectIntoAgents !== false);
   let agentMcpBaseUrl: string | null = null;
   {
     const agentMcpRoute = "/mcp/agents";
 
     const createAgentMcpSession = async (callerAgentId?: string) => {
+      await jevToolsDependencies.eligibility.primeFromRuntime({ callerAgentId }, (id) =>
+        agentManager.getAgent(id),
+      );
       const agentMcpServer = await createAgentMcpServer(
         createAgentToolHostDependencies({
           callerAgentId,
@@ -3179,6 +3387,8 @@ export async function createPaseoDaemon(
               // root agents are untouched (docs/resource-monitor.md).
               holdChildAdmission: (held, reason) =>
                 childAdmission.setHold("cpu-saturation", held, reason),
+              // `ask_jev`'s commands count against the agent that asked (docs/resource-monitor.md).
+              readAgentSideProcesses: () => agentSideProcesses.snapshot(),
               sendSystemMessageToAgent: async (agentId, body) => {
                 await sendPromptToAgent({
                   agentManager,
@@ -3483,6 +3693,8 @@ export async function createPaseoDaemon(
       // model loading doesn't block the server from accepting connections.
       speechService.start();
       scriptHealthMonitor.start();
+      // After listening, so a bootstrap that fails (port in use) never leaves an adb child.
+      await physicalDeviceDetection.start();
     } catch (error) {
       unsubscribePluginProviders();
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
@@ -3502,6 +3714,7 @@ export async function createPaseoDaemon(
     agentModelDivergenceMonitor?.stop();
     agentResourceMonitor?.stop();
     deviceLeaseManager.stop();
+    physicalDeviceDetection.stop();
     pluginConnectionMonitor?.stop();
     accountFailoverMonitor?.stop();
     budgetPacingMonitor?.stop();
@@ -3556,6 +3769,8 @@ export async function createPaseoDaemon(
     // After the monitor stops: its last sweep's readings are still in memory, not on disk.
     await wsServer?.getUsageHistoryStore().close();
     stopMonitorsAndSweeps();
+    // Before the savings callers: the observer's queued judgments still land their records.
+    await readCheckObserver.observer.stop();
     spawnHintSavings.stop();
     await savingsAdapters.stop();
     // After every JEV caller has stopped: the ledger's day totals and the audit queue go to disk.

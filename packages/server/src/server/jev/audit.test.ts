@@ -120,6 +120,27 @@ describe("buildJevAuditLine", () => {
     );
   });
 
+  test("reads: hashes the excerpt and outline, keeps the path, size and recent rows", () => {
+    const line = buildLine("reads", {
+      task: "Fix login",
+      recent: ["tool Read src/a.ts"],
+      path: "src/session.ts",
+      size: "all 10 lines, about 50 tokens",
+      outline: "export function resolveSessionToken() {",
+      excerpt: "const secretBody = 1;",
+    });
+    const state = line.state as Record<string, unknown>;
+    expect(state["path"]).toBe("src/session.ts");
+    expect(state["recent"]).toEqual(["tool Read src/a.ts"]);
+    expect(state["excerpt"]).toEqual({
+      sha256: createHash("sha256").update("const secretBody = 1;").digest("hex"),
+      bytes: 21,
+    });
+    expect((state["outline"] as { sha256: string }).sha256).toHaveLength(64);
+    expect(JSON.stringify(line)).not.toContain("secretBody");
+    expect(JSON.stringify(line)).not.toContain("resolveSessionToken");
+  });
+
   test("agentTools: hashes state.content, never storing the content string in the line", () => {
     const secretContent = "SECRET-FILE-CONTENT-should-never-appear";
     const line = buildLine("agentTools", { path: "a.ts", content: secretContent });

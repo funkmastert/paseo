@@ -1165,6 +1165,7 @@ export const ko: TranslationResources = {
       search: "검색",
       schedules: "일정",
       askJev: "JEV에게 묻기",
+      jevDashboard: "JEV 대시보드",
     },
     worktreeSetup: {
       title: "워크트리 스크립트 설정",
@@ -2005,6 +2006,53 @@ export const ko: TranslationResources = {
     },
     expand: "기기 상태 펼치기",
     collapse: "기기 상태 접기",
+    free: "여유 — 다음에 요청하는 에이전트가 사용합니다",
+    reservedForYou: "회원님을 위해 예약됨",
+    runningFor: "{{duration}} 동안 실행 중",
+    heldFor: "{{duration}} 동안 점유 중",
+    enforce: "적용",
+    openAgent: "{{agent}} 열기",
+    actionFailed: "기기 작업 실패: {{message}}",
+    mode: {
+      off: "꺼짐",
+      offDescription: "아무것도 집계되거나 거부되지 않습니다.",
+      dryRun: "드라이런",
+      dryRunDescription: "집계만 — 아무것도 거부되지 않습니다.",
+      enforcing: "적용 중",
+      enforcingDescription: "한도를 초과하는 기기 실행을 거부합니다.",
+    },
+    floorNote: "Android 1대, iOS 1대는 항상 허용됩니다. 그 이상은 메모리에 따라 다릅니다.",
+    actions: {
+      menuLabel: "기기 작업",
+      release: "예약 해제",
+      reserve: "나를 위해 예약",
+      unreserve: "예약 취소",
+      shutdown: "종료",
+    },
+    confirmShutdown: {
+      title: "이 기기를 종료할까요?",
+      message: "이 기기가 종료됩니다. 기기의 다른 작업에는 영향을 주지 않습니다.",
+      midTurnTitle: "이 기기는 현재 사용 중입니다",
+      midTurnMessage:
+        "{{agent}}가 지금 이 기기를 사용하고 있습니다. 종료하면 해당 작업이 중단됩니다. 그래도 종료할까요?",
+      confirmLabel: "종료",
+    },
+    blocked_one: "최근 거부 {{count}}건",
+    blocked_other: "최근 거부 {{count}}건",
+    blockedDryRun_one: "실행 {{count}}건이 거부되었을 것입니다",
+    blockedDryRun_other: "실행 {{count}}건이 거부되었을 것입니다",
+    physical: {
+      sectionTitle: "실기기",
+      platform: {
+        ios: "아이폰",
+        android: "안드로이드 휴대폰",
+      },
+      transport: {
+        usb: "USB",
+        network: "Wi-Fi",
+      },
+      disconnected: "연결 끊김 — {{duration}} 후 해제됩니다",
+    },
   },
   mcpStatus: {
     collapsedSummary: {
@@ -2095,6 +2143,7 @@ export const ko: TranslationResources = {
     jevShadow: "섀도",
     jevDryRun: "드라이 런",
     jevOlder: "이전 {{count}}건",
+    jevAllActivity: "모든 JEV 활동",
   },
   review: {
     comment: {

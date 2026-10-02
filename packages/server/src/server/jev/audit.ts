@@ -113,9 +113,28 @@ function hashAgentToolsState(state: JevState): JevState {
   return record;
 }
 
+/** Feature 16's state fields that carry file content (docs/jev.md, "State and question"). */
+export const JEV_READ_CHECK_CONTENT_FIELDS = ["excerpt", "outline"] as const;
+
+/** `reads` only: replaces the file excerpt and outline with `{ sha256, bytes }`. */
+function hashReadCheckState(state: JevState): JevState {
+  if (typeof state !== "object" || state === null || Array.isArray(state)) return state;
+  const record: Record<string, unknown> = { ...(state as Record<string, unknown>) };
+  for (const field of JEV_READ_CHECK_CONTENT_FIELDS) {
+    const content = record[field];
+    if (typeof content === "string") record[field] = hashOf(content);
+  }
+  return record;
+}
+
+function auditedState(lane: JevLane, state: JevState): JevState {
+  if (lane === "agentTools") return hashAgentToolsState(state);
+  if (lane === "reads") return hashReadCheckState(state);
+  return state;
+}
+
 export function buildJevAuditLine(input: BuildJevAuditLineInput): JevAuditLine {
-  const state =
-    input.lane === "agentTools" ? hashAgentToolsState(input.request.state) : input.request.state;
+  const state = auditedState(input.lane, input.request.state);
   const serialized = JSON.stringify(state);
   const buffer = Buffer.from(serialized, "utf8");
   const truncated = buffer.length > MAX_STATE_LINE_BYTES;

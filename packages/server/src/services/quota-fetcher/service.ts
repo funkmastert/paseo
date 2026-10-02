@@ -21,7 +21,6 @@ export interface ProviderUsageServiceOptions {
   /** `agents.providerUsage.openaiApi`, read on every fetch. */
   readOpenAiApiConfig?: () => OpenAiApiUsageConfig | undefined;
   readJevStatus?: ProviderUsageFetcherFactoryOptions["readJevStatus"];
-  readJevDecisions?: ProviderUsageFetcherFactoryOptions["readJevDecisions"];
 }
 
 export interface ProviderUsageListResult {
@@ -49,7 +48,6 @@ export class ProviderUsageService {
           fetch: options.fetch,
           readOpenAiApiConfig: options.readOpenAiApiConfig,
           readJevStatus: options.readJevStatus,
-          readJevDecisions: options.readJevDecisions,
         },
         options.claudeDerivedProviders,
       );

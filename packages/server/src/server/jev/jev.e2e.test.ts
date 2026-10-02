@@ -86,6 +86,8 @@ describe("the four RPCs over the wire", () => {
     expect(status.keyPresent).toBe(true);
     expect(status.provider).toBe("fake");
     expect(status.features.spawnHint?.shadow).toBe(true);
+    // The daemon registers the JEV agent tools on its agent MCP endpoint.
+    expect(status.agentTools.served).toBe(true);
     expect(JSON.stringify(status)).not.toContain(FAKE_KEY);
   });
 

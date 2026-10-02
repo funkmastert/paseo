@@ -17,6 +17,7 @@ import type {
 } from "./agent/process-sampler.js";
 import type { SaturationLedgerRecord } from "./agent/saturation-ledger.js";
 import type { SystemLoadReading, SystemLoadSample } from "./agent/system-load.js";
+import { AgentSideProcesses } from "./agent/agent-side-processes.js";
 import {
   AgentResourceMonitor,
   type AgentResourceMonitorOptions,
@@ -227,6 +228,7 @@ function createMonitor(params: {
   saturationLedger?: AgentResourceMonitorOptions["saturationLedger"];
   holdChildAdmission?: AgentResourceMonitorOptions["holdChildAdmission"];
   lowerProcessPriority?: AgentResourceMonitorOptions["lowerProcessPriority"];
+  readAgentSideProcesses?: AgentResourceMonitorOptions["readAgentSideProcesses"];
   childAdmission?: ChildAdmissionController;
   /** Cwds `AgentStorage.list()` returns — every agent's recorded cwd, live or archived. */
   agentCwds?: string[];
@@ -258,6 +260,9 @@ function createMonitor(params: {
     ...(params.saturationLedger ? { saturationLedger: params.saturationLedger } : {}),
     ...(params.holdChildAdmission ? { holdChildAdmission: params.holdChildAdmission } : {}),
     ...(params.lowerProcessPriority ? { lowerProcessPriority: params.lowerProcessPriority } : {}),
+    ...(params.readAgentSideProcesses
+      ? { readAgentSideProcesses: params.readAgentSideProcesses }
+      : {}),
     ...(params.worktreeRootDirs ? { worktreeRootDirs: params.worktreeRootDirs } : {}),
     // Never shells out to a real lsof in a test unless a test explicitly injects one.
     cwdResolver: params.cwdResolver ?? { resolve: async () => new Map() },
@@ -446,6 +451,30 @@ describe("AgentResourceMonitor", () => {
     expect(push.sent).toHaveLength(1);
     expect(push.sent[0]?.data?.reason).toBe("resource_cpu");
     expect(push.sent[0]?.body).toContain("500%");
+  });
+
+  test("a command the daemon runs for an agent (ask_jev) counts against that agent", async () => {
+    const sides = new AgentSideProcesses();
+    const { monitor, push } = createMonitor({
+      processRows: [
+        agentProcessRow("agent-1", 1000, 5),
+        row({ pid: 900, ppid: 1, rssKb: 1000, cpuPercent: 0, command: "node daemon" }),
+        row({ pid: 901, ppid: 900, rssKb: 1000, cpuPercent: 250, command: "/bin/bash -c npm t" }),
+        row({ pid: 902, ppid: 901, rssKb: 1000, cpuPercent: 250, command: "node vitest" }),
+      ],
+      config: { memoryBytesPerAgent: 6 * 1024 ** 3, cpuPercentPerAgent: 400 },
+      readAgentSideProcesses: () => sides.snapshot(),
+    });
+
+    await monitor.tick();
+    expect(push.sent).toHaveLength(0);
+
+    const release = sides.add("agent-1", 901);
+    await monitor.tick();
+    expect(push.sent).toHaveLength(1);
+    expect(push.sent[0]?.data?.reason).toBe("resource_cpu");
+    release();
+    expect(sides.snapshot().size).toBe(0);
   });
 
   test("notifyAgent: false sends the push but skips the steer message", async () => {

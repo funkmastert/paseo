@@ -20,6 +20,8 @@
  * about counting.
  */
 
+import { ProviderOverrideSchema } from "@getpaseo/protocol/provider-config";
+
 /** Ordered weakest to strongest so a tier can be compared, not just matched. */
 export const DEVICE_LAUNCH_ENFORCEMENT_TIERS = ["observes", "asks", "refuses"] as const;
 
@@ -123,6 +125,22 @@ export function resolveDeviceLaunchEnforcement(
     return ENFORCEMENT_BY_PROVIDER.copilot as DeviceLaunchEnforcement;
   }
   return UNKNOWN_PROVIDER_ENFORCEMENT;
+}
+
+/**
+ * The `extends` a provider config entry declares, read the same way `resolveAccountPoolEntries`
+ * does (account-pool-providers.ts) — off the resolved `agents.providers` config the daemon
+ * itself validates entries with, not a literal id comparison. A `claude-backup` entry with
+ * `extends: "claude"` must enforce exactly like `claude`; gating on the bare id instead is the
+ * bug this function exists to not repeat (docs/device-leases.md).
+ */
+export function resolveProviderExtends(
+  providerId: string | undefined,
+  providers: Record<string, unknown> | undefined,
+): string | undefined {
+  if (!providerId || !providers || !(providerId in providers)) return undefined;
+  const result = ProviderOverrideSchema.safeParse(providers[providerId]);
+  return result.success ? result.data.extends : undefined;
 }
 
 /** One sentence an agent can act on, for the `device_status` tool and the checkout result. */

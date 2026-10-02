@@ -1,4 +1,7 @@
-import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
+import type {
+  MutableDaemonConfigPatch,
+  SessionEventSubscription,
+} from "@getpaseo/protocol/messages";
 import type { McpGatewaySnapshotEntry } from "./mcp-gateway/gateway.js";
 import type { AgentRequests } from "./agent/requests/index.js";
 import equal from "fast-deep-equal";
@@ -1708,10 +1711,16 @@ export class Session {
    */
   private ensureDeviceStatusSubscription(): void {
     if (this.unsubscribeDeviceStatus) return;
-    this.unsubscribeDeviceStatus = this.agentManager.onDeviceStatusChange(() => {
+    const emitIfSubscribed = () => {
       if (!this.wantsEvent("device_status_update")) return;
       void this.emitDeviceStatusUpdate();
-    });
+    };
+    const unsubscribeEmulator = this.agentManager.onDeviceStatusChange(emitIfSubscribed);
+    const unsubscribePhysical = this.agentManager.onPhysicalDeviceStatusChange(emitIfSubscribed);
+    this.unsubscribeDeviceStatus = () => {
+      unsubscribeEmulator();
+      unsubscribePhysical();
+    };
   }
 
   /**
@@ -1723,6 +1732,7 @@ export class Session {
     try {
       const snapshot = await this.agentManager.getDeviceStatusSnapshot();
       if (!snapshot) return;
+      const physical = await this.agentManager.getPhysicalDeviceStatusSnapshot();
       const message = {
         type: "device_status_update" as const,
         payload: {
@@ -1736,6 +1746,8 @@ export class Session {
           blocked: snapshot.blocked,
           enforcement: snapshot.enforcement,
           generatedAt: snapshot.generatedAt,
+          ...(physical ? { physicalDevices: physical.devices } : {}),
+          ...(physical && physical.blocked.length > 0 ? { physicalBlocked: physical.blocked } : {}),
         },
       };
       if (source) this.emitForSource(message, source);
@@ -2241,9 +2253,36 @@ export class Session {
       this.dispatchPluginMessage(msg) ??
       this.dispatchTerminalMessage(msg) ??
       this.dispatchScheduleMessage(msg) ??
-      this.dispatchRestartRecoveryMessage(msg) ??
-      this.dispatchMiscMessage(msg);
+      this.dispatchRestartRecoveryOrDeviceOrMiscMessage(msg);
     if (promise) await promise;
+  }
+
+  private dispatchRestartRecoveryOrDeviceOrMiscMessage(
+    msg: SessionInboundMessage,
+  ): Promise<void> | undefined {
+    return (
+      this.dispatchRestartRecoveryMessage(msg) ??
+      this.dispatchDeviceActionMessage(msg) ??
+      this.dispatchMiscMessage(msg)
+    );
+  }
+
+  /** The Devices UI's three human actions on a device (docs/device-leases.md). */
+  private dispatchDeviceActionMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "device.lease.release.request":
+        return this.handleDeviceLeaseReleaseRequest(msg.deviceId, msg.requestId);
+      case "device.reserve.set.request":
+        return this.handleDeviceReserveSetRequest(msg.deviceId, msg.reserved, msg.requestId);
+      case "device.shutdown.request":
+        return this.handleDeviceShutdownRequest(
+          msg.deviceId,
+          msg.confirmMidTurnHolder,
+          msg.requestId,
+        );
+      default:
+        return undefined;
+    }
   }
 
   private dispatchWorkspaceLifecycleMessage(msg: SessionInboundMessage): Promise<void> | undefined {
@@ -2756,21 +2795,30 @@ export class Session {
         return this.daemonSession.handleDiagnosticsRequest(msg);
       case "daemon.update.request":
         return this.daemonSession.handleUpdateRequest(msg);
-      case "set_daemon_config_request":
+      case "set_daemon_config_request": {
+        const patched = this.daemonConfigStore.patch(msg.config);
         this.emit({
           type: "set_daemon_config_response",
-          payload: {
-            requestId: msg.requestId,
-            config: this.daemonConfigStore.patch(msg.config),
-          },
+          payload: { requestId: msg.requestId, config: patched },
         });
+        this.refreshDeviceStatusIfPatched(msg.config);
         return undefined;
+      }
       case "read_project_config_request":
         return this.projectConfigSession.handleReadProjectConfigRequest(msg);
       case "write_project_config_request":
         return this.projectConfigSession.handleWriteProjectConfigRequest(msg);
       default:
         return undefined;
+    }
+  }
+
+  /** A daemon-config patch doesn't otherwise make the daemon push a fresh device_status_update
+   * on its own — the dry-run switch (or any other deviceLeases writer) would look stuck until
+   * the next resource-monitor sweep, up to a minute away. */
+  private refreshDeviceStatusIfPatched(config: MutableDaemonConfigPatch): void {
+    if (config.deviceLeases !== undefined) {
+      this.agentManager.refreshDeviceStatus();
     }
   }
 
@@ -3554,6 +3602,61 @@ export class Session {
         },
       });
     }
+  }
+
+  /** The Devices UI's "Release the lease" action (docs/device-leases.md). */
+  private async handleDeviceLeaseReleaseRequest(
+    deviceId: string,
+    requestId: string,
+  ): Promise<void> {
+    this.sessionLogger.info({ deviceId, requestId }, "session: device.lease.release.request");
+    const released = await this.agentManager.releaseDeviceLease(deviceId);
+    this.emit({
+      type: "device.lease.release.response",
+      payload: { requestId, deviceId, released },
+    });
+  }
+
+  /** "Reserve for me" / "Unreserve" from the Devices UI. */
+  private async handleDeviceReserveSetRequest(
+    deviceId: string,
+    reserved: boolean,
+    requestId: string,
+  ): Promise<void> {
+    this.sessionLogger.info(
+      { deviceId, reserved, requestId },
+      "session: device.reserve.set.request",
+    );
+    await this.agentManager.setDeviceReservation(deviceId, reserved);
+    this.emit({
+      type: "device.reserve.set.response",
+      payload: { requestId, deviceId, reserved },
+    });
+  }
+
+  /** "Shut down", an explicit human action — never reaping (docs/device-leases.md). */
+  private async handleDeviceShutdownRequest(
+    deviceId: string,
+    confirmMidTurnHolder: boolean | undefined,
+    requestId: string,
+  ): Promise<void> {
+    this.sessionLogger.info(
+      { deviceId, confirmMidTurnHolder, requestId },
+      "session: device.shutdown.request",
+    );
+    const result = await this.agentManager.shutdownDevice({
+      deviceId,
+      ...(confirmMidTurnHolder === undefined ? {} : { confirmMidTurnHolder }),
+    });
+    this.emit({
+      type: "device.shutdown.response",
+      payload: {
+        requestId,
+        deviceId,
+        status: result.status,
+        ...("message" in result && result.message ? { message: result.message } : {}),
+      },
+    });
   }
 
   private async handleProjectIconSetRequest(

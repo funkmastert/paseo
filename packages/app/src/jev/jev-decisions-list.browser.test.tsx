@@ -130,10 +130,12 @@ function Popover({
   decisions,
   status,
   width,
+  onOpenAllActivity,
 }: {
   decisions: JevDecisionRecord[];
   status: JevStatus | null;
   width: number;
+  onOpenAllActivity?: () => void;
 }) {
   const innerWidth = Math.min(TOOLTIP_MAX_WIDTH, width - TOOLTIP_SCREEN_MARGIN);
   const innerStyle = useMemo(() => ({ width: innerWidth, gap: 6 }), [innerWidth]);
@@ -143,7 +145,11 @@ function Popover({
       <View style={innerStyle}>
         <Text style={titleStyle}>Context window</Text>
         <Text style={titleStyle}>38% used</Text>
-        <JevDecisionsList view={view} now={new Date(NOW_MS)} />
+        <JevDecisionsList
+          view={view}
+          now={new Date(NOW_MS)}
+          onOpenAllActivity={onOpenAllActivity}
+        />
       </View>
     </View>
   );
@@ -167,6 +173,30 @@ describe("JEV decisions in the context popover", () => {
     expect(rows[1].textContent).not.toMatch(/Shadow|Dry run|Not applied/);
     expect(rows[2].textContent).toContain("Shadow");
     expect(rows[2].textContent).toContain("Should a remediation agent handle this?");
+  });
+
+  it("opens all JEV activity when given a callback, and shows nothing without one", () => {
+    const onOpenAllActivity = vi.fn();
+    const withLink = mount(
+      <Popover
+        decisions={DECISIONS}
+        status={STATUS}
+        width={PHONE_WIDTH}
+        onOpenAllActivity={onOpenAllActivity}
+      />,
+      PHONE_WIDTH,
+    );
+    const link = withLink.querySelector<HTMLElement>('[data-testid="jev-all-activity-link"]');
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toBe("All JEV activity");
+    act(() => link?.click());
+    expect(onOpenAllActivity).toHaveBeenCalledTimes(1);
+
+    const withoutLink = mount(
+      <Popover decisions={DECISIONS} status={STATUS} width={PHONE_WIDTH} />,
+      PHONE_WIDTH,
+    );
+    expect(withoutLink.querySelector('[data-testid="jev-all-activity-link"]')).toBeNull();
   });
 
   it("is absent for an agent with no decisions, and on a host that predates JEV", () => {

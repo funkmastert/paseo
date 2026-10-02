@@ -1174,6 +1174,7 @@ export const ru: TranslationResources = {
       search: "Поиск",
       schedules: "Расписания",
       askJev: "Спросить JEV",
+      jevDashboard: "Панель JEV",
     },
     worktreeSetup: {
       title: "Настроить скрипты worktree",
@@ -2026,6 +2027,53 @@ export const ru: TranslationResources = {
     },
     expand: "Развернуть состояние устройств",
     collapse: "Свернуть состояние устройств",
+    free: "Свободно — достанется следующему агенту, который запросит",
+    reservedForYou: "Забронировано для вас",
+    runningFor: "Работает уже {{duration}}",
+    heldFor: "Занято уже {{duration}}",
+    enforce: "Применять",
+    openAgent: "Открыть {{agent}}",
+    actionFailed: "Не удалось выполнить действие с устройством: {{message}}",
+    mode: {
+      off: "Выключено",
+      offDescription: "Ничего не учитывается и не отклоняется.",
+      dryRun: "Пробный запуск",
+      dryRunDescription: "Только учёт — ничего не отклоняется.",
+      enforcing: "Применяется",
+      enforcingDescription: "Отклоняются запуски устройств сверх лимита.",
+    },
+    floorNote: "1 Android и 1 iOS разрешены всегда; остальное зависит от памяти.",
+    actions: {
+      menuLabel: "Действия с устройством",
+      release: "Освободить бронь",
+      reserve: "Забронировать для себя",
+      unreserve: "Снять бронь",
+      shutdown: "Выключить",
+    },
+    confirmShutdown: {
+      title: "Выключить это устройство?",
+      message: "Это выключит устройство. Остальное на машине не пострадает.",
+      midTurnTitle: "Устройство сейчас используется",
+      midTurnMessage:
+        "{{agent}} сейчас использует это устройство. Выключение прервёт этот ход. Всё равно выключить?",
+      confirmLabel: "Выключить",
+    },
+    blocked_one: "{{count}} недавний отказ",
+    blocked_other: "{{count}} недавних отказов",
+    blockedDryRun_one: "{{count}} запуск был бы отклонён",
+    blockedDryRun_other: "{{count}} запусков были бы отклонены",
+    physical: {
+      sectionTitle: "Физическое",
+      platform: {
+        ios: "iPhone",
+        android: "Телефон Android",
+      },
+      transport: {
+        usb: "USB",
+        network: "Wi-Fi",
+      },
+      disconnected: "Отключено — освободится через {{duration}}",
+    },
   },
   mcpStatus: {
     collapsedSummary: {
@@ -2117,6 +2165,7 @@ export const ru: TranslationResources = {
     jevShadow: "Теневой режим",
     jevDryRun: "Пробный запуск",
     jevOlder: "Ещё {{count}}",
+    jevAllActivity: "Вся активность JEV",
   },
   review: {
     comment: {
