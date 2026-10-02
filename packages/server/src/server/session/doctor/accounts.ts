@@ -2,7 +2,11 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { DoctorFinding } from "@getpaseo/protocol/doctor/rpc-schemas";
 import { deriveClaudeProviderEntries } from "../../../services/quota-fetcher/manifest.js";
-import { readClaudeAccountAuth } from "../../agent/providers/claude/account-auth.js";
+import {
+  claudeSignInCommand,
+  readClaudeAccountAuth,
+} from "../../agent/providers/claude/account-auth.js";
+import { findPoolAccountIdentityProblems } from "../../agent/pool-account-identity.js";
 import { finding, type DoctorCheck, type DoctorContext } from "./context.js";
 import {
   expandPathLike,
@@ -22,6 +26,8 @@ export interface AccountSlot {
   configDir: string;
   providers: Array<{ id: string; label: string }>;
   keychainService?: string;
+  /** `params.accountPool.email` of the entry this dir belongs to, when it declares one. */
+  expectedEmail: string | null;
   /** The account whose `CLAUDE.md`, `projects/` and `skills/` every other slot must resolve to. */
   isCanonical: boolean;
 }
@@ -49,17 +55,24 @@ function providersOf(ctx: DoctorContext): Record<string, unknown> | undefined {
 export function resolveAccountSlots(ctx: DoctorContext): AccountSlot[] {
   const canonical = canonicalClaudeDir(ctx);
   const byDir = new Map<string, AccountSlot>();
-  const add = (dir: string, provider: { id: string; label: string }, keychainService?: string) => {
+  const add = (
+    dir: string,
+    provider: { id: string; label: string },
+    keychainService?: string,
+    expectedEmail: string | null = null,
+  ) => {
     const configDir = path.resolve(expandPathLike(dir, ctx.home, ctx.env));
     const existing = byDir.get(configDir);
     if (existing) {
       existing.providers.push(provider);
+      existing.expectedEmail ??= expectedEmail;
       return;
     }
     byDir.set(configDir, {
       configDir,
       providers: [provider],
       keychainService,
+      expectedEmail,
       isCanonical: configDir === canonical,
     });
   };
@@ -70,6 +83,7 @@ export function resolveAccountSlots(ctx: DoctorContext): AccountSlot[] {
       entry.claudeHome,
       { id: entry.providerId, label: entry.displayName },
       entry.keychainService,
+      entry.expectedEmail ?? null,
     );
   }
   if (!derived.some((entry) => entry.providerId === "claude")) {
@@ -253,17 +267,29 @@ export const accountLoginCheck: DoctorCheck = {
   async run(ctx) {
     const slots = resolveAccountSlots(ctx);
     const out: DoctorFinding[] = [];
-    const seenAccounts = new Map<string, AccountSlot>();
+    const auths = new Map(slots.map((slot) => [slot, readClaudeAccountAuth(slot.configDir)]));
+    // The same check the failover sweep runs (pool-account-identity.ts), so doctor and the push
+    // cannot disagree about which login is wrong.
+    const identity = new Map(
+      findPoolAccountIdentityProblems(
+        slots.map((slot) => ({
+          providerId: slot.providers[0]?.id ?? slot.configDir,
+          configDir: slot.configDir,
+          expectedEmail: slot.expectedEmail,
+          auth: auths.get(slot) ?? null,
+        })),
+      ).map((problem) => [problem.providerId, problem]),
+    );
     for (const slot of slots) {
       const id = "account.login";
       const name = slotName(slot);
-      const auth = readClaudeAccountAuth(slot.configDir);
+      const auth = auths.get(slot) ?? { state: "unknown" as const };
       const credentials = await ctx.probes.hasCredentials({
         configDir: slot.configDir,
         providerId: slot.providers[0]?.id ?? "claude",
         keychainService: slot.keychainService,
       });
-      const signIn = `CLAUDE_CONFIG_DIR=${slot.configDir} claude /login`;
+      const signIn = claudeSignInCommand(slot.configDir, slot.expectedEmail);
       if (auth.state === "signed-out" || credentials === false) {
         out.push(
           finding(id, "accounts", "fail", `${name}: not logged in`, {
@@ -287,19 +313,21 @@ export const accountLoginCheck: DoctorCheck = {
         );
         continue;
       }
-      const label = auth.accountLabel;
-      const twin = label ? seenAccounts.get(label) : undefined;
-      if (label && twin) {
+      const problem = identity.get(slot.providers[0]?.id ?? slot.configDir);
+      if (problem) {
+        const headline =
+          problem.kind === "shared-login"
+            ? `${name}: same login as ${problem.sharesWith.join(", ")}`
+            : `${name}: signed into the wrong login`;
         out.push(
-          finding(id, "accounts", "warn", `${name}: same login as ${twin.configDir}`, {
-            detail: "Two config dirs are signed into one account.",
-            why: "The pool counts two accounts but has one budget, so 'failing over' between them moves work nowhere.",
-            fix: `CLAUDE_CONFIG_DIR=${slot.configDir} claude /login   # sign in as a different account`,
+          finding(id, "accounts", "warn", headline, {
+            detail: problem.summary,
+            why: "The pool counts two accounts but has one budget, so 'failing over' between them moves work nowhere, or the budget row reads the wrong account.",
+            fix: problem.fixCommand,
           }),
         );
         continue;
       }
-      if (label) seenAccounts.set(label, slot);
       out.push(
         finding(id, "accounts", "ok", `${name}: logged in`, {
           detail:

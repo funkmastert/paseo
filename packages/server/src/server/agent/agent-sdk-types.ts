@@ -841,7 +841,13 @@ export interface ResolveAgentDefaultModeInput {
  * a provider that reads a config file cannot see a revoked keychain token.
  */
 export type AgentAccountAuth =
-  | { state: "signed-in"; accountLabel: string | null }
+  | {
+      state: "signed-in";
+      /** The login's email. Free of any expected value: this is what the CLI says it is. */
+      accountLabel: string | null;
+      /** The login's account id. Two config dirs with one id are one budget, whatever their labels. */
+      accountUuid?: string | null;
+    }
   | { state: "signed-out"; signInCommand: string | null }
   | { state: "unknown" };
 

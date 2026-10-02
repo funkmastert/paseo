@@ -81,6 +81,8 @@ export interface ClaudeDerivedProviderEntry {
   claudeHome: string;
   /** Explicit override for `params.accountPool.keychainService`; see docs/providers.md. */
   keychainService?: string;
+  /** `params.accountPool.email`: the login this entry is meant to be signed into. */
+  expectedEmail?: string | null;
 }
 
 export function createProviderUsageFetchers(
@@ -120,6 +122,7 @@ const AccountPoolParamsSchema = z
     accountPool: z
       .object({
         keychainService: z.string().optional(),
+        email: z.string().min(1).optional(),
       })
       .passthrough()
       .optional(),
@@ -154,6 +157,9 @@ export function deriveClaudeProviderEntries(
       displayName: result.data.label ?? (providerId === "claude" ? "Claude" : providerId),
       claudeHome,
       keychainService: params.success ? params.data.accountPool?.keychainService : undefined,
+      ...(params.success && params.data.accountPool?.email
+        ? { expectedEmail: params.data.accountPool.email }
+        : {}),
     });
   }
   return entries;
