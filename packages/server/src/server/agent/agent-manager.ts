@@ -20,6 +20,7 @@ import {
   hasOpenAgentTab,
   isDelegatedAgent,
   isOpenAgentTabLabel,
+  JEV_TOOLS_LABEL,
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import type { Logger } from "pino";
@@ -1126,12 +1127,21 @@ function validateAgentId(agentId: string, source: string): string {
   return result.data;
 }
 
+/**
+ * Labels no patch may set, only the agent's create config. `paseo.jev-tools` decides the D8
+ * experiment arm (JevToolsEligibility pins it from the agent's stored labels on every daemon
+ * restart), so a patch that could write it would let an agent grant itself the tools by setting
+ * the label and waiting for a restart, bypassing the classifier's own assignment.
+ */
+const PROTECTED_LABEL_KEYS: ReadonlySet<string> = new Set([JEV_TOOLS_LABEL]);
+
 function applyLabelPatch(
   labels: Record<string, string>,
   patch: AgentLabelPatch,
 ): Record<string, string> {
   const nextLabels = { ...labels };
   for (const [key, value] of Object.entries(patch)) {
+    if (PROTECTED_LABEL_KEYS.has(key)) continue;
     if (value === null) {
       delete nextLabels[key];
     } else {
@@ -1293,6 +1303,7 @@ export class AgentManager {
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private readonly paseoToolPolicies = new Map<string, ProviderPaseoToolsPolicy | undefined>();
+  private readonly launchEnvs = new Map<string, Readonly<Record<string, string>>>();
   /** Per agent, the gateway servers its current launch was given (docs/mcp-gateway.md). */
   private readonly brokeredMcpServerNames = new Map<string, ReadonlySet<string>>();
   private readonly resolvePaseoToolPolicy: (
@@ -1721,6 +1732,15 @@ export class AgentManager {
 
   getPaseoToolPolicy(agentId: string): ProviderPaseoToolsPolicy | undefined {
     return this.paseoToolPolicies.get(agentId);
+  }
+
+  /**
+   * The env the agent's provider was last launched with (`buildLaunchContext`): its create env
+   * after the plugins' `agent.session_open` transform, plus `PASEO_AGENT_ID` and `PASEO_AGENT_CWD`.
+   * What `ask_jev`'s command runs with, so it sees what the agent's own Bash sees.
+   */
+  getAgentLaunchEnv(agentId: string): Readonly<Record<string, string>> | undefined {
+    return this.launchEnvs.get(agentId);
   }
 
   /**
@@ -2607,7 +2627,12 @@ export class AgentManager {
       storedConfig.cwd,
       paseoToolPolicy,
       options?.env,
-      { reason: "create", purpose: "interactive", workspaceId: options.workspaceId ?? null },
+      {
+        reason: "create",
+        purpose: "interactive",
+        workspaceId: options.workspaceId ?? null,
+        ...(options.labels ? { labels: options.labels } : {}),
+      },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const createOptions = this.buildCreateSessionOptions(options);
@@ -2732,6 +2757,7 @@ export class AgentManager {
         reason: "resume",
         purpose: resumeOptions?.purpose ?? "interactive",
         workspaceId: options?.workspaceId ?? null,
+        ...(options?.labels ? { labels: options.labels } : {}),
       },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
@@ -2901,7 +2927,12 @@ export class AgentManager {
       storedConfig.cwd,
       paseoToolPolicy,
       undefined,
-      { reason: "refresh", purpose: "interactive", workspaceId: existing.workspaceId },
+      {
+        reason: "refresh",
+        purpose: "interactive",
+        workspaceId: existing.workspaceId,
+        labels: existing.labels,
+      },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     if (
@@ -3631,6 +3662,11 @@ export class AgentManager {
   }
 
   private async writeLabels(agentId: string, patch: AgentLabelPatch): Promise<WriteLabelsResult> {
+    for (const key of Object.keys(patch)) {
+      if (PROTECTED_LABEL_KEYS.has(key)) {
+        this.logger.warn({ agentId, label: key }, "refused to patch a protected agent label");
+      }
+    }
     const liveAgent = this.agents.get(agentId);
     if (liveAgent) {
       liveAgent.labels = applyLabelPatch(liveAgent.labels, patch);
@@ -5603,6 +5639,7 @@ export class AgentManager {
   private discardRetainedAgentState(agentId: string): void {
     this.timelineStore.delete(agentId);
     this.paseoToolPolicies.delete(agentId);
+    this.launchEnvs.delete(agentId);
     for (const event of this.providerSubagents.deleteParent(agentId)) {
       this.dispatch({ type: "provider_subagent", event });
     }
@@ -7349,6 +7386,8 @@ export class AgentManager {
       reason: PluginSessionOpenRequest["reason"];
       purpose: PluginSessionOpenRequest["purpose"];
       workspaceId?: string | null;
+      /** The agent's labels: at create the agent is not in the manager yet for the catalog to read. */
+      labels?: Readonly<Record<string, string>>;
     },
   ): Promise<AgentLaunchContext> {
     if (this.pluginLifecycle) {
@@ -7372,6 +7411,7 @@ export class AgentManager {
         PASEO_AGENT_CWD: cwd,
       },
     };
+    this.launchEnvs.set(agentId, { ...context.env });
     if (
       this.paseoToolsEnabled &&
       isPaseoToolPolicyEnabled(paseoToolPolicy) &&
@@ -7381,6 +7421,8 @@ export class AgentManager {
       context.paseoTools = await this.paseoToolCatalogFactory({
         callerAgentId: agentId,
         paseoToolPolicy,
+        callerCwd: cwd,
+        ...(opening?.labels ? { callerLabels: opening.labels } : {}),
       });
     }
     return context;

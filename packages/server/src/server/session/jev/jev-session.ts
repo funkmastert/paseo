@@ -131,7 +131,7 @@ const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
     },
   },
   spawnHint: { applyHard: false, applyRole: false },
-  agentTools: { assignShare: 0 },
+  agentTools: { assignShare: 0, served: false },
   todayByFeature: {
     spawnHint: {
       calls: 0,

@@ -17,9 +17,8 @@ import type { JevLedgerEntry } from "./ledger.js";
 import { JevSavingsLedger } from "./savings.js";
 import {
   createStallJudgmentSavingsAdapter,
-  createToolUseSavingsAdapter,
   JsonlTail,
-  startSavingsAdapters,
+  recordToolUseSavings,
 } from "./savings-adapters.js";
 import { createRemediationSavingsHook, RemediationAgentCosts } from "./savings-hooks.js";
 
@@ -110,39 +109,9 @@ describe("JsonlTail edges (review m3)", () => {
     await tail.poll();
     expect(seen).toEqual([1, 2]);
   });
-
-  test("stop polls a last time, so the last lines before shutdown count", async () => {
-    const dir = tempDir();
-    const { savings } = await ledger();
-    const adapters = startSavingsAdapters({
-      jevDir: dir,
-      savings,
-      readAgentModel: () => "claude-sonnet-5",
-      logger: pino({ level: "silent" }),
-    });
-    await adapters.poll();
-    appendFileSync(
-      path.join(dir, "tool-use.jsonl"),
-      `${JSON.stringify({
-        v: 1,
-        at: new Date(NOON).toISOString(),
-        agentId: "agent-1",
-        tool: "ask_jev_file_bool",
-        outcome: "answered",
-        jevCalls: 1,
-        jevUsd: 0.0001,
-        resultChars: 100,
-        readTokensAvoided: 1_000,
-        callerContextTokens: null,
-        paths: ["/repo/a.ts"],
-      })}\n`,
-    );
-    await adapters.stop();
-    expect(savings.events({ range: "today" }).events).toHaveLength(1);
-  });
 });
 
-describe("the agent tools adapter (tool-use.jsonl)", () => {
+describe("recordToolUseSavings (features 4-6, called directly beside useLog.append)", () => {
   function toolLine(overrides: Record<string, unknown> = {}) {
     return {
       v: 1,
@@ -181,7 +150,8 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
 
   test("an answered file tool is live and pending until its regret window closes; a re-read is a regret", async () => {
     const { savings, clock } = await ledger();
-    const adapt = createToolUseSavingsAdapter({ savings, readAgentModel: () => "claude-sonnet-5" });
+    const adapt = (line: Record<string, unknown>) =>
+      recordToolUseSavings(savings, line, { callId: null, model: "claude-sonnet-5" });
 
     adapt(toolLine());
     const [record] = savings.events({ range: "today" }).events;
@@ -216,7 +186,8 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
     const readTokensAvoided = Math.ceil((20_000 + 7 * 400) / 2.35);
     expect(readTokensAvoided).toBe(9_703);
     const { savings, clock } = await ledger();
-    const adapt = createToolUseSavingsAdapter({ savings, readAgentModel: () => "claude-sonnet-5" });
+    const adapt = (line: Record<string, unknown>) =>
+      recordToolUseSavings(savings, line, { callId: null, model: "claude-sonnet-5" });
 
     adapt(toolLine({ readTokensAvoided, resultChars: 470, callerContextTokens: 150_000 }));
     observerRead(savings, NOON + 10 * MINUTE);
@@ -233,7 +204,8 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
 
   test("a window nothing watched gives no figure, and neither does a call that sent no path", async () => {
     const { savings, clock } = await ledger();
-    const adapt = createToolUseSavingsAdapter({ savings, readAgentModel: () => "claude-sonnet-5" });
+    const adapt = (line: Record<string, unknown>) =>
+      recordToolUseSavings(savings, line, { callId: null, model: "claude-sonnet-5" });
 
     adapt(toolLine());
     adapt(toolLine({ tool: "ask_jev", paths: [], at: new Date(NOON + 1).toISOString() }));
@@ -263,9 +235,7 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
       return savings;
     };
     const first = await open();
-    createToolUseSavingsAdapter({ savings: first, readAgentModel: () => "claude-sonnet-5" })(
-      toolLine(),
-    );
+    recordToolUseSavings(first, toolLine(), { callId: null, model: "claude-sonnet-5" });
     await first.stop();
 
     clock.now = NOON + 20 * MINUTE;
@@ -290,9 +260,10 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
     writeFileSync(path.join(realDir, "a.ts"), "x");
     symlinkSync(realDir, path.join(dir, "link"));
     const { savings } = await ledger();
-    createToolUseSavingsAdapter({ savings, readAgentModel: () => "claude-sonnet-5" })(
-      toolLine({ paths: [path.join(dir, "link", "a.ts")] }),
-    );
+    recordToolUseSavings(savings, toolLine({ paths: [path.join(dir, "link", "a.ts")] }), {
+      callId: null,
+      model: "claude-sonnet-5",
+    });
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     savings.noteRead({
@@ -309,7 +280,8 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
 
   test("two different calls of one tool in the same millisecond are two records (review m8)", async () => {
     const { savings } = await ledger();
-    const adapt = createToolUseSavingsAdapter({ savings, readAgentModel: () => "claude-sonnet-5" });
+    const adapt = (line: Record<string, unknown>) =>
+      recordToolUseSavings(savings, line, { callId: null, model: "claude-sonnet-5" });
 
     adapt(toolLine({ paths: ["/repo/src/a.ts"] }));
     adapt(toolLine({ paths: ["/repo/src/b.ts"] }));
@@ -320,7 +292,8 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
 
   test("a refusal is nothing, an unavailable call is a not-asked count, ask_jev_diff_risk claims nothing", async () => {
     const { savings } = await ledger();
-    const adapt = createToolUseSavingsAdapter({ savings, readAgentModel: () => "claude-sonnet-5" });
+    const adapt = (line: Record<string, unknown>) =>
+      recordToolUseSavings(savings, line, { callId: null, model: "claude-sonnet-5" });
 
     adapt(toolLine({ outcome: "refused", jevCalls: 0 }));
     adapt(toolLine({ outcome: "unavailable", jevCalls: 1 }));

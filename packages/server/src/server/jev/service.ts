@@ -147,6 +147,11 @@ export interface JevServiceRuntime extends JevService {
   stop(): Promise<void>;
   /** The push for a lane's first spent budget of the day (`jev_budget_exhausted`). */
   setBudgetNoticeSender(send: ((event: JevBudgetExhaustedEvent) => void) | null): void;
+  /**
+   * Whether this daemon lists the JEV agent tools to agents labelled `on`, read on every
+   * `status()` as `agentTools.served`. Bootstrap sets it where it wires the tools; unset is false.
+   */
+  setAgentToolsServed(read: () => boolean): void;
 }
 
 interface Snapshot {
@@ -1017,9 +1022,28 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     }
   }
 
-  function isActive(feature: JevFeatureId): boolean {
+  function isActive(feature: JevFeatureId, caller: { callerAgentId?: string } = {}): boolean {
     try {
-      return gateReason(readSnapshot(false), feature) === null;
+      const snap = readSnapshot(false);
+      if (gateReason(snap, feature) !== null) return false;
+      const agentId = caller.callerAgentId;
+      if (agentId === undefined || JEV_FEATURE_LANES[feature] !== "agentTools" || !snap.config) {
+        return true;
+      }
+      // The caller's hourly bucket, as `reserve` judges it with no estimate: spent is spent.
+      const spent =
+        ledger.spentByAgentLastHourUsd(agentId) + reservations.reservedForAgentUsd(agentId);
+      return spent < snap.config.agentTools.maxUsdPerAgentPerHour;
+    } catch {
+      return false;
+    }
+  }
+
+  let readAgentToolsServed: () => boolean = () => false;
+
+  function agentToolsServed(): boolean {
+    try {
+      return readAgentToolsServed() === true;
     } catch {
       return false;
     }
@@ -1079,7 +1103,10 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
         applyHard: config?.spawnHint.applyHard ?? false,
         applyRole: config?.spawnHint.applyRole ?? false,
       },
-      agentTools: { assignShare: config?.agentTools.assignShare ?? 0 },
+      agentTools: {
+        assignShare: config?.agentTools.assignShare ?? 0,
+        served: agentToolsServed(),
+      },
       todayByFeature: Object.fromEntries(
         JEV_FEATURES.map((feature) => [feature, ledger.featureTotalsToday(feature)]),
       ) as JevStatus["todayByFeature"],
@@ -1118,6 +1145,9 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     },
     setBudgetNoticeSender(send) {
       sendBudgetNotice = send;
+    },
+    setAgentToolsServed(read) {
+      readAgentToolsServed = read;
     },
   };
 }

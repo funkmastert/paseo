@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { resolvePaseoNodeEnv } from "./paseo-env.js";
 import { z } from "zod";
 import { expandTilde } from "../utils/path.js";
+import { isSameOrDescendantPath } from "./path-utils.js";
 
 import type { PaseoDaemonConfig } from "./bootstrap.js";
 import {
@@ -494,9 +495,17 @@ function resolveWorktreesRoot(
   }
 
   const expandedRoot = expandTilde(configuredRoot);
-  return path.isAbsolute(expandedRoot)
+  const resolvedRoot = path.isAbsolute(expandedRoot)
     ? path.resolve(expandedRoot)
     : path.resolve(paseoHome, expandedRoot);
+  // A worktrees root at or above $PASEO_HOME carves the whole denial out for it (m6): the agent
+  // tools' worktrees-carve-out widens to cover every other agent's config and secrets under
+  // $PASEO_HOME, not only worktrees. Ignored outright, not merely logged, so a misconfiguration
+  // never silently widens what an agent's cwd can read.
+  if (isSameOrDescendantPath(resolvedRoot, path.resolve(paseoHome))) {
+    return undefined;
+  }
+  return resolvedRoot;
 }
 
 function resolveAppendSystemPrompt(persisted: ReturnType<typeof loadPersistedConfig>): string {

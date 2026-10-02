@@ -146,6 +146,10 @@ import {
   type PaseoToolHostDependencies,
 } from "./agent/tools/paseo-tools.js";
 import type { PaseoToolRuntimeContext } from "./agent/tools/types.js";
+import { JevToolsEligibility, type JevToolsDependencies } from "./agent/tools/jev-tools.js";
+import { JevToolUseLog } from "./agent/tools/jev-tool-use-log.js";
+import { AgentSideProcesses } from "./agent/agent-side-processes.js";
+import { createCatastropheCommandGate } from "./jev/command-gate.js";
 import { createAgentProviderRuntime } from "./agent/provider-runtime.js";
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
 import { WorkspaceReconciliationService } from "./workspace-reconciliation-service.js";
@@ -2012,6 +2016,7 @@ export async function createPaseoDaemon(
     paseoHome: config.paseoHome,
     logger: logger.child({ module: "work-snapshots" }),
   });
+  const agentSideProcesses = new AgentSideProcesses();
   const deviceLaunchGate = createArtifactAwareLaunchGate({
     janitor: testArtifactJanitor,
     inner: deviceLeaseManager,
@@ -2695,6 +2700,27 @@ export async function createPaseoDaemon(
   );
   logger.info({ elapsed: elapsed() }, "Preparing voice and MCP runtime");
 
+  // The JEV agent tools (docs/jev.md, "Features 4–6"): one command gate and one D8 use log for the
+  // daemon. `ask_jev`'s command asks the catastrophe gate as a Bash call would, failing closed.
+  const jevToolsDependencies: JevToolsDependencies = {
+    jev,
+    commandGate: createCatastropheCommandGate({
+      isEnabled: () => daemonConfigStore.get().catastropheGate?.enabled !== false,
+    }),
+    // The device cap the agent's own Bash goes through (docs/device-leases.md).
+    deviceGate: deviceLaunchGate,
+    eligibility: new JevToolsEligibility({ jev }),
+    // `command` runs as the daemon's child; the resource monitor charges it to the agent.
+    agentSideProcesses,
+    providerRuntimeSettings: config.agentProviderSettings,
+    paseoHome: config.paseoHome,
+    worktreesRoot: config.worktreesRoot,
+    useLog: new JevToolUseLog({ dir: path.join(config.paseoHome, "jev"), logger }),
+    // Direct now (docs/jev.md, "Hooking in the features already built"): `recordToolUseSavings`
+    // is called beside the use-log append, so `startSavingsAdapters` no longer tails
+    // `tool-use.jsonl`.
+    savings: jev.savings,
+  };
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,
   ): PaseoToolHostDependencies => ({
@@ -2751,6 +2777,7 @@ export async function createPaseoDaemon(
     browserToolsEnabled: browserToolsPolicy.isEnabled(),
     browserToolsBroker,
     deviceLeaseManager,
+    jevTools: jevToolsDependencies,
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
@@ -2768,7 +2795,14 @@ export async function createPaseoDaemon(
   const setAgentProviderToolsEnabled = (enabled: boolean) => {
     agentProviderRuntime.setPaseoToolCatalog(enabled ? createAgentToolCatalog({}) : null);
   };
-  agentManager.setPaseoToolCatalogFactory(createAgentToolCatalog);
+  // The JEV tools' eligibility is decided before the first catalog an agent sees, from its launch
+  // labels at create (the agent is not in the manager yet), and pinned (docs/jev.md).
+  agentManager.setPaseoToolCatalogFactory(async (runtime) => {
+    await jevToolsDependencies.eligibility.primeFromRuntime(runtime, (id) =>
+      agentManager.getAgent(id),
+    );
+    return createAgentToolCatalog(runtime);
+  });
   agentManager.setPaseoToolsEnabled(config.mcpInjectIntoAgents !== false);
   setAgentProviderToolsEnabled(config.mcpEnabled !== false && config.mcpInjectIntoAgents !== false);
 
@@ -2803,11 +2837,17 @@ export async function createPaseoDaemon(
   });
 
   let mcpEnabled = config.mcpEnabled ?? true;
+  // `jev.status` says the agent tools are served while agents can reach them: the agent MCP
+  // endpoint is on and Paseo's tools are injected into agents. The plugin labels no create until.
+  jev.setAgentToolsServed(() => mcpEnabled && config.mcpInjectIntoAgents !== false);
   let agentMcpBaseUrl: string | null = null;
   {
     const agentMcpRoute = "/mcp/agents";
 
     const createAgentMcpSession = async (callerAgentId?: string) => {
+      await jevToolsDependencies.eligibility.primeFromRuntime({ callerAgentId }, (id) =>
+        agentManager.getAgent(id),
+      );
       const agentMcpServer = await createAgentMcpServer(
         createAgentToolHostDependencies({
           callerAgentId,
@@ -3232,6 +3272,8 @@ export async function createPaseoDaemon(
               // root agents are untouched (docs/resource-monitor.md).
               holdChildAdmission: (held, reason) =>
                 childAdmission.setHold("cpu-saturation", held, reason),
+              // `ask_jev`'s commands count against the agent that asked (docs/resource-monitor.md).
+              readAgentSideProcesses: () => agentSideProcesses.snapshot(),
               sendSystemMessageToAgent: async (agentId, body) => {
                 await sendPromptToAgent({
                   agentManager,
