@@ -704,6 +704,11 @@ export interface PaseoDaemonConfig {
     remediationSink?: RemediationSink;
     /** Stands in for restart recovery's claims, which only a real restart produces. */
     isClaimedByRestartRecovery?: (agentId: string) => boolean;
+    /**
+     * Wraps the daemon's shared resume pace, so a test can act at the moment a paced move is let
+     * through: a turn starting while the move waited for its slot.
+     */
+    wrapPaceResume?: (paceResume: PaceResume) => PaceResume;
   };
   /**
    * Test seams for FinishObligationService; production leaves this unset. Tests push the timer
@@ -1369,7 +1374,7 @@ function createAccountFailoverMonitor(input: {
     isClaimedByRestartRecovery:
       overrides?.isClaimedByRestartRecovery ??
       ((agentId) => input.restartRecovery.isAboutToResume(agentId)),
-    paceResume: input.paceResume,
+    paceResume: overrides?.wrapPaceResume?.(input.paceResume) ?? input.paceResume,
     sweepIntervalMs: overrides?.sweepIntervalMs,
     now: overrides?.now,
   });
