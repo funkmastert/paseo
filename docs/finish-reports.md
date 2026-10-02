@@ -3,7 +3,10 @@
 A delegated agent owes the agent that asked for it a report when it finishes, errors, is
 cancelled or is closed. The obligation is derived, not declared: `create_agent` with
 `notifyOnFinish` (the default for agent-scoped creation) arms it, and so does `send_agent_prompt`
-in the background. The child never has to cooperate.
+in the background. The child never has to cooperate. Nothing else arms it: a child started from the
+CLI (`paseo run`, even from inside an agent) owes nobody a report, so a lead that spawns its
+children that way is never woken when they finish. On 2026-10-01 three finished units sat unmerged
+overnight while their lead waited. Spawn children with `create_agent`.
 
 The report used to exist only as an in-memory subscription (`setupFinishNotification`), which a
 daemon restart dropped. Shutdown closes every agent and nothing restarts a child that was mid-turn,

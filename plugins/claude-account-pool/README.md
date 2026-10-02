@@ -1102,6 +1102,13 @@ as `Write` does. A custom profile's *pre-approve* list only skips permission
 prompts; it cannot re-enable a denied tool, since `disallowedTools` has
 already removed it.
 
+So a `read-only` agent cannot run a workflow that needs a shell, and neither can a child it spawns
+([A child is never less restricted than its parent](#a-child-is-never-less-restricted-than-its-parent)).
+On 2026-10-02 a `ce-code-review` run handed to an agent labelled `reviewer` lost its scope and
+merge scripts, its run artifacts and its cross-model pass, and the child it delegated to was
+denied the same tools. Give an agent that has to run such a skill a role whose profile keeps
+`Bash`, and keep `reviewer` for agents that only read.
+
 Restrictions only accumulate. Whatever the caller already denied stays denied
 — a plugin that can silently widen a caller's own sandbox would be a worse bug
 than an unenforced role.
