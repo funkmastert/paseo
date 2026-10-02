@@ -53,7 +53,9 @@ export interface ComposerSendClient {
       images: Array<{ data: string; mimeType: string }>;
       attachments: ReturnType<typeof splitComposerAttachmentsForSubmit>["attachments"];
     },
-  ) => Promise<void>;
+    // The composer ignores which agent took the message (a daemon delivers a send to a moved
+    // agent's live end); the app follows the move itself in utils/agent-migration.ts.
+  ) => Promise<unknown>;
   uploadFile: (input: { fileName: string; mimeType: string; bytes: Uint8Array }) => Promise<{
     requestId: string;
     file: {

@@ -21,6 +21,7 @@ function idleRoot(
     title: "Check mobile support needs",
     busy: false,
     pendingPermissionCount: 0,
+    runningProviderSubagentCount: 0,
     lastActivityAt: new Date(NOW - 60_000).toISOString(),
     timelineSeq: 40,
     lastTimelineAt: new Date(NOW - 60_000).toISOString(),

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { applyClearDraftRecord, pruneFinalizedDraftRecords, toDraftInputIfReady } from "./state";
+import {
+  applyClearDraftRecord,
+  moveDraftRecord,
+  pruneFinalizedDraftRecords,
+  toDraftInputIfReady,
+  type DraftRecord,
+} from "./state";
 
 describe("draft-store lifecycle", () => {
   it("prunes finalized tombstones after TTL", () => {
@@ -167,5 +173,74 @@ describe("draft-store normalization", () => {
       text: "Keep this prompt",
       attachments: [pickerAttachment],
     });
+  });
+});
+
+describe("moveDraftRecord", () => {
+  function record(text: string, lifecycle: DraftRecord["lifecycle"] = "active"): DraftRecord {
+    return { input: { text, attachments: [] }, lifecycle, updatedAt: 1, version: 3 };
+  }
+
+  it("moves an unsent draft to a key that has none and clears the old key", () => {
+    expect(
+      moveDraftRecord({
+        drafts: { from: record("half typed") },
+        fromKey: "from",
+        toKey: "to",
+        nowMs: 50,
+      }),
+    ).toEqual({
+      to: {
+        input: { text: "half typed", attachments: [] },
+        lifecycle: "active",
+        updatedAt: 50,
+        version: 1,
+      },
+    });
+  });
+
+  it("keeps the destination's own unsent draft and drops the old one", () => {
+    expect(
+      moveDraftRecord({
+        drafts: { from: record("old"), to: record("newer") },
+        fromKey: "from",
+        toKey: "to",
+        nowMs: 50,
+      }),
+    ).toEqual({ to: record("newer") });
+  });
+
+  it("replaces an empty or finalized destination record", () => {
+    expect(
+      moveDraftRecord({
+        drafts: { from: record("keep me"), to: record("", "sent") },
+        fromKey: "from",
+        toKey: "to",
+        nowMs: 50,
+      }),
+    ).toEqual({
+      to: {
+        input: { text: "keep me", attachments: [] },
+        lifecycle: "active",
+        updatedAt: 50,
+        version: 4,
+      },
+    });
+  });
+
+  it("does not carry a finalized draft and still clears the old key", () => {
+    expect(
+      moveDraftRecord({
+        drafts: { from: record("", "sent") },
+        fromKey: "from",
+        toKey: "to",
+        nowMs: 50,
+      }),
+    ).toEqual({});
+  });
+
+  it("returns the same map when the old key has nothing", () => {
+    const drafts = { other: record("x") };
+    expect(moveDraftRecord({ drafts, fromKey: "from", toKey: "to", nowMs: 50 })).toBe(drafts);
   });
 });

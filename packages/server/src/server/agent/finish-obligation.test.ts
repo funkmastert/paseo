@@ -232,6 +232,21 @@ describe("the ladder", () => {
     });
   });
 
+  it("sends a report up the ladder, not into the loop, when its owner's moves loop", () => {
+    const looped = context({
+      owner: {
+        ...presence(),
+        agentId: "owner",
+        migrationLoop: ["owner", "owner-successor", "owner"],
+      },
+    });
+    expect(planObligationStep(owed(), looped)).toEqual({
+      kind: "escalate",
+      to: "orchestrator",
+      why: "its owner's account moves loop (owner → owner-successor → owner), so no agent answers for it",
+    });
+  });
+
   it("releases a report whose owner was archived", () => {
     const archivedOwner = context({ owner: { ...presence({ archived: true }), agentId: "owner" } });
     expect(planObligationStep(owed(), archivedOwner)).toMatchObject({ kind: "release" });

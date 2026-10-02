@@ -107,6 +107,15 @@ targets.
 Both paths converge on `navigateToAgent()`. Do not make notification routing
 guess a workspace, and do not add a workspace to the stable agent URL format.
 
+A handle that account failover retired carries `paseo.account-failover.migrated-to`
+([account-failover.md](account-failover.md)). `navigateToAgent()` opens the live end
+of that chain instead, in the successor's own workspace, so the dead handle never
+lands in the route or in navigation history. A workspace tab already on the handle
+is retargeted in place (`useFollowMovedAgentTabs`), and the workspace never
+auto-opens a handle whose successor the app holds. Each raises the one-line
+"Moved to <account>" toast. A loop or a successor the host has not sent leaves the
+handle where it is, with the toast naming where it went.
+
 ## Params
 
 Required dynamic params belong to the matched route.

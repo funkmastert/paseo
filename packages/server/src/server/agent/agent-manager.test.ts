@@ -1793,7 +1793,7 @@ test("a message sent with no behavior steers into the running turn", async () =>
       logger,
     });
 
-    expect(result).toEqual({ disposition: "steered" });
+    expect(result).toEqual({ disposition: "steered", agentId: agent.id });
     expect(session.steerCount).toBe(1);
     expect(session.interruptCount).toBe(0);
     expect(session.startPrompts).toEqual(["initial"]);

@@ -244,6 +244,10 @@ export const ru: TranslationResources = {
       callout: "Этот агент находится в архиве",
       unarchive: "Разархивировать",
     },
+    moved: {
+      toAccount: "Перенесено в {{account}}",
+      toAgent: "Перенесено в агента {{agentId}}",
+    },
   },
   agentIdChip: {
     copiedLabel: "ID агента",

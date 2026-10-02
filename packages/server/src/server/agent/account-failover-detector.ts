@@ -4,7 +4,11 @@
  * in. See docs/account-failover.md.
  */
 import type { AgentLifecycleStatus } from "@getpaseo/protocol/agent-lifecycle";
-import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
+import {
+  ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
+  getMigratedToFromLabels,
+  getParentAgentIdFromLabels,
+} from "@getpaseo/protocol/agent-labels";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type { AccountFailoverAgentSummary } from "./agent-manager.js";
 import { isModelWindow, windowLimitsModel } from "./account-pool-headroom.js";
@@ -36,9 +40,10 @@ export function parseResetTimeHint(text: string | undefined | null): string | nu
 
 /**
  * Set on a predecessor once it has a successor. A labeled agent is retired: never a candidate
- * again. Durable across restarts because it lives on the agent record.
+ * again. Durable across restarts because it lives on the agent record. Defined in the protocol so
+ * the app can follow a moved handle too.
  */
-export const ACCOUNT_FAILOVER_MIGRATED_TO_LABEL = "paseo.account-failover.migrated-to";
+export { ACCOUNT_FAILOVER_MIGRATED_TO_LABEL, getMigratedToFromLabels };
 
 /**
  * Set on a successor, naming its predecessor. Deliberately the same un-namespaced key the manual
@@ -46,13 +51,6 @@ export const ACCOUNT_FAILOVER_MIGRATED_TO_LABEL = "paseo.account-failover.migrat
  * automatic migration recognizes a handoff a person already did, and vice versa.
  */
 export const HANDOFF_FROM_LABEL = "handoff-from";
-
-export function getMigratedToFromLabels(
-  labels: Record<string, string> | null | undefined,
-): string | null {
-  const migratedTo = labels?.[ACCOUNT_FAILOVER_MIGRATED_TO_LABEL];
-  return typeof migratedTo === "string" && migratedTo.trim().length > 0 ? migratedTo.trim() : null;
-}
 
 /**
  * How long one limit-shaped failure keeps its account dead without corroboration. Five hours is

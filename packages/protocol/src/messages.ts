@@ -357,7 +357,9 @@ const MutableAccountFailoverConfigSchema = z
     migrationConcurrency: z.number().int().positive().optional(),
     notifyParent: z.boolean().optional(),
     collapseToSharedAccount: z.boolean().optional(),
+    settleBack: z.boolean().optional(),
     // COMPAT(failoverReturn): accepted and ignored since 2026-09-24; remove after 2027-01-31.
+    // settleBack replaced the return leg; returnHome: false does not turn it off.
     returnHome: z.boolean().optional(),
     returnMaxHomeUsedPct: z.number().nonnegative().optional(),
     returnMinIdleMinutes: z.number().nonnegative().optional(),
@@ -5514,9 +5516,15 @@ export const SendAgentMessageResponseMessageSchema = z.object({
   type: z.literal("send_agent_message_response"),
   payload: z.object({
     requestId: z.string(),
+    /** The agent the message was addressed to, resolved from the id, prefix or title sent. */
     agentId: z.string(),
     accepted: z.boolean(),
     error: z.string().nullable(),
+    /**
+     * Set only when `agentId` had moved to another account (account failover's `migrated-to`):
+     * the agent the message was delivered to, where the conversation lives now. Wait on this one.
+     */
+    deliveredToAgentId: z.string().optional(),
   }),
 });
 

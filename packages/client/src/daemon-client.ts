@@ -367,6 +367,17 @@ export interface SendMessageOptions {
   attachments?: SendAgentMessageRequest["attachments"];
 }
 
+export interface SendAgentMessageResult {
+  /** The agent the message was addressed to, resolved from the id, prefix or title sent. */
+  agentId: string;
+  /**
+   * Where the message was delivered when that agent had moved to another account (account
+   * failover); null when it had not. An older daemon never sets it. A wait for the turn this
+   * message started belongs on `deliveredToAgentId ?? agentId`.
+   */
+  deliveredToAgentId: string | null;
+}
+
 export interface AgentAttentionRequiredNotification {
   agentId: string;
   reason: "finished" | "error" | "permission";
@@ -3386,7 +3397,7 @@ export class DaemonClient {
     agentId: string,
     text: string,
     options?: SendMessageOptions,
-  ): Promise<void> {
+  ): Promise<SendAgentMessageResult> {
     const requestId = this.createRequestId();
     const messageId = options?.messageId ?? crypto.randomUUID();
     const message = SessionInboundMessageSchema.parse({
@@ -3416,10 +3427,16 @@ export class DaemonClient {
     if (!payload.accepted) {
       throw new Error(payload.error ?? "sendAgentMessage rejected");
     }
+    return { agentId: payload.agentId, deliveredToAgentId: payload.deliveredToAgentId ?? null };
   }
 
-  async sendMessage(agentId: string, text: string, options?: SendMessageOptions): Promise<void> {
-    await this.sendAgentMessage(agentId, text, options);
+  /** See {@link SendAgentMessageResult}: wait on `deliveredToAgentId ?? agentId`. */
+  async sendMessage(
+    agentId: string,
+    text: string,
+    options?: SendMessageOptions,
+  ): Promise<SendAgentMessageResult> {
+    return await this.sendAgentMessage(agentId, text, options);
   }
 
   async rewindAgent(

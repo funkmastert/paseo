@@ -12,12 +12,15 @@ import type {
   ScheduleConditionLeaf,
 } from "@getpaseo/protocol/schedule/condition";
 import type { DoneJanitorAgentView } from "../agent/done-janitor-detector.js";
-import { parentOf } from "../agent/done-janitor-detector.js";
+import { liveParentOf } from "../agent/live-parent.js";
 
 export type ConditionVerdict = { fire: true; reason: string } | { fire: false; reason: string };
 
 export interface ConditionInput {
-  /** The heartbeat's target as the daemon sees it. Null when it has no record at all. */
+  /**
+   * The heartbeat's target as the daemon sees it: where its conversation lives now, when account
+   * failover moved it. Null when it has no record at all.
+   */
   target: DoneJanitorAgentView | null;
   /** Every agent view, the target's children among them. */
   views: readonly DoneJanitorAgentView[];
@@ -42,11 +45,13 @@ function isOccupied(view: DoneJanitorAgentView): boolean {
   return isRunning(view) || (view.live && view.pendingPermissionCount > 0);
 }
 
-function childrenOf(
-  targetId: string,
-  views: readonly DoneJanitorAgentView[],
-): DoneJanitorAgentView[] {
-  return views.filter((view) => !view.archived && parentOf(view) === targetId);
+/** Its children, including those spawned under an id its conversation has since moved from. */
+function childrenOf(input: ConditionInput, target: DoneJanitorAgentView): DoneJanitorAgentView[] {
+  const byId = new Map(input.views.map((view) => [view.id, view]));
+  const labelsOf = (agentId: string) => byId.get(agentId)?.labels ?? null;
+  return input.views.filter(
+    (view) => !view.archived && liveParentOf(view.labels, labelsOf) === target.id,
+  );
 }
 
 /**
@@ -68,7 +73,7 @@ function evaluateLeaf(
     case "always":
       return { fire: true, reason: "always" };
     case "hasActiveChildren": {
-      const running = childrenOf(target.id, input.views).filter(isRunning);
+      const running = childrenOf(input, target).filter(isRunning);
       if (running.length > 0) {
         return { fire: true, reason: `${running.length} child agent(s) still running` };
       }
@@ -82,7 +87,7 @@ function evaluateLeaf(
     }
     case "childFinishedSince": {
       const horizon = newsHorizonMs(input, target);
-      const finished = childrenOf(target.id, input.views).filter(
+      const finished = childrenOf(input, target).filter(
         (child) =>
           !isRunning(child) &&
           child.lifecycle !== "initializing" &&

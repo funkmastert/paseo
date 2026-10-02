@@ -1106,6 +1106,9 @@
             "collapseToSharedAccount": {
               "type": "boolean"
             },
+            "settleBack": {
+              "type": "boolean"
+            },
             "returnHome": {
               "type": "boolean"
             },

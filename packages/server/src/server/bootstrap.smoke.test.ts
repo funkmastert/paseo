@@ -360,7 +360,12 @@ describe("paseo daemon bootstrap", () => {
           modelDivergence: { enabled: true },
           usageHistory: { enabled: true },
         },
-        accountFailover: { enabled: true, migrateSubagents: false, returnHome: false },
+        accountFailover: {
+          enabled: true,
+          migrateSubagents: false,
+          settleBack: false,
+          returnHome: false,
+        },
         budgetPacing: { enabled: true, dryRun: true, speedUp: { horizonMinutes: 90 } },
         leaderCompaction: { enabled: true, dryRun: true, prepareAtTokens: 400_000 },
         contextMeter: { amberTokens: 150_000, redPercent: 75 },
@@ -466,6 +471,7 @@ describe("paseo daemon bootstrap", () => {
           accountFailover: {
             enabled: true,
             migrateSubagents: true,
+            settleBack: true,
             returnHome: true,
             returnMinIdleMinutes: 20,
           },

@@ -4,13 +4,10 @@ import { buildFinishReportNotificationPayload } from "@getpaseo/protocol/finish-
 import type { AgentManager, AgentManagerEvent, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent-storage.js";
 import type { PushNotificationSender } from "../push/index.js";
-import {
-  getMigratedToFromLabels,
-  HANDOFF_FROM_LABEL,
-  isLimitShapedError,
-} from "./account-failover-detector.js";
+import { HANDOFF_FROM_LABEL, isLimitShapedError } from "./account-failover-detector.js";
 import { findExistingSuccessor } from "./account-failover-migration.js";
 import {
+  followMigratedToAsync,
   formatFinishNotificationBody,
   formatSystemNotificationPrompt,
   sendPromptToAgent,
@@ -550,7 +547,7 @@ export class FinishObligationService {
     plan: Extract<ObligationStep, { kind: "deliver" }>,
     context: ObligationContext,
   ): Promise<boolean> {
-    // The target is not always the stored owner advanceSteps checked: resolveOwner follows
+    // The target is not always the stored owner advanceSteps checked: resolveLiveEnd follows
     // `migrated-to` to a successor, and the orchestrator rung walks up the tree. A target restart
     // recovery has claimed waits for it to let go, like a claimed owner; nothing is recorded.
     const claimed = this.options.isClaimedByRestartRecovery;
@@ -576,6 +573,9 @@ export class FinishObligationService {
           // idle or closed agent it starts one, which is the point of a report.
           activeTurnBehavior: "steer",
           unarchive: false,
+          // The target is already where its conversation lives (resolveLiveEnd), under the
+          // report's own rule, and it is the agent gateDelivery judged.
+          followMigration: false,
           logger: this.options.logger,
         });
       };
@@ -717,7 +717,7 @@ export class FinishObligationService {
   ): Promise<ObligationContext> {
     const [child, owner] = await Promise.all([
       this.presenceOf(childAgentId),
-      this.resolveOwner(obligation.ownerAgentId),
+      this.resolveLiveEnd(obligation.ownerAgentId),
     ]);
     const ran = this.ranThisBoot.has(
       watcherKey(childAgentId, obligation.ownerAgentId, obligation.generation),
@@ -764,27 +764,38 @@ export class FinishObligationService {
   }
 
   /**
-   * The agent that answers for `ownerAgentId`. Account failover retires an owner it imports into
-   * a new agent (`migrated-to`) without archiving it; a report sent to the retired handle would
-   * wake a conversation on the capped account that nobody reads. Follow the chain to the live end.
+   * The agent that answers for `agentId`. Account failover retires an agent it imports into a new
+   * one (`migrated-to`) without archiving it; a report sent to the retired handle would wake a
+   * conversation on the capped account that nobody reads. Follow the chain to the live end, but
+   * not into an archived or missing successor: a report never unarchives anything, so the walk
+   * stops at the last agent it could reach. A loop has no live end, and says so.
    */
-  private async resolveOwner(ownerAgentId: string): Promise<ChildPresence & { agentId: string }> {
-    const seen = new Set<string>();
-    let agentId = ownerAgentId;
-    let presence = await this.presenceOf(agentId);
-    for (let hop = 0; hop < MAX_ANCESTOR_HOPS; hop += 1) {
-      seen.add(agentId);
-      const next = getMigratedToFromLabels(presence.live?.labels ?? presence.record?.labels);
-      if (!next || seen.has(next)) break;
-      const nextPresence = await this.presenceOf(next);
-      if (!nextPresence.exists || nextPresence.archived) break;
-      agentId = next;
-      presence = nextPresence;
+  private async resolveLiveEnd(
+    agentId: string,
+  ): Promise<ChildPresence & { agentId: string; migrationLoop?: string[] }> {
+    const presences = new Map<string, ChildPresence>();
+    const presenceAt = async (id: string): Promise<ChildPresence> => {
+      const known = presences.get(id);
+      if (known) return known;
+      const presence = await this.presenceOf(id);
+      presences.set(id, presence);
+      return presence;
+    };
+    const result = await followMigratedToAsync(agentId, async (id) => {
+      const presence = await presenceAt(id);
+      if (!presence.exists || (presence.archived && id !== agentId)) return null;
+      return presence.live?.labels ?? presence.record?.labels ?? {};
+    });
+    if (result.kind === "loop") {
+      return { ...(await presenceAt(agentId)), agentId, migrationLoop: result.chain };
     }
-    return { ...presence, agentId };
+    return { ...(await presenceAt(result.agentId)), agentId: result.agentId };
   }
 
-  /** The nearest non-archived agent above the owner, walking parent labels. */
+  /**
+   * The nearest non-archived agent above the owner, walking parent labels, and where its
+   * conversation lives now. An ancestor whose moves loop cannot be told, so the walk passes it.
+   */
   private async findOrchestrator(
     owner: ChildPresence,
   ): Promise<{ agentId: string; presence: AgentPresence } | null> {
@@ -794,7 +805,10 @@ export class FinishObligationService {
       seen.add(nextId);
       const presence = await this.presenceOf(nextId);
       if (!presence.exists) return null;
-      if (!presence.archived) return { agentId: nextId, presence };
+      if (!presence.archived) {
+        const end = await this.resolveLiveEnd(nextId);
+        if (!end.migrationLoop) return { agentId: end.agentId, presence: end };
+      }
       nextId = presence.parentAgentId;
     }
     return null;

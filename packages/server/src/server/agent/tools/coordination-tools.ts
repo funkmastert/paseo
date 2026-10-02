@@ -35,7 +35,7 @@
 
 import { z } from "zod";
 import type { Logger } from "pino";
-import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
+import { followMigratedTo, getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import { ensureValidJson } from "../../json-utils.js";
 import type { AgentManager, ManagedAgent } from "../agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "../agent-storage.js";
@@ -44,6 +44,7 @@ import {
   sendPromptToAgent,
   setupFinishNotification,
 } from "../agent-prompt.js";
+import { liveParentOf } from "../live-parent.js";
 import { SPEND_BUDGET_LABEL } from "../spend-governor.js";
 import {
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
@@ -216,14 +217,20 @@ export async function loadFleet(
   return fleet;
 }
 
+function labelsIn(fleet: ReadonlyMap<string, FleetEntry>) {
+  return (agentId: string) => fleet.get(agentId)?.labels ?? null;
+}
+
+/** Its children, including those spawned under an id its conversation has since moved from. */
 function childrenOf(fleet: ReadonlyMap<string, FleetEntry>, parentId: string): FleetEntry[] {
+  const labelsOf = labelsIn(fleet);
   return [...fleet.values()].filter(
-    (entry) => !entry.archived && getParentAgentIdFromLabels(entry.labels) === parentId,
+    (entry) => !entry.archived && liveParentOf(entry.labels, labelsOf) === parentId,
   );
 }
 
 function siblingsOf(fleet: ReadonlyMap<string, FleetEntry>, self: FleetEntry): FleetEntry[] {
-  const parentId = getParentAgentIdFromLabels(self.labels);
+  const parentId = liveParentOf(self.labels, labelsIn(fleet));
   if (!parentId) return [];
   return childrenOf(fleet, parentId).filter((entry) => entry.id !== self.id);
 }
@@ -613,6 +620,52 @@ interface BroadcastTargetResult {
   title: string | null;
   outcome: BroadcastOutcome;
   reason?: string;
+  /** Where the message went (or would have) when `agentId` had moved to another account. */
+  deliveredToAgentId?: string;
+}
+
+export type BroadcastRecipient =
+  | { kind: "deliver"; target: FleetEntry; recipient: FleetEntry }
+  | { kind: "skipped"; target: FleetEntry; deliveredToAgentId: string; reason: string }
+  | { kind: "failed"; target: FleetEntry; reason: string };
+
+/**
+ * Where each target's conversation lives now. A target account failover retired is reached at the
+ * end of its `migrated-to` chain, and each conversation once: a successor that is itself a target
+ * takes the message directly, and the first handle of a conversation outside the selection
+ * carries it for the rest. A loop has no live end and fails.
+ */
+export function resolveBroadcastRecipients(input: {
+  fleet: ReadonlyMap<string, FleetEntry>;
+  targets: readonly FleetEntry[];
+  callerId: string;
+}): BroadcastRecipient[] {
+  const reached = new Set([input.callerId, ...input.targets.map((target) => target.id)]);
+  return input.targets.map((target): BroadcastRecipient => {
+    const chain = followMigratedTo(target.id, (id) => input.fleet.get(id)?.labels ?? null);
+    if (chain.kind === "loop") {
+      return {
+        kind: "failed",
+        target,
+        reason: `it moved between accounts in a loop (${chain.chain.join(" → ")}), so no agent holds its conversation`,
+      };
+    }
+    const recipient = chain.kind === "moved" ? input.fleet.get(chain.agentId) : undefined;
+    if (!recipient) return { kind: "deliver", target, recipient: target };
+    if (reached.has(recipient.id)) {
+      return {
+        kind: "skipped",
+        target,
+        deliveredToAgentId: recipient.id,
+        reason:
+          recipient.id === input.callerId
+            ? "it moved to you"
+            : `it moved to ${recipient.id}, which this broadcast already reaches`,
+      };
+    }
+    reached.add(recipient.id);
+    return { kind: "deliver", target, recipient };
+  });
 }
 
 const broadcastAgentPromptTool = defineCoordinationTool({
@@ -673,13 +726,30 @@ const broadcastAgentPromptTool = defineCoordinationTool({
 
     const results: BroadcastTargetResult[] = [];
     let wakesUsed = 0;
-    for (const target of targets) {
+    for (const resolved of resolveBroadcastRecipients({ fleet, targets, callerId })) {
+      const named = { agentId: resolved.target.id, title: resolved.target.title };
+      if (resolved.kind === "failed") {
+        results.push({ ...named, outcome: "failed", reason: resolved.reason });
+        continue;
+      }
+      if (resolved.kind === "skipped") {
+        results.push({
+          ...named,
+          outcome: "skipped",
+          reason: resolved.reason,
+          deliveredToAgentId: resolved.deliveredToAgentId,
+        });
+        continue;
+      }
+      // Planned and delivered on the agent that holds the conversation, not the retired handle.
+      const target = resolved.recipient;
+      const base =
+        target.id === resolved.target.id ? named : { ...named, deliveredToAgentId: target.id };
       const plan = planBroadcastDelivery({
         entry: target,
         wakeIdle,
         wakesRemaining: maxWakes - wakesUsed,
       });
-      const base = { agentId: target.id, title: target.title };
       if (plan.action === "skip") {
         results.push({ ...base, outcome: "skipped", reason: plan.reason });
         continue;
@@ -738,7 +808,7 @@ async function deliver(input: {
     if (host.agentManager.getAgent(target.id)?.lifecycle !== "idle") {
       return { outcome: "skipped", reason: "no longer idle" };
     }
-    await sendPromptToAgent({
+    const delivered = await sendPromptToAgent({
       agentManager: host.agentManager,
       agentStorage: host.agentStorage,
       agentId: target.id,
@@ -752,7 +822,7 @@ async function deliver(input: {
     setupFinishNotification({
       agentManager: host.agentManager,
       agentStorage: host.agentStorage,
-      childAgentId: target.id,
+      childAgentId: delivered.agentId,
       callerAgentId: input.callerId,
       logger: host.logger,
     });

@@ -1115,6 +1115,41 @@ test("keeps the transport connected when a session RPC ping times out", async ()
   expect(client.getConnectionState().status).toBe("connected");
 });
 
+test("sendMessage says where a message to a moved agent was delivered, so a wait can follow it", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_send_moved",
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const sent = client.sendMessage("agent_retired", "pick it up");
+  const request = parseSentFrame(mock.sent.at(-1));
+  expect(request).toMatchObject({ type: "send_agent_message_request", agentId: "agent_retired" });
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "send_agent_message_response",
+      payload: {
+        requestId: request.requestId,
+        agentId: "agent_retired",
+        accepted: true,
+        error: null,
+        deliveredToAgentId: "agent_successor",
+      },
+    }),
+  );
+
+  await expect(sent).resolves.toEqual({
+    agentId: "agent_retired",
+    deliveredToAgentId: "agent_successor",
+  });
+});
+
 test("waits for the daemon to acknowledge push token revocation", async () => {
   const mock = createMockTransport();
   const client = new DaemonClient({

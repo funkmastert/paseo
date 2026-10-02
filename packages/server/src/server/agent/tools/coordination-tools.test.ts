@@ -13,7 +13,10 @@ import {
 import type { PaseoToolHostDependencies } from "./types.js";
 
 const promptMocks = vi.hoisted(() => ({
-  sendPromptToAgent: vi.fn(async () => ({ disposition: "turn_started" })),
+  sendPromptToAgent: vi.fn(async (params: { agentId: string }) => ({
+    disposition: "turn_started",
+    agentId: params.agentId,
+  })),
   setupFinishNotification: vi.fn(),
 }));
 
@@ -422,6 +425,47 @@ describe("broadcast_agent_prompt", () => {
     );
   });
 
+  test("reaches a moved child once, where its conversation lives now, and refuses a loop", async () => {
+    const MIGRATED_TO = "paseo.account-failover.migrated-to";
+    const harness = createHarness(
+      [
+        { id: "boss", status: "running" },
+        // Retired, and its successor is a child too: the successor takes it directly.
+        { id: "old-1", stored: true, labels: { [PARENT_LABEL]: "boss", [MIGRATED_TO]: "new-1" } },
+        { id: "new-1", status: "running", labels: { [PARENT_LABEL]: "boss" } },
+        // Retired into a successor made without the parent label.
+        { id: "old-2", stored: true, labels: { [PARENT_LABEL]: "boss", [MIGRATED_TO]: "new-2" } },
+        { id: "new-2", status: "idle" },
+        { id: "loop-a", stored: true, labels: { [PARENT_LABEL]: "boss", [MIGRATED_TO]: "loop-b" } },
+        { id: "loop-b", stored: true, labels: { [MIGRATED_TO]: "loop-a" } },
+      ],
+      "boss",
+    );
+
+    const result = await call(harness, "broadcast_agent_prompt", {
+      prompt: "Status?",
+      wakeIdle: true,
+    });
+
+    const byId = Object.fromEntries(result.results.map((r: Loose) => [r.agentId, r]));
+    expect(byId["new-1"].outcome).toBe("steered");
+    expect(byId["old-1"]).toMatchObject({ outcome: "skipped", deliveredToAgentId: "new-1" });
+    expect(byId["old-1"].reason).toContain("new-1");
+    expect(byId["old-2"]).toMatchObject({ outcome: "woken", deliveredToAgentId: "new-2" });
+    expect(byId["loop-a"].outcome).toBe("failed");
+    expect(byId["loop-a"].reason).toContain("loop-a → loop-b → loop-a");
+
+    expect(harness.steerAgentRun).toHaveBeenCalledTimes(1);
+    expect(harness.steerAgentRun).toHaveBeenCalledWith("new-1", expect.any(String));
+    expect(promptMocks.sendPromptToAgent).toHaveBeenCalledTimes(1);
+    expect(promptMocks.sendPromptToAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: "new-2", unarchive: false }),
+    );
+    expect(promptMocks.setupFinishNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ childAgentId: "new-2", callerAgentId: "boss" }),
+    );
+  });
+
   test("dry run reports the plan and sends nothing", async () => {
     const harness = createHarness(fleet, "boss");
 
@@ -523,6 +567,67 @@ describe("list_peers", () => {
         role: "reviewer",
       },
     ]);
+  });
+});
+
+// Account failover and settle-back change the id a conversation runs under; its children keep the
+// parent id they were spawned with. They are still the caller's children.
+describe("a caller whose conversation moved", () => {
+  const MIGRATED_TO = "paseo.account-failover.migrated-to";
+  const fleet: FakeAgentSpec[] = [
+    { id: "boss", status: "running" },
+    // The handle the conversation left: settle-back revived "boss" and retired this one.
+    { id: "boss-old", stored: true, labels: { [MIGRATED_TO]: "boss" } },
+    { id: "kid-new", status: "running", labels: { [PARENT_LABEL]: "boss" } },
+    { id: "kid-old", status: "running", labels: { [PARENT_LABEL]: "boss-old" } },
+    // A parent whose moves loop is nobody's live end, so this child is not the caller's.
+    { id: "loop-x", stored: true, labels: { [MIGRATED_TO]: "loop-y" } },
+    { id: "loop-y", stored: true, labels: { [MIGRATED_TO]: "loop-x" } },
+    { id: "kid-loop", status: "running", labels: { [PARENT_LABEL]: "loop-x" } },
+  ];
+
+  test("whoami counts the children it spawned under the id it moved from", async () => {
+    const who = await call(createHarness(fleet, "boss"), "whoami");
+
+    expect(who.children.count).toBe(2);
+    expect(who.children.agents.map((agent: Loose) => agent.id).sort()).toEqual([
+      "kid-new",
+      "kid-old",
+    ]);
+  });
+
+  test("list_peers shows them in the children scope", async () => {
+    const result = await call(createHarness(fleet, "boss"), "list_peers");
+
+    expect(result.agents.map((agent: Loose) => agent.id).sort()).toEqual(["kid-new", "kid-old"]);
+  });
+
+  test("a broadcast to its children reaches them", async () => {
+    const harness = createHarness(fleet, "boss");
+
+    const result = await call(harness, "broadcast_agent_prompt", { prompt: "Status?" });
+
+    expect(result.results.map((r: Loose) => r.agentId).sort()).toEqual(["kid-new", "kid-old"]);
+    expect(result.steered).toBe(2);
+  });
+
+  test("siblings are the agents under where its parent's conversation lives now", async () => {
+    const harness = createHarness(
+      [
+        { id: "lead", status: "running" },
+        { id: "lead-old", stored: true, labels: { [MIGRATED_TO]: "lead" } },
+        { id: "me", status: "running", labels: { [PARENT_LABEL]: "lead-old" } },
+        { id: "sib", status: "running", labels: { [PARENT_LABEL]: "lead" } },
+      ],
+      "me",
+    );
+
+    const result = await call(harness, "broadcast_agent_prompt", {
+      prompt: "hi",
+      scope: "siblings",
+    });
+
+    expect(result.results.map((r: Loose) => r.agentId)).toEqual(["sib"]);
   });
 });
 

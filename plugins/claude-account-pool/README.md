@@ -384,7 +384,8 @@ not.
 
 Collapse is reversible on its own: an account recovering re-arms the notice
 and new placements go back to preferring isolation. Agents already placed on
-the shared account are the return leg's business, not this one's.
+the shared account stay there: moving a child back would cost a cache rebuild
+([account-failover.md](../../docs/account-failover.md#which-agents-move)).
 
 ### No account left
 

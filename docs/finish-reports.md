@@ -108,7 +108,11 @@ Two ways work moves to another agent id, and the report follows both.
 - **Owner side.** Account failover retires an agent it imports by labelling it
   `paseo.account-failover.migrated-to=<newId>` without archiving it. A report sent there would wake
   a conversation on the capped account that nobody reads, so delivery follows `migrated-to` to the
-  live end.
+  live end, as every prompt does ([account-failover.md](account-failover.md#idempotency)). Unlike a
+  message from a person, a report stops before an archived or missing successor, because it never
+  unarchives anything, and goes to the last agent it reached. Pointers that loop leave nobody to
+  tell, so the report goes straight to the orchestrator rung. That rung resolves its agent the
+  same way.
 - **Child side.** A successor inherits the obligation when the work it carries on has not been
   reported as finished. That includes work already reported as "errored" or "stopped": the
   successor is the one that will finish, and the owner is owed that. The successor is recognised by

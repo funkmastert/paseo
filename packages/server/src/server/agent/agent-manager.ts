@@ -447,6 +447,9 @@ export interface AccountFailoverAgentSummary {
    * janitor reads: failover must not take the account out from under live work. */
   busy: boolean;
   pendingPermissionCount: number;
+  /** Provider subagents (Claude Task-tool) still running after the turn. A move closes the
+   * session, which cancels them. */
+  runningProviderSubagentCount: number;
   /** The newest of every activity timestamp the manager holds, or null if none parses. */
   lastActivityAt: string | null;
   /** Timeline generation: moves on every appended row, so a repeat failure with identical text
@@ -2310,6 +2313,9 @@ export class AgentManager {
       title: agent.config.title ?? null,
       busy: this.isAgentBusy(agent),
       pendingPermissionCount: agent.pendingPermissions.size,
+      runningProviderSubagentCount: this.providerSubagents
+        .list(agent.id)
+        .filter((subagent) => subagent.status === "running").length,
       lastActivityAt: this.lastActivityAtOf(agent),
       timelineSeq: this.timelineStore.getNextSeq(agent.id),
       lastTimelineAt: this.timelineStore.has(agent.id)
