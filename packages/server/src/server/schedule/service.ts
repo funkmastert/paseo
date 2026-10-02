@@ -659,7 +659,6 @@ export class ScheduleService {
       }
       const verdict = evaluateScheduleCondition(condition, {
         target: byId.get(moved.agentId) ?? null,
-        formerTargetIds: moved.kind === "moved" ? moved.chain.slice(0, -1) : [],
         views,
         createdAtMs: Date.parse(schedule.createdAt),
         lastRunAtMs: schedule.lastRunAt ? Date.parse(schedule.lastRunAt) : null,

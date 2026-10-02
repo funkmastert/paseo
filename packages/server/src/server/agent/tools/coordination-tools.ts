@@ -44,6 +44,7 @@ import {
   sendPromptToAgent,
   setupFinishNotification,
 } from "../agent-prompt.js";
+import { liveParentOf } from "../live-parent.js";
 import { SPEND_BUDGET_LABEL } from "../spend-governor.js";
 import {
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
@@ -216,14 +217,20 @@ export async function loadFleet(
   return fleet;
 }
 
+function labelsIn(fleet: ReadonlyMap<string, FleetEntry>) {
+  return (agentId: string) => fleet.get(agentId)?.labels ?? null;
+}
+
+/** Its children, including those spawned under an id its conversation has since moved from. */
 function childrenOf(fleet: ReadonlyMap<string, FleetEntry>, parentId: string): FleetEntry[] {
+  const labelsOf = labelsIn(fleet);
   return [...fleet.values()].filter(
-    (entry) => !entry.archived && getParentAgentIdFromLabels(entry.labels) === parentId,
+    (entry) => !entry.archived && liveParentOf(entry.labels, labelsOf) === parentId,
   );
 }
 
 function siblingsOf(fleet: ReadonlyMap<string, FleetEntry>, self: FleetEntry): FleetEntry[] {
-  const parentId = getParentAgentIdFromLabels(self.labels);
+  const parentId = liveParentOf(self.labels, labelsIn(fleet));
   if (!parentId) return [];
   return childrenOf(fleet, parentId).filter((entry) => entry.id !== self.id);
 }

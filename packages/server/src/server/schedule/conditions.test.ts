@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
-import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import {
+  ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
+  PARENT_AGENT_ID_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import type { ScheduleCondition } from "@getpaseo/protocol/schedule/condition";
 import type { DoneJanitorAgentView } from "../agent/done-janitor-detector.js";
 import { evaluateScheduleCondition, type ConditionInput } from "./conditions.js";
@@ -228,13 +231,17 @@ describe("evaluateScheduleCondition", () => {
   });
 
   test("children the target's conversation spawned under an id it moved from are its own", () => {
-    // Account failover moved "leader" to "leader-new"; its children still name the old id.
+    // Account failover moved "leader" to "leader-new"; its children still name the old id. The
+    // heartbeat may name either id.
     const successor = view({ id: "leader-new" });
+    const retired = view({
+      id: "leader",
+      live: false,
+      lifecycle: "closed",
+      labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "leader-new" },
+    });
     const runningChild = child("c1", { lifecycle: "running" });
-    const verdict = evaluateScheduleCondition(
-      running,
-      input(successor, [runningChild], { formerTargetIds: ["leader"] }),
-    );
+    const verdict = evaluateScheduleCondition(running, input(successor, [retired, runningChild]));
     expect(verdict).toEqual({ fire: true, reason: "1 child agent(s) still running" });
   });
 });

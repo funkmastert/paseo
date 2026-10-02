@@ -12,7 +12,7 @@ import type {
   ScheduleConditionLeaf,
 } from "@getpaseo/protocol/schedule/condition";
 import type { DoneJanitorAgentView } from "../agent/done-janitor-detector.js";
-import { parentOf } from "../agent/done-janitor-detector.js";
+import { liveParentOf } from "../agent/live-parent.js";
 
 export type ConditionVerdict = { fire: true; reason: string } | { fire: false; reason: string };
 
@@ -22,11 +22,6 @@ export interface ConditionInput {
    * failover moved it. Null when it has no record at all.
    */
   target: DoneJanitorAgentView | null;
-  /**
-   * The ids the target's conversation moved from (account failover's `migrated-to`). Children it
-   * spawned under them still carry them as their parent, and they are its children all the same.
-   */
-  formerTargetIds?: readonly string[];
   /** Every agent view, the target's children among them. */
   views: readonly DoneJanitorAgentView[];
   /** When the heartbeat was created. */
@@ -50,12 +45,13 @@ function isOccupied(view: DoneJanitorAgentView): boolean {
   return isRunning(view) || (view.live && view.pendingPermissionCount > 0);
 }
 
+/** Its children, including those spawned under an id its conversation has since moved from. */
 function childrenOf(input: ConditionInput, target: DoneJanitorAgentView): DoneJanitorAgentView[] {
-  const parentIds = new Set([target.id, ...(input.formerTargetIds ?? [])]);
-  return input.views.filter((view) => {
-    const parentId = parentOf(view);
-    return !view.archived && parentId !== null && parentIds.has(parentId);
-  });
+  const byId = new Map(input.views.map((view) => [view.id, view]));
+  const labelsOf = (agentId: string) => byId.get(agentId)?.labels ?? null;
+  return input.views.filter(
+    (view) => !view.archived && liveParentOf(view.labels, labelsOf) === target.id,
+  );
 }
 
 /**

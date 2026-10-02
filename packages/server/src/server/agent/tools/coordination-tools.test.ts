@@ -570,6 +570,67 @@ describe("list_peers", () => {
   });
 });
 
+// Account failover and settle-back change the id a conversation runs under; its children keep the
+// parent id they were spawned with. They are still the caller's children.
+describe("a caller whose conversation moved", () => {
+  const MIGRATED_TO = "paseo.account-failover.migrated-to";
+  const fleet: FakeAgentSpec[] = [
+    { id: "boss", status: "running" },
+    // The handle the conversation left: settle-back revived "boss" and retired this one.
+    { id: "boss-old", stored: true, labels: { [MIGRATED_TO]: "boss" } },
+    { id: "kid-new", status: "running", labels: { [PARENT_LABEL]: "boss" } },
+    { id: "kid-old", status: "running", labels: { [PARENT_LABEL]: "boss-old" } },
+    // A parent whose moves loop is nobody's live end, so this child is not the caller's.
+    { id: "loop-x", stored: true, labels: { [MIGRATED_TO]: "loop-y" } },
+    { id: "loop-y", stored: true, labels: { [MIGRATED_TO]: "loop-x" } },
+    { id: "kid-loop", status: "running", labels: { [PARENT_LABEL]: "loop-x" } },
+  ];
+
+  test("whoami counts the children it spawned under the id it moved from", async () => {
+    const who = await call(createHarness(fleet, "boss"), "whoami");
+
+    expect(who.children.count).toBe(2);
+    expect(who.children.agents.map((agent: Loose) => agent.id).sort()).toEqual([
+      "kid-new",
+      "kid-old",
+    ]);
+  });
+
+  test("list_peers shows them in the children scope", async () => {
+    const result = await call(createHarness(fleet, "boss"), "list_peers");
+
+    expect(result.agents.map((agent: Loose) => agent.id).sort()).toEqual(["kid-new", "kid-old"]);
+  });
+
+  test("a broadcast to its children reaches them", async () => {
+    const harness = createHarness(fleet, "boss");
+
+    const result = await call(harness, "broadcast_agent_prompt", { prompt: "Status?" });
+
+    expect(result.results.map((r: Loose) => r.agentId).sort()).toEqual(["kid-new", "kid-old"]);
+    expect(result.steered).toBe(2);
+  });
+
+  test("siblings are the agents under where its parent's conversation lives now", async () => {
+    const harness = createHarness(
+      [
+        { id: "lead", status: "running" },
+        { id: "lead-old", stored: true, labels: { [MIGRATED_TO]: "lead" } },
+        { id: "me", status: "running", labels: { [PARENT_LABEL]: "lead-old" } },
+        { id: "sib", status: "running", labels: { [PARENT_LABEL]: "lead" } },
+      ],
+      "me",
+    );
+
+    const result = await call(harness, "broadcast_agent_prompt", {
+      prompt: "hi",
+      scope: "siblings",
+    });
+
+    expect(result.results.map((r: Loose) => r.agentId)).toEqual(["sib"]);
+  });
+});
+
 function entry(overrides: Partial<FleetEntry> & { id: string }): FleetEntry {
   return {
     title: null,
