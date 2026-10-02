@@ -131,6 +131,14 @@ describe("PhysicalDeviceLeaseManager waiting", () => {
     expect(await pending).toMatchObject({ status: "granted", device: { id: USB_PIXEL.id } });
   });
 
+  test("waiting with no device of the platform connected returns at once", async () => {
+    const { manager } = createManager({ devices: [NETWORK_IPHONE] });
+
+    expect(
+      await manager.checkout({ agentId: "agent-1", platform: "android", wait: true }),
+    ).toMatchObject({ status: "unavailable" });
+  });
+
   test("without wait, a held named device says who holds it", async () => {
     const { manager } = createManager({ devices: [USB_PIXEL] });
     await manager.checkout({ agentId: "agent-1", platform: "android" });

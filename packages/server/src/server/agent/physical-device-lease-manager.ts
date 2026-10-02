@@ -307,12 +307,17 @@ export class PhysicalDeviceLeaseManager {
       reservedDeviceIds: this.reservations.reservedDeviceIds(),
     });
     if (!device) {
+      // Waiting only makes sense for a device somebody holds. With nothing of the platform
+      // connected there is nothing to wait for — a phone being plugged in isn't a check-in.
+      const anyConnected = connected.some((entry) => entry.platform === input.platform);
+      let message = `no ${input.platform} device is connected`;
+      if (input.device) message = `${input.device} is not a connected ${input.platform} device`;
+      else if (anyConnected) message = `no free ${input.platform} device is connected`;
       return {
         status: "unavailable",
         platform: input.platform,
-        message: input.device
-          ? `${input.device} is not a connected ${input.platform} device`
-          : `no free ${input.platform} device is connected`,
+        message,
+        ...(anyConnected ? {} : { final: true }),
       };
     }
 
