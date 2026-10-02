@@ -3,7 +3,7 @@
 // until an account resets and someone resumes them (plan in ~/bozeo-ops/jev-build-STATE.md).
 // Checking costs no tokens; only
 // the one message it sends does. Fires when the leader's weekly window has reset (usedPct under
-// 15) or a worker's weekly window is below 100, then writes a marker and never fires again.
+// 15) or a worker's weekly window is below 90, then writes a marker and never fires again.
 // launchd runs it every 15 minutes (sh.bozeo.budget-resume-watch).
 import { existsSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -23,7 +23,9 @@ const leader = weekly("claude");
 const workers = { "claude-backup": weekly("claude-backup"), "claude-personal": weekly("claude-personal") };
 const stamp = new Date().toISOString();
 const readings = `claude=${leader} ${Object.entries(workers).map(([k, v]) => `${k}=${v}`).join(" ")}`;
-const freeWorker = Object.entries(workers).find(([, v]) => typeof v === "number" && v < 100);
+// A worker counts as back only with real headroom: 99% "has budget" in name only, and firing on it
+// on 2026-10-01 woke the orchestrator into a pool that was still effectively capped.
+const freeWorker = Object.entries(workers).find(([, v]) => typeof v === "number" && v < 90);
 const leaderReset = typeof leader === "number" && leader < 15;
 console.log(`${stamp} ${readings}`);
 if (!freeWorker && !leaderReset) process.exit(0);
