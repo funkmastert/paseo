@@ -476,6 +476,30 @@ export function createFakeJevTransport(script?: {
   return new FakeJevTransportImpl(script);
 }
 
+/**
+ * Wraps a transport so every attempt answers `delayMs` later, as a slow JEV would. For latency
+ * tests and `PASEO_JEV_FAKE_DELAY_MS` on a scratch daemon. Aborts still end the wait at once.
+ */
+export function withJevTransportDelay(transport: JevTransport, delayMs: number): JevTransport {
+  return {
+    provider: transport.provider,
+    async send(request, options) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, delayMs);
+        options.signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            reject(new DOMException("jev fake: aborted", "AbortError"));
+          },
+          { once: true },
+        );
+      });
+      return transport.send(request, options);
+    },
+  };
+}
+
 export interface TestJevServiceOptions {
   answers?: Record<string, JevScriptedAnswer>;
   behavior?: JevFakeBehavior | JevFakeBehavior[];

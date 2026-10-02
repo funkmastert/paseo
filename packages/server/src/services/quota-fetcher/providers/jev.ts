@@ -51,12 +51,14 @@ const LANE_LABELS: Readonly<Record<JevLane, string>> = {
   control: "Control",
   agentTools: "Agent tools",
   interactive: "Ask JEV",
+  reads: "Read check",
 };
 
 const LANE_BALANCE_IDS: Readonly<Record<JevLane, string>> = {
   control: "control-today",
   agentTools: "tools-today",
   interactive: "ask-today",
+  reads: "reads-today",
 };
 
 // The spawn hint's note carries its answers as "task_class mechanical 0.91, reasoning 0.6"

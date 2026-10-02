@@ -771,3 +771,55 @@ describe("scanText", () => {
     expect(checker().scanText(body("safe"), config)).toEqual(excludedBy("error"));
   });
 });
+
+describe("check: concurrent checks share git", () => {
+  test("a burst of checks in one cold directory runs each git command once", async () => {
+    const top = dir("outside", "burst");
+    const calls: string[] = [];
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const remote = fakeGit(top, remoteList("git@github.com:someone/app.git"));
+    const runGit = async (args: string[]): Promise<JevGitResult> => {
+      calls.push(args.includes("rev-parse") ? "rev-parse" : "remote");
+      await gate;
+      return remote(args);
+    };
+    const scopeChecker = checker({ runGit });
+    const verdicts = Array.from({ length: 8 }, () =>
+      scopeChecker.check({ cwds: [top] }, REMOTES_ONLY),
+    );
+    await sleep(10);
+    release();
+    expect(await Promise.all(verdicts)).toEqual(Array.from({ length: 8 }, () => NOT_EXCLUDED));
+    expect(calls).toEqual(["rev-parse", "remote"]);
+  });
+
+  test("a shared load that fails is not cached; the next check runs git again", async () => {
+    const top = dir("outside", "flaky");
+    let runs = 0;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runGit = async (args: string[]): Promise<JevGitResult> => {
+      runs += 1;
+      if (runs === 1) {
+        await gate;
+        return { exitCode: 1, stdout: "", stderr: "boom" };
+      }
+      return fakeGit(top, remoteList("git@github.com:someone/app.git"))(args);
+    };
+    const scopeChecker = checker({ runGit });
+    const both = Promise.all([
+      scopeChecker.check({ cwds: [top] }, REMOTES_ONLY),
+      scopeChecker.check({ cwds: [top] }, REMOTES_ONLY),
+    ]);
+    await sleep(10);
+    release();
+    expect(await both).toEqual([excludedBy("error"), excludedBy("error")]);
+    expect(runs).toBe(1);
+    expect(await scopeChecker.check({ cwds: [top] }, REMOTES_ONLY)).toEqual(NOT_EXCLUDED);
+  });
+});

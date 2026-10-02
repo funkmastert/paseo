@@ -4,6 +4,7 @@ export interface JevLaneLimits {
   control: number;
   agentTools: number;
   interactive: number;
+  reads: number;
   perGroup: number;
   requestsPerSecond: number;
 }
@@ -155,6 +156,8 @@ interface RateWaiter {
 /**
  * Daemon-wide token bucket. `control` and `interactive` waiters are always served before
  * `agentTools` ones: a person waiting on an answer does not queue behind agents' tool calls.
+ * `reads` waiters get a token only when no other lane is waiting: a shadow read check is never
+ * urgent, and a live one gives up at its own deadline and lets the read through.
  */
 class RateLimiter {
   private configured = false;
@@ -164,6 +167,7 @@ class RateLimiter {
   private lastRefillAt: number;
   private controlQueue: RateWaiter[] = [];
   private toolQueue: RateWaiter[] = [];
+  private readsQueue: RateWaiter[] = [];
   private pumpTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly now: () => number) {
@@ -181,7 +185,7 @@ class RateLimiter {
     if (this.now() >= deadlineAt) return Promise.resolve({ ok: false, reason: "saturated" });
 
     return new Promise((resolve) => {
-      const queue = lane === "agentTools" ? this.toolQueue : this.controlQueue;
+      const queue = this.queueFor(lane);
       const waiter = {} as RateWaiter;
       waiter.settle = (result) => {
         this.removeWaiter(queue, waiter);
@@ -204,6 +208,26 @@ class RateLimiter {
       queue.push(waiter);
       this.pump();
     });
+  }
+
+  private queueFor(lane: JevLane): RateWaiter[] {
+    switch (lane) {
+      case "agentTools":
+        return this.toolQueue;
+      case "reads":
+        return this.readsQueue;
+      case "control":
+      case "interactive":
+        return this.controlQueue;
+    }
+  }
+
+  /** The next queue to serve, in priority order, or null when nothing waits. */
+  private nextQueue(): RateWaiter[] | null {
+    if (this.controlQueue.length > 0) return this.controlQueue;
+    if (this.toolQueue.length > 0) return this.toolQueue;
+    if (this.readsQueue.length > 0) return this.readsQueue;
+    return null;
   }
 
   private removeWaiter(queue: RateWaiter[], waiter: RateWaiter): void {
@@ -239,8 +263,9 @@ class RateLimiter {
 
   private pump(): void {
     this.refill();
-    while (this.tokens >= 1 && (this.controlQueue.length > 0 || this.toolQueue.length > 0)) {
-      const queue = this.controlQueue.length > 0 ? this.controlQueue : this.toolQueue;
+    while (this.tokens >= 1) {
+      const queue = this.nextQueue();
+      if (!queue) break;
       const waiter = queue.shift();
       if (!waiter) break;
       this.tokens -= 1;
@@ -254,7 +279,7 @@ class RateLimiter {
       clearTimeout(this.pumpTimer);
       this.pumpTimer = null;
     }
-    if (this.controlQueue.length === 0 && this.toolQueue.length === 0) return;
+    if (!this.nextQueue()) return;
     if (this.ratePerSecond <= 0) return;
     const deficit = Math.max(0, 1 - this.tokens);
     const waitMs = (deficit / this.ratePerSecond) * 1000;
@@ -276,11 +301,13 @@ export class JevLanes {
       control: new JevCircuit(),
       agentTools: new JevCircuit(),
       interactive: new JevCircuit(),
+      reads: new JevCircuit(),
     };
     this.laneSemaphores = {
       control: new Semaphore(),
       agentTools: new Semaphore(),
       interactive: new Semaphore(),
+      reads: new Semaphore(),
     };
     this.rateLimiter = new RateLimiter(this.now);
   }

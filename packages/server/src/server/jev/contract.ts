@@ -90,15 +90,18 @@ export type JevFeatureId =
   | "awayReply"
   /** Feature 15: a person's own question from the app's Ask JEV screen, over `jev.ask`. */
   | "askJev"
+  /** Feature 16: whether an agent's large file read is needed, on the `reads` lane. */
+  | "readCheck"
   /** Feature 17: whether a workspace's name still fits before spending a title regeneration. */
   | "titleRefresh";
 
 /**
- * Slots, spend caps and circuits are per lane, so agent tools can neither starve nor bankrupt
- * the features that steer the daemon. `agentTools` is its own lane, a person's questions from the
- * app (`askJev`) are `interactive`, and every other feature is `control`.
+ * Slots, spend caps and circuits are per lane, so agent tools and file reads can neither starve
+ * nor bankrupt the features that steer the daemon. `agentTools` is its own lane, a person's
+ * questions from the app (`askJev`) are `interactive`, file-read checks (`readCheck`) are `reads`,
+ * and every other feature is `control`.
  */
-export type JevLane = "control" | "agentTools" | "interactive";
+export type JevLane = "control" | "agentTools" | "interactive" | "reads";
 
 /**
  * What a call's state is about, for the D7 exclusion (docs/jev.md, "The D7 exclusion"). Required
@@ -150,6 +153,12 @@ export interface JevDecideInput {
    * use the lane's remaining slots. Absent: the call is its own group.
    */
   callGroup?: string;
+  /**
+   * Answer as `shadow` even when the feature is live: the answer is recorded, never acted on.
+   * Feature 16 sends it for the agents outside `readCheck.liveShare`, its control arm, and for
+   * reads too small to hold. It can only make a call shadow, never live.
+   */
+  shadow?: true;
 }
 
 /**
@@ -378,12 +387,8 @@ export type CommandGate = (input: { command: string; cwd: string }) => Promise<C
  * in `jev/savings.ts`, and the read-check track implements feature 16 against them.
  */
 
-/**
- * Feature 16, the file-read check, is not a `JevFeatureId` yet: the read-check track adds
- * `"readCheck"` there, and `"reads"` to `JevLane`, when it wires the feature. Until then the
- * savings types name it here.
- */
-export type JevSavingsFeature = JevFeatureId | "readCheck";
+/** Every feature that can write a savings record. Feature 16 is `readCheck` in `JevFeatureId`. */
+export type JevSavingsFeature = JevFeatureId;
 
 export type JevSavingsMode = "shadow" | "live";
 
@@ -419,14 +424,25 @@ export type JevNotAskedReason =
   | "inactive"
   /** An image, a PDF, a notebook, or a NUL byte in the first 8 KB. */
   | "not-text"
-  /** A secret-shaped name or a denied root (`agent/tools/jev-file-state.ts`). */
+  /** A secret-shaped name (`jev/secret-paths.ts`), a personal location or a hard link, by any name it goes by. */
   | "secret-path"
   /** Outside the agent's cwd, which the file tools refuse too. */
   | "outside-cwd"
+  /** Not inside a git work tree below the home directory: only project files are ever sent. */
+  | "outside-repo"
+  /** A Bash line that can print more than one file's text: several files, stdin, a redirect. */
+  | "compound"
+  /** Too many reads already being judged, or the lane's slot or rate token did not come in time. */
+  | "saturated"
   /** The CLI answered `file_unchanged`: the read loaded nothing. */
   | "dedup"
   /** Judged for the same agent, path and range in the last 30 minutes; the verdict is reused. */
-  | "repeat";
+  | "repeat"
+  /**
+   * The file changed between the path checks and the read, or a `Read`'s text is not what is on
+   * disk under the path the checks saw: what would be sent is not what was checked.
+   */
+  | "changed";
 
 export interface JevSavingsDecision {
   /** What code did, in the feature's words: `start-agent`, `alert`, `class standard on claude-sonnet-5`. */

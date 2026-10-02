@@ -25,8 +25,9 @@ const KNOWN_FEATURES = new Set<JevFeatureId>([
   "stallJudgment",
   "awayReply",
   "askJev",
+  "readCheck",
 ]);
-const KNOWN_LANES = new Set<JevLane>(["control", "agentTools", "interactive"]);
+const KNOWN_LANES = new Set<JevLane>(["control", "agentTools", "interactive", "reads"]);
 
 function isJevFeatureId(value: string): value is JevFeatureId {
   return KNOWN_FEATURES.has(value as JevFeatureId);
