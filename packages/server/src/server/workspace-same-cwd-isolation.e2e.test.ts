@@ -413,6 +413,7 @@ test("local workspace auto-title does not broadcast provider snapshot warm-up to
 test("create_agent_request with workspaceId does not retitle an existing workspace", async () => {
   const cwd = mkdtempSync(path.join(tmpdir(), "paseo-agent-submit-title-"));
   const daemon = await createTestPaseoDaemon({
+    isDev: true,
     agentClients: { mock: new MockLoadTestAgentClient() },
   });
   const client = new DaemonClient({
@@ -456,6 +457,7 @@ test("create_agent_request with workspaceId does not retitle an existing workspa
 test("creating another same-cwd local workspace keeps running status on the owning workspace only", async () => {
   const cwd = mkdtempSync(path.join(tmpdir(), "paseo-running-same-cwd-create-"));
   const daemon = await createTestPaseoDaemon({
+    isDev: true,
     agentClients: { mock: new MockLoadTestAgentClient() },
   });
   const client = new DaemonClient({
