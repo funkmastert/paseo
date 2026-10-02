@@ -124,7 +124,7 @@ export interface CollectedDiff {
   top: string;
   base: string;
   baseSha: string;
-  /** What `base...HEAD` diffs from; empty when the histories share no commit. */
+  /** What `base...HEAD` diffs from. */
   mergeBaseSha: string;
   headSha: string;
   paths: Array<{ status: string; path: string }>;
@@ -153,9 +153,20 @@ export async function collectDiff(input: {
   const resolved = await resolveBase(git, cwd, input.base?.trim());
   if (!resolved.ok) return resolved;
   const { base, baseSha } = resolved;
-  const range = `${baseSha}...HEAD`;
   const head = await git(["rev-parse", "--verify", "HEAD"], { cwd });
+  if (head.code !== 0) return { ok: false, reason: "git could not resolve HEAD" };
   const mergeBase = await git(["merge-base", baseSha, "HEAD"], { cwd });
+  // Exit 1 means the histories share no common ancestor: a real outcome, not a failure, but
+  // `A...B` below is defined in terms of that merge base, so every diff/log call that uses it
+  // fails the same way. Recorded as its own distinct reason rather than running them to find
+  // that out, so this case never reads as the generic "git could not produce the diff" a true
+  // failure gets.
+  if (mergeBase.code === 1) {
+    return { ok: false, reason: `no history in common with ${base}; the histories are unrelated` };
+  }
+  if (mergeBase.code !== 0) return { ok: false, reason: "git could not produce the diff" };
+  const mergeBaseSha = mergeBase.stdout.trim();
+  const range = `${baseSha}...HEAD`;
   const common = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"];
   const nameStatus = await git([...common, "--name-status", "-z", range], { cwd });
   const numstat = await git([...common, "--numstat", "-z", range], { cwd });
@@ -181,7 +192,7 @@ export async function collectDiff(input: {
       top: cwd,
       base,
       baseSha,
-      mergeBaseSha: mergeBase.code === 0 ? mergeBase.stdout.trim() : "",
+      mergeBaseSha,
       headSha: head.stdout.trim(),
       paths: parseNameStatus(nameStatus.stdout),
       lines: countChangedLines(numstat.stdout),
@@ -226,17 +237,14 @@ async function resolveBase(
 }
 
 /**
- * The secret-shaped files a patch carries, read off its `diff --git` headers. The pathspecs keep
- * them out; this is the check that they did, so a gap in either list never ships a secret.
+ * The first secret-shaped changed path, from the `--name-status -z` list rather than the patch
+ * text: git quotes a path with non-ASCII or control-character bytes in a `diff --git` header
+ * (`"caf\303\251/.env"`), so a regex over that text can miss what the NUL-separated list, never
+ * quoted, always carries. The pathspec exclusion already keeps a matching file's content out of
+ * the patch; this is what refuses to send the diff at all when one is touched.
  */
-export function secretPathsInPatch(patch: string): string[] {
-  const found = new Set<string>();
-  for (const match of patch.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)) {
-    for (const side of [match[1]!, match[2]!]) {
-      if (isSecretShapedPath(side)) found.add(side);
-    }
-  }
-  return [...found];
+export function secretShapedChangedPath(diff: CollectedDiff): string | undefined {
+  return diff.paths.find((entry) => isSecretShapedPath(entry.path))?.path;
 }
 
 function parseNameStatus(stdout: string): Array<{ status: string; path: string }> {

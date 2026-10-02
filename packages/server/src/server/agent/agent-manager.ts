@@ -20,6 +20,7 @@ import {
   hasOpenAgentTab,
   isDelegatedAgent,
   isOpenAgentTabLabel,
+  JEV_TOOLS_LABEL,
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import type { Logger } from "pino";
@@ -1119,12 +1120,21 @@ function validateAgentId(agentId: string, source: string): string {
   return result.data;
 }
 
+/**
+ * Labels no patch may set, only the agent's create config. `paseo.jev-tools` decides the D8
+ * experiment arm (JevToolsEligibility pins it from the agent's stored labels on every daemon
+ * restart), so a patch that could write it would let an agent grant itself the tools by setting
+ * the label and waiting for a restart, bypassing the classifier's own assignment.
+ */
+const PROTECTED_LABEL_KEYS: ReadonlySet<string> = new Set([JEV_TOOLS_LABEL]);
+
 function applyLabelPatch(
   labels: Record<string, string>,
   patch: AgentLabelPatch,
 ): Record<string, string> {
   const nextLabels = { ...labels };
   for (const [key, value] of Object.entries(patch)) {
+    if (PROTECTED_LABEL_KEYS.has(key)) continue;
     if (value === null) {
       delete nextLabels[key];
     } else {
@@ -3620,6 +3630,11 @@ export class AgentManager {
   }
 
   private async writeLabels(agentId: string, patch: AgentLabelPatch): Promise<WriteLabelsResult> {
+    for (const key of Object.keys(patch)) {
+      if (PROTECTED_LABEL_KEYS.has(key)) {
+        this.logger.warn({ agentId, label: key }, "refused to patch a protected agent label");
+      }
+    }
     const liveAgent = this.agents.get(agentId);
     if (liveAgent) {
       liveAgent.labels = applyLabelPatch(liveAgent.labels, patch);

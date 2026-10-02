@@ -1,10 +1,13 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { promisify } from "node:util";
 
 import type { CommandGate } from "../../jev/contract.js";
 import { createExternalProcessEnv } from "../../paseo-env.js";
 import { lowerAgentProcessPriority } from "../../../utils/process-priority.js";
 import type { DeviceLaunchGate } from "../device-lease-manager.js";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * `ask_jev`'s `command` (docs/jev.md, "The tools"). It runs only for an agent whose own Bash would
@@ -41,6 +44,23 @@ export const JEV_COMMAND_SANDBOXED_REASON =
 export const JEV_COMMAND_NO_ENV_REASON =
   "ask_jev cannot rebuild your Bash environment; run it with Bash";
 
+/**
+ * Shell startup-file variables that run code the catastrophe gate never sees: `bash -c` sources
+ * `$BASH_ENV` (and a POSIX-mode shell sources `$ENV`) before the command, and `PROMPT_COMMAND`
+ * runs after every command bash itself would print a prompt for; `SHELLOPTS`/`BASHOPTS` can turn
+ * on tracing or sourcing options the same way. The agent's own Bash has the same exposure, so this
+ * closes a gap in ask_jev's command, not a new one.
+ */
+const SHELL_STARTUP_ENV_KEYS = ["BASH_ENV", "ENV", "PROMPT_COMMAND", "SHELLOPTS", "BASHOPTS"];
+
+function withoutShellStartupEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const sanitized = { ...env };
+  for (const key of SHELL_STARTUP_ENV_KEYS) {
+    delete sanitized[key];
+  }
+  return sanitized;
+}
+
 export interface JevCommandOutput {
   command: string;
   exit_code: number | null;
@@ -76,6 +96,12 @@ export interface RunJevCommandInput {
   sandboxed: boolean;
   /** Charges the spawned process tree to the agent; returns the release. */
   onSpawn?: (pid: number) => () => void;
+  /**
+   * Called once per descendant pid still alive after the group kill (m3): a process that left
+   * bash's process group with `setsid` and so was never signalled. The caller keeps charging it
+   * to the agent until it exits on its own (`AgentSideProcesses.trackUntilExit`).
+   */
+  onSurvivor?: (pid: number) => void;
   platform?: NodeJS.Platform;
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -115,10 +141,11 @@ export async function runJevCommand(input: RunJevCommandInput): Promise<JevComma
     argv: jevCommandArgv(input.command, { platform }),
     command: input.command,
     cwd: input.cwd,
-    env: createExternalProcessEnv(input.env, { CI: "1" }),
+    env: withoutShellStartupEnv(createExternalProcessEnv(input.env, { CI: "1" })),
     timeoutMs: input.timeoutMs ?? JEV_COMMAND_TIMEOUT_MS,
     signal: input.signal,
     onSpawn: input.onSpawn,
+    onSurvivor: input.onSurvivor,
   });
   return { kind: "ran", output };
 }
@@ -127,6 +154,15 @@ export async function runJevCommand(input: RunJevCommandInput): Promise<JevComma
  * `/bin/bash -c <command>`, behind the platform's low-priority disk I/O launcher when it has one:
  * `taskpolicy -d utility` on macOS and `ionice -c 2 -n 7` on Linux. Both exec in place, so the
  * pid is bash's and the process group is the command's.
+ *
+ * Deliberately does not also wrap with `nice -n`: POSIX `nice -n` adds to the *invoking*
+ * process's own niceness rather than setting an absolute level, so its result depends on the
+ * daemon's own niceness at the moment of exec — observed to drift on this platform's background
+ * scheduling, and unlike `os.setPriority` on an already-niced pid, an overshoot here cannot be
+ * corrected afterward: lowering a process's own niceness back down needs a privilege an agent's
+ * daemon doesn't have. The one-line post-spawn `lowerAgentProcessPriority(child.pid)` below still
+ * leaves a brief window where something bash forks before that call lands; closing it needs a
+ * privileged absolute pre-exec primitive Node doesn't expose, so the window is accepted (minor).
  */
 export function jevCommandArgv(
   command: string,
@@ -148,6 +184,58 @@ const TASKPOLICY = "/usr/sbin/taskpolicy";
 function hasLauncher(tool: string): boolean {
   if (tool.startsWith("/")) return existsSync(tool);
   return ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].some((dir) => existsSync(`${dir}/${tool}`));
+}
+
+interface DescendantProcess {
+  pid: number;
+  /** Its process group id: still `rootPid` means still in bash's group, due to be killed by the
+   * group signal; anything else already left with `setsid` or `setpgid`. */
+  pgid: number;
+}
+
+async function listDescendants(rootPid: number): Promise<DescendantProcess[]> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync("ps", ["-axo", "pid,ppid,pgid"]));
+  } catch {
+    return [];
+  }
+  const childrenByPpid = new Map<number, number[]>();
+  const rows = new Map<number, DescendantProcess>();
+  for (const line of stdout.split("\n").slice(1)) {
+    const [pidText, ppidText, pgidText] = line.trim().split(/\s+/);
+    const pid = Number.parseInt(pidText ?? "", 10);
+    const ppid = Number.parseInt(ppidText ?? "", 10);
+    const pgid = Number.parseInt(pgidText ?? "", 10);
+    if (!Number.isFinite(pid) || !Number.isFinite(ppid) || !Number.isFinite(pgid)) continue;
+    rows.set(pid, { pid, pgid });
+    const siblings = childrenByPpid.get(ppid) ?? [];
+    siblings.push(pid);
+    childrenByPpid.set(ppid, siblings);
+  }
+  const descendants: DescendantProcess[] = [];
+  const seen = new Set<number>([rootPid]);
+  const queue = [rootPid];
+  while (queue.length > 0) {
+    const pid = queue.shift() as number;
+    for (const child of childrenByPpid.get(pid) ?? []) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      const row = rows.get(child);
+      if (row) descendants.push(row);
+      queue.push(child);
+    }
+  }
+  return descendants;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 class CappedText {
@@ -179,6 +267,7 @@ function spawnBash(input: {
   timeoutMs: number;
   signal: AbortSignal | undefined;
   onSpawn: ((pid: number) => () => void) | undefined;
+  onSurvivor: ((pid: number) => void) | undefined;
 }): Promise<JevCommandOutput> {
   return new Promise((resolve) => {
     const stdout = new CappedText();
@@ -190,6 +279,7 @@ function spawnBash(input: {
     const timers = new Set<ReturnType<typeof setTimeout>>();
     let draining = false;
     let killed = false;
+    let survivorsReady: Promise<void> | null = null;
     // Its own process group, so a timeout kills the whole pipeline, not only bash.
     const child = spawn(input.argv[0]!, input.argv.slice(1), {
       cwd: input.cwd,
@@ -204,7 +294,7 @@ function spawnBash(input: {
         child.kill("SIGKILL");
       }
     };
-    const finish = (exitCode: number | null) => {
+    const finish = async (exitCode: number | null) => {
       if (settled) return;
       settled = true;
       for (const pending of timers) clearTimeout(pending);
@@ -212,6 +302,9 @@ function spawnBash(input: {
       // What bash left behind in its group goes with it, and a process that left the group with
       // setsid stops holding the call: its end of the pipes is cut, not waited for.
       killGroup();
+      // Waits for the snapshot `kill` started (bounded: one `ps` call), so a caller that reads
+      // the result already sees every survivor it reported.
+      if (survivorsReady) await survivorsReady;
       child.stdout?.destroy();
       child.stderr?.destroy();
       release?.();
@@ -226,12 +319,41 @@ function spawnBash(input: {
         stderr: note ? `${err}${err ? "\n" : ""}${note}` : err,
       });
     };
-    const kill = (why: string) => {
-      note = why;
-      killGroup();
+    const armFallback = () => {
       if (killed) return;
       killed = true;
       timers.add(setTimeout(() => finish(null), KILL_FALLBACK_MS));
+    };
+    const kill = (why: string) => {
+      note = why;
+      // Snapshot descendants before killGroup, while bash (and anything still parented to it) is
+      // still alive: a setsid survivor's ppid only changes to 1 the moment bash itself dies, which
+      // can be sooner than a concurrently-started `ps` call would observe the tree, and by the
+      // time `finish` runs in response to that exit the reparenting has already happened — a
+      // post-mortem walk from bash's pid can never find it. Waiting for the snapshot before
+      // sending the kill is a small, bounded delay (one `ps` call) in exchange for a reliable one.
+      // This is still a best-effort snapshot, not a continuous one: a descendant forked after this
+      // point is missed.
+      if (!survivorsReady && input.onSurvivor && child.pid !== undefined) {
+        const rootPid = child.pid;
+        const onSurvivor = input.onSurvivor;
+        survivorsReady = listDescendants(rootPid)
+          .then((descendants) => {
+            for (const { pid, pgid } of descendants) {
+              // Still in bash's group: the signal below kills it; only a pid that already left
+              // (setsid, setpgid) needs to be kept charged to the agent separately.
+              if (pgid !== rootPid && processIsAlive(pid)) onSurvivor(pid);
+            }
+            return undefined;
+          })
+          .finally(() => {
+            killGroup();
+            armFallback();
+          });
+        return;
+      }
+      killGroup();
+      armFallback();
     };
     if (child.pid !== undefined) {
       lowerAgentProcessPriority(child.pid);

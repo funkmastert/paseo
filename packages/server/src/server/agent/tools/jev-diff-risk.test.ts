@@ -10,9 +10,10 @@ import {
   deterministicTriggers,
   DIFF_RISK_MAX_DIFF_BYTES,
   scoreDiffRisk,
-  secretPathsInPatch,
+  secretShapedChangedPath,
   type CollectedDiff,
 } from "./jev-diff-risk.js";
+import { runJevGit, type JevGitRunner } from "./jev-file-state.js";
 
 let repo: string;
 
@@ -88,6 +89,30 @@ describe("collectDiff", () => {
     expect(diff.lines).toBe(2);
     expect(diff.diff).toContain("+export const app = 2;");
     expect(diff.commitMessage).toBe("Bump app to 2");
+  });
+
+  test("a HEAD resolution failure fails the whole collection, not an empty headSha (m5)", async () => {
+    write("src/app.ts", "export const app = 2;\n");
+    commitAll("Bump app to 2");
+    const runGit: JevGitRunner = (args, options) => {
+      if (args[0] === "rev-parse" && args[1] === "--verify" && args[2] === "HEAD") {
+        return Promise.resolve({ code: 128, stdout: "", stderr: "fatal: ambiguous HEAD" });
+      }
+      return runJevGit(args, options);
+    };
+    const result = await collectDiff({ cwd: repo, base: "main", runGit });
+    expect(result).toEqual({ ok: false, reason: "git could not resolve HEAD" });
+  });
+
+  test("unrelated histories fail distinctly, not as a generic git failure (m5)", async () => {
+    git("checkout", "-q", "--orphan", "other-root");
+    write("src/other.ts", "export const other = 1;\n");
+    commitAll("unrelated root commit");
+    const result = await collectDiff({ cwd: repo, base: "main" });
+    expect(result).toEqual({
+      ok: false,
+      reason: "no history in common with main; the histories are unrelated",
+    });
   });
 
   test("secret-shaped files never enter the diff text, but they force review", async () => {
@@ -239,24 +264,25 @@ describe("collectDiff", () => {
       expect(diff.diff, value).not.toContain(`${value}-VALUE`);
     }
     expect(diff.diff).toContain("export const app = 2;");
-    expect(secretPathsInPatch(diff.diff)).toEqual([]);
+    // Secret-shaped content never enters the patch text, but the changed-path list still lists
+    // the name, which is what lets the diff be refused outright rather than merely flagged.
+    expect(secretShapedChangedPath(diff)).toBe(".pypirc");
     expect(deterministicTriggers(diff).filter((t) => t.startsWith("secret-shaped"))).toHaveLength(
       7,
     );
   });
 
-  test("a patch that still carries a secret-shaped file is caught by its headers", () => {
-    const patch = [
-      "diff --git a/src/app.ts b/src/app.ts",
-      "--- a/src/app.ts",
-      "+++ b/src/app.ts",
-      "@@ -1 +1 @@",
-      "-a",
-      "+b",
-      "diff --git a/Config/Server.Key b/Config/Server.Key",
-      "new file mode 100644",
-    ].join("\n");
-    expect(secretPathsInPatch(patch)).toEqual(["Config/Server.Key"]);
+  test("a secret-shaped path is caught even though the pathspec keeps it out of the patch text (m4)", async () => {
+    // The exclusion pathspec already keeps café/.env's header and content out of `diff.diff`
+    // (and would do so whether or not git quotes the name), so a check parsing that text has
+    // nothing to find either way. Reading the already-collected `--name-status -z` list instead
+    // means a secret-shaped file always blocks the diff, not only when it happens to leak in.
+    write("café/.env", "ENV-VALUE=1\n");
+    write("src/app.ts", "export const app = 2;\n");
+    commitAll("add files");
+    const diff = await collect();
+    expect(diff.diff).not.toContain("caf");
+    expect(secretShapedChangedPath(diff)).toBe("café/.env");
   });
 
   test("with no upstream and no origin/HEAD, it asks for a base", async () => {

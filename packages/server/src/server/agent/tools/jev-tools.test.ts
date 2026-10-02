@@ -766,6 +766,19 @@ describe("feature 6b: ask_jev_diff_risk", () => {
     expect(result["needs_full_review"]).toBe(true);
     expect((result["forced_by"] as string[])[0]).toMatch(/^git: /);
   });
+
+  test("a secret-shaped file with a quoted diff header still refuses to send the diff (m4)", async () => {
+    // Git quotes a path with non-ASCII bytes in its `diff --git` header (octal-escaped), so a
+    // regex over the raw patch text for `diff --git a/(.+) b/(.+)` never matches this path; the
+    // refusal has to come from the already-collected `--name-status -z` list instead, which is
+    // never quoted.
+    branch({ "café/.env": "SECRET=1\n", "src/util.ts": "export const add = 1;\n" }, "Add config");
+    const { catalog, jev } = await setup({ answers: low });
+    const result = json(await catalog.executeTool("ask_jev_diff_risk", { base: "main" }));
+    expect(result["needs_full_review"]).toBe(true);
+    expect(result["reason"]).toMatch(/secret-shaped/);
+    expect(sent(jev)).toEqual([]);
+  });
 });
 
 describe("fail open and the lane", () => {

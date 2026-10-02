@@ -40,6 +40,36 @@ describe("server config", () => {
     expect(config.providerCatalogRefreshTimeoutMs).toBe(180_000);
   });
 
+  test("ignores a worktreesRoot that equals or contains $PASEO_HOME (m6)", async () => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-worktrees-root-"));
+    roots.push(paseoHome);
+
+    // Equal to $PASEO_HOME: the carve-out for `worktreesRoot` would otherwise swallow the whole
+    // denial for $PASEO_HOME, letting an agent read every other agent's config and secrets, not
+    // only worktrees.
+    await writeFile(
+      path.join(paseoHome, "config.json"),
+      JSON.stringify({ worktrees: { root: paseoHome } }),
+    );
+    expect(loadConfig(paseoHome, { env: {} }).worktreesRoot).toBeUndefined();
+
+    // An ancestor of $PASEO_HOME: contains it the same way.
+    await writeFile(
+      path.join(paseoHome, "config.json"),
+      JSON.stringify({ worktrees: { root: path.dirname(paseoHome) } }),
+    );
+    expect(loadConfig(paseoHome, { env: {} }).worktreesRoot).toBeUndefined();
+
+    // A real subdirectory is unaffected.
+    await writeFile(
+      path.join(paseoHome, "config.json"),
+      JSON.stringify({ worktrees: { root: "worktrees-custom" } }),
+    );
+    expect(loadConfig(paseoHome, { env: {} }).worktreesRoot).toBe(
+      path.join(paseoHome, "worktrees-custom"),
+    );
+  });
+
   test("resolves reload state from the supplied validated snapshot", async () => {
     const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-snapshot-"));
     roots.push(paseoHome);

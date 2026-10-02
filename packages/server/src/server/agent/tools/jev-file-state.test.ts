@@ -513,6 +513,35 @@ describe("Paseo worktrees", () => {
       /private directory/,
     );
   });
+
+  test("a worktreesRoot that equals or contains $PASEO_HOME is ignored, not carved out (m6)", async () => {
+    write(path.join(paseoHome, "agents", "x.json"), '{"secret":true}\n');
+
+    for (const worktreesRoot of [paseoHome, path.dirname(paseoHome)]) {
+      const opened = await JevFileScope.open({
+        cwd: paseoHome,
+        homeDir: home,
+        paseoHome,
+        worktreesRoot,
+      });
+      if (!opened.ok) throw new Error(opened.reason);
+      const reason = opened.scope.deniedReason(path.join(paseoHome, "agents", "x.json"));
+      expect(reason).not.toBeNull();
+      expect(reason).toMatch(/private directory/);
+    }
+  });
+
+  test("a cwd of exactly the worktrees root itself is refused (m6)", async () => {
+    const custom = path.join(paseoHome, "trees");
+    mkdirSync(custom, { recursive: true });
+    const opened = await JevFileScope.open({
+      cwd: custom,
+      homeDir: home,
+      paseoHome,
+      worktreesRoot: custom,
+    });
+    expect(opened.ok).toBe(false);
+  });
 });
 
 describe("git never runs a program a repository's config names", () => {

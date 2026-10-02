@@ -404,7 +404,21 @@ export class JevFileScope {
       };
     }
     const deniedRoots = await resolveDeniedRoots(homeDir, options.paseoHome);
-    const worktreeRoots = await resolveWorktreeRoots(options.paseoHome, options.worktreesRoot);
+    const worktreeRoots = await resolveWorktreeRoots(
+      options.paseoHome,
+      options.worktreesRoot,
+      platform,
+    );
+    // The carve-out is for reading inside one worktree, not for listing every worktree there is:
+    // a cwd that is the worktrees root itself would otherwise see every other agent's worktree as
+    // "inside its own working directory," with the paseoHome denial carved out for all of them (m6).
+    if (worktreeRoots.some((root) => canonicalCwd === canonicalJevPath(root, platform))) {
+      return {
+        ok: false,
+        reason:
+          "the JEV file tools do not read from the worktrees root itself; run from a worktree",
+      };
+    }
     const top = await runGit(["rev-parse", "--show-toplevel"], { cwd: realCwd });
     const gitTop = top.code === 0 && top.stdout.trim() ? top.stdout.trim() : null;
     return {
@@ -782,14 +796,22 @@ async function resolveDeniedRoots(homeDir: string, paseoHome: string): Promise<D
   ];
 }
 
-/** `worktreesRoot` when configured, else `$PASEO_HOME/worktrees` (`resolvePaseoWorktreesBaseRoot`). */
+/**
+ * `worktreesRoot` when configured, else `$PASEO_HOME/worktrees` (`resolvePaseoWorktreesBaseRoot`).
+ * The config loader already refuses a `worktreesRoot` that equals or contains `$PASEO_HOME` (m6):
+ * carved out, it would widen the denial's exception to every other agent's config and secrets
+ * under `$PASEO_HOME`, not only worktrees. Checked again here in case a caller reaches this with
+ * one some other way; dropping it leaves no carve-out rather than guessing a safe substitute.
+ */
 async function resolveWorktreeRoots(
   paseoHome: string,
   worktreesRoot: string | undefined,
+  platform: NodeJS.Platform,
 ): Promise<string[]> {
-  return withRealPaths([
+  const roots = await withRealPaths([
     resolvePaseoWorktreesBaseRoot({ paseoHome, ...(worktreesRoot ? { worktreesRoot } : {}) }),
   ]);
+  return roots.filter((root) => !samePathOrBelow(root, paseoHome, platform));
 }
 
 /**

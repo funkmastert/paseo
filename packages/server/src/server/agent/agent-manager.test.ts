@@ -19,7 +19,11 @@ import { MCP_SCOPE_LABEL } from "./runtime-mcp-config.js";
 import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
-import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import {
+  getOpenAgentTabLabel,
+  JEV_TOOLS_LABEL,
+  PARENT_AGENT_ID_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import {
   createPromptQueue,
   formatSystemNotificationPrompt,
@@ -7146,6 +7150,73 @@ test("setLabels merges and persists labels", async () => {
     surface: "mobile",
     phase: "1a",
   });
+});
+
+test("setLabels cannot grant the JEV tools label to a live agent", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-jev-label-live-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: {
+      codex: new TestAgentClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000134",
+  });
+
+  const snapshot = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
+  expect(snapshot.labels[JEV_TOOLS_LABEL]).toBeUndefined();
+
+  await manager.setLabels(snapshot.id, { [JEV_TOOLS_LABEL]: "on", surface: "mobile" });
+
+  const live = manager.getAgent(snapshot.id);
+  expect(live?.labels[JEV_TOOLS_LABEL]).toBeUndefined();
+  expect(live?.labels["surface"]).toBe("mobile");
+
+  const persisted = await storage.get(snapshot.id);
+  expect(persisted?.labels[JEV_TOOLS_LABEL]).toBeUndefined();
+  expect(persisted?.labels["surface"]).toBe("mobile");
+});
+
+test("updateAgentMetadata cannot grant the JEV tools label to a stored agent", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-jev-label-stored-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: {
+      codex: new TestAgentClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000135",
+  });
+
+  const snapshot = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
+  await manager.closeAgent(snapshot.id);
+  expect(manager.getAgent(snapshot.id)).toBeNull();
+
+  await manager.updateAgentMetadata(snapshot.id, {
+    labels: { [JEV_TOOLS_LABEL]: "on", role: "worker" },
+  });
+
+  const persisted = await storage.get(snapshot.id);
+  expect(persisted?.labels[JEV_TOOLS_LABEL]).toBeUndefined();
+  expect(persisted?.labels["role"]).toBe("worker");
 });
 
 test("detachAgent removes relationship lifecycle labels from a live agent and emits state", async () => {

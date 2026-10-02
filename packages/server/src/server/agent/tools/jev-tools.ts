@@ -29,7 +29,7 @@ import {
   deterministicTriggers,
   DIFF_RISK_QUESTIONS,
   scoreDiffRisk,
-  secretPathsInPatch,
+  secretShapedChangedPath,
   type DiffRiskResult,
 } from "./jev-diff-risk.js";
 import {
@@ -1203,7 +1203,12 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
       bashDenied: denials.bashDenied,
       unattended: call.caller.unattended,
       sandboxed: denials.sandboxed,
-      ...(sides ? { onSpawn: (pid: number) => sides.add(call.caller.id, pid) } : {}),
+      ...(sides
+        ? {
+            onSpawn: (pid: number) => sides.add(call.caller.id, pid),
+            onSurvivor: (pid: number) => sides.trackUntilExit(call.caller.id, pid),
+          }
+        : {}),
       platform,
       signal: call.signal,
     });
@@ -1293,7 +1298,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
     const ruled = diff.paths.find(
       (entry) => scope.deniedReason(path.join(diff.top, entry.path)) !== null,
     );
-    const secretInPatch = secretPathsInPatch(diff.diff)[0];
+    const secretInPatch = secretShapedChangedPath(diff);
     let unansweredReason: string | undefined;
     let answers: Record<string, JevAnswer> | null = null;
     let callId: string | null = null;

@@ -322,6 +322,38 @@ describe("the agent's environment (M5)", () => {
   });
 });
 
+describe("shell startup-file env (m2)", () => {
+  test("BASH_ENV in the launch env does not run before the command", async () => {
+    const marker = path.join(cwd, "bash-env-ran.txt");
+    const startupFile = path.join(cwd, "startup.sh");
+    execFileSync("/bin/sh", [
+      "-c",
+      `printf 'echo ran > %s\\n' ${JSON.stringify(marker)} > ${JSON.stringify(startupFile)}`,
+    ]);
+    const result = await run({
+      command: "echo hi",
+      env: agentEnv({ BASH_ENV: startupFile }),
+    });
+    if (result.kind !== "ran") throw new Error("did not run");
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("ENV in the launch env does not run before the command", async () => {
+    const marker = path.join(cwd, "env-ran.txt");
+    const startupFile = path.join(cwd, "startup.sh");
+    execFileSync("/bin/sh", [
+      "-c",
+      `printf 'echo ran > %s\\n' ${JSON.stringify(marker)} > ${JSON.stringify(startupFile)}`,
+    ]);
+    const result = await run({
+      command: "echo hi",
+      env: agentEnv({ ENV: startupFile }),
+    });
+    if (result.kind !== "ran") throw new Error("did not run");
+    expect(existsSync(marker)).toBe(false);
+  });
+});
+
 describe("priority and attribution (H3)", () => {
   test.skipIf(process.platform === "win32")(
     "the command runs at the agents' nice and is charged to the agent while it runs",
@@ -396,6 +428,33 @@ describe("a command that leaves something running (M3)", () => {
         expect(Date.now() - started).toBeLessThan(5_000);
         expect(result.output.exit_code).toBeNull();
         expect(result.output.stderr).toContain("[killed after 0.5 s]");
+      } finally {
+        try {
+          execFileSync("pkill", ["-f", tag]);
+        } catch {
+          // Already gone.
+        }
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "a process that leaves the group with setsid is reported as a survivor, still alive (m3)",
+    async () => {
+      const tag = `jev-m3-survivor-${process.pid}-${Date.now()}`;
+      const detach = `perl -e 'use POSIX; POSIX::setsid(); sleep 5' ${tag}`;
+      const survivors: number[] = [];
+      try {
+        const result = await run({
+          command: `${detach} & sleep 30`,
+          timeoutMs: 500,
+          onSurvivor: (pid) => survivors.push(pid),
+        });
+        if (result.kind !== "ran") throw new Error("did not run");
+        expect(survivors.length).toBeGreaterThan(0);
+        for (const pid of survivors) {
+          expect(() => process.kill(pid, 0)).not.toThrow();
+        }
       } finally {
         try {
           execFileSync("pkill", ["-f", tag]);
