@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ACCOUNT_FAILOVER_MIGRATED_TO_LABEL } from "@getpaseo/protocol/agent-labels";
-import { planMovedAgentTabs } from "@/workspace-tabs/moved-agent-tabs";
+import { decideMovedAgentTabActions, planMovedAgentTabs } from "@/workspace-tabs/moved-agent-tabs";
 import type { WorkspaceTab } from "@/workspace-tabs/model";
 
 function agentTab(tabId: string, agentId: string): WorkspaceTab {
@@ -46,5 +46,98 @@ describe("planMovedAgentTabs", () => {
     expect(
       planMovedAgentTabs({ tabs: [agentTab("t1", "stranded")], workspaceId: "ws-1", lookup }),
     ).toEqual([{ kind: "stranded", tabId: "t1", fromAgentId: "stranded", movedToAgentId: "gone" }]);
+  });
+});
+
+describe("decideMovedAgentTabActions", () => {
+  const retarget = {
+    kind: "retarget",
+    tabId: "t1",
+    fromAgentId: "retired",
+    toAgentId: "live",
+  } as const;
+  const navigate = {
+    kind: "navigate",
+    tabId: "t2",
+    fromAgentId: "moved-away",
+    toAgentId: "far",
+  } as const;
+  const stranded = {
+    kind: "stranded",
+    tabId: "t3",
+    fromAgentId: "stranded",
+    movedToAgentId: "gone",
+  } as const;
+  const ready = {
+    routeFocused: true,
+    layoutHydrated: true,
+    workspaceKey: "ws-key",
+    notedStrandedAgentIds: new Set<string>(),
+  };
+
+  it("does nothing while the workspace is not in view or its layout has not hydrated", () => {
+    const steps = [retarget, navigate, stranded];
+    for (const gate of [
+      { routeFocused: false },
+      { layoutHydrated: false },
+      { workspaceKey: null },
+    ]) {
+      expect(decideMovedAgentTabActions({ ...ready, ...gate, steps, focusedTabId: "t1" })).toEqual(
+        [],
+      );
+    }
+  });
+
+  it("retargets a background tab and carries its draft without a note", () => {
+    expect(
+      decideMovedAgentTabActions({ ...ready, steps: [retarget], focusedTabId: "other" }),
+    ).toEqual([
+      { kind: "moveDraft", fromAgentId: "retired", toAgentId: "live" },
+      { kind: "follow", workspaceKey: "ws-key", fromAgentId: "retired", toAgentId: "live" },
+    ]);
+  });
+
+  it("notes the move when the retargeted tab is the one in view", () => {
+    expect(decideMovedAgentTabActions({ ...ready, steps: [retarget], focusedTabId: "t1" })).toEqual(
+      [
+        { kind: "moveDraft", fromAgentId: "retired", toAgentId: "live" },
+        { kind: "follow", workspaceKey: "ws-key", fromAgentId: "retired", toAgentId: "live" },
+        { kind: "announce", agentId: "live" },
+      ],
+    );
+  });
+
+  it("leaves for another workspace only from the tab in view", () => {
+    expect(
+      decideMovedAgentTabActions({ ...ready, steps: [navigate], focusedTabId: "other" }),
+    ).toEqual([]);
+    expect(decideMovedAgentTabActions({ ...ready, steps: [navigate], focusedTabId: "t2" })).toEqual(
+      [
+        { kind: "moveDraft", fromAgentId: "moved-away", toAgentId: "far" },
+        { kind: "closeTab", workspaceKey: "ws-key", tabId: "t2" },
+        { kind: "navigateToAgent", agentId: "far" },
+        { kind: "announce", agentId: "far" },
+      ],
+    );
+  });
+
+  it("names where a stranded handle went once, and only while it is in view", () => {
+    expect(
+      decideMovedAgentTabActions({ ...ready, steps: [stranded], focusedTabId: "other" }),
+    ).toEqual([]);
+    expect(decideMovedAgentTabActions({ ...ready, steps: [stranded], focusedTabId: "t3" })).toEqual(
+      [
+        { kind: "noteStranded", agentId: "stranded" },
+        { kind: "announce", agentId: "gone" },
+      ],
+    );
+    expect(
+      decideMovedAgentTabActions({
+        ...ready,
+        notedStrandedAgentIds: new Set(["stranded"]),
+        steps: [stranded],
+        focusedTabId: "t3",
+      }),
+    ).toEqual([]);
   });
 });
