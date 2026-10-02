@@ -161,9 +161,15 @@ notification. Opening the workspace clears that attention through the normal foc
 
 `requiresAttention` is an **unread** signal, not a state: `checkAndSetAttention` sets it on an
 edge (`running` → `idle` is `finished`, anything → `error` is `error`, a permission request is
-`permission`) and it stays until something reads it. Two things clear it — opening the agent, and
+`permission`) and it stays until something reads it. Opening the agent clears it, and so does
 archiving it. Closing does not: `closeAllAgents` runs on every shutdown, so clearing there would
 wipe every genuine unread finish each time the daemon restarts.
+
+An `error` flag also clears when a later turn finishes. The agent recovered, so the error is
+stale: a root's flag becomes `finished`, and a delegated agent's goes away. Without this, the
+subagents failover or a leader resumed after a cap kept red error badges for good, since nobody
+opens a subagent. A cancelled turn and a done-janitor question turn leave the error in place;
+neither shows the agent can work again.
 
 **A delegated agent's finish never raises attention.** Its parent already has the result in-band,
 through the tool call that spawned it; `broadcastAgentAttention` has skipped delegated agents
@@ -192,7 +198,9 @@ delay, and nothing times a pending permission out.
 
 The flag is also what stops a push repeating. `checkAndSetAttention` returns early when the agent
 is already flagged, so an unread agent cannot notify twice — which means a stale flag suppresses
-notifications rather than causing them. The noise a stale flag causes is in the UI.
+notifications rather than causing them. The noise a stale flag causes is in the UI. The one
+exception is the recovered error above: it is cleared before that check, so a root that recovers
+gets its `finished` push.
 
 ## Activity summary
 

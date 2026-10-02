@@ -6999,13 +6999,25 @@ export class AgentManager {
       return;
     }
 
+    const finishedTurn = previousStatus === "running" && currentStatus === "idle";
+
+    // A turn that finishes after an error means the agent recovered, so the error is stale. Without
+    // this, the early return below kept it forever on a subagent that failover or its leader
+    // resumed: nobody opens a subagent to clear it. A cancelled or janitor turn proves nothing.
+    const workFinished = finishedTurn && !canceled && !options?.quietTurn;
+    const errorFlagged =
+      agent.attention.requiresAttention && agent.attention.attentionReason === "error";
+    if (workFinished && errorFlagged) {
+      agent.attention = { requiresAttention: false };
+    }
+
     // Skip if already requires attention
     if (agent.attention.requiresAttention) {
       return;
     }
 
     // Check if agent transitioned from running to idle (finished)
-    if (previousStatus === "running" && currentStatus === "idle") {
+    if (finishedTurn) {
       if (canceled || options?.quietTurn) {
         return;
       }
