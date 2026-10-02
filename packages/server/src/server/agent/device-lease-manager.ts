@@ -1242,7 +1242,7 @@ export class DeviceLeaseManager {
       .filter((lease) => lease.platform === platform)
       .map((lease) => {
         const heldFor = formatDuration((this.now() - lease.acquiredAtMs) / 1000);
-        return `${lease.agentId} (${heldFor}${lease.reason ? `, ${lease.reason}` : ""})`;
+        return `${this.describeAgent(lease.agentId)} (${heldFor}${lease.reason ? `, ${lease.reason}` : ""})`;
       });
     const unleasedOnPlatform = (this.sample?.devices ?? []).filter(
       (device) =>
@@ -1250,7 +1250,11 @@ export class DeviceLeaseManager {
         !this.leases.some((lease) => lease.deviceId === device.deviceId),
     );
     for (const device of unleasedOnPlatform) {
-      if (device.agentId) entries.push(`${device.agentId} (${device.deviceId}, never checked out)`);
+      if (device.agentId) {
+        entries.push(
+          `${this.describeAgent(device.agentId)} (${device.deviceId}, never checked out)`,
+        );
+      }
     }
     const unleased = unleasedOnPlatform.filter((device) => device.agentId === undefined);
     const parts: string[] = [];

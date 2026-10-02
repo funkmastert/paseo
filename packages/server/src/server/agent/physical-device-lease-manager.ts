@@ -446,9 +446,12 @@ export class PhysicalDeviceLeaseManager {
     if (lease?.agentId === agentId) return undefined;
     const label = device.name ?? device.id;
     if (lease) {
+      const harm = intent.stateOnly
+        ? "it would change the app state of another agent's device"
+        : "installing over another agent's device is exactly what this gate exists to stop";
       return (
         `${label} is held by ${this.describeAgent(lease.agentId)}. \`${intent.command}\` was not ` +
-        `run — installing over another agent's device is exactly what this gate exists to stop. ` +
+        `run — ${harm}. ` +
         `Call device_checkout with kind "physical", this device and \`wait: true\` to get it ` +
         `when it is checked in, or target a different device.`
       );
