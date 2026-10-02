@@ -1329,6 +1329,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
               launchEnv: agentManager.getAgentLaunchEnv(agent.id) ?? null,
               labels: agent.labels,
               providerOptions: agent.config?.providerOptions,
+              // Same lookup bootstrap.ts used for the now-removed tool-use.jsonl adapter
+              // (`readAgentModel`): the running model, falling back to the configured one.
+              model: agent.runtimeInfo?.model ?? agent.config?.model ?? null,
               contextTokens: agent.lastUsage?.contextWindowUsedTokens ?? null,
               unattended: isDefaultAgentCreateConfigUnattended({
                 modeId: agent.currentModeId,

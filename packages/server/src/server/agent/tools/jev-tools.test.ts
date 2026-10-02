@@ -12,6 +12,7 @@ import {
   type JevFakeBehavior,
 } from "../../jev/fake.js";
 import type { JevServiceRuntime } from "../../jev/service.js";
+import { JevSavingsLedger } from "../../jev/savings.js";
 import { AgentSideProcesses } from "../agent-side-processes.js";
 import { createPaseoToolCatalog } from "./paseo-tools.js";
 import { JevToolUseLog, type JevToolUseRecord } from "./jev-tool-use-log.js";
@@ -1114,5 +1115,40 @@ describe("diff risk records which commits it judged (L6)", () => {
     const main = git(project, "rev-parse", "main").trim();
     const head = git(project, "rev-parse", "HEAD").trim();
     expect(record!.diffRisk).toMatchObject({ baseSha: main, mergeBaseSha: main, headSha: head });
+  });
+});
+
+describe("the savings ledger (docs/jev.md, Savings)", () => {
+  test("one tool call produces exactly one savings record, direct, not through an adapter", async () => {
+    const savingsDir = mkdtempSync(path.join(os.tmpdir(), "jev-tools-savings-"));
+    const savings = new JevSavingsLedger({
+      dir: savingsDir,
+      logger: pino({ level: "silent" }),
+      findCall: () => null,
+    });
+    await savings.load();
+    try {
+      const { catalog } = await setup({
+        answers: { answer: { type: "noul", noul: 0.9 } },
+        deps: { savings },
+      });
+      const result = await catalog.executeTool("ask_jev_file_bool", {
+        path: "src/session.ts",
+        question: "Does `content` refresh tokens?",
+      });
+      expect(result.isError).toBeFalsy();
+
+      const events = savings.events({ range: "today" }).events;
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        feature: "agentTools",
+        agentId: AGENT_ID,
+        mode: "live",
+        outcome: "answered",
+      });
+    } finally {
+      await savings.stop();
+      rmSync(savingsDir, { recursive: true, force: true });
+    }
   });
 });

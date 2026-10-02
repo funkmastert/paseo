@@ -2663,6 +2663,10 @@ export async function createPaseoDaemon(
     paseoHome: config.paseoHome,
     worktreesRoot: config.worktreesRoot,
     useLog: new JevToolUseLog({ dir: path.join(config.paseoHome, "jev"), logger }),
+    // Direct now (docs/jev.md, "Hooking in the features already built"): `recordToolUseSavings`
+    // is called beside the use-log append, so `startSavingsAdapters` no longer tails
+    // `tool-use.jsonl`.
+    savings: jev.savings,
   };
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,

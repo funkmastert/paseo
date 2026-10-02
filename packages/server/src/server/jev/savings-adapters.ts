@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import path from "node:path";
 import type { Logger } from "pino";
 
 import type { JevSavingsSink } from "./contract.js";
@@ -209,23 +208,6 @@ function notAskedReason(reason: string | null): "excluded" | "inactive" {
   return reason?.includes("excluded") ? "excluded" : "inactive";
 }
 
-/** The `tool-use.jsonl` adapter, until the tools code calls `recordToolUseSavings` itself. */
-export function createToolUseSavingsAdapter(options: {
-  savings: JevSavingsSink;
-  readAgentModel: (agentId: string) => string | null;
-}): (line: Line) => void {
-  return (line) => {
-    try {
-      const agentId = str(line, "agentId");
-      recordToolUseSavings(options.savings, line, {
-        model: agentId ? options.readAgentModel(agentId) : null,
-      });
-    } catch {
-      // An adapter never breaks the tail.
-    }
-  };
-}
-
 /**
  * Feature 10, fed each line the stall sweep writes to `stall-judgments.jsonl` (bootstrap's
  * `recordMeasurement`), not by a tail. A `judgment` with a call records (pending for a
@@ -329,7 +311,11 @@ function closeEpisode(savings: JevSavingsSink, byEpisode: Map<string, string>, l
 /**
  * Tails the files of features still on their own branches and polls them every 15 seconds. `stop`
  * polls a last time, so the lines of the last interval count; the ledger flushes them after. The
- * stall judgment merged and calls its adapter directly, so `stall-judgments.jsonl` is not tailed.
+ * stall judgment merged and calls its adapter directly, so `stall-judgments.jsonl` is not tailed,
+ * and the agent tools merged the same way (`recordToolUseSavings`, called directly from
+ * `agent/tools/jev-tools.ts`), so `tool-use.jsonl` is not tailed either. No feature is left on its
+ * own branch right now, so `tails` is empty; kept so the next one that is has somewhere to add
+ * its own.
  */
 export function startSavingsAdapters(options: {
   jevDir: string;
@@ -337,13 +323,7 @@ export function startSavingsAdapters(options: {
   readAgentModel: (agentId: string) => string | null;
   logger: Logger;
 }): { stop(): Promise<void>; poll(): Promise<void> } {
-  const tails = [
-    new JsonlTail(
-      path.join(options.jevDir, "tool-use.jsonl"),
-      path.join(options.jevDir, "tool-use.1.jsonl"),
-      createToolUseSavingsAdapter(options),
-    ),
-  ];
+  const tails: JsonlTail[] = [];
   let polling: Promise<void> = Promise.all(tails.map((tail) => tail.start())).then(() => undefined);
   const poll = async () => {
     polling = polling.then(() =>

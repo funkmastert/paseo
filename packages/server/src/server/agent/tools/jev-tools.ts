@@ -12,10 +12,12 @@ import type {
   JevFailureReason,
   JevOutcome,
   JevQuestions,
+  JevSavingsSink,
   JevService,
   JevState,
   JevUnavailableReason,
 } from "../../jev/contract.js";
+import { recordToolUseSavings } from "../../jev/savings-adapters.js";
 import { choice, noul, score, validateJevRequest } from "../../jev/wire.js";
 import type { AgentSideProcesses } from "../agent-side-processes.js";
 import type { DeviceLaunchGate } from "../device-lease-manager.js";
@@ -110,6 +112,12 @@ export interface JevToolsDependencies {
   worktreesRoot?: string | undefined;
   /** The D8 record. Absent in tests that do not measure. */
   useLog?: JevToolUseLog | null;
+  /**
+   * The savings ledger (docs/jev.md, "Hooking in the features already built"): direct now that
+   * the tools track has merged, called beside `useLog` with the same record, never through the
+   * `tool-use.jsonl` adapter, which would otherwise double-count it.
+   */
+  savings?: JevSavingsSink | null;
   homeDir?: string;
   platform?: NodeJS.Platform;
   runGit?: JevGitRunner;
@@ -134,6 +142,8 @@ export interface JevToolCaller {
   launchEnv: Readonly<Record<string, string>> | null;
   labels: Readonly<Record<string, string>>;
   providerOptions?: unknown;
+  /** The model the agent runs, for the savings record; null when none is known yet. */
+  model?: string | null;
   /** The context the extra model step re-reads (`lastUsage.contextWindowUsedTokens`). */
   contextTokens: number | null;
   /** The current mode runs tools without asking (`isDefaultAgentCreateConfigUnattended`). */
@@ -391,6 +401,8 @@ class ToolCall {
   paths: string[] = [];
   commandSha256: string | null = null;
   diffRisk: JevToolUseRecord["diffRisk"] = null;
+  /** The first real JEV `callId` this call counted, for the savings record. */
+  firstCallId: string | null = null;
 
   constructor(
     readonly tool: JevToolName,
@@ -402,6 +414,7 @@ class ToolCall {
   count(outcome: JevOutcome): void {
     this.jevCalls += 1;
     if (outcome.kind === "answered") this.jevAnswered += 1;
+    if (!this.firstCallId && outcome.callId) this.firstCallId = outcome.callId;
     const meta = outcome.kind === "unavailable" ? null : outcome.meta;
     if (meta) {
       this.jevUsd += meta.cost.usd ?? 0;
@@ -648,35 +661,47 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
     }
     const result = toResult(answer);
     const resultChars = result.content.reduce((sum, part) => sum + (part.text?.length ?? 0), 0);
+    const record: JevToolUseRecord = {
+      v: 1,
+      at: new Date(startedAt).toISOString(),
+      agentId: caller.id,
+      arm: "on",
+      tool,
+      outcome: answer.outcome,
+      reason: recordedReason(answer.reason),
+      jevCalls: call.jevCalls,
+      jevAnswered: call.jevAnswered,
+      jevUsd: call.jevUsd,
+      jevInputTokens: call.jevInputTokens,
+      resultChars,
+      readTokensAvoided: call.readTokensAvoided,
+      avoidedFileChars: call.avoidedFileChars,
+      avoidedFileBytes: call.avoidedFileBytes,
+      avoidedFileLines: call.avoidedFileLines,
+      avoidedOutputChars: call.avoidedOutputChars,
+      avoidedOutputBytes: call.avoidedOutputBytes,
+      callerContextTokens: caller.contextTokens,
+      cwd: caller.cwd,
+      paths: call.paths,
+      commandSha256: call.commandSha256,
+      diffRisk: call.diffRisk,
+      elapsedMs: now() - startedAt,
+    };
     try {
-      deps.useLog?.append({
-        v: 1,
-        at: new Date(startedAt).toISOString(),
-        agentId: caller.id,
-        arm: "on",
-        tool,
-        outcome: answer.outcome,
-        reason: recordedReason(answer.reason),
-        jevCalls: call.jevCalls,
-        jevAnswered: call.jevAnswered,
-        jevUsd: call.jevUsd,
-        jevInputTokens: call.jevInputTokens,
-        resultChars,
-        readTokensAvoided: call.readTokensAvoided,
-        avoidedFileChars: call.avoidedFileChars,
-        avoidedFileBytes: call.avoidedFileBytes,
-        avoidedFileLines: call.avoidedFileLines,
-        avoidedOutputChars: call.avoidedOutputChars,
-        avoidedOutputBytes: call.avoidedOutputBytes,
-        callerContextTokens: caller.contextTokens,
-        cwd: caller.cwd,
-        paths: call.paths,
-        commandSha256: call.commandSha256,
-        diffRisk: call.diffRisk,
-        elapsedMs: now() - startedAt,
-      });
+      deps.useLog?.append(record);
     } catch (error) {
       log.warn({ err: error }, "jev tool-use record failed");
+    }
+    try {
+      // Direct now that the tools track has merged (docs/jev.md, "Hooking in the features
+      // already built"): the same record `useLog` just appended, never through the
+      // `tool-use.jsonl` adapter, which would otherwise double-count it.
+      recordToolUseSavings(deps.savings, record, {
+        callId: call.firstCallId,
+        model: caller.model ?? null,
+      });
+    } catch (error) {
+      log.warn({ err: error }, "jev tool-use savings record failed");
     }
     return result;
   }
