@@ -253,7 +253,7 @@ export function applyClearDraftRecord(input: {
   };
 }
 
-function recordHasUnsentContent(record: DraftRecord | undefined): record is DraftRecord {
+function recordHasUnsentContent(record: DraftRecord | undefined): boolean {
   return (
     record?.lifecycle === "active" &&
     (record.input.text.length > 0 || record.input.attachments.length > 0)
