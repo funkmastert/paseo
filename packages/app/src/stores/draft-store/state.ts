@@ -252,3 +252,38 @@ export function applyClearDraftRecord(input: {
     version: input.record.version + 1,
   };
 }
+
+function recordHasUnsentContent(record: DraftRecord | undefined): record is DraftRecord {
+  return (
+    record?.lifecycle === "active" &&
+    (record.input.text.length > 0 || record.input.attachments.length > 0)
+  );
+}
+
+/**
+ * Hands an unsent draft from one key to another when the conversation it belongs to moved (an agent
+ * account failover retired). The destination's own unsent draft wins; the old key is cleared either
+ * way.
+ */
+export function moveDraftRecord(input: {
+  drafts: Record<string, DraftRecord>;
+  fromKey: string;
+  toKey: string;
+  nowMs: number;
+}): Record<string, DraftRecord> {
+  const from = input.drafts[input.fromKey];
+  if (!from || input.fromKey === input.toKey) {
+    return input.drafts;
+  }
+  const next = { ...input.drafts };
+  delete next[input.fromKey];
+  const to = input.drafts[input.toKey];
+  if (recordHasUnsentContent(from) && !recordHasUnsentContent(to)) {
+    next[input.toKey] = {
+      ...from,
+      updatedAt: input.nowMs,
+      version: (to?.version ?? 0) + 1,
+    };
+  }
+  return next;
+}

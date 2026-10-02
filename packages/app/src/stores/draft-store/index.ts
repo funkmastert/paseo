@@ -19,6 +19,7 @@ import {
   isAttachmentMetadata,
   isCanonicalDraftInput,
   isLegacyDraftImage,
+  moveDraftRecord,
   normalizeComposerAttachment,
   pruneFinalizedDraftRecords,
   toDraftInputIfReady,
@@ -47,6 +48,8 @@ interface DraftStoreActions {
     draftKey: string;
     lifecycle?: Exclude<DraftLifecycleState, "active">;
   }) => void;
+  /** Hands an unsent draft to the key of the agent a conversation moved to (`moveDraftRecord`). */
+  moveDraft: (input: { fromKey: string; toKey: string }) => void;
   attachWorkspaceFile: (input: {
     draftKey: string;
     attachment: WorkspaceFileComposerAttachment;
@@ -362,6 +365,18 @@ export const useDraftStore = create<DraftStore>()(
         });
 
         scheduleAttachmentGc();
+      },
+
+      moveDraft: ({ fromKey, toKey }) => {
+        set((state) => {
+          const drafts = moveDraftRecord({
+            drafts: state.drafts,
+            fromKey,
+            toKey,
+            nowMs: Date.now(),
+          });
+          return drafts === state.drafts ? state : { drafts };
+        });
       },
 
       attachWorkspaceFile: async ({ draftKey, attachment }) => {
