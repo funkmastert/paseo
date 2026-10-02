@@ -1,18 +1,19 @@
 /**
- * Parses `xcrun devicectl list devices --json-output <file>`, keeping only physical devices —
- * `reality: "simulated"` entries are simulators, already covered by the process scan.
+ * Parses `xcrun devicectl list devices --json-output <file>`, keeping only physical devices that
+ * can be reached right now — `reality: "simulated"` entries are simulators, already covered by
+ * the process scan.
  *
- * Verified against a real run on this machine (docs/device-leases.md, Physical devices):
- * `result.devices[].hardwareProperties.{reality,udid,deviceType,marketingName,serialNumber}`
- * and `.connectionProperties.transportType` ("wired" | "network"). `properties.connection.state`
- * looks like the obvious "is it reachable" field but is not: it tracks devicectl's own remote
- * tunnel (used by `devicectl device install`/`process launch`), and reads "disconnected" on a
- * device the `devicectl list devices` table calls "available (paired)" right now — a physical
- * iPhone paired over the network with no active tunnel session. Presence in the polled device
- * list is the connectivity signal this uses instead: devicectl only lists what it currently
- * detects (USB enumeration or the coredevice Bonjour registration), so a device that becomes
- * unreachable drops out of the list on its own, and DevicectlPollingService's grace period
- * absorbs a momentary drop the same way the adb side does.
+ * Fields, from real captures (docs/device-leases.md, Physical devices):
+ * `result.devices[].identifier` (the CoreDevice identifier, which `devicectl --device` accepts;
+ * it is not the UDID), `.hardwareProperties.{reality,udid,deviceType,marketingName,serialNumber}`,
+ * `.deviceProperties.name` (the name Tyler gave the phone), and
+ * `.connectionProperties.{transportType,tunnelState}`.
+ *
+ * Reachability: devicectl lists every PAIRED device, reachable or not. CoreDevice's transports
+ * are `wired` (USB), `localNetwork` (Wi-Fi) and `sameMachine` (simulators). A paired iPhone that
+ * left the network has no transport and a `tunnelState` of `unavailable`. `tunnelState` is
+ * otherwise about devicectl's own tunnel session — a reachable Wi-Fi iPhone reads
+ * `disconnected` — so only `unavailable` means anything here.
  */
 
 import { z } from "zod";
@@ -21,13 +22,19 @@ export type DevicectlTransport = "wired" | "network";
 
 export interface DevicectlPhysicalDevice {
   udid: string;
+  /** CoreDevice's own identifier — a second id `devicectl --device` accepts. */
+  identifier?: string;
+  /** The model's marketing name ("iPhone 16e"), which commands also use to name a device. */
   name: string;
+  /** The name the owner gave the phone, when devicectl reports one. */
+  deviceName?: string;
   deviceType: string;
   serialNumber?: string;
   transport: DevicectlTransport;
 }
 
 const DevicectlDeviceSchema = z.object({
+  identifier: z.string().optional(),
   hardwareProperties: z
     .object({
       reality: z.string().optional(),
@@ -40,6 +47,7 @@ const DevicectlDeviceSchema = z.object({
   connectionProperties: z
     .object({
       transportType: z.string().optional(),
+      tunnelState: z.string().optional(),
     })
     .optional(),
   deviceProperties: z
@@ -57,31 +65,37 @@ const DevicectlOutputSchema = z.object({
     .optional(),
 });
 
-/** "wired" unless devicectl explicitly says "network" — a missing field is the safer default,
- * since an install command wrongly thought wired just gets a redundant -destination. */
-function resolveTransport(transportType: string | undefined): DevicectlTransport {
-  return transportType === "network" ? "network" : "wired";
+const TRANSPORTS: Readonly<Record<string, DevicectlTransport>> = {
+  wired: "wired",
+  localNetwork: "network",
+};
+
+type DevicectlDeviceEntry = z.infer<typeof DevicectlDeviceSchema>;
+
+/** One devicectl entry as a reachable physical device, or undefined for a simulator or a
+ * paired device that can't be reached right now. */
+function toPhysicalDevice(entry: DevicectlDeviceEntry): DevicectlPhysicalDevice | undefined {
+  const hardware = entry.hardwareProperties;
+  if (!hardware || hardware.reality !== "physical" || !hardware.udid) return undefined;
+  const connection = entry.connectionProperties;
+  const transport = TRANSPORTS[connection?.transportType ?? ""];
+  if (!transport || connection?.tunnelState === "unavailable") return undefined;
+  const deviceName = entry.deviceProperties?.name;
+  return {
+    udid: hardware.udid,
+    ...(entry.identifier ? { identifier: entry.identifier } : {}),
+    name: hardware.marketingName ?? deviceName ?? hardware.deviceType ?? hardware.udid,
+    ...(deviceName ? { deviceName } : {}),
+    deviceType: hardware.deviceType ?? "iPhone",
+    ...(hardware.serialNumber ? { serialNumber: hardware.serialNumber } : {}),
+    transport,
+  };
 }
 
 export function parseDevicectlDevicesJson(raw: unknown): DevicectlPhysicalDevice[] {
   const parsed = DevicectlOutputSchema.safeParse(raw);
   if (!parsed.success) return [];
-
-  const devices: DevicectlPhysicalDevice[] = [];
-  for (const entry of parsed.data.result?.devices ?? []) {
-    const hardware = entry.hardwareProperties;
-    if (!hardware || hardware.reality !== "physical" || !hardware.udid) continue;
-    devices.push({
-      udid: hardware.udid,
-      name:
-        hardware.marketingName ??
-        entry.deviceProperties?.name ??
-        hardware.deviceType ??
-        hardware.udid,
-      deviceType: hardware.deviceType ?? "iPhone",
-      ...(hardware.serialNumber ? { serialNumber: hardware.serialNumber } : {}),
-      transport: resolveTransport(entry.connectionProperties?.transportType),
-    });
-  }
-  return devices;
+  return (parsed.data.result?.devices ?? [])
+    .map(toPhysicalDevice)
+    .filter((device): device is DevicectlPhysicalDevice => device !== undefined);
 }

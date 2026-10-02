@@ -139,8 +139,11 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
         const result = await options.physicalManager.checkout({
           agentId: callerAgentId,
           platform: input.platform,
+          wait: input.wait ?? true,
           ...(input.reason ? { reason: input.reason } : {}),
           ...(input.device ? { device: input.device } : {}),
+          ...(input.timeoutMinutes ? { timeoutMs: input.timeoutMinutes * 60_000 } : {}),
+          ...(context.signal ? { signal: context.signal } : {}),
         });
         return toResult(result, result.status === "unavailable");
       }
@@ -166,25 +169,26 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
         "Give back a device slot as soon as you are finished with the device, so a waiting agent can have it. " +
         "Shut the device down too — the slot is also freed automatically when the device stops or the agent ends.",
       inputSchema: {
-        leaseId: z.string().optional().describe("Defaults to every slot this agent holds."),
-        kind: KindSchema.optional(),
+        leaseId: z
+          .string()
+          .optional()
+          .describe("Defaults to every slot and physical device this agent holds."),
+        kind: KindSchema.optional().describe(
+          "Only check in this kind. Defaults to both: simulator/emulator slots and physical devices.",
+        ),
       },
     },
     async (input) => {
       if (!callerAgentId) return toResult({ error: NO_AGENT_MESSAGE }, true);
-      if (input.kind === "physical") {
-        const released =
-          (await options.physicalManager?.checkin({
-            agentId: callerAgentId,
-            ...(input.leaseId ? { leaseId: input.leaseId } : {}),
-          })) ?? 0;
-        return toResult({ released });
-      }
-      const released = await manager.checkin({
+      const request = {
         agentId: callerAgentId,
         ...(input.leaseId ? { leaseId: input.leaseId } : {}),
-      });
-      return toResult({ released });
+      };
+      // Lease ids are disjoint across the two managers, so asking both is safe.
+      const simulator = input.kind === "physical" ? 0 : await manager.checkin(request);
+      const physical =
+        input.kind === "simulator" ? 0 : ((await options.physicalManager?.checkin(request)) ?? 0);
+      return toResult({ released: simulator + physical });
     },
   );
 
@@ -207,6 +211,7 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
         summary: summarize(snapshot),
         ...snapshot,
         ...(physical ? { physicalDevices: physical.devices } : {}),
+        ...(physical && physical.blocked.length > 0 ? { physicalBlocked: physical.blocked } : {}),
         ...(enforcement ? { yourEnforcement: enforcement } : {}),
       });
     },

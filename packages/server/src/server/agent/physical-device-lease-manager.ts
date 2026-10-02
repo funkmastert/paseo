@@ -8,11 +8,8 @@
  * enabled/dryRun toggle (one switch for the whole device-management feature), and the
  * DeviceReservations store (a reservation is just a deviceId, physical or not).
  *
- * No waiting queue: `checkout` with nothing free returns `unavailable` immediately rather than
- * parking the agent the way the emulator cap's `device_checkout` does. A physical device doesn't
- * free up on its own the way a slot does when a device stops, so there's nothing worth waiting
- * for — the agent is told to ask again once the device is free. See docs/device-leases.md for
- * why this is a scoped-down corner of "waiting works as for the emulator cap".
+ * Waiting works as for the emulator cap: `checkout` with `wait` parks the agent until a device
+ * frees (a check-in, the holder ending, a grace period running out) or its timeout passes.
  */
 
 import {
@@ -20,6 +17,7 @@ import {
   type InstallCommandIntent,
 } from "./device-install-commands.js";
 import {
+  physicalDeviceMatches,
   reconcilePhysicalDeviceLeases,
   selectFreePhysicalDevice,
   type PhysicalDevice,
@@ -31,6 +29,10 @@ import type { DeviceLaunchGateDecision, DeviceLeaseAgentSummary } from "./device
 
 const DEFAULT_GRACE_MINUTES = 30;
 const DEFAULT_MAX_LEASE_HOURS = 12;
+const DEFAULT_WAIT_TIMEOUT_MS = 20 * 60_000;
+/** How often a waiting checkout looks again when nothing has notified it — a disconnect grace
+ * period runs out without anybody calling in. */
+const WAIT_RECHECK_MS = 5_000;
 const BLOCKED_HISTORY_LIMIT = 10;
 
 export interface PhysicalDeviceReservations {
@@ -95,6 +97,9 @@ interface PhysicalDeviceLeaseManagerLogger {
 export interface PhysicalDeviceLeaseManagerOptions {
   /** The live detection services' current view — never polled here directly. */
   listConnectedDevices: () => readonly PhysicalDevice[];
+  /** Emulators adb sees as well. An untargeted `adb` command could mean any of them too, and
+   * with more than one target adb refuses to pick on its own. Defaults to none. */
+  countAndroidEmulators?: () => number;
   listAgents: () => readonly DeviceLeaseAgentSummary[];
   reservations: PhysicalDeviceReservations;
   readDaemonConfig: () => { deviceLeases?: { enabled?: boolean; dryRun?: boolean } };
@@ -109,6 +114,7 @@ let leaseCounter = 0;
 
 export class PhysicalDeviceLeaseManager {
   private readonly listConnectedDevices: () => readonly PhysicalDevice[];
+  private readonly countAndroidEmulators: () => number;
   private readonly listAgents: () => readonly DeviceLeaseAgentSummary[];
   private readonly reservations: PhysicalDeviceReservations;
   private readonly readDaemonConfig: PhysicalDeviceLeaseManagerOptions["readDaemonConfig"];
@@ -124,6 +130,7 @@ export class PhysicalDeviceLeaseManager {
 
   constructor(options: PhysicalDeviceLeaseManagerOptions) {
     this.listConnectedDevices = options.listConnectedDevices;
+    this.countAndroidEmulators = options.countAndroidEmulators ?? (() => 0);
     this.listAgents = options.listAgents;
     this.reservations = options.reservations;
     this.readDaemonConfig = options.readDaemonConfig;
@@ -201,11 +208,97 @@ export class PhysicalDeviceLeaseManager {
     platform: PhysicalDevicePlatform;
     device?: string;
     reason?: string;
+    /** Wait for the device (or any free one) instead of being told there is none. */
+    wait?: boolean;
+    timeoutMs?: number;
+    signal?: AbortSignal;
   }): Promise<PhysicalDeviceCheckoutResult> {
     if (!this.isEnabled()) return { status: "disabled" };
-    this.reconcile();
+    const deadline = this.now() + (input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS);
+    for (;;) {
+      const attempt = this.tryCheckout(input);
+      if (attempt.status !== "unavailable" || !input.wait || attempt.final) {
+        const { final: _final, ...result } = attempt;
+        return result;
+      }
+      if (input.signal?.aborted) {
+        return {
+          status: "unavailable",
+          platform: input.platform,
+          message: "The wait was canceled.",
+        };
+      }
+      if (this.now() >= deadline) {
+        return {
+          status: "unavailable",
+          platform: input.platform,
+          message: `Waited and nothing came free: ${attempt.message}`,
+        };
+      }
+      await this.nextChange(input.signal);
+      if (!this.isEnabled()) return { status: "disabled" };
+    }
+  }
 
+  /** Resolves on the next lease change, after WAIT_RECHECK_MS, or on abort — whichever first. */
+  private async nextChange(signal: AbortSignal | undefined): Promise<void> {
+    let finish: () => void = () => undefined;
+    const changed = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const timer = setTimeout(() => finish(), WAIT_RECHECK_MS);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    const unsubscribe = this.subscribe(() => finish());
+    const onAbort = () => finish();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      await changed;
+    } finally {
+      clearTimeout(timer);
+      unsubscribe();
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  private tryCheckout(input: {
+    agentId: string;
+    platform: PhysicalDevicePlatform;
+    device?: string;
+    reason?: string;
+  }): PhysicalDeviceCheckoutResult & { final?: boolean } {
+    this.reconcile();
     const connected = this.listConnectedDevices();
+    if (input.device) {
+      const target = input.device;
+      const named = connected.find((device) => physicalDeviceMatches(device, target));
+      const lease = named ? this.leases.find((entry) => entry.deviceId === named.id) : undefined;
+      if (named && lease?.agentId === input.agentId) {
+        return {
+          status: "granted",
+          leaseId: lease.id,
+          platform: named.platform,
+          device: this.describeDevice(named),
+        };
+      }
+      if (named && this.reservations.isReserved(named.id) && !lease) {
+        return {
+          status: "unavailable",
+          platform: input.platform,
+          message: `${named.name ?? named.id} is reserved for Tyler, so it is never handed to an agent`,
+          final: true,
+        };
+      }
+      if (named && lease) {
+        return {
+          status: "unavailable",
+          platform: input.platform,
+          message:
+            `${named.name ?? named.id} is held by ${this.describeAgent(lease.agentId)}. Call ` +
+            `device_checkout with kind "physical", this device and \`wait: true\` to get it ` +
+            `when it is checked in`,
+        };
+      }
+    }
     const device = selectFreePhysicalDevice({
       platform: input.platform,
       ...(input.device ? { namedDeviceId: input.device } : {}),
@@ -218,7 +311,7 @@ export class PhysicalDeviceLeaseManager {
         status: "unavailable",
         platform: input.platform,
         message: input.device
-          ? `${input.device} is not a connected, free, unreserved ${input.platform} device`
+          ? `${input.device} is not a connected ${input.platform} device`
           : `no free ${input.platform} device is connected`,
       };
     }
@@ -232,9 +325,14 @@ export class PhysicalDeviceLeaseManager {
     return {
       status: "granted",
       leaseId: lease.id,
-      platform: input.platform,
+      platform: device.platform,
       device: this.describeDevice(device),
     };
+  }
+
+  private describeAgent(agentId: string): string {
+    const title = this.listAgents().find((agent) => agent.agentId === agentId)?.title;
+    return title ? `"${title}" (${agentId})` : agentId;
   }
 
   /** Without a lease id, every physical lease this agent holds is released. */
@@ -305,26 +403,31 @@ export class PhysicalDeviceLeaseManager {
         : connected.filter((device) => device.platform === intent.platform);
 
     if (intent.target) {
-      const device = candidates.find((entry) => entry.id === intent.target);
-      // Names a device this gate doesn't currently see connected: nothing here to protect, and
-      // the command itself will fail against a device that isn't there.
+      const target = intent.target;
+      const device = candidates.find((entry) => physicalDeviceMatches(entry, target));
+      // Names a device this gate doesn't currently see connected — an emulator, a simulator, or
+      // nothing at all: nothing here to protect.
       return device ? this.resolveDeviceAccess(agentId, device, intent) : undefined;
     }
 
     if (candidates.length === 0) return undefined;
-    if (candidates.length === 1 && !intent.installsOnAllIfUntargeted) {
-      // Exactly one candidate: an untargeted adb/expo/etc. command can only mean this one.
-      return this.resolveDeviceAccess(agentId, candidates[0] as PhysicalDevice, intent);
-    }
+    // A plain `adb` command with more than one device attached refuses to pick one on its own,
+    // so it can't install over anybody — unless an ANDROID_SERIAL the gate can't see (the
+    // agent's shell profile) points it somewhere, and then it is a good command. Let adb decide.
+    const adbTargets =
+      intent.platform === "android" ? candidates.length + this.countAndroidEmulators() : 0;
+    if (intent.command.startsWith("adb ") && adbTargets > 1) return undefined;
     if (candidates.length === 1) {
-      // installsOnAllIfUntargeted (gradle) still only touches the one connected device.
       return this.resolveDeviceAccess(agentId, candidates[0] as PhysicalDevice, intent);
     }
     const platformLabel = intent.platform === "unknown" ? "" : `${intent.platform} `;
+    const fixes = candidates.map((device) => `\`${targetingFix(intent, device)}\``).join(" or ");
     return (
       `\`${intent.command}\` does not target a device, and ${candidates.length} ${platformLabel}` +
-      `devices are connected (${candidates.map((device) => device.id).join(", ")}) — ` +
-      `${intent.installsOnAllIfUntargeted ? "it would install on all of them" : "it could pick any of them"}.`
+      `devices are connected (${candidates.map((device) => device.name ?? device.id).join(", ")}) — ` +
+      `${intent.installsOnAllIfUntargeted ? "it would install on all of them" : "it could pick any of them"}, ` +
+      `including another agent's. Name the device you hold: ${fixes}. \`device_checkout\` with ` +
+      `kind "physical" gets you one.`
     );
   }
 
@@ -333,20 +436,25 @@ export class PhysicalDeviceLeaseManager {
     device: PhysicalDevice,
     intent: InstallCommandIntent,
   ): string | undefined {
-    if (this.reservations.isReserved(device.id)) {
-      return `${device.name ?? device.id} is reserved for Tyler. \`${intent.command}\` was not run.`;
-    }
     const lease = this.leases.find((entry) => entry.deviceId === device.id);
-    if (lease && lease.agentId !== agentId) {
+    // Whoever holds it keeps using it: reserving a device doesn't evict its holder.
+    if (lease?.agentId === agentId) return undefined;
+    const label = device.name ?? device.id;
+    if (lease) {
       return (
-        `${device.name ?? device.id} is held by ${lease.agentId}. \`${intent.command}\` was not run ` +
-        `— installing over another agent's device is exactly what this gate exists to stop. ` +
-        `Call device_checkout with kind "physical" and wait for it to free up, or target a different device.`
+        `${label} is held by ${this.describeAgent(lease.agentId)}. \`${intent.command}\` was not ` +
+        `run — installing over another agent's device is exactly what this gate exists to stop. ` +
+        `Call device_checkout with kind "physical", this device and \`wait: true\` to get it ` +
+        `when it is checked in, or target a different device.`
       );
     }
-    if (!lease) {
-      this.bindLease({ agentId, device, source: "install" });
+    // Force-stopping an app on a free device changes nothing anybody is relying on, and is no
+    // reason to claim the device.
+    if (intent.stateOnly) return undefined;
+    if (this.reservations.isReserved(device.id)) {
+      return `${label} is reserved for Tyler. \`${intent.command}\` was not run.`;
     }
+    this.bindLease({ agentId, device, source: "install" });
     return undefined;
   }
 
@@ -367,7 +475,12 @@ export class PhysicalDeviceLeaseManager {
       if (seen.has(lease.deviceId)) continue;
       devices.push(
         this.toEntry(
-          { id: lease.deviceId, platform: lease.platform, transport: "usb" },
+          {
+            id: lease.deviceId,
+            platform: lease.platform,
+            transport: lease.transport ?? "usb",
+            ...(lease.name ? { name: lease.name } : {}),
+          },
           lease,
           false,
           nowMs,
@@ -441,6 +554,8 @@ export class PhysicalDeviceLeaseManager {
       agentId: input.agentId,
       source: input.source,
       acquiredAtMs: this.now(),
+      transport: input.device.transport,
+      ...(input.device.name ? { name: input.device.name } : {}),
       ...(input.reason ? { reason: input.reason } : {}),
     };
     this.leases.push(lease);
@@ -461,4 +576,16 @@ export class PhysicalDeviceLeaseManager {
     this.blocked = [entry, ...this.blocked].slice(0, BLOCKED_HISTORY_LIMIT);
     this.notify();
   }
+}
+
+/** The exact command shape that targets this device, for a refusal to paste. */
+function targetingFix(intent: InstallCommandIntent, device: PhysicalDevice): string {
+  if (device.platform === "android") {
+    return intent.command.startsWith("adb ")
+      ? `adb -s ${device.id} …`
+      : `ANDROID_SERIAL=${device.id} ${intent.command}`;
+  }
+  if (intent.command === "ios-deploy") return `ios-deploy --id ${device.id} …`;
+  if (intent.command.startsWith("xcodebuild")) return `-destination 'id=${device.id}'`;
+  return `--device ${device.id}`;
 }

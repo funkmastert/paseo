@@ -15,6 +15,26 @@ export interface PhysicalDevice {
   platform: PhysicalDevicePlatform;
   name?: string;
   transport: PhysicalDeviceTransport;
+  /** Other names a command may use for this device: an iPhone's CoreDevice identifier and the
+   * name its owner gave it. */
+  aliases?: readonly string[];
+}
+
+/** Model names come from adb with underscores (`Pixel_9_Pro_XL`); people and CLIs write them
+ * with spaces. Compared case-insensitively, like devicectl and xcodebuild compare them. */
+function normalizeDeviceName(name: string): string {
+  return name.replace(/_/g, " ").trim().toLowerCase();
+}
+
+/** Whether a command's device selector names this device: its serial/UDID, model name, or one
+ * of its aliases. */
+export function physicalDeviceMatches(device: PhysicalDevice, target: string): boolean {
+  if (device.id === target) return true;
+  if (device.platform === "ios" && device.id.toLowerCase() === target.toLowerCase()) return true;
+  const wanted = normalizeDeviceName(target);
+  return [device.name, ...(device.aliases ?? [])].some(
+    (name) => name !== undefined && normalizeDeviceName(name) === wanted,
+  );
 }
 
 export type PhysicalLeaseSource = "checkout" | "install";
@@ -27,6 +47,10 @@ export interface PhysicalDeviceLease {
   reason?: string;
   source: PhysicalLeaseSource;
   acquiredAtMs: number;
+  /** What the device was called and how it was connected when leased, so a row for a device
+   * that has gone away still reads as that device. */
+  name?: string;
+  transport?: PhysicalDeviceTransport;
   /**
    * Set the moment a sweep first finds the device gone; cleared the moment it is seen again.
    * The lease survives a disconnect until `nowMs - disconnectedAtMs >= graceMs` — phones get
@@ -118,7 +142,8 @@ export function selectFreePhysicalDevice(input: {
 }): PhysicalDevice | undefined {
   const held = new Set(input.leases.map((lease) => lease.deviceId));
   if (input.namedDeviceId) {
-    const named = input.connectedDevices.find((device) => device.id === input.namedDeviceId);
+    const target = input.namedDeviceId;
+    const named = input.connectedDevices.find((device) => physicalDeviceMatches(device, target));
     if (!named || held.has(named.id) || input.reservedDeviceIds.has(named.id)) return undefined;
     return named;
   }

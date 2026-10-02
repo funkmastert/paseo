@@ -11,6 +11,8 @@ function createManager(
     dryRun?: boolean;
     agentIds?: string[];
     reservedIds?: string[];
+    /** Emulators adb also sees — an untargeted adb command could mean any of them too. */
+    emulatorCount?: number;
   } = {},
 ) {
   const state = {
@@ -28,6 +30,7 @@ function createManager(
   let leaseCounter = 0;
   const manager = new PhysicalDeviceLeaseManager({
     listConnectedDevices: () => state.devices,
+    countAndroidEmulators: () => options.emulatorCount ?? 0,
     listAgents: () => state.agents,
     reservations: {
       reservedDeviceIds: () => state.reserved,
@@ -108,6 +111,36 @@ describe("PhysicalDeviceLeaseManager checkout", () => {
     expect(await manager.checkin({ agentId: "agent-1" })).toBe(1);
     const result = await manager.checkout({ agentId: "agent-2", platform: "android" });
     expect(result.status).toBe("granted");
+  });
+});
+
+describe("PhysicalDeviceLeaseManager waiting", () => {
+  test("a checkout that waits gets the device once its holder checks it in", async () => {
+    const { manager } = createManager({ devices: [USB_PIXEL] });
+    await manager.checkout({ agentId: "agent-1", platform: "android" });
+
+    const pending = manager.checkout({
+      agentId: "agent-2",
+      platform: "android",
+      device: USB_PIXEL.id,
+      wait: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await manager.checkin({ agentId: "agent-1" });
+
+    expect(await pending).toMatchObject({ status: "granted", device: { id: USB_PIXEL.id } });
+  });
+
+  test("without wait, a held named device says who holds it", async () => {
+    const { manager } = createManager({ devices: [USB_PIXEL] });
+    await manager.checkout({ agentId: "agent-1", platform: "android" });
+
+    const result = await manager.checkout({
+      agentId: "agent-2",
+      platform: "android",
+      device: USB_PIXEL.id,
+    });
+    expect(result.status === "unavailable" && result.message).toContain("agent-1");
   });
 });
 
@@ -201,14 +234,39 @@ describe("PhysicalDeviceLeaseManager gateInstall", () => {
     expect(decision.decision).toBe("deny");
   });
 
-  test("untargeted with two connected devices of the same platform is refused", async () => {
+  test("untargeted adb with two connected devices is allowed: adb itself refuses to pick one", async () => {
+    // And an ANDROID_SERIAL exported in the agent's shell, which the gate can't see, makes it
+    // a perfectly good command — refusing it would be a false refusal.
     const other: PhysicalDevice = { ...USB_PIXEL, id: "FAKESERIAL0002" };
     const { manager } = createManager({ devices: [USB_PIXEL, other] });
+    await manager.checkout({ agentId: "agent-2", platform: "android", device: USB_PIXEL.id });
+
     const decision = await manager.gateInstall({
       agentId: "agent-1",
       command: "adb install app.apk",
     });
+    expect(decision).toEqual({ decision: "allow" });
+  });
+
+  test("untargeted adb with one phone and a running emulator is allowed the same way", async () => {
+    const { manager } = createManager({ devices: [USB_PIXEL], emulatorCount: 1 });
+    await manager.checkout({ agentId: "agent-2", platform: "android" });
+
+    expect(
+      await manager.gateInstall({ agentId: "agent-1", command: "adb install app.apk" }),
+    ).toEqual({ decision: "allow" });
+  });
+
+  test("untargeted ios-deploy with two iPhones is refused with the exact targeting fix", async () => {
+    const other: PhysicalDevice = { ...NETWORK_IPHONE, id: "00000000-000FAKE00E0002" };
+    const { manager } = createManager({ devices: [NETWORK_IPHONE, other] });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "ios-deploy --bundle App.app",
+    });
     expect(decision.decision).toBe("deny");
+    expect(decision.decision === "deny" && decision.message).toContain(`--id ${NETWORK_IPHONE.id}`);
   });
 
   test("untargeted with exactly one connected device is leased and allowed", async () => {
@@ -223,11 +281,13 @@ describe("PhysicalDeviceLeaseManager gateInstall", () => {
   test("gradlew installDebug with no target and two devices refuses (installs on all)", async () => {
     const other: PhysicalDevice = { ...USB_PIXEL, id: "FAKESERIAL0002" };
     const { manager } = createManager({ devices: [USB_PIXEL, other] });
-    const decision = await manager.gateInstall({
-      agentId: "agent-1",
-      command: "./gradlew installDebug",
-    });
-    expect(decision.decision).toBe("deny");
+    for (const command of ["./gradlew installDebug", "./gradlew :app:installDebug"]) {
+      const decision = await manager.gateInstall({ agentId: "agent-1", command });
+      expect(decision.decision, command).toBe("deny");
+      expect(decision.decision === "deny" && decision.message, command).toContain(
+        `ANDROID_SERIAL=${USB_PIXEL.id}`,
+      );
+    }
   });
 
   test("read-only commands pass untouched", async () => {
@@ -281,5 +341,99 @@ describe("PhysicalDeviceLeaseManager gateInstall", () => {
     expect(decision).toEqual({ decision: "allow" });
     const snapshot = await manager.getSnapshot();
     expect(snapshot.blocked[0]).toMatchObject({ dryRun: true, agentId: "agent-2" });
+  });
+
+  test("read-only and build-only commands pass even on another agent's or Tyler's device", async () => {
+    const { manager } = createManager({
+      devices: [USB_PIXEL, NETWORK_IPHONE],
+      reservedIds: [NETWORK_IPHONE.id],
+    });
+    await manager.checkout({ agentId: "agent-1", platform: "android" });
+
+    for (const command of [
+      `adb -s ${USB_PIXEL.id} shell pm list packages`,
+      "adb shell pm path com.example",
+      "xcodebuild -scheme App -destination 'generic/platform=iOS' archive",
+      "xcodebuild build -scheme App -destination 'generic/platform=iOS'",
+      "ios-deploy --detect",
+    ]) {
+      expect(await manager.gateInstall({ agentId: "agent-2", command }), command).toEqual({
+        decision: "allow",
+      });
+    }
+    expect((await manager.getSnapshot()).blocked).toEqual([]);
+  });
+
+  test("force-stop is refused only on a device another agent holds, and takes no lease", async () => {
+    const { manager } = createManager({ devices: [USB_PIXEL] });
+
+    expect(
+      await manager.gateInstall({
+        agentId: "agent-1",
+        command: `adb -s ${USB_PIXEL.id} shell am force-stop com.example`,
+      }),
+    ).toEqual({ decision: "allow" });
+    expect((await manager.getSnapshot()).devices[0]?.agentId).toBeUndefined();
+
+    await manager.checkout({ agentId: "agent-1", platform: "android" });
+    const decision = await manager.gateInstall({
+      agentId: "agent-2",
+      command: `adb -s ${USB_PIXEL.id} shell am force-stop com.example`,
+    });
+    expect(decision.decision).toBe("deny");
+  });
+
+  test("a device named by its model name, user-set name or CoreDevice identifier is protected", async () => {
+    const iphone: PhysicalDevice = {
+      ...NETWORK_IPHONE,
+      name: "iPhone 16e",
+      aliases: ["Fake Name iPhone", "11111111-2222-3333-4444-FAKE00000001"],
+    };
+    const { manager } = createManager({ devices: [iphone] });
+    await manager.checkout({ agentId: "agent-1", platform: "ios" });
+
+    for (const command of [
+      "xcodebuild test -scheme App -destination 'platform=iOS,name=iPhone 16e'",
+      "npx expo run:ios --device 'fake name iphone'",
+      "xcrun devicectl device install app --device 11111111-2222-3333-4444-FAKE00000001 App.app",
+      `xcrun devicectl device process launch --device ${iphone.id} com.example`,
+    ]) {
+      const decision = await manager.gateInstall({ agentId: "agent-2", command });
+      expect(decision.decision, command).toBe("deny");
+    }
+  });
+
+  test("reserving a device does not lock out the agent already holding it", async () => {
+    const { manager, state } = createManager({ devices: [USB_PIXEL] });
+    await manager.checkout({ agentId: "agent-1", platform: "android" });
+    state.reserved.add(USB_PIXEL.id);
+
+    expect(
+      await manager.gateInstall({
+        agentId: "agent-1",
+        command: `adb -s ${USB_PIXEL.id} install app.apk`,
+      }),
+    ).toEqual({ decision: "allow" });
+    expect(
+      (
+        await manager.gateInstall({
+          agentId: "agent-2",
+          command: `adb -s ${USB_PIXEL.id} install app.apk`,
+        })
+      ).decision,
+    ).toBe("deny");
+  });
+
+  test("a disconnected device keeps its name and transport in the snapshot", async () => {
+    const { manager, state } = createManager({ devices: [NETWORK_IPHONE] });
+    await manager.checkout({ agentId: "agent-1", platform: "ios" });
+    state.devices = [];
+
+    expect((await manager.getSnapshot()).devices[0]).toMatchObject({
+      id: NETWORK_IPHONE.id,
+      name: NETWORK_IPHONE.name,
+      transport: "network",
+      connected: false,
+    });
   });
 });

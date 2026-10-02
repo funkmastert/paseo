@@ -11,14 +11,18 @@
  * not matched at all — they never touch an install.
  */
 
-import { stripCommandPrefixes, tokenizeCommandSegments } from "./device-launch-commands.js";
+import {
+  basename,
+  stripCommandPrefixes,
+  tokenizeCommandSegments,
+} from "./device-launch-commands.js";
 
 export type InstallCommandPlatform = "ios" | "android" | "unknown";
 
 export interface InstallCommandIntent {
   platform: InstallCommandPlatform;
   command: string;
-  /** The serial, UDID, or device name the command names, when it names one. */
+  /** The serial, UDID, CoreDevice identifier or device name the command names, if it names one. */
   target?: string;
   /**
    * True for a shape that installs on every connected device of its platform when no target is
@@ -26,16 +30,37 @@ export interface InstallCommandIntent {
    * case the gate has to catch, not just the one where a device is named explicitly.
    */
   installsOnAllIfUntargeted: boolean;
+  /**
+   * True for a command that changes app state without installing anything (`am force-stop`).
+   * It is refused only on a device another agent holds, and never takes a lease itself.
+   */
+  stateOnly: boolean;
 }
 
-function basename(token: string): string {
-  return token.split("/").pop() ?? token;
+const RUNNERS = new Set(["npx", "bunx", "pnpm", "yarn", "bun"]);
+
+function readFlagValue(tokens: readonly string[], ...flags: string[]): string | undefined {
+  for (const flag of flags) {
+    const index = tokens.indexOf(flag);
+    const value = index >= 0 ? tokens[index + 1] : undefined;
+    if (value && !value.startsWith("-")) return value;
+    const inline = tokens.find((token) => token.startsWith(`${flag}=`));
+    if (inline && inline.length > flag.length + 1) return inline.slice(flag.length + 1);
+  }
+  return undefined;
 }
 
-function readFlagValue(tokens: readonly string[], flag: string): string | undefined {
-  const index = tokens.indexOf(flag);
-  const value = index >= 0 ? tokens[index + 1] : undefined;
-  return value && !value.startsWith("-") ? value : undefined;
+function intent(
+  fields: Omit<InstallCommandIntent, "installsOnAllIfUntargeted" | "stateOnly"> &
+    Partial<Pick<InstallCommandIntent, "installsOnAllIfUntargeted" | "stateOnly">>,
+): InstallCommandIntent {
+  const { target, ...rest } = fields;
+  return {
+    ...rest,
+    ...(target ? { target } : {}),
+    installsOnAllIfUntargeted: fields.installsOnAllIfUntargeted ?? false,
+    stateOnly: fields.stateOnly ?? false,
+  };
 }
 
 /** `ANDROID_SERIAL=<value>` among the leading env assignments, if the caller set one — the only
@@ -48,7 +73,16 @@ function readAndroidSerialEnv(tokens: readonly string[]): string | undefined {
   return undefined;
 }
 
-/** `adb [-s <serial>] install|install-multiple|uninstall|shell am start|shell pm clear`. */
+/** `adb shell am|pm|cmd …` subcommands that install, uninstall, wipe or launch. Everything else
+ * under `adb shell` — `pm list`, `pm path`, `am broadcast`, `getprop`, `screencap` — reads, or
+ * at least leaves the installed app alone, and is never gated. */
+const ADB_SHELL_INSTALL_LIKE: Readonly<Record<string, readonly string[]>> = {
+  am: ["start", "start-activity"],
+  pm: ["clear", "install", "uninstall"],
+};
+
+/** `adb [-s <serial>] install|install-multiple|uninstall|shell am start|shell pm clear|install`,
+ * and `shell am force-stop` as a state-only change. */
 function matchAdb(tokens: readonly string[]): InstallCommandIntent | undefined {
   const envSerial = readAndroidSerialEnv(tokens);
   const stripped = stripCommandPrefixes(tokens);
@@ -56,140 +90,139 @@ function matchAdb(tokens: readonly string[]): InstallCommandIntent | undefined {
   const flagSerial = readFlagValue(stripped, "-s");
   const rest = flagSerial ? stripped.slice(stripped.indexOf("-s") + 2) : stripped.slice(1);
   const sub = rest[0];
-
-  const installLike = sub && ["install", "install-multiple", "uninstall"].includes(sub);
-  const shellLike =
-    sub === "shell" && rest[1] && ["am", "pm"].includes(rest[1]) && rest[2] !== undefined;
-  if (!installLike && !shellLike) return undefined;
-
-  const command = shellLike ? `adb shell ${rest[1]} ${rest[2]}` : `adb ${sub}`;
   const target = flagSerial ?? envSerial;
-  return {
-    platform: "android",
-    command,
-    ...(target ? { target } : {}),
-    // A bare `adb install` with no -s and multiple devices attached installs on whichever one
-    // adb picks when there's exactly one, and refuses itself ("more than one device/emulator")
-    // when there's more than one — so it cannot silently overwrite a second device. Still
-    // dangerous with exactly one OTHER agent's device attached and this agent meaning its own.
-    installsOnAllIfUntargeted: false,
-  };
+
+  // A bare `adb install` with more than one device attached refuses itself ("more than one
+  // device/emulator"), so it cannot silently overwrite a second device; the manager allows it
+  // in that case rather than second-guess an ANDROID_SERIAL it cannot see.
+  if (sub && ["install", "install-multiple", "install-multiple-split", "uninstall"].includes(sub)) {
+    return intent({ platform: "android", command: `adb ${sub}`, target });
+  }
+  if (sub !== "shell") return undefined;
+  const tool = rest[1];
+  const action = rest[2];
+  if (!tool || !action) return undefined;
+  if (ADB_SHELL_INSTALL_LIKE[tool]?.includes(action)) {
+    return intent({ platform: "android", command: `adb shell ${tool} ${action}`, target });
+  }
+  if (tool === "am" && action === "force-stop") {
+    return intent({
+      platform: "android",
+      command: "adb shell am force-stop",
+      target,
+      stateOnly: true,
+    });
+  }
+  return undefined;
 }
 
-/** `./gradlew install*` / `gradlew.bat install*` — installs on every connected device unless
- * `ANDROID_SERIAL` is set. */
+/** A gradle task that installs on the device(s): `installDebug`, `:app:installDebug`,
+ * `app:uninstallAll`, and `connected…AndroidTest`, which installs the app and its test APK on
+ * every connected device. */
+const GRADLE_DEVICE_TASK = /^(?::?[\w-]+)*:?(?:(?:un)?install\w*|connected\w*AndroidTest)$/i;
+
+/** `./gradlew install*` / `gradlew.bat install*` / `gradle install*` — installs on every
+ * connected device unless `ANDROID_SERIAL` is set. */
 function matchGradleInstall(tokens: readonly string[]): InstallCommandIntent | undefined {
   const envSerial = readAndroidSerialEnv(tokens);
   const stripped = stripCommandPrefixes(tokens);
   const program = basename(stripped[0] ?? "");
-  if (!/^gradlew(\.bat)?$/.test(program)) return undefined;
-  const task = stripped.find((token) => /^install\w*$/i.test(token));
+  if (program !== "gradlew" && program !== "gradle") return undefined;
+  const task = stripped.slice(1).find((token) => GRADLE_DEVICE_TASK.test(token));
   if (!task) return undefined;
-  return {
+  return intent({
     platform: "android",
     command: `gradlew ${task}`,
-    ...(envSerial ? { target: envSerial } : {}),
+    target: envSerial,
     installsOnAllIfUntargeted: true,
-  };
+  });
 }
 
 /** `expo run:android --device <id>` / `expo run:ios --device <id>`. Only gated when `--device`
- * actually names one — without it these boot a simulator/emulator, which
- * device-launch-commands.ts already covers. */
+ * names one — without it the runner uses a simulator/emulator, which device-launch-commands.ts
+ * covers. */
 function matchExpoRun(tokens: readonly string[]): InstallCommandIntent | undefined {
-  const skipped = ["npx", "bunx", "pnpm", "yarn", "bun"].includes(basename(tokens[0] ?? ""))
-    ? tokens.slice(1)
-    : tokens;
+  const skipped = RUNNERS.has(basename(tokens[0] ?? "")) ? tokens.slice(1) : tokens;
   if (basename(skipped[0] ?? "") !== "expo") return undefined;
   const sub = skipped[1];
   let platform: "ios" | "android" | undefined;
   if (sub === "run:ios") platform = "ios";
   else if (sub === "run:android") platform = "android";
   if (!platform) return undefined;
-  const target = readFlagValue(skipped, "--device");
+  const target = readFlagValue(skipped, "--device", "-d");
   if (!target) return undefined;
-  return { platform, command: `expo ${sub} --device`, target, installsOnAllIfUntargeted: false };
+  return intent({ platform, command: `expo ${sub} --device`, target });
 }
 
-/** `react-native run-android --deviceId <id>` / `run-ios --udid <id>`. Same reasoning as expo
- * run: only gated when the flag names a device. */
+/** `react-native run-android --deviceId <id>` / `run-ios --udid <id>` / `run-ios --device
+ * <name>`. Same reasoning as expo run: only gated when the flag names a device. */
 function matchReactNativeRun(tokens: readonly string[]): InstallCommandIntent | undefined {
-  const skipped = ["npx", "bunx", "pnpm", "yarn", "bun"].includes(basename(tokens[0] ?? ""))
-    ? tokens.slice(1)
-    : tokens;
+  const skipped = RUNNERS.has(basename(tokens[0] ?? "")) ? tokens.slice(1) : tokens;
   if (basename(skipped[0] ?? "") !== "react-native") return undefined;
   const sub = skipped[1];
   if (sub === "run-android") {
     const target = readFlagValue(skipped, "--deviceId");
     return target
-      ? {
-          platform: "android",
-          command: "react-native run-android --deviceId",
-          target,
-          installsOnAllIfUntargeted: false,
-        }
+      ? intent({ platform: "android", command: "react-native run-android --deviceId", target })
       : undefined;
   }
   if (sub === "run-ios") {
-    const target = readFlagValue(skipped, "--udid");
+    const target = readFlagValue(skipped, "--udid", "--device");
     return target
-      ? {
-          platform: "ios",
-          command: "react-native run-ios --udid",
-          target,
-          installsOnAllIfUntargeted: false,
-        }
+      ? intent({ platform: "ios", command: "react-native run-ios --udid", target })
       : undefined;
   }
   return undefined;
 }
 
-/** `xcrun devicectl device install ... --device <udid>` / `process launch ... --device <udid>`. */
+/** `xcrun devicectl device install app|uninstall app|process launch … --device <id>`. */
 function matchDevicectl(tokens: readonly string[]): InstallCommandIntent | undefined {
   const program = basename(tokens[0] ?? "");
   const rest = program === "xcrun" ? tokens.slice(1) : tokens;
-  if (basename(rest[0] ?? "") !== "devicectl") return undefined;
-  const isInstall = rest[1] === "device" && rest[2] === "install";
-  const isLaunch = rest[1] === "process" && rest[2] === "launch";
-  if (!isInstall && !isLaunch) return undefined;
-  const target = readFlagValue(rest, "--device");
-  return {
+  if (basename(rest[0] ?? "") !== "devicectl" || rest[1] !== "device") return undefined;
+  let action: string | undefined;
+  if (rest[2] === "install" || rest[2] === "uninstall") action = rest[2];
+  else if (rest[2] === "process" && rest[3] === "launch") action = "process launch";
+  if (!action) return undefined;
+  return intent({
     platform: "ios",
-    command: `devicectl ${rest[1]} ${rest[2]}`,
-    ...(target ? { target } : {}),
-    installsOnAllIfUntargeted: false,
-  };
+    command: `devicectl device ${action}`,
+    target: readFlagValue(rest, "--device", "-d"),
+  });
 }
 
-/** `xcodebuild ... -destination 'id=<udid>'` or `'platform=iOS,name=<name>'` — a physical
- * destination, not `platform=iOS Simulator…` (device-launch-commands.ts's territory). */
+/** The xcodebuild actions that install on the destination. `build` and `archive` don't. */
+const XCODEBUILD_INSTALLING_ACTIONS = new Set(["test", "test-without-building"]);
+
+/** `xcodebuild test … -destination 'id=<udid>'` or `'platform=iOS,name=<name>'` — a physical
+ * destination, not `platform=iOS Simulator…` (device-launch-commands.ts's territory) and not
+ * `generic/platform=iOS`, which names no device at all. */
 function matchXcodebuildPhysical(tokens: readonly string[]): InstallCommandIntent | undefined {
   if (basename(tokens[0] ?? "") !== "xcodebuild") return undefined;
+  if (!tokens.some((token) => XCODEBUILD_INSTALLING_ACTIONS.has(token))) return undefined;
   const destination = readFlagValue(tokens, "-destination");
   if (!destination) return undefined;
+  if (/generic\//i.test(destination)) return undefined;
   if (/platform\s*=\s*iOS Simulator/i.test(destination)) return undefined;
   if (!/platform\s*=\s*iOS\b/i.test(destination) && !/\bid\s*=/.test(destination)) return undefined;
   const id = /\bid\s*=\s*([^,]+)/i.exec(destination)?.[1]?.trim();
   const name = /\bname\s*=\s*([^,]+)/i.exec(destination)?.[1]?.trim();
-  const target = id ?? name;
-  return {
-    platform: "ios",
-    command: "xcodebuild -destination",
-    ...(target ? { target } : {}),
-    installsOnAllIfUntargeted: false,
-  };
+  return intent({ platform: "ios", command: "xcodebuild -destination", target: id ?? name });
 }
 
-/** `ios-deploy --id <udid>`. */
+/** `ios-deploy` when it installs or launches (`-b/--bundle`) or uninstalls (`-9/--uninstall_only`).
+ * `--detect`, `--list`, `--exists` and the other inspection flags never touch the install. */
 function matchIosDeploy(tokens: readonly string[]): InstallCommandIntent | undefined {
   if (basename(tokens[0] ?? "") !== "ios-deploy") return undefined;
-  const target = readFlagValue(tokens, "--id");
-  return {
+  const changesInstall = tokens.some((token) =>
+    ["-b", "--bundle", "-9", "--uninstall_only"].includes(token),
+  );
+  if (!changesInstall) return undefined;
+  return intent({
     platform: "ios",
     command: "ios-deploy",
-    ...(target ? { target } : {}),
-    installsOnAllIfUntargeted: false,
-  };
+    target: readFlagValue(tokens, "--id", "-i"),
+  });
 }
 
 /** `flutter run -d <id>`. Flutter's device id can name either platform's device, so the caller
@@ -197,14 +230,9 @@ function matchIosDeploy(tokens: readonly string[]): InstallCommandIntent | undef
 function matchFlutterRun(tokens: readonly string[]): InstallCommandIntent | undefined {
   if (basename(tokens[0] ?? "") !== "flutter") return undefined;
   if (tokens[1] !== "run") return undefined;
-  const target = readFlagValue(tokens, "-d") ?? readFlagValue(tokens, "--device-id");
+  const target = readFlagValue(tokens, "-d", "--device-id");
   if (!target) return undefined;
-  return {
-    platform: "unknown",
-    command: "flutter run -d",
-    target,
-    installsOnAllIfUntargeted: false,
-  };
+  return intent({ platform: "unknown", command: "flutter run -d", target });
 }
 
 const MATCHERS = [
@@ -225,9 +253,9 @@ export function detectInstallCommandIntents(command: string): InstallCommandInte
   for (const segment of tokenizeCommandSegments(command)) {
     if (segment.length === 0) continue;
     for (const matcher of MATCHERS) {
-      const intent = matcher(segment);
-      if (intent) {
-        intents.push(intent);
+      const match = matcher(segment);
+      if (match) {
+        intents.push(match);
         break;
       }
     }
