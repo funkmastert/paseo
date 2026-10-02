@@ -358,7 +358,14 @@ describe("priority and attribution (H3)", () => {
   test.skipIf(process.platform === "win32")(
     "the command runs at the agents' nice and is charged to the agent while it runs",
     async () => {
-      setProcessPriorityPolicy({ agentNice: 12 });
+      const agentNice = 12;
+      setProcessPriorityPolicy({ agentNice });
+      // The child inherits this process's own niceness at fork; `lowerAgentProcessPriority` only
+      // ever raises niceness (lowers priority), never lowers it. Under a test runner that is
+      // itself niced past `agentNice` (e.g. `nice -n 10 npx vitest` on a lower MAX_NICE ceiling),
+      // the policy leaves the inherited value alone, so the expected result is relative to the
+      // runner's own priority, not the absolute configured value.
+      const runnerNice = os.getPriority();
       const spawned: number[] = [];
       const released: number[] = [];
       const result = await run({
@@ -370,7 +377,7 @@ describe("priority and attribution (H3)", () => {
       });
       if (result.kind !== "ran") throw new Error("did not run");
       const [nice, pidLine] = result.output.stdout.trim().split("\n");
-      expect(Number(nice?.trim())).toBe(12);
+      expect(Number(nice?.trim())).toBe(Math.max(agentNice, runnerNice));
       expect(spawned).toEqual([Number(pidLine?.replace("pid=", ""))]);
       expect(released).toEqual(spawned);
     },

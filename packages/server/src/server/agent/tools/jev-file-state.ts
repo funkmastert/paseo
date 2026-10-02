@@ -6,6 +6,16 @@ import path from "node:path";
 import { createExternalProcessEnv } from "../../paseo-env.js";
 import { isSameOrDescendantPath, resolvePathFromBase } from "../../path-utils.js";
 import { resolvePaseoWorktreesBaseRoot } from "../../../utils/worktree.js";
+import { isSecretShapedPath, SECRET_PATHSPEC_GLOBS } from "../../jev/secret-paths.js";
+
+/**
+ * Secret-shaped names (docs/jev.md, "Reading files safely"): the one list every JEV feature that
+ * might send a file refuses, shared with the read check (`jev/secret-paths.ts`). The agent can
+ * still Read any of them; the tools only decline to send them to a third party. Re-exported here
+ * so the `:(exclude,glob,icase)` pathspecs `git diff` gets still come from this module's own
+ * export surface, as `jev-diff-risk.ts` and this file's tests expect.
+ */
+export { isSecretShapedPath, SECRET_PATHSPEC_GLOBS };
 
 /**
  * How the JEV agent tools read files (docs/jev.md, "Reading files safely"). A JEV tool never
@@ -34,64 +44,6 @@ const LOCK_FILE_NAMES = new Set([
   "pnpm-lock.yaml",
   "go.sum",
 ]);
-
-/**
- * Secret-shaped names (docs/jev.md, "Reading files safely"). The agent can still Read any of
- * them; the tools only decline to send them to a third party. One list feeds both checks: the
- * name check here and the `:(exclude,glob,icase)` pathspecs `git diff` gets, so a diff leaves out
- * exactly what a read refuses. Matched case-insensitively both ways: macOS and Windows volumes
- * fold case, and `Credentials.json` is the same secret as `credentials.json`.
- */
-export const SECRET_PATHSPEC_GLOBS = [
-  ".env",
-  ".env.*",
-  "*.env",
-  "*.pem",
-  "*.key",
-  "*.p12",
-  "*.pfx",
-  "*.p8",
-  "*.jks",
-  "*.keystore",
-  "*.mobileprovision",
-  "*.tfvars",
-  "*.tfstate",
-  "*.tfstate.*",
-  "id_rsa*",
-  "id_dsa*",
-  "id_ecdsa*",
-  "id_ed25519*",
-  ".npmrc",
-  ".netrc",
-  ".pypirc",
-  ".pgpass",
-  ".git-credentials",
-  "credentials*",
-  ".credentials*",
-  "hosts.yml",
-  "kubeconfig",
-  ".docker/config.json",
-  "google-services.json",
-  "GoogleService-Info.plist",
-  "local.properties",
-  "keystore.properties",
-] as const;
-
-/** A glob's `*` matches any run of characters within one path segment, dots included, as in git. */
-function globToRegExp(glob: string): RegExp {
-  const body = glob
-    .split("*")
-    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-    .join("[^/]*");
-  return new RegExp(`(^|/)${body}$`, "i");
-}
-
-const SECRET_NAME_RES = SECRET_PATHSPEC_GLOBS.map(globToRegExp);
-
-export function isSecretShapedPath(filePath: string): boolean {
-  const normalized = filePath.replace(/\\/g, "/");
-  return SECRET_NAME_RES.some((re) => re.test(normalized));
-}
 
 export function isBinaryOrLockPath(filePath: string): boolean {
   const base = path.basename(filePath);
