@@ -83,6 +83,18 @@ describe("detectInstallCommandIntents", () => {
     expect(detectInstallCommandIntents("./gradlew test")).toEqual([]);
   });
 
+  test("a long non-install module task is rejected in linear time", () => {
+    // The old pattern backtracked exponentially here and froze the daemon's event loop.
+    const started = performance.now();
+    expect(
+      detectInstallCommandIntents(
+        "./gradlew :motion-mobile-core:testDebugUnitTest :motion-mobile-core-with-a-much-longer-name:ktlintCheck",
+      ),
+    ).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(100);
+    expect(detectInstallCommandIntents("./gradlew appinstallDebug")).toEqual([]);
+  });
+
   test("expo run:android/ios is gated only with --device", () => {
     expect(detectInstallCommandIntents("expo run:android --device FAKESERIAL004")).toEqual([
       {

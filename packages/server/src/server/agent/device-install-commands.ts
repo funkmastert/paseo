@@ -118,8 +118,10 @@ function matchAdb(tokens: readonly string[]): InstallCommandIntent | undefined {
 
 /** A gradle task that installs on the device(s): `installDebug`, `:app:installDebug`,
  * `app:uninstallAll`, and `connected…AndroidTest`, which installs the app and its test APK on
- * every connected device. */
-const GRADLE_DEVICE_TASK = /^(?::?[\w-]+)*:?(?:(?:un)?install\w*|connected\w*AndroidTest)$/i;
+ * every connected device. Each project segment must end in `:` so there is only one way to split
+ * a token — an optional separator made the split ambiguous, and a long non-install task like
+ * `:motion-mobile-core:testDebugUnitTest` backtracked exponentially and froze the daemon. */
+const GRADLE_DEVICE_TASK = /^:?(?:[\w-]+:)*(?:(?:un)?install\w*|connected\w*AndroidTest)$/i;
 
 /** `./gradlew install*` / `gradlew.bat install*` / `gradle install*` — installs on every
  * connected device unless `ANDROID_SERIAL` is set. */
