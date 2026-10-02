@@ -299,8 +299,13 @@ import { DeviceReservationStore } from "./agent/device-reservation-store.js";
 import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
 import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
 import { PhysicalDeviceLeaseManager } from "./agent/physical-device-lease-manager.js";
-import type { PhysicalDevice } from "./agent/physical-device-registry.js";
-import { AdbTrackDevicesService } from "./agent/adb-track-devices-service.js";
+import { physicalDeviceMatches, type PhysicalDevice } from "./agent/physical-device-registry.js";
+import {
+  AdbTrackDevicesService,
+  createAdbTrackDevicesPidFile,
+} from "./agent/adb-track-devices-service.js";
+import { toPhysicalAndroidDevices } from "./agent/device-adb-track.js";
+import { PhysicalDeviceDetection } from "./agent/physical-device-detection.js";
 import { DevicectlPollingService } from "./agent/devicectl-polling-service.js";
 import {
   createPromptQueue,
@@ -1871,12 +1876,21 @@ export async function createPaseoDaemon(
     logger,
     path.join(config.paseoHome, "device-reservations.json"),
   );
+  // What physical detection (below) currently sees. Read by the cap too: a runner that names a
+  // connected phone boots no simulator.
+  let androidPhysicalDevices: PhysicalDevice[] = [];
+  let androidEmulatorCount = 0;
+  let iosPhysicalDevices: PhysicalDevice[] = [];
   const deviceLeaseManager = new DeviceLeaseManager({
     processSampler,
     readDaemonConfig: () => ({ deviceLeases: daemonConfigStore.get().deviceLeases }),
     listAgents: () => listDeviceLeaseAgents(),
     sendSystemMessageToAgent: (agentId, body) => sendDeviceLeaseMessageToAgent(agentId, body),
     reservations: deviceReservationStore,
+    isPhysicalDeviceTarget: (target) =>
+      [...androidPhysicalDevices, ...iosPhysicalDevices].some((device) =>
+        physicalDeviceMatches(device, target),
+      ),
     logger: logger.child({ module: "device-leases" }),
   });
   deviceLeaseManager.reportMode();
@@ -1909,11 +1923,11 @@ export async function createPaseoDaemon(
   // another job inside DeviceLeaseManager. Live detection feeds it rather than a `ps` sample:
   // a daemon-owned `adb track-devices -l` child for Android, `devicectl list devices
   // --json-output` polling for iOS. Both share the same enabled/dryRun toggle and reservation
-  // store as the emulator cap — one feature, one switch.
-  let androidPhysicalDevices: PhysicalDevice[] = [];
-  let iosPhysicalDevices: PhysicalDevice[] = [];
+  // store as the emulator cap — one feature, one switch. Detection runs only while that switch
+  // is on, and only once the daemon is up (`syncPhysicalDetection` in start()).
   const physicalDeviceLeaseManager = new PhysicalDeviceLeaseManager({
     listConnectedDevices: () => [...androidPhysicalDevices, ...iosPhysicalDevices],
+    countAndroidEmulators: () => androidEmulatorCount,
     listAgents: () => listDeviceLeaseAgents(),
     reservations: deviceReservationStore,
     readDaemonConfig: () => ({ deviceLeases: daemonConfigStore.get().deviceLeases }),
@@ -1921,21 +1935,14 @@ export async function createPaseoDaemon(
   });
   const adbTrackDevicesService = new AdbTrackDevicesService({
     onDevicesChanged: (devices) => {
-      androidPhysicalDevices = devices
-        .filter((device) => device.physical && device.state === "device")
-        .map((device): PhysicalDevice => {
-          const entry: PhysicalDevice = {
-            id: device.serial,
-            platform: "android",
-            transport: device.wireless ? "network" : "usb",
-          };
-          if (device.properties.model) entry.name = device.properties.model;
-          return entry;
-        });
+      androidPhysicalDevices = toPhysicalAndroidDevices(devices);
+      androidEmulatorCount = devices.filter(
+        (device) => !device.physical && device.state === "device",
+      ).length;
     },
+    pidFile: createAdbTrackDevicesPidFile(path.join(config.paseoHome, "adb-track-devices.pid")),
     logger: logger.child({ module: "adb-track-devices" }),
   });
-  adbTrackDevicesService.start();
   const devicectlPollingService = new DevicectlPollingService({
     onDevicesChanged: (devices) => {
       iosPhysicalDevices = devices.map((device) => ({
@@ -1943,11 +1950,25 @@ export async function createPaseoDaemon(
         platform: "ios",
         transport: device.transport === "network" ? "network" : "usb",
         name: device.name,
+        aliases: [device.identifier, device.deviceName].filter(
+          (alias): alias is string => alias !== undefined,
+        ),
       }));
     },
     logger: logger.child({ module: "devicectl-polling" }),
   });
-  devicectlPollingService.start();
+  const physicalDeviceDetection = new PhysicalDeviceDetection({
+    adb: adbTrackDevicesService,
+    devicectl: devicectlPollingService,
+    isEnabled: () => daemonConfigStore.get().deviceLeases?.enabled === true,
+    onStopped: () => {
+      androidPhysicalDevices = [];
+      androidEmulatorCount = 0;
+      iosPhysicalDevices = [];
+    },
+    logger: logger.child({ module: "physical-devices" }),
+  });
+  daemonConfigStore.onChange(() => physicalDeviceDetection.sync());
 
   // The gate a provider's PreToolUse hook actually calls: the emulator/simulator slot cap (plus
   // the artifact janitor's disk guard) first, then the physical-device install gate — disjoint
@@ -2026,12 +2047,19 @@ export async function createPaseoDaemon(
   // Same reassignable-closure trick as handleAgentTurnFinished above: the device cap was built
   // before AgentManager because the providers need its gate, and it only reads the agent list.
   listDeviceLeaseAgents = () =>
-    agentManager.listAgentsForResourceMonitor().map((agent) => ({
-      agentId: agent.id,
-      provider: agent.provider,
-      isRunning: agent.isRunning,
-      extendsProviderId: resolveProviderExtends(agent.provider, daemonConfigStore.get().providers),
-    }));
+    agentManager.listAgentsForResourceMonitor().map((agent) => {
+      const summary: DeviceLeaseAgentSummary = {
+        agentId: agent.id,
+        provider: agent.provider,
+        isRunning: agent.isRunning,
+        extendsProviderId: resolveProviderExtends(
+          agent.provider,
+          daemonConfigStore.get().providers,
+        ),
+      };
+      if (agent.title) summary.title = agent.title;
+      return summary;
+    });
   // The cap's only lever over a provider it cannot refuse: tell the agent about a device it
   // took without asking. Same steer path the resource monitor uses (agent-prompt.ts).
   sendDeviceLeaseMessageToAgent = async (agentId, body) => {
@@ -3440,6 +3468,8 @@ export async function createPaseoDaemon(
       // model loading doesn't block the server from accepting connections.
       speechService.start();
       scriptHealthMonitor.start();
+      // After listening, so a bootstrap that fails (port in use) never leaves an adb child.
+      await physicalDeviceDetection.start();
     } catch (error) {
       unsubscribePluginProviders();
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
@@ -3459,8 +3489,7 @@ export async function createPaseoDaemon(
     agentModelDivergenceMonitor?.stop();
     agentResourceMonitor?.stop();
     deviceLeaseManager.stop();
-    adbTrackDevicesService.stop();
-    devicectlPollingService.stop();
+    physicalDeviceDetection.stop();
     pluginConnectionMonitor?.stop();
     accountFailoverMonitor?.stop();
     budgetPacingMonitor?.stop();

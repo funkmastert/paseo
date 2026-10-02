@@ -9,6 +9,8 @@
  * turns a sequence of frames into connect/disconnect events.
  */
 
+import type { PhysicalDevice } from "./physical-device-registry.js";
+
 export type AdbDeviceConnectionState =
   | "device"
   | "offline"
@@ -88,6 +90,35 @@ export function parseAdbDeviceListPayload(payload: string): AdbTrackedDevice[] {
     if (device) devices.push(device);
   }
   return devices;
+}
+
+/** `adb-<serialno>-<suffix>._adb-tls-connect._tcp`: the phone's USB serial is in the name. */
+const MDNS_SERIAL = /^adb-(.+)-[^-.]+\._adb-tls-connect\._tcp/;
+
+/**
+ * The phones in a device list, as the physical-device gate sees them: ready (`device` state),
+ * not an emulator, with adb's underscored model token made readable. A phone on USB and on
+ * wireless debugging at once shows up under two serials; the wireless one is dropped when its
+ * mDNS name carries the USB serial, so one phone is never counted as two connected devices.
+ */
+export function toPhysicalAndroidDevices(devices: readonly AdbTrackedDevice[]): PhysicalDevice[] {
+  const ready = devices.filter((device) => device.physical && device.state === "device");
+  const usbSerials = new Set(ready.filter((device) => !device.wireless).map((d) => d.serial));
+  return ready
+    .filter((device) => {
+      const embedded = MDNS_SERIAL.exec(device.serial)?.[1];
+      return !(device.wireless && embedded && usbSerials.has(embedded));
+    })
+    .map((device): PhysicalDevice => {
+      const entry: PhysicalDevice = {
+        id: device.serial,
+        platform: "android",
+        transport: device.wireless ? "network" : "usb",
+      };
+      const model = device.properties.model?.replace(/_/g, " ");
+      if (model) entry.name = model;
+      return entry;
+    });
 }
 
 /**

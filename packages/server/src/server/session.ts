@@ -1746,6 +1746,7 @@ export class Session {
           enforcement: snapshot.enforcement,
           generatedAt: snapshot.generatedAt,
           ...(physical ? { physicalDevices: physical.devices } : {}),
+          ...(physical && physical.blocked.length > 0 ? { physicalBlocked: physical.blocked } : {}),
         },
       };
       if (source) this.emitForSource(message, source);

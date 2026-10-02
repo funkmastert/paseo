@@ -419,6 +419,8 @@ export interface ResourceMonitorAgentSummary {
   isRunning: boolean;
   /** The `paseo.parent-agent-id` label: set on a child agent, null on a root. */
   parentAgentId: string | null;
+  /** What Tyler sees in the sidebar; the device cap names agents by it. */
+  title?: string | null;
 }
 
 /**
@@ -1940,6 +1942,7 @@ export class AgentManager {
       internal: agent.internal ?? false,
       isRunning: agent.lifecycle === "running",
       parentAgentId: getParentAgentIdFromLabels(agent.labels),
+      title: agent.config.title ?? null,
     }));
   }
 

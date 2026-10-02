@@ -6799,6 +6799,9 @@ export const DeviceStatusEntrySchema = z.object({
   // COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30.
   // Independent of `attribution`: a reserved device can still show its current holder.
   reserved: z.boolean().optional(),
+  // COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30.
+  // A simulator's name from simctl; absent for an emulator, whose deviceId is its AVD name.
+  name: z.string().optional(),
 });
 
 // COMPAT(deviceLeaseEnforcement): added in v0.8.2, remove optional parsing after 2027-09-19.
@@ -6820,6 +6823,16 @@ export const DeviceStatusWaiterSchema = z.object({
 export const DeviceStatusBlockedSchema = z.object({
   agentId: z.string(),
   platform: z.enum(["ios", "android"]),
+  command: z.string(),
+  message: z.string(),
+  dryRun: z.boolean(),
+  at: z.string(),
+});
+
+// COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30. A
+// refusal by the physical install gate. No platform: an untargeted command may span both.
+export const PhysicalDeviceStatusBlockedSchema = z.object({
+  agentId: z.string(),
   command: z.string(),
   message: z.string(),
   dryRun: z.boolean(),
@@ -6863,6 +6876,9 @@ export const DeviceStatusUpdateMessageSchema = z.object({
     generatedAt: z.string(),
     // COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30.
     physicalDevices: z.array(PhysicalDeviceStatusEntrySchema).optional(),
+    // COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30.
+    // The physical install gate's recent refusals (and dry-run would-have-refused records).
+    physicalBlocked: z.array(PhysicalDeviceStatusBlockedSchema).optional(),
   }),
 });
 

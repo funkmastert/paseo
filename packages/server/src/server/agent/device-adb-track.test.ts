@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { AdbTrackDevicesFrameReader, parseAdbDeviceListPayload } from "./device-adb-track.js";
+import {
+  AdbTrackDevicesFrameReader,
+  parseAdbDeviceListPayload,
+  toPhysicalAndroidDevices,
+} from "./device-adb-track.js";
 
 /** Builds a real track-devices frame: 4 hex chars of length, then the payload bytes. */
 function frame(payload: string): Buffer {
@@ -106,5 +110,30 @@ describe("parseAdbDeviceListPayload", () => {
   test("skips a header line if the caller's adb build still sends one", () => {
     const devices = parseAdbDeviceListPayload("List of devices attached\nFAKESERIAL45291 device\n");
     expect(devices).toHaveLength(1);
+  });
+});
+
+describe("toPhysicalAndroidDevices", () => {
+  test("keeps ready phones, with a readable model name", () => {
+    const devices = parseAdbDeviceListPayload(
+      "FAKESERIAL0001\tdevice usb:1-1 product:fake model:Pixel_9_Pro_XL device:fake\n" +
+        "emulator-5554\tdevice product:sdk model:sdk_gphone64 device:emu\n" +
+        "FAKESERIAL0002\tunauthorized usb:1-2\n",
+    );
+
+    expect(toPhysicalAndroidDevices(devices)).toEqual([
+      { id: "FAKESERIAL0001", platform: "android", transport: "usb", name: "Pixel 9 Pro XL" },
+    ]);
+  });
+
+  test("a phone on USB and on wireless debugging at once is one device", () => {
+    const devices = parseAdbDeviceListPayload(
+      "FAKESERIAL0001\tdevice usb:1-1 model:Pixel_8\n" +
+        "adb-FAKESERIAL0001-AbCdEf._adb-tls-connect._tcp\tdevice model:Pixel_8\n",
+    );
+
+    expect(toPhysicalAndroidDevices(devices).map((device) => device.id)).toEqual([
+      "FAKESERIAL0001",
+    ]);
   });
 });
