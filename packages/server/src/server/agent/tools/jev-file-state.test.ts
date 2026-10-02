@@ -391,6 +391,44 @@ test("secret-shaped names match in any case, and the list covers keys, state and
   }
 });
 
+test("the read-check's additional secret-shaped names (jev/secret-paths.ts) are refused here too", () => {
+  // The tools import the shared list (jev/secret-paths.ts), a superset of what they used to carry
+  // on their own: nothing the read check added may be readable through the tools.
+  for (const name of [
+    ".envrc",
+    "infra/server.ppk",
+    "vault/db.kdbx",
+    ".vault-token",
+    "k8s/secrets.yaml",
+    "k8s/secrets.yml",
+    "gcp/service-account-prod.json",
+    "backend/serviceaccount.json",
+    ".zsh_history",
+    ".psql_history",
+    ".dev.vars",
+    ".dev.vars.staging",
+    "env.local",
+    "dotenv",
+    "secrets.json",
+    "api.secret",
+    "client.ovpn",
+    ".htpasswd",
+    "wp-config.php",
+    "firebase-adminsdk-abc123.json",
+    "gcp-key.json",
+    "prod-sa-key.json",
+    ".yarnrc.yml",
+    ".terraformrc",
+    "terraform.rc",
+    ".s3cfg",
+    ".my.cnf",
+    ".boto",
+    "auth.json",
+  ]) {
+    expect(isSecretShapedPath(name), name).toBe(true);
+  }
+});
+
 test("every secret-shaped name has a pathspec glob, so a diff leaves out what a read refuses", () => {
   // The pathspecs are matched by git, the name check by code: one list feeds both.
   for (const glob of SECRET_PATHSPEC_GLOBS) {
