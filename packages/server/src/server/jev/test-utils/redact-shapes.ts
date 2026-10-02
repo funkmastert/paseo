@@ -226,7 +226,104 @@ const MORE_SECRET_SHAPES: RedactionShape[] = [
   { label: "passphrase=", text: `passphrase=${PASSWORD}42`, needle: `${PASSWORD}42` },
 ];
 
-export const SECRET_SHAPES: RedactionShape[] = [...REVIEW_SECRET_SHAPES, ...MORE_SECRET_SHAPES];
+/** Credentials in shell command lines, which `recent` sends (read-check egress review 2, E1). */
+const COMMAND_SECRET_SHAPES: RedactionShape[] = [
+  { label: "curl -u", text: `curl -u admin:${PASSWORD} https://api.example.com`, needle: PASSWORD },
+  { label: "curl --user", text: `curl --user admin:${PASSWORD} https://x`, needle: PASSWORD },
+  { label: "curl -sSu", text: `curl -sSu "admin:${PASSWORD}" https://x`, needle: PASSWORD },
+  { label: "curl -u attached", text: `curl -uadmin:${PASSWORD} https://x`, needle: PASSWORD },
+  {
+    label: "curl --proxy-user",
+    text: `curl --proxy-user ops:${PASSWORD} https://x`,
+    needle: PASSWORD,
+  },
+  { label: "curl -u token as user", text: `curl -u ${PASSWORD}: https://x`, needle: PASSWORD },
+  { label: "curl -u, short", text: "curl -u admin:pw1 https://x", needle: "pw1" },
+  { label: "http -a", text: `http -a admin:${PASSWORD} example.com`, needle: PASSWORD },
+  { label: "https --auth", text: `https --auth admin:${PASSWORD} example.com`, needle: PASSWORD },
+  { label: "xh -a", text: `xh -a admin:${PASSWORD} example.com`, needle: PASSWORD },
+  { label: "redis-cli -a", text: `redis-cli -h cache -a ${PASSWORD} ping`, needle: PASSWORD },
+  { label: "redis-cli -a, short", text: "redis-cli -a pw12 ping", needle: "pw12" },
+  {
+    label: "redis URL, no user",
+    text: `redis-cli -u redis://:${PASSWORD}@cache:6379`,
+    needle: PASSWORD,
+  },
+  { label: "mysql -p attached, short", text: "mysql -uroot -phunter2 app", needle: "hunter2" },
+  { label: "mysql --password=", text: "mysql -uroot --password=hunter2 app", needle: "hunter2" },
+  { label: "wget --password=", text: "wget --password=hunter2 https://x", needle: "hunter2" },
+  { label: "--http-password", text: "wget --http-password hunter2 https://x", needle: "hunter2" },
+  { label: "psql URL", text: "psql postgresql://app:hunter2@db/app", needle: "hunter2" },
+  { label: "psql keyword", text: 'psql "host=db user=app password=hunter2"', needle: "hunter2" },
+  { label: "PGPASSWORD=", text: "PGPASSWORD=abc123 psql -h db", needle: "abc123" },
+  {
+    label: "DB_PASSWORD= before a command",
+    text: "DB_PASSWORD=hunter2 npm start",
+    needle: "hunter2",
+  },
+  {
+    label: "DB_PASS= in recent",
+    text: "tool Bash `DB_PASS=s3cr3t! node seed.js`",
+    needle: "s3cr3t!",
+  },
+  {
+    label: "git clone with a token",
+    text: `git clone https://admin:${PASSWORD}@git.example.com/r.git`,
+    needle: PASSWORD,
+  },
+  { label: "sshpass -p, short", text: "sshpass -p hunter2 ssh host", needle: "hunter2" },
+  {
+    label: "-H Authorization",
+    text: "curl -H 'Authorization: Basic YWRtaW46cHc=' https://x",
+    needle: "YWRtaW46cHc=",
+  },
+  { label: "-H X-Api-Key", text: 'curl -H "X-Api-Key: abc123" https://x', needle: "abc123" },
+  {
+    label: "--header Cookie",
+    text: "curl --header 'Cookie: sid=abc123' https://x",
+    needle: "sid=abc123",
+  },
+  { label: "--token=", text: "gh api --token=ab12cd https://x", needle: "ab12cd" },
+  { label: "--api-key", text: "tool --api-key ab12cd run", needle: "ab12cd" },
+  {
+    label: "ldapsearch -w",
+    text: "ldapsearch -x -D cn=admin -w hunter2 -b dc=x",
+    needle: "hunter2",
+  },
+  {
+    label: "openssl -passin",
+    text: "openssl rsa -in k.pem -passin pass:hunter2",
+    needle: "hunter2",
+  },
+];
+
+/** Values a copied `.env` or a local config file kept (read-check egress review 2, E4–E5). */
+const FILE_SECRET_SHAPES: RedactionShape[] = [
+  {
+    label: "a password with spaces",
+    text: "ADMIN_PASSWORD=correct horse battery",
+    needle: "horse battery",
+  },
+  { label: "password = phrase", text: "password = correct horse battery", needle: "horse battery" },
+  { label: "a salt", text: "ENCRYPTION_SALT=Qx7pL2vN9mK4", needle: "Qx7pL2vN9mK4" },
+  { label: "PRIVATE=", text: `PRIVATE=${PASSWORD}`, needle: PASSWORD },
+  { label: "a signing key", text: `{"Jwt":{"Signing":"${PASSWORD}"}}`, needle: PASSWORD },
+  { label: "private_key_id", text: `"private_key_id": "${PASSWORD}"`, needle: PASSWORD },
+  { label: "PHP define", text: `define('DB_PASSWORD', '${PASSWORD}');`, needle: PASSWORD },
+  {
+    label: "a WordPress salt",
+    text: "define('AUTH_KEY', 'q8#Lz|v@p!2W;xR^m0>kE7$yT-cN4/hU');",
+    needle: "q8#Lz|v@p!2W",
+  },
+  { label: "an htpasswd hash", text: `admin:$apr1$${PASSWORD}`, needle: PASSWORD },
+];
+
+export const SECRET_SHAPES: RedactionShape[] = [
+  ...REVIEW_SECRET_SHAPES,
+  ...MORE_SECRET_SHAPES,
+  ...COMMAND_SECRET_SHAPES,
+  ...FILE_SECRET_SHAPES,
+];
 
 const NPM_INTEGRITY = join(
   "sha512-",
@@ -311,4 +408,15 @@ export const BENIGN_TEXTS: Omit<RedactionShape, "needle">[] = [
     }).concat("\npath: Sources/PaseoApp/Features/Timeline/Views2"),
   },
   { label: "a log line with an auth key", text: "auth: user logged in successfully" },
+  { label: "docker --user with ids", text: "docker run --user 1000:1000 -v $PWD:/src node" },
+  {
+    label: "curl without credentials",
+    text: "curl -sSL https://example.com/install.sh -o install.sh",
+  },
+  { label: "a comparison", text: "if (token == null) return;\nif (password === other) fail();" },
+  { label: "an HTTPie request", text: "http GET example.com/api Accept:application/json" },
+  {
+    label: "a header without a credential",
+    text: "curl -H 'Content-Type: application/json' https://x",
+  },
 ];

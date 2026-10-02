@@ -62,6 +62,15 @@ describe("recognizeRead: the Read tool", () => {
     expect(recognizeRead({ toolName: "Read", toolInput: {}, cwd: CWD, home: HOME })).toBeNull();
     expect(recognizeRead({ toolName: "Grep", toolInput: {}, cwd: CWD, home: HOME })).toBeNull();
   });
+
+  test("a leading ~ is the home directory, as the CLI expands it, never a folder in the cwd", () => {
+    const read = (file_path: string, home: string | null = HOME) =>
+      recognizeRead({ toolName: "Read", toolInput: { file_path }, cwd: CWD, home })?.files[0]?.path;
+    expect(read("~/Documents/taxes.txt")).toBe(`${HOME}/Documents/taxes.txt`);
+    expect(read("~")).toBe(HOME);
+    expect(read("~/Documents/taxes.txt", null)).toBeUndefined();
+    expect(read("src/~x.ts")).toBe(`${CWD}/src/~x.ts`);
+  });
 });
 
 describe("recognizeRead: Bash lines that only read files", () => {

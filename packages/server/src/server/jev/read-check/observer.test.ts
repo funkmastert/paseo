@@ -24,6 +24,7 @@ import {
   type ReadCheckFileSystem,
 } from "./observer.js";
 import type { ReadCheckTimelineRow } from "./validation.js";
+import { initGitRepo } from "../test-utils/git-repo.js";
 
 const AGENT = "agent-read-1";
 const NOT_NEEDED: Record<string, JevScriptedAnswer> = {
@@ -199,7 +200,7 @@ beforeEach(() => {
   repo = path.join(root, "projects", "app");
   paseoHome = path.join(root, ".paseo");
   // A git work tree: only files inside one are ever sent.
-  mkdirSync(path.join(repo, ".git"), { recursive: true });
+  initGitRepo(repo);
   mkdirSync(paseoHome, { recursive: true });
   rows = [
     {

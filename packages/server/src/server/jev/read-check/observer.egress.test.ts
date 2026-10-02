@@ -22,6 +22,7 @@ import type {
 import { createTestJevService } from "../fake.js";
 import { isSecretShapedPath, SECRET_PATHSPEC_GLOBS } from "../secret-paths.js";
 import { ReadCheckObserver } from "./observer.js";
+import { initGitRepo } from "../test-utils/git-repo.js";
 
 /**
  * The adversarial review's probes (feature 16, "Blockers: data egress", M1–M3), as tests. Each
@@ -158,7 +159,7 @@ beforeEach(() => {
   home = path.join(root, "home");
   repo = path.join(home, "projects", "app");
   paseoHome = path.join(home, ".paseo");
-  mkdirSync(path.join(repo, ".git"), { recursive: true });
+  initGitRepo(repo);
   mkdirSync(paseoHome, { recursive: true });
 });
 

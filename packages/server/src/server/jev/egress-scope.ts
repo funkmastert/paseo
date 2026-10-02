@@ -706,7 +706,7 @@ function gitEnvironment(): NodeJS.ProcessEnv {
   return env;
 }
 
-function runGitProcess(args: string[], options: JevGitOptions): Promise<JevGitResult> {
+export function runGitProcess(args: string[], options: JevGitOptions): Promise<JevGitResult> {
   return new Promise((resolve) => {
     execFile(
       "git",

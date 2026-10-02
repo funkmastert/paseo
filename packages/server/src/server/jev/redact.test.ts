@@ -103,8 +103,11 @@ describe("redactJevRequest: line-shaped patterns in a state string", () => {
     );
   });
 
-  it("leaves an assignment whose value is shorter than 8 characters", () => {
-    expect(sentText("DB_PWD=abc123 and password: none")).toBe("DB_PWD=abc123 and password: none");
+  it("leaves a value under 8 characters, or under 4 when a password is set with `=`", () => {
+    expect(sentText("API_TOKEN=abc123")).toBe("API_TOKEN=abc123");
+    expect(sentText("DB_PWD=abc\npassword: none")).toBe("DB_PWD=abc\npassword: none");
+    expect(sentText("DB_PWD=none")).toBe("DB_PWD=none");
+    expect(sentText("DB_PWD=abc123")).toBe("DB_PWD=[redacted:assignment]");
   });
 
   it("redacts every listed token prefix, in either case", () => {
@@ -670,8 +673,8 @@ describe("redactJevRequest: what a .env or a tfstate leaks (read-check review)",
   });
 
   it("redacts a base64 key as an assignment's whole value, whatever the name", () => {
-    expect(sentText("INTERNAL_SIGNING=Zm9vYmFyYmF6cXV4MTIzNDU2")).toBe(
-      "INTERNAL_SIGNING=[redacted:entropy]",
+    expect(sentText("INTERNAL_BLOB=Zm9vYmFyYmF6cXV4MTIzNDU2")).toBe(
+      "INTERNAL_BLOB=[redacted:entropy]",
     );
     expect(sentText("FACTORY=AbstractFactoryBuilder")).toBe("FACTORY=AbstractFactoryBuilder");
     expect(sentText("STRIPE_ACCOUNT=acct_1Nq2b3C4d5E6f7G8")).toBe(

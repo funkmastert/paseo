@@ -83,11 +83,24 @@ function positiveInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }
 
+/**
+ * A file tool's path as the Claude CLI opens it: a leading `~` or `~/` is the home directory, as
+ * its own expander does (2.1.284); anything else relative is from the cwd. Null for a `~` path
+ * when the home directory is unknown.
+ */
+function toolPath(filePath: string, input: RecognizeReadInput): string | null {
+  if (filePath === "~" || filePath.startsWith("~/") || filePath.startsWith("~\\")) {
+    return input.home === null ? null : path.join(input.home, filePath.slice(1));
+  }
+  return path.isAbsolute(filePath) ? filePath : path.resolve(input.cwd, filePath);
+}
+
 function recognizeReadTool(input: RecognizeReadInput): RecognizedRead | null {
   const toolInput = record(input.toolInput);
   const filePath = toolInput?.["file_path"];
   if (typeof filePath !== "string" || filePath.length === 0) return null;
-  const absolute = path.isAbsolute(filePath) ? filePath : path.resolve(input.cwd, filePath);
+  const absolute = toolPath(filePath, input);
+  if (absolute === null) return null;
   const notText =
     toolInput?.["pages"] !== undefined ||
     NOT_TEXT_EXTENSIONS.has(path.extname(absolute).toLowerCase());
@@ -652,5 +665,5 @@ export function editedPath(input: RecognizeReadInput): string | null {
   const toolInput = record(input.toolInput);
   const filePath = toolInput?.["file_path"] ?? toolInput?.["notebook_path"];
   if (typeof filePath !== "string" || filePath.length === 0) return null;
-  return path.isAbsolute(filePath) ? filePath : path.resolve(input.cwd, filePath);
+  return toolPath(filePath, input);
 }

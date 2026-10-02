@@ -28,6 +28,7 @@ import {
 } from "../../../jev/read-check/observer.js";
 import { ClaudeAgentClient } from "./agent.js";
 import type { ClaudeQueryInput } from "./query.js";
+import { initGitRepo } from "../../../jev/test-utils/git-repo.js";
 
 /**
  * Feature 16 at the Claude provider's seam (docs/jev.md, "Feature 16"): which matchers are
@@ -206,7 +207,7 @@ function slowObserver(config: Record<string, unknown> = {}, defer?: (work: () =>
 beforeEach(() => {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "claude-read-check-")));
   repo = path.join(root, "repo");
-  mkdirSync(path.join(repo, ".git"), { recursive: true });
+  initGitRepo(repo);
 });
 
 afterEach(() => {

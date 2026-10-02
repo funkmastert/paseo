@@ -174,8 +174,8 @@ export function recentLine(item: AgentTimelineItem): string | null {
       return item.text.trim() ? `thinking: ${clip(item.text, RECENT_OTHER_CHARS)}` : null;
     case "tool_call":
       return toolSummary(item);
-    case "error":
-      return `error: ${clip(item.message, RECENT_OTHER_CHARS)}`;
+    // An error row carries a tool's stderr, which can quote a credential, and says little
+    // about what the agent means to do.
     default:
       return null;
   }

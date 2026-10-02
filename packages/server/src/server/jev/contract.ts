@@ -437,7 +437,12 @@ export type JevNotAskedReason =
   /** The CLI answered `file_unchanged`: the read loaded nothing. */
   | "dedup"
   /** Judged for the same agent, path and range in the last 30 minutes; the verdict is reused. */
-  | "repeat";
+  | "repeat"
+  /**
+   * The file changed between the path checks and the read, or a `Read`'s text is not what is on
+   * disk under the path the checks saw: what would be sent is not what was checked.
+   */
+  | "changed";
 
 export interface JevSavingsDecision {
   /** What code did, in the feature's words: `start-agent`, `alert`, `class standard on claude-sonnet-5`. */

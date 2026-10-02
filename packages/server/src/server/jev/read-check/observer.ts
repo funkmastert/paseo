@@ -1,12 +1,19 @@
-import { promises as fsPromises, type Stats } from "node:fs";
+import { constants as fsConstants, promises as fsPromises, type Stats } from "node:fs";
 import path from "node:path";
 import type { Logger } from "pino";
 
 import { JEV_TOOLS_LABEL } from "@getpaseo/protocol/agent-labels";
 
 import type { AgentTimelineItem } from "../../agent/agent-sdk-types.js";
+import {
+  commandName,
+  resolvePath,
+  walkShellCommands,
+  type ExpandedWord,
+} from "../../agent/shell-commands.js";
 import type { JevNotAskedReason, JevOutcome, JevSavingsSink, JevService } from "../contract.js";
 import type { ResolvedJevConfig } from "../config.js";
+import { runGitProcess, type JevGitOptions, type JevGitResult } from "../egress-scope.js";
 import {
   decideLiveDeny,
   formatReadDenial,
@@ -108,12 +115,27 @@ export interface ReadCheckAgentSource {
   ): { epoch: string; rows: ReadCheckTimelineRow[] } | null;
 }
 
-export type ReadCheckStat = Pick<Stats, "nlink" | "size" | "isFile" | "isSymbolicLink">;
+export type ReadCheckStat = Pick<
+  Stats,
+  "nlink" | "size" | "isFile" | "isSymbolicLink" | "dev" | "ino" | "mtimeMs"
+>;
+
+/** The file the path checks saw: the read that follows must open this one, unchanged. */
+export interface ReadCheckFileIdentity {
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+}
 
 export interface ReadCheckFileSystem {
   realpath(filePath: string): Promise<string>;
-  /** At most `MAX_OBSERVER_FILE_BYTES` from the start of a regular file. */
-  readFile(filePath: string): Promise<Buffer>;
+  /**
+   * At most `MAX_OBSERVER_FILE_BYTES` from the start of the regular file at `filePath`, opened
+   * without following a symlink. Throws unless the file opened is `expected`, unchanged, with one
+   * link, before and after the read.
+   */
+  readFile(filePath: string, expected: ReadCheckFileIdentity): Promise<Buffer>;
   /** Never opens the file. */
   stat(filePath: string): Promise<ReadCheckStat>;
   lstat(filePath: string): Promise<ReadCheckStat>;
@@ -137,6 +159,8 @@ export interface ReadCheckObserverOptions {
   sweepIntervalMs?: number;
   /** Default `process.platform`: darwin and win32 compare paths case-insensitively. */
   platform?: NodeJS.Platform;
+  /** Runs git for the ignored-file rule. Default: `git` as the D7 scope check runs it. */
+  runGit?: (args: string[], options: JevGitOptions) => Promise<JevGitResult>;
 }
 
 const CALL_SITE_SHADOW = "read-check.shadow";
@@ -160,6 +184,38 @@ const MAX_CONCURRENT_JUDGMENTS = 3;
 const MAX_SYMLINK_HOPS = 40;
 /** Characters `Read` adds to each line: its number, a tab and the newline. */
 const READ_TOOL_LINE_OVERHEAD = READ_TOOL_LINE_PREFIX_CHARS + 1;
+/** How long a file copied or moved from a secret one is refused. */
+const TAINT_MS = 24 * 60 * 60_000;
+const GIT_TIMEOUT_MS = 2000;
+/** Commands that write a copy of their sources: the last operand, or `-t`'s directory. */
+const COPY_COMMANDS = new Set(["cp", "mv", "rsync", "ditto", "install", "ln", "gcp", "gmv"]);
+/**
+ * Dependency and build output: ignored by git, and the large reads the check exists to judge. An
+ * ignored file anywhere else is a local file, which can hold anything, so it is never sent.
+ */
+const BUILD_DIRECTORIES = new Set([
+  "node_modules",
+  "bower_components",
+  "vendor",
+  "pods",
+  "carthage",
+  "deriveddata",
+  "dist",
+  "build",
+  "out",
+  "target",
+  "coverage",
+  ".next",
+  ".nuxt",
+  ".svelte-kit",
+  ".turbo",
+  ".gradle",
+  ".build",
+  ".dart_tool",
+  "__pycache__",
+  ".venv",
+  "venv",
+]);
 
 interface HookFields {
   toolName: string;
@@ -316,6 +372,47 @@ function notAskedReasonFor(
 
 type RangeText = ReturnType<typeof sliceRange>;
 
+/** A command's file operands, resolved, and the directory a `-t` option names. */
+function commandOperands(
+  words: readonly ExpandedWord[],
+  cwd: string | null,
+): { operands: string[]; target: string | null } {
+  const operands: string[] = [];
+  let target: string | null = null;
+  let optionsEnded = false;
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index]!;
+    if (!optionsEnded && word.text === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && word.text.startsWith("-") && word.text.length > 1) {
+      if (word.text === "-t" || word.text === "--target-directory") {
+        const next = words[index + 1];
+        index += 1;
+        target = next?.resolved ? resolvePath(cwd, next.text) : null;
+      } else if (word.text.startsWith("--target-directory=") && word.resolved) {
+        target = resolvePath(cwd, word.text.slice("--target-directory=".length));
+      }
+      continue;
+    }
+    const resolved = word.resolved ? resolvePath(cwd, word.text) : null;
+    if (resolved !== null) operands.push(resolved);
+  }
+  return { operands, target };
+}
+
+type SliceResult = ({ kind: "text" } & RangeText) | { kind: "not-text" | "changed" };
+
+/**
+ * Whether a `Read`'s text is what is on disk. The tool may drop a final newline or turn CRLF into
+ * LF; nothing else may differ.
+ */
+function sameText(onDisk: string, loaded: string): boolean {
+  const normalize = (text: string) => text.replace(/\r\n/g, "\n").replace(/\n$/, "");
+  return normalize(onDisk) === normalize(loaded);
+}
+
 interface ShadowReadInput {
   event: FileReadHookEvent;
   /** When the read's result arrived. */
@@ -357,25 +454,54 @@ interface Asked {
   };
 }
 
+function identityOf(stat: ReadCheckStat): ReadCheckFileIdentity {
+  return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
+}
+
+function isSameFile(stat: ReadCheckStat, expected: ReadCheckFileIdentity): boolean {
+  return (
+    stat.isFile() &&
+    stat.nlink === 1 &&
+    stat.dev === expected.dev &&
+    stat.ino === expected.ino &&
+    stat.size === expected.size &&
+    stat.mtimeMs === expected.mtimeMs
+  );
+}
+
+/** Windows has no `O_NOFOLLOW`: there the path is lstat'ed first and the handle checked after. */
+const OPEN_NO_FOLLOW = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+
 export const defaultReadCheckFs: ReadCheckFileSystem = {
   realpath: (filePath) => fsPromises.realpath(filePath),
   stat: (filePath) => fsPromises.stat(filePath),
   lstat: (filePath) => fsPromises.lstat(filePath),
   readlink: (filePath) => fsPromises.readlink(filePath),
-  readFile: async (filePath) => {
-    const handle = await fsPromises.open(filePath, "r");
+  readFile: async (filePath, expected) => {
+    if (fsConstants.O_NOFOLLOW === undefined) {
+      const link = await fsPromises.lstat(filePath);
+      if (link.isSymbolicLink()) throw new Error("a symlink");
+    }
+    const handle = await fsPromises.open(filePath, OPEN_NO_FOLLOW);
     try {
-      const stat = await handle.stat();
-      if (!stat.isFile()) throw new Error("not a regular file");
-      const length = Math.min(stat.size, MAX_OBSERVER_FILE_BYTES);
+      if (!isSameFile(await handle.stat(), expected)) throw new Error("the file changed");
+      const length = Math.min(expected.size, MAX_OBSERVER_FILE_BYTES);
       const buffer = Buffer.alloc(length);
-      await handle.read(buffer, 0, length, 0);
+      const { bytesRead } = await handle.read(buffer, 0, length, 0);
+      // A write during the read changes the size or the modification time.
+      if (bytesRead !== length || !isSameFile(await handle.stat(), expected)) {
+        throw new Error("the file changed");
+      }
       return buffer;
     } finally {
       await handle.close();
     }
   },
 };
+
+type Eligibility =
+  | { eligible: true; identity: ReadCheckFileIdentity }
+  | { eligible: false; reason: JevNotAskedReason };
 
 export class ReadCheckObserver implements FileReadObserver {
   private readonly logger: Logger;
@@ -386,6 +512,9 @@ export class ReadCheckObserver implements FileReadObserver {
   private readonly agents = new Map<string, AgentReadState>();
   private readonly pending = new Map<string, PendingRead>();
   private readonly personal: PersonalPathRules;
+  private readonly runGit: (args: string[], options: JevGitOptions) => Promise<JevGitResult>;
+  /** Paths written by a copy or move of a secret file, folded, to when they stop being refused. */
+  private readonly tainted = new Map<string, number>();
   private realHomeAdded = false;
   private judging = 0;
   private liveSnapshot: LiveSnapshot = { enabled: false, live: false, liveShare: 0 };
@@ -397,6 +526,7 @@ export class ReadCheckObserver implements FileReadObserver {
     this.now = options.now ?? Date.now;
     this.fs = options.fs ?? defaultReadCheckFs;
     this.defer = options.defer ?? ((work) => setImmediate(work));
+    this.runGit = options.runGit ?? runGitProcess;
     this.personal = {
       homeDirs: [options.homeDir],
       paseoHome: options.paseoHome,
@@ -468,6 +598,9 @@ export class ReadCheckObserver implements FileReadObserver {
         if (now - state.lastSeen >= AGENT_IDLE_MS && state.denied.size === 0) {
           this.agents.delete(agentId);
         }
+      }
+      for (const [key, until] of this.tainted) {
+        if (now >= until) this.tainted.delete(key);
       }
       for (const agentId of this.validation.agentsWithOpenWindows()) this.scanAgent(agentId);
       this.validation.expire(now);
@@ -660,19 +793,29 @@ export class ReadCheckObserver implements FileReadObserver {
     agentCwd: string;
     namedPath: string;
     realPath: string;
-  }): Promise<JevNotAskedReason | null> {
+  }): Promise<Eligibility> {
+    const refuse = (reason: JevNotAskedReason): Eligibility => ({ eligible: false, reason });
+    // Taken before any name is checked: the file read later must be this one (`isSameFile`), so
+    // a swap during the checks, or during git, sends nothing.
+    const stat = await this.fs.lstat(input.realPath).catch(() => null);
     await this.addRealHome();
     const realCwd = await this.realpathOf(input.agentCwd);
-    if (!isInside(input.realPath, realCwd)) return "outside-cwd";
+    if (!isInside(input.realPath, realCwd)) return refuse("outside-cwd");
     const names = [...(await this.symlinkChain(input.namedPath)), input.realPath];
-    if (names.some((name) => isSecretShapedPath(name) || isPersonalPath(name, this.personal))) {
-      return "secret-path";
+    if (
+      names.some(
+        (name) =>
+          isSecretShapedPath(name) || isPersonalPath(name, this.personal) || this.isTainted(name),
+      )
+    ) {
+      return refuse("secret-path");
     }
-    const stat = await this.fs.stat(input.realPath).catch(() => null);
-    if (!stat?.isFile()) return "not-text";
-    if (stat.nlink > 1) return "secret-path";
+    if (stat?.isSymbolicLink()) return refuse("changed");
+    if (!stat?.isFile()) return refuse("not-text");
+    if (stat.nlink > 1) return refuse("secret-path");
     const workTree = await this.workTreeOf(input.realPath);
-    if (workTree === null || isHomeOrAbove(workTree, this.personal)) return "outside-repo";
+    if (workTree === null || isHomeOrAbove(workTree, this.personal)) return refuse("outside-repo");
+    if (await this.isLocalOnly(workTree, input.realPath)) return refuse("secret-path");
     const scope = await this.options.jev
       .checkScope({
         cwds: [input.agentCwd],
@@ -681,7 +824,98 @@ export class ReadCheckObserver implements FileReadObserver {
         agentIds: [input.agentId],
       })
       .catch(() => "excluded" as const);
-    return scope === "ok" ? null : "excluded";
+    if (scope !== "ok") return refuse("excluded");
+    return { eligible: true, identity: identityOf(stat) };
+  }
+
+  /**
+   * A file git ignores outside dependency and build output: `.dev.vars`, `appsettings.Local.json`,
+   * a key someone saved in the project. Any answer but git's "not ignored" refuses it.
+   */
+  private async isLocalOnly(workTree: string, realPath: string): Promise<boolean> {
+    const relative = path.relative(workTree, realPath);
+    const directories = relative.split(/[\\/]/).slice(0, -1);
+    if (directories.some((name) => BUILD_DIRECTORIES.has(name.toLowerCase()))) return false;
+    try {
+      const result = await this.runGit(["-C", workTree, "check-ignore", "-q", "--", relative], {
+        timeoutMs: GIT_TIMEOUT_MS,
+      });
+      return result.exitCode !== 1;
+    } catch {
+      return true;
+    }
+  }
+
+  private taintKey(filePath: string): string {
+    const resolved = path.resolve(filePath).normalize("NFC");
+    const platform = this.personal.platform;
+    return platform === "darwin" || platform === "win32" ? resolved.toLowerCase() : resolved;
+  }
+
+  private isTainted(filePath: string): boolean {
+    const until = this.tainted.get(this.taintKey(filePath));
+    return until !== undefined && this.now() < until;
+  }
+
+  private taint(filePaths: Iterable<string>, at: number): void {
+    for (const filePath of filePaths) this.tainted.set(this.taintKey(filePath), at + TAINT_MS);
+  }
+
+  private isSecretSource(filePath: string): boolean {
+    return (
+      isSecretShapedPath(filePath) ||
+      isPersonalPath(filePath, this.personal) ||
+      this.isTainted(filePath)
+    );
+  }
+
+  /**
+   * A Bash line that copies, moves or links a secret file (`cp .env notes.txt`, `mv`, `rsync`,
+   * `ditto`, `install`, `ln`), or writes one through `tee` or `>`: every file the line writes is
+   * refused for 24 hours, since its name no longer says what it holds. The lexical paths are
+   * taken before anything awaits, so a read queued after this line already sees them.
+   */
+  private async noteCopies(hook: HookFields, cwd: string, at: number): Promise<void> {
+    const command = record(hook.toolInput)?.["command"];
+    if (typeof command !== "string") return;
+    const sources: string[] = [];
+    const written: string[] = [];
+    walkShellCommands(
+      command,
+      { cwd, home: this.options.homeDir },
+      {
+        command(args, context) {
+          const name = commandName(args[0]!.text);
+          const { operands, target } = commandOperands(args.slice(1), context.cwd);
+          sources.push(...operands);
+          if (name === "tee") written.push(...operands);
+          if (COPY_COMMANDS.has(name)) {
+            const into = target ?? (operands.length >= 2 ? operands[operands.length - 1]! : null);
+            const from = target ? operands : operands.slice(0, -1);
+            if (into !== null) {
+              written.push(into, ...from.map((source) => path.join(into, path.basename(source))));
+            }
+          }
+          return false;
+        },
+        outputRedirect(target, context) {
+          const resolved = target.resolved ? resolvePath(context.cwd, target.text) : null;
+          if (resolved !== null && resolved !== "/dev/null") written.push(resolved);
+          return false;
+        },
+      },
+    );
+    if (written.length === 0 || sources.length === 0) return;
+    if (sources.some((source) => this.isSecretSource(source))) {
+      this.taint(written, at);
+    } else {
+      // A symlink onto a secret file: `cp link notes.txt`.
+      const real = await Promise.all(sources.map((source) => this.realpathOf(source)));
+      if (!real.some((source) => this.isSecretSource(source))) return;
+      this.taint(written, at);
+    }
+    const realWritten = await Promise.all(written.map((file) => this.realpathOf(file)));
+    this.taint(realWritten, at);
   }
 
   /** The home directory as realpath spells it, checked as well as the configured one. */
@@ -722,6 +956,11 @@ export class ReadCheckObserver implements FileReadObserver {
   // -------------------------------------------------------------------------------------------
 
   private async onPostRead(event: FileReadHookEvent, hook: HookFields, at: number): Promise<void> {
+    if (hook.toolName === "Bash") {
+      await this.noteCopies(hook, hook.cwd ?? event.agentCwd, at).catch((error: unknown) => {
+        this.logger.debug({ err: error }, "read check: copy taint failed");
+      });
+    }
     const config = this.refreshLiveSnapshot();
     const pending = hook.toolUseId ? this.pending.get(hook.toolUseId) : undefined;
     if (hook.toolUseId) this.pending.delete(hook.toolUseId);
@@ -792,20 +1031,20 @@ export class ReadCheckObserver implements FileReadObserver {
     const { event, read, file, realPath, state } = input;
     const key = `${realPath}|${rangeKey(file.range)}`;
     state.judged.set(key, this.now());
-    const ineligible = await this.eligibility({
+    const eligibility = await this.eligibility({
       agentId: event.agentId,
       agentCwd: event.agentCwd,
       namedPath: file.path,
       realPath,
     });
-    if (ineligible) {
+    if (!eligibility.eligible) {
       state.judged.delete(key);
-      return this.countNotAsked(ineligible);
+      return this.countNotAsked(eligibility.reason);
     }
-    const slice = await this.shadowSlice(input);
-    if (!slice) {
+    const slice = await this.shadowSlice(input, eligibility.identity);
+    if (slice.kind !== "text") {
       state.judged.delete(key);
-      return this.countNotAsked("not-text");
+      return this.countNotAsked(slice.kind);
     }
     const tokens = input.contextTokens ?? 0;
     const asked = await this.ask({
@@ -871,24 +1110,34 @@ export class ReadCheckObserver implements FileReadObserver {
   }
 
   /**
-   * The range's text after the scope check passed. A `Read`: exactly what it loaded. A Bash read:
-   * the file's range read here from the eligible file, never the command's output, which could
-   * hold anything the line printed.
+   * The range's text after the scope check passed, read here from the file the checks saw. A Bash
+   * read sends it, never the command's output, which could hold anything the line printed. A
+   * `Read` sends what it loaded only when that is the same text: a path that pointed elsewhere
+   * when the tool opened it (a swapped symlink, `~` spelled two ways) sends nothing.
    */
-  private async shadowSlice(input: ShadowReadInput): Promise<RangeText | null> {
+  private async shadowSlice(
+    input: ShadowReadInput,
+    identity: ReadCheckFileIdentity,
+  ): Promise<SliceResult> {
     const { measured } = input;
     if (input.read.tool === "Bash" || measured?.text == null) {
-      return this.loadRange(input.realPath, input.file, input.read.filters);
+      const loaded = await this.loadRange(input.realPath, identity, input.file, input.read.filters);
+      return loaded.kind === "text" ? loaded : { kind: loaded.kind };
     }
     const text = measured.text;
     const lines = measured.lines;
     const totalLines = lines?.total ?? text.split("\n").length;
-    return {
-      text,
-      firstLine: lines?.first ?? 1,
-      lastLine: lines ? lines.first + lines.count - 1 : totalLines,
-      totalLines,
-    };
+    const firstLine = lines?.first ?? 1;
+    const lastLine = lines ? lines.first + lines.count - 1 : totalLines;
+    const onDisk = await this.loadRange(
+      input.realPath,
+      identity,
+      { path: input.file.path, range: { kind: "lines", first: firstLine, last: lastLine } },
+      [],
+    );
+    if (onDisk.kind !== "text") return { kind: onDisk.kind };
+    if (!sameText(onDisk.text, text)) return { kind: "changed" };
+    return { kind: "text", text, firstLine, lastLine, totalLines };
   }
 
   /** Builds the state and asks. Null when nothing came back worth a record. */
@@ -951,21 +1200,23 @@ export class ReadCheckObserver implements FileReadObserver {
 
   private async loadRange(
     realPath: string,
+    identity: ReadCheckFileIdentity,
     file: RecognizedFile,
     filters: RecognizedRead["filters"],
-  ): Promise<RangeText | null> {
+  ): Promise<SliceResult> {
     let buffer: Buffer;
     try {
-      buffer = await this.fs.readFile(realPath);
+      buffer = await this.fs.readFile(realPath, identity);
     } catch {
-      return null;
+      return { kind: "changed" };
     }
     // Only the head of a large file is read: a range from its end would be the wrong text.
     const fromEnd = file.range.kind === "last-lines" || file.range.kind === "last-bytes";
-    if (fromEnd && buffer.length >= MAX_OBSERVER_FILE_BYTES) return null;
-    if (!hasTextBody(buffer)) return null;
+    if (fromEnd && buffer.length >= MAX_OBSERVER_FILE_BYTES) return { kind: "not-text" };
+    if (!hasTextBody(buffer)) return { kind: "not-text" };
     const slice = sliceRange(buffer.toString("utf8"), file.range);
-    return filters.length > 0 ? { ...slice, text: applyFilters(slice.text, filters) } : slice;
+    const text = filters.length > 0 ? applyFilters(slice.text, filters) : slice.text;
+    return { kind: "text", ...slice, text };
   }
 
   private noteRead(
@@ -1192,15 +1443,16 @@ export class ReadCheckObserver implements FileReadObserver {
     if (!stat?.isFile() || this.maxReadTokens(stat.size, file) < config.liveMinTokens) {
       return null;
     }
-    const ineligible = await this.eligibility({
+    const eligibility = await this.eligibility({
       agentId: event.agentId,
       agentCwd: event.agentCwd,
       namedPath: file.path,
       realPath,
     });
-    if (ineligible) return null;
-    const slice = await this.loadRange(realPath, file, read.filters);
-    if (!slice) return null;
+    if (!eligibility.eligible) return null;
+    const loaded = await this.loadRange(realPath, eligibility.identity, file, read.filters);
+    if (loaded.kind !== "text") return null;
+    const slice: RangeText = loaded;
     const characters = read.tool === "Read" ? readToolCharacters(slice.text) : slice.text.length;
     const tokens = estimateReadTokens(characters);
     if (tokens < config.liveMinTokens) return null;

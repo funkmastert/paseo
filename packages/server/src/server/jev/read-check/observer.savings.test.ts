@@ -8,6 +8,7 @@ import { resolveJevConfig } from "../config.js";
 import { createTestJevService } from "../fake.js";
 import { ReadCheckObserver } from "./observer.js";
 import type { ReadCheckTimelineRow } from "./validation.js";
+import { initGitRepo } from "../test-utils/git-repo.js";
 
 /** The observer over the service's real savings ledger, not a recording double. */
 
@@ -29,7 +30,7 @@ beforeEach(() => {
   root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "read-check-savings-")));
   repo = path.join(root, "projects", "app");
   paseoHome = path.join(root, ".paseo");
-  mkdirSync(path.join(repo, ".git"), { recursive: true });
+  initGitRepo(repo);
   mkdirSync(paseoHome, { recursive: true });
   rows = [];
 });

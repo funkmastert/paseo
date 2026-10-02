@@ -19,7 +19,7 @@ export interface JevSecretValue {
 
 /** A secret-shaped name, matched against the whole name and against its last segment. */
 export const SECRET_NAME_RE =
-  /^(?:secret|token|passw(?:or)?d|pwd|pass|api[_-]?key|key|auth|credentials?|private[_-]?key|pat|dsn)$/i;
+  /^(?:secret|token|passw(?:or)?d|pwd|pass|api[_-]?key|key|auth|credentials?|private[_-]?key|pat|dsn|salt|signing|private)$/i;
 /** The same words closing a run-together segment: `AUTHTOKEN`, `PGPASSWORD`, `SSHPASS`. */
 const SECRET_SUFFIX_RE =
   /(?:secret|token|passw(?:or)?d|passphrase|pwd|pass|key|auth|credentials?)$/i;
@@ -28,6 +28,12 @@ const MIN_SECRET_LENGTH = 8;
 /** A PIN or a one-time code is short: `ADMIN_PIN=482913`. */
 const SHORT_SECRET_NAME_RE = /^(?:pin|passcode|otp)$/i;
 const MIN_SHORT_SECRET_LENGTH = 4;
+/**
+ * Short values that are not secrets, for the rules that take values from 4 characters: a
+ * placeholder, a boolean or null, a variable, a mask.
+ */
+const PLACEHOLDER_VALUE_RE =
+  /^(?:true|false|null|none|nil|undefined|yes|no|on|off|empty|\*+|x+|\.{3,}|\$\{?[A-Za-z_]\w*\}?|<[^>]*>|\[redacted:[a-z-]+\])$/i;
 /** Names whose value is a `user:password` pair: `SMTP_LOGIN=ops:Hunter22pw`. */
 const PAIR_NAME_RE = /^(?:login|creds?|userpass|basic(?:auth)?)$/i;
 /**
@@ -60,6 +66,8 @@ export function isSecretName(name: string): boolean {
   if (SECRET_NAME_RE.test(lastSegment) || SECRET_SUFFIX_RE.test(lastSegment)) return true;
   const lastWord = LAST_CAMEL_WORD_RE.exec(lastSegment)?.[0] ?? "";
   if (SECRET_NAME_RE.test(lastWord)) return true;
+  // A service-account key's id names the key: `private_key_id`.
+  if (/private[_-]?key[_-]?id$/i.test(name)) return true;
   return /url$/i.test(name) && /database|dsn/i.test(name);
 }
 
@@ -164,7 +172,7 @@ const WEBHOOK_RE =
   /(?:hooks\.slack\.com\/(?:services|workflows|triggers)|discord(?:app)?\.com\/api\/webhooks)\/([A-Za-z0-9_/-]{16,})/gi;
 const JWT_RE = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/gi;
 const USERINFO_RE =
-  /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/([^\s/?#@:"'<>\\]{1,256}):([^\s/?#@"'<>\\]{1,256})@/gi;
+  /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/([^\s/?#@:"'<>\\]{0,256}):([^\s/?#@"'<>\\]{1,256})@/gi;
 /** A name and its separator; the value is read by `assignedValue`. */
 const ASSIGNMENT_NAME_RE =
   /(?<![\w.$-])\\?["']?([A-Za-z_][\w.-]{0,63})\\?["']?[ \t]{0,16}([:=])[ \t]{0,16}/g;
@@ -193,6 +201,61 @@ const NOT_SECRET_ARGUMENT_RE =
  */
 const PASSWORD_COMMAND_RE =
   /(?<![\w./-])(?:(mysql(?:dump|admin|import|show|check|pump)?|mariadb(?:-dump|-admin)?)|sshpass|mongo(?:sh|dump|restore|import|export)?|(?:docker|podman|nerdctl|buildah|skopeo|oras)[ \t]{1,16}login)(?![\w.-])/g;
+/**
+ * Commands whose option takes a `user:password` pair: curl's `-u`/`--user`/`--proxy-user` (also
+ * inside a cluster, `-sSu`), HTTPie's and xh's `-a`/`--auth`. The password half goes; a value with
+ * no password (`-u sk_live_…:`) is a token as the user, and goes whole.
+ */
+const PAIR_COMMAND_RULES: readonly CommandCredentialRule[] = [
+  {
+    commands: /(?<![\w./-])curl(?![\w.-])/g,
+    flag: /(?<!\S)(?:--(?:proxy-)?user(?![\w-])|-[A-Za-z]{0,16}?[uU])/g,
+    attached: true,
+    pair: true,
+  },
+  {
+    commands: /(?<![\w./-])(?:https?|xh|xhs)(?![\w.:/-])/g,
+    flag: /(?<!\S)(?:--auth(?![\w-])|-[A-Za-z]{0,16}?a)/g,
+    attached: true,
+    pair: true,
+  },
+  {
+    commands: /(?<![\w./-])redis-cli(?![\w.-])/g,
+    flag: /(?<!\S)-a(?![\w-])/g,
+    attached: false,
+    pair: false,
+  },
+  {
+    commands:
+      /(?<![\w./-])ldap(?:search|modify|add|delete|passwd|compare|whoami|exop|modrdn)(?![\w.-])/g,
+    flag: /(?<!\S)-[wy](?![\w-])/g,
+    attached: false,
+    pair: false,
+  },
+];
+
+interface CommandCredentialRule {
+  commands: RegExp;
+  flag: RegExp;
+  /** The value may follow the option with no gap: `-uadmin:pw`. */
+  attached: boolean;
+  /** The value is `user:password`. */
+  pair: boolean;
+}
+
+/** OpenSSL's `-passin pass:X`, `-passout pass:X`, `-pass pass:X`. */
+const OPENSSL_PASS_RE = /(?<![\w-])-pass(?:in|out)?[ \t]{1,16}\\?["']?pass:([^\s"'\\]{1,256})/g;
+/** `-H 'X-Api-Key: v'`, `--header "Cookie: …"`: a credential header's value, at any length. */
+const HEADER_FLAG_RE =
+  /(?<![\w-])(?:-H|--header)(?:=|[ \t]{1,16})\\?["']?([A-Za-z][A-Za-z0-9-]{0,63})[ \t]{0,16}:[ \t]{0,16}([^\r\n"'\\]{1,4096})/g;
+const CREDENTIAL_HEADER_RE = /^(?:(?:proxy-)?authorization|cookie|set-cookie)$/i;
+/** PHP's `define('DB_PASSWORD', '…')`: WordPress keeps its credentials and salts this way. */
+const PHP_DEFINE_RE =
+  /define[ \t]{0,16}\([ \t]{0,16}\\?["']([A-Za-z_]\w{0,63})\\?["'][ \t]{0,16},[ \t]{0,16}\\?(["'])((?:(?!\\?\2)[^\r\n]){1,4096})\\?\2/g;
+/** A crypt-style password hash: `.htpasswd`'s `$apr1$…`, bcrypt's `$2y$…`, sha512-crypt's `$6$…`. */
+const PASSWORD_HASH_RE =
+  /(?<![\w$])\$(?:apr1|2[abxy]?|1|5|6|y|argon2(?:id|i|d))\$[^\s:"'`,;]{8,256}/g;
+
 /** Where a command ends: a newline without a `\` continuation, `;`, `|` or `&`. */
 const COMMAND_END_RE = /(?<!\\)\r?\n|[;|&]/g;
 const SHORT_PASSWORD_FLAG_RE = /(?<!\S)-p/g;
@@ -315,6 +378,7 @@ function redactArgvContext(items: string[], ctx: WalkContext): string[] {
   flagSpans(joined, spans);
   argumentSpans(joined, spans);
   shortPasswordSpans(joined, spans);
+  commandCredentialSpans(joined, spans);
   if (spans.length === 0) return items;
   const offsets: number[] = [];
   let offset = 0;
@@ -473,6 +537,11 @@ function redactText(text: string, ctx: WalkContext): string {
   flagSpans(text, findings.secrets);
   argumentSpans(text, findings.secrets);
   shortPasswordSpans(text, findings.secrets);
+  commandCredentialSpans(text, findings.secrets);
+  suffixSpans(text, OPENSSL_PASS_RE, "argument", findings.secrets);
+  headerSpans(text, findings.secrets);
+  phpDefineSpans(text, findings.secrets);
+  wholeSpans(text, PASSWORD_HASH_RE, "hash", findings.secrets);
   entropySpans(text, findings.secrets);
   bareRunSpans(text, findings.secrets);
   exactSpans(text, ctx.secrets, findings.secrets);
@@ -600,10 +669,19 @@ function assignmentSpans(text: string, out: SecretSpan[]): void {
       base64ValueSpan(text, re.lastIndex, out);
       continue;
     }
-    const yamlLine =
-      match[2] === ":" && PASSPHRASE_NAME_RE.test(match[1]) && startsLine(text, match.index);
-    const value = yamlLine ? lineValue(text, re.lastIndex) : assignedValue(text, re.lastIndex);
-    if (value.end - value.start >= MIN_SECRET_LENGTH) out.push({ ...value, kind: "assignment" });
+    const passphrase = PASSPHRASE_NAME_RE.test(match[1]);
+    const yamlLine = match[2] === ":" && passphrase && startsLine(text, match.index);
+    // `NAME=value` runs to the end of the line: `ADMIN_PASSWORD=correct horse battery`,
+    // `DB_PASSWORD=hunter2 npm start`. A comparison (`token == x`) is not an assignment.
+    const envLine = match[2] === "=" && text[re.lastIndex] !== "=";
+    const value =
+      yamlLine || envLine ? lineValue(text, re.lastIndex) : assignedValue(text, re.lastIndex);
+    // A password set with `=` is often short: `PGPASSWORD=abc123 psql`.
+    const floor = envLine && passphrase ? MIN_SHORT_SECRET_LENGTH : MIN_SECRET_LENGTH;
+    const valueText = text.slice(value.start, value.end);
+    if (value.end - value.start >= floor && !PLACEHOLDER_VALUE_RE.test(valueText)) {
+      out.push({ ...value, kind: "assignment" });
+    }
     re.lastIndex = Math.max(re.lastIndex, value.end);
   }
 }
@@ -683,7 +761,8 @@ function flagSpans(text: string, out: SecretSpan[]): void {
     const value = argumentValue(text, re.lastIndex);
     if (!value) continue;
     re.lastIndex = Math.max(re.lastIndex, value.end);
-    if (isSecretArgument(text.slice(value.start, value.end)))
+    // An option names its value, so a short one is still the secret: `--password=hunter2`.
+    if (isSecretArgument(text.slice(value.start, value.end), MIN_SHORT_SECRET_LENGTH))
       out.push({ ...value, kind: "argument" });
   }
 }
@@ -714,8 +793,12 @@ function argumentValue(text: string, from: number): TextRange | null {
   return OPTION_AHEAD_RE.test(text) ? null : assignedValue(text, from);
 }
 
-function isSecretArgument(value: string): boolean {
-  return value.length >= MIN_SECRET_LENGTH && !NOT_SECRET_ARGUMENT_RE.test(value);
+function isSecretArgument(value: string, floor = MIN_SECRET_LENGTH): boolean {
+  return (
+    value.length >= floor &&
+    !NOT_SECRET_ARGUMENT_RE.test(value) &&
+    !PLACEHOLDER_VALUE_RE.test(value)
+  );
 }
 
 /**
@@ -744,6 +827,64 @@ function shortPasswordSpans(text: string, out: SecretSpan[]): void {
       if (value.end > value.start) out.push({ ...value, kind: "argument" });
     }
     commands.lastIndex = Math.max(commands.lastIndex, end);
+  }
+}
+
+/**
+ * The table's options after their commands (`curl -u admin:pw`, `redis-cli -a pw`), within the
+ * command, as `shortPasswordSpans` reads `-p`.
+ */
+function commandCredentialSpans(text: string, out: SecretSpan[]): void {
+  for (const rule of PAIR_COMMAND_RULES) {
+    const commands = new RegExp(rule.commands);
+    const ends = new RegExp(COMMAND_END_RE);
+    const flags = new RegExp(rule.flag);
+    for (let command = commands.exec(text); command; command = commands.exec(text)) {
+      const from = commands.lastIndex;
+      ends.lastIndex = from;
+      const end = ends.exec(text)?.index ?? text.length;
+      const segment = text.slice(from, end);
+      flags.lastIndex = 0;
+      for (let flag = flags.exec(segment); flag; flag = flags.exec(segment)) {
+        let valueFrom = from + flags.lastIndex;
+        PASSWORD_FLAG_GAP_RE.lastIndex = valueFrom;
+        if (PASSWORD_FLAG_GAP_RE.test(text)) valueFrom = PASSWORD_FLAG_GAP_RE.lastIndex;
+        else if (!rule.attached) continue;
+        const value = assignedValue(text, valueFrom);
+        if (value.end <= value.start) continue;
+        const span = rule.pair ? pairSecret(text, value) : value;
+        if (span) out.push({ ...span, kind: "argument" });
+      }
+      commands.lastIndex = Math.max(commands.lastIndex, end);
+    }
+  }
+}
+
+/** The password of a `user:password` value, or the whole value when it holds no password. */
+function pairSecret(text: string, value: TextRange): TextRange | null {
+  const colon = text.slice(value.start, value.end).indexOf(":");
+  if (colon === -1) return null;
+  const password = { start: value.start + colon + 1, end: value.end };
+  return password.end > password.start ? password : { start: value.start, end: value.end };
+}
+
+function headerSpans(text: string, out: SecretSpan[]): void {
+  for (const match of text.matchAll(HEADER_FLAG_RE)) {
+    const name = match[1];
+    if (!CREDENTIAL_HEADER_RE.test(name) && !isSecretName(name)) continue;
+    const { end } = rangeOf(match);
+    const value = match[2].replace(/[ \t]+$/, "");
+    const start = end - match[2].length;
+    if (value.length > 0) out.push({ start, end: start + value.length, kind: "argument" });
+  }
+}
+
+function phpDefineSpans(text: string, out: SecretSpan[]): void {
+  for (const match of text.matchAll(PHP_DEFINE_RE)) {
+    if (!isSecretName(match[1])) continue;
+    const { start } = rangeOf(match);
+    const valueStart = start + match[0].lastIndexOf(match[3]);
+    out.push({ start: valueStart, end: valueStart + match[3].length, kind: "assignment" });
   }
 }
 
