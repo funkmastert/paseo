@@ -1992,10 +1992,16 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         lastMessage: z.string().nullable().optional(),
         permission: AgentPermissionRequestPayloadSchema.nullable().optional(),
         guidance: z.string().optional(),
+        deliveredToAgentId: z
+          .string()
+          .optional()
+          .describe(
+            "Set when agentId had moved to another account: the agent the prompt went to. Use it from now on.",
+          ),
       },
     },
     async ({
-      agentId,
+      agentId: requestedAgentId,
       prompt,
       sessionMode,
       background = Boolean(callerAgentId),
@@ -2003,14 +2009,25 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     }) => {
       const shouldNotifyOnFinish = Boolean(callerAgentId && notifyOnFinish && background);
 
-      await sendPromptToAgent({
+      // A handle account failover retired delivers to where its conversation lives now, and
+      // everything after this (the finish watcher, the wait) follows the prompt there.
+      const { agentId } = await sendPromptToAgent({
         agentManager,
         agentStorage,
-        agentId,
+        agentId: requestedAgentId,
         prompt,
         sessionMode,
         logger: childLogger,
       });
+      const moved =
+        agentId === requestedAgentId
+          ? null
+          : {
+              deliveredToAgentId: agentId,
+              note:
+                `${requestedAgentId} moved to ${agentId} (account failover), so the prompt went ` +
+                `to ${agentId}. Address ${agentId} from now on.`,
+            };
 
       if (shouldNotifyOnFinish && callerAgentId) {
         setupFinishNotification({
@@ -2033,6 +2050,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           status: result.status,
           lastMessage: result.lastMessage,
           permission: sanitizePermissionRequest(result.permission),
+          ...(moved ? { deliveredToAgentId: moved.deliveredToAgentId, guidance: moved.note } : {}),
         };
         const validJson = ensureValidJson(responseData);
 
@@ -2047,17 +2065,17 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       // Re-fetch snapshot since the state may have changed
       const currentSnapshot = agentManager.getAgent(agentId);
 
+      const notifyGuidance = shouldNotifyOnFinish
+        ? "You will get notified when the prompted agent finishes, errors, or needs permission. Do not poll for status; continue with other work until the notification arrives."
+        : null;
+      const guidance = [moved?.note, notifyGuidance].filter(Boolean).join(" ");
       const responseData = {
         success: true,
         status: currentSnapshot?.lifecycle ?? "idle",
         lastMessage: null,
         permission: null,
-        ...(shouldNotifyOnFinish
-          ? {
-              guidance:
-                "You will get notified when the prompted agent finishes, errors, or needs permission. Do not poll for status; continue with other work until the notification arrives.",
-            }
-          : {}),
+        ...(moved ? { deliveredToAgentId: moved.deliveredToAgentId } : {}),
+        ...(guidance ? { guidance } : {}),
       };
       const validJson = ensureValidJson(responseData);
 
