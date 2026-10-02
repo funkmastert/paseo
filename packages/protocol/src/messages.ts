@@ -96,6 +96,10 @@ import {
   JevDecisionsListResponseSchema,
   JevAskRequestSchema,
   JevAskResponseSchema,
+  JevSavingsSummaryRequestSchema,
+  JevSavingsSummaryResponseSchema,
+  JevSavingsEventsRequestSchema,
+  JevSavingsEventsResponseSchema,
 } from "./jev/rpc-schemas.js";
 import {
   PaseoConfigRawSchema,
@@ -3247,6 +3251,9 @@ export const WorkspaceCreateRequestSchema = z.object({
   requestId: z.string(),
   // Optional user-set title applied to the created workspace.
   title: z.string().optional(),
+  // The agent the request is made for (a CLI run under PASEO_AGENT_ID). An agent's title is
+  // one Paseo may refresh later; a title without it is a person's and is never auto-changed.
+  callerAgentId: z.string().optional(),
   // Optional prompt context for workspace-level name/branch generation.
   firstAgentContext: FirstAgentContextSchema.optional(),
   source: z.discriminatedUnion("kind", [
@@ -3876,6 +3883,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   JevScopeCheckRequestSchema,
   JevDecisionsListRequestSchema,
   JevAskRequestSchema,
+  JevSavingsSummaryRequestSchema,
+  JevSavingsEventsRequestSchema,
   ResumeAgentRequestMessageSchema,
   ImportAgentRequestMessageSchema,
   RefreshAgentRequestMessageSchema,
@@ -4347,6 +4356,8 @@ export const ServerInfoStatusPayloadSchema = z
         jev: z.boolean().optional(),
         // COMPAT(jevAsk): added in v0.8.x, remove gate after 2027-03-29.
         jevAsk: z.boolean().optional(),
+        // COMPAT(jevSavings): added in v0.8.x, remove gate after 2027-03-30.
+        jevSavings: z.boolean().optional(),
       })
       .optional(),
   })
@@ -7575,6 +7586,8 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   JevScopeCheckResponseSchema,
   JevDecisionsListResponseSchema,
   JevAskResponseSchema,
+  JevSavingsSummaryResponseSchema,
+  JevSavingsEventsResponseSchema,
   ListCommandsResponseSchema,
   ListTerminalsResponseSchema,
   TerminalsChangedSchema,

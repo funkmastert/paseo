@@ -269,6 +269,7 @@ describe("parseWindowsProcessJson", () => {
       cpuSeconds: 360,
       command:
         '"C:\\Program Files\\Java\\bin\\java.exe" -Xmx4g org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.10',
+      name: "java.exe",
     });
     expect(parseClockSeconds(rows[1]?.etime ?? "")).toBe(90_061);
   });
@@ -307,6 +308,7 @@ describe("parseWindowsProcessJson", () => {
         etime: "00:10",
         cpuSeconds: 1,
         command: "a.exe --x",
+        name: "a.exe",
       },
     ]);
   });

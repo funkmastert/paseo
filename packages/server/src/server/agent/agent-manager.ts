@@ -482,6 +482,13 @@ export interface WorkspaceTitleTrackerAgentSummary {
   lastActivityAt: string | null;
 }
 
+/** What an agent was asked and last answered; see getWorkspaceTitleConversation. */
+export interface WorkspaceTitleConversation {
+  firstUserMessage: string | null;
+  recentUserMessages: string[];
+  lastAssistantMessage: string | null;
+}
+
 /**
  * Lean per-agent view for AgentLeaderCompactionMonitor's sweep. `busy` has the done janitor's
  * meaning; the monitor only ever starts a turn when it is false and `lifecycle` is idle.
@@ -1953,6 +1960,31 @@ export class AgentManager {
       lastActivitySummary: agent.lastActivitySummary ?? null,
       lastActivityAt: this.lastActivityAtOf(agent),
     }));
+  }
+
+  /**
+   * What an agent was asked and last said, for feature 17's workspace title refresh: the first
+   * and the newest few user messages from the live timeline (empty after a restart until the
+   * agent's next turn), and the last assistant reply from either store.
+   */
+  async getWorkspaceTitleConversation(
+    agentId: string,
+    recentUserMessageCount: number,
+  ): Promise<WorkspaceTitleConversation> {
+    if (!this.agents.has(agentId)) {
+      return { firstUserMessage: null, recentUserMessages: [], lastAssistantMessage: null };
+    }
+    const userMessages: string[] = [];
+    for (const item of this.timelineStore.getItems(agentId)) {
+      if (item.type !== "user_message") continue;
+      const text = item.text.trim();
+      if (text) userMessages.push(text);
+    }
+    return {
+      firstUserMessage: userMessages[0] ?? null,
+      recentUserMessages: userMessages.slice(-recentUserMessageCount),
+      lastAssistantMessage: await this.getLastAssistantMessageFromStores(agentId),
+    };
   }
 
   /** The newest activity timestamp the manager holds for an agent, or null if none parses. */

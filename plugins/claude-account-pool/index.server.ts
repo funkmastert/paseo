@@ -2,6 +2,7 @@ import type { PluginBeforeRequests, PluginHookContext, PluginServerContext } fro
 import { createAccountIdentity } from "./server/account-identity";
 import { startClassifierToolServer, type ClassifierToolServer } from "./server/classifier-tool";
 import { echoed, echoedList } from "./server/echo";
+import { CE_PLUGIN_ID, createCompoundPolicyRouter, type CompoundPolicyEpisode, type ProviderEntryShape } from "./server/compound-policy";
 import { createHealthTracker } from "./server/health";
 import { createJevAvailability, jevToolsWorldFor, type JevAvailability } from "./server/jev-availability";
 import { fetchSpawnHint, type SpawnHint } from "./server/jev-hint";
@@ -20,7 +21,7 @@ import { classifierInputFor, createRoleRouter, type RoleCreateRouter } from "./s
 import { createProviderIdCache, createRouter, type AgentCreateRouter, type ProviderIdCache } from "./server/router";
 import { createUsagePoller, type FetchUsageFn, type UsagePoller } from "./server/usage-poll";
 import { roleModelPolicyRpc } from "./shared/role-policy-rpc";
-import { AGENT_TYPE_LABEL, catalogFamilies } from "./shared/role-policy-schema";
+import { AGENT_TYPE_LABEL, catalogFamilies, DEFAULT_POLICY } from "./shared/role-policy-schema";
 
 function isPoolProvider(pool: PoolCache, providerId: string): boolean {
   const { pool: resolved } = pool.get();
@@ -428,6 +429,29 @@ export default function contribute(server: PluginServerContext) {
     return routed ?? (token === undefined ? undefined : request);
   });
 
+  // Runs after the account router on purpose: whether the leader's profile can run the
+  // compound-engineering skills depends on the account it was actually placed on, and the account
+  // router may have just moved it. See server/compound-policy.ts.
+  const compoundPolicyOptions = {
+    policy: () => policyCache?.get() ?? DEFAULT_POLICY,
+    isPoolProvider: (providerId: string) => (poolCache ? isPoolProvider(poolCache, providerId) : false),
+    onPluginMissing: (episode: CompoundPolicyEpisode) =>
+      console.error(
+        `[claude-account-pool] compound-policy: leader on "${episode.providerId}" runs with Claude profile ${episode.configDir}, which cannot run the compound-engineering skills (${episode.reason}); injected the policy with a degraded-mode notice and labelled it ce-plugin-missing — enable ${CE_PLUGIN_ID} in that profile`,
+      ),
+    onError: (error: unknown) =>
+      console.error("[claude-account-pool] compound-policy: WARNING — enforcing the compound-engineering policy failed; the create went through without it", error),
+  };
+  const unregisterCompoundPolicy = server.before("agent.create", async (input, context) => {
+    await ensureStarted(context.paseo);
+    const routeCompoundPolicy = createCompoundPolicyRouter({
+      ...compoundPolicyOptions,
+      providerEntries: async () =>
+        (await context.paseo.config.get()).config.providers as Record<string, ProviderEntryShape> | undefined,
+    });
+    return routeCompoundPolicy(input);
+  });
+
   /**
    * Starts the agent-facing classifier tool the first time a create sees it
    * enabled, and not before.
@@ -566,6 +590,7 @@ export default function contribute(server: PluginServerContext) {
   return () => {
     unregisterRoleCreate();
     unregisterCreate();
+    unregisterCompoundPolicy();
     unregisterClassifierTool();
     unregisterTurnEnded();
     unregisterPermissionRequested();

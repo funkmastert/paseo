@@ -1,7 +1,10 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { PluginBeforeRequests, PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import contribute from "./index.server";
+import { CE_PLUGIN_ID, COMPOUND_POLICY_LABEL, COMPOUND_POLICY_NOTICE } from "./server/compound-policy";
 import { DECISION_TOKEN_LABEL } from "./server/decision-log";
 
 type BeforeHandler = (
@@ -785,5 +788,81 @@ describe("contribute (index.server)", () => {
         h.done();
       });
     });
+  });
+});
+
+/**
+ * The compound-engineering policy through the whole create chain, the way the daemon runs it:
+ * role hook, account hook, then the policy hook, against Claude profiles on disk.
+ */
+describe("contribute (index.server) — compound-engineering policy for leaders", () => {
+  function profileDir(withCe: boolean): string {
+    const dir = mkdtempSync(join(tmpdir(), "ce-profile-"));
+    mkdirSync(join(dir, "plugins"));
+    writeFileSync(join(dir, "settings.json"), JSON.stringify(withCe ? { enabledPlugins: { [CE_PLUGIN_ID]: true } } : {}));
+    writeFileSync(
+      join(dir, "plugins", "installed_plugins.json"),
+      JSON.stringify({ version: 2, plugins: withCe ? { [CE_PLUGIN_ID]: [{ scope: "user", version: "3.19.0" }] } : {} }),
+    );
+    return dir;
+  }
+
+  async function run(withCeOnLeader: boolean, request: Record<string, unknown>) {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logs = vi.spyOn(console, "log").mockImplementation(() => {});
+    const leaderDir = profileDir(withCeOnLeader);
+    const workerDir = profileDir(true);
+    const { server, dispatchBefore } = fakeServer();
+    const cleanup = contribute(server);
+    const { paseo } = fakePaseo({
+      providers: {
+        claude: { env: { CLAUDE_CONFIG_DIR: leaderDir }, params: { accountPool: { role: "leader", priority: 1 } } },
+        "claude-personal": {
+          extends: "claude",
+          env: { CLAUDE_CONFIG_DIR: workerDir },
+          params: { accountPool: { role: "worker", priority: 1 } },
+        },
+      },
+    });
+    try {
+      const result = await dispatchBefore(
+        "agent.create",
+        request as unknown as PluginBeforeRequests["agent.create"],
+        fakeContext(paseo),
+      );
+      return { result, logged: errors.mock.calls.map((call) => String(call[0])).join("\n") };
+    } finally {
+      cleanup();
+      errors.mockRestore();
+      logs.mockRestore();
+      rmSync(leaderDir, { recursive: true, force: true });
+      rmSync(workerDir, { recursive: true, force: true });
+    }
+  }
+
+  const appendOf = (result: PluginBeforeRequests["agent.create"]) =>
+    (result.config.providerOptions as { appendSystemPrompt?: string } | undefined)?.appendSystemPrompt;
+
+  it("injects the policy into a root leader whose profile has the CE plugin", async () => {
+    const { result } = await run(true, { config: { provider: "claude", cwd: "/tmp" }, labels: {} });
+    expect(result.labels?.[COMPOUND_POLICY_LABEL]).toBe("injected");
+    expect(appendOf(result)).toContain(COMPOUND_POLICY_NOTICE);
+  });
+
+  it("flags and logs a root leader whose profile lacks the CE plugin, without refusing it", async () => {
+    const { result, logged } = await run(false, { config: { provider: "claude", cwd: "/tmp" }, labels: {} });
+    expect(result.labels?.[COMPOUND_POLICY_LABEL]).toBe("ce-plugin-missing");
+    expect(appendOf(result)).toContain("NOT enabled in this agent's Claude profile");
+    expect(logged).toContain("compound-policy: leader on \"claude\"");
+  });
+
+  it("leaves a spawned worker child without the policy", async () => {
+    const { result } = await run(true, {
+      config: { provider: "claude-personal", cwd: "/tmp" },
+      callerAgentId: "leader-1",
+      labels: { "paseo.agent-type": "worker" },
+    });
+    expect(result.labels?.[COMPOUND_POLICY_LABEL]).toBeUndefined();
+    expect(appendOf(result) ?? "").not.toContain("COMPOUND-ENGINEERING");
   });
 });

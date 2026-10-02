@@ -1,4 +1,5 @@
 import { appendFileSync, mkdirSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createPaseoDaemon } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
@@ -10,6 +11,8 @@ import {
   consumePreviousShutdownReceipt,
   ShutdownRecorder,
 } from "./daemon-vitals/shutdown-receipt.js";
+import { readDaemonVitals } from "./daemon-vitals/vitals-file.js";
+import { describePreviousShutdown } from "./daemon-vitals/shutdown-reason.js";
 
 process.title = "Paseo Daemon";
 
@@ -144,6 +147,13 @@ async function main() {
   // docs/daemon-vitals.md.
   const receiptEnabled = config.daemonVitals?.shutdownReceipt !== false;
   let shutdownRecorder: ShutdownRecorder | null = null;
+  // Read before daemon vitals starts and overwrites the heartbeat file: it is the only cheap way
+  // to tell "no receipt because the Mac rebooted" from "no receipt because it crashed hard".
+  let previousShutdownInfo = describePreviousShutdown({
+    previous: { status: "none" },
+    systemBootAt: null,
+    lastHeartbeatAt: null,
+  });
   if (receiptEnabled) {
     const previous = consumePreviousShutdownReceipt(paseoHome);
     if (previous.status === "receipt") {
@@ -165,6 +175,12 @@ async function main() {
         "Previous daemon run left no shutdown receipt (killed, crashed hard, or first run)",
       );
     }
+    const vitals = readDaemonVitals(paseoHome);
+    previousShutdownInfo = describePreviousShutdown({
+      previous,
+      systemBootAt: new Date(Date.now() - os.uptime() * 1000),
+      lastHeartbeatAt: vitals.status === "ok" ? new Date(vitals.file.updatedAtMs) : null,
+    });
   }
 
   const writeReceipt = (
@@ -371,6 +387,7 @@ async function main() {
     daemon = await createPaseoDaemon(
       {
         ...config,
+        previousShutdownInfo,
         onLifecycleIntent: handleLifecycleIntent,
       },
       logger,

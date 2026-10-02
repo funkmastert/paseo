@@ -830,6 +830,7 @@ describe("JevService: ledger, audit, status", () => {
     expect(status.features.agentTools.shadow).toBe(false);
     expect(status.features.askJev.shadow).toBe(false);
     expect(status.features.awayReply.shadow).toBe(true);
+    expect(status.features.titleRefresh.shadow).toBe(false);
     expect(Object.keys(status.lanes).sort()).toEqual(["agentTools", "control", "interactive"]);
     const everyFeature = Object.keys(JEV_FEATURE_LANES).sort();
     expect(everyFeature).toEqual([
@@ -841,6 +842,7 @@ describe("JevService: ledger, audit, status", () => {
       "remediationTriage",
       "spawnHint",
       "stallJudgment",
+      "titleRefresh",
     ]);
     expect(Object.keys(status.features).sort()).toEqual(everyFeature);
     expect(Object.keys(status.todayByFeature).sort()).toEqual(everyFeature);

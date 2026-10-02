@@ -57,6 +57,26 @@ test("a rename through a real daemon records who named the workspace", async () 
       title: null,
       titleSource: "auto",
     });
+
+    // A title typed into the app's create form is a person's; the same request made for an
+    // agent (a CLI run under PASEO_AGENT_ID) is the agent's, which Paseo may refresh later.
+    const typed = await client.createWorkspace({
+      source: { kind: "directory", path: projectRoot },
+      title: "Typed by a person",
+    });
+    expect(await readWorkspace(daemon.paseoHome, typed.workspace!.id)).toMatchObject({
+      title: "Typed by a person",
+      titleSource: "manual",
+    });
+    const agentNamed = await client.createWorkspace({
+      source: { kind: "directory", path: projectRoot },
+      title: "Named by an agent",
+      callerAgentId: "agent-fake-do-not-use",
+    });
+    expect(await readWorkspace(daemon.paseoHome, agentNamed.workspace!.id)).toMatchObject({
+      title: "Named by an agent",
+      titleSource: "auto",
+    });
   } finally {
     await client.close().catch(() => undefined);
     await daemon.close();

@@ -57,4 +57,32 @@ describe("buildRestartRecoveryStripModel", () => {
     expect(model?.open.map((candidate) => candidate.agentId)).toEqual(["a", "b", "c"]);
     expect(model?.resumableCount).toBe(2);
   });
+
+  it("leaves an already-archived entry out of the list and the count", () => {
+    const model = buildRestartRecoveryStripModel(
+      plan([
+        entry({ agentId: "a" }),
+        entry({ agentId: "b", state: "not_attempted", detail: "archived at 2026-09-29T12:00:00Z" }),
+      ]),
+    );
+    expect(model?.open.map((candidate) => candidate.agentId)).toEqual(["a"]);
+    expect(model?.resumableCount).toBe(1);
+  });
+
+  it("carries mode, the reason and a time to show", () => {
+    const withReason: RestartRecoveryPlan = {
+      ...plan([entry({ agentId: "a" })]),
+      previousShutdownInfo: { reason: "bozeo_quit", at: "2026-09-29T20:49:10.000Z" },
+    };
+    const model = buildRestartRecoveryStripModel(withReason);
+    expect(model?.mode).toBe("plan");
+    expect(model?.reason).toBe("bozeo_quit");
+    expect(model?.at).toBe("2026-09-29T20:49:10.000Z");
+  });
+
+  it("falls back to capturedAt for the time, and null for an unknown reason", () => {
+    const model = buildRestartRecoveryStripModel(plan([entry({ agentId: "a" })]));
+    expect(model?.reason).toBeNull();
+    expect(model?.at).toBe("2026-09-23T10:01:00.000Z");
+  });
 });

@@ -4,6 +4,7 @@ import { formatAmount, resolveUsedPct } from "@/provider-usage/format";
 import type {
   ProviderUsage,
   ProviderUsageBalance,
+  ProviderUsageDetail,
   ProviderUsageTone,
   ProviderUsageWindow,
 } from "@/provider-usage/types";
@@ -56,11 +57,20 @@ interface AccountBudgetRowBase {
   usage: AccountUsageCount | null;
 }
 
+/** A line the provider reports beside its figures, e.g. a JEV feature and what it did today. */
+export interface AccountDetailViewModel {
+  id: string;
+  label: string;
+  value: string;
+  tone: ProviderUsageTone;
+}
+
 export type AccountBudgetRowViewModel =
   | (AccountBudgetRowBase & {
       kind: "available";
       windows: ProviderUsageWindow[];
       balances: AccountBalanceViewModel[];
+      details: AccountDetailViewModel[];
     })
   | (AccountBudgetRowBase & {
       kind: "unavailable";
@@ -246,7 +256,7 @@ export function resolveAccountLabel(
 
 // Who runs the account, for a provider whose own name does not say. The daemon reports "Codex";
 // a reader looking for the OpenAI account should not have to know that.
-const PROVIDER_VENDORS: Readonly<Record<string, string>> = { codex: "OpenAI" };
+const PROVIDER_VENDORS: Readonly<Record<string, string>> = { codex: "OpenAI", jev: "TypeSafe" };
 
 /** The account's name with its vendor named once: "OpenAI (Codex)", never "OpenAI (OpenAI Codex)". */
 function withVendor(providerId: string, label: string): string {
@@ -261,9 +271,12 @@ function formatPlan(planLabel: string | null | undefined): string | null {
 }
 
 // usd carries cents and thousands separators ("$4,658.87"); the other units keep the shared format.
+// Under ten cents it keeps up to four places: a day of JEV costs fractions of a cent, and "$0.00"
+// would say it cost nothing.
 function formatBalanceAmount(value: number, unit: ProviderUsageBalance["unit"]): string {
   if (unit !== "usd") return formatAmount(value, unit);
-  return `$${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const maximumFractionDigits = value > 0 && value < 0.1 ? 4 : 2;
+  return `$${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits })}`;
 }
 
 export function formatAccountBalance(balance: ProviderUsageBalance): AccountBalanceViewModel {
@@ -278,6 +291,25 @@ export function formatAccountBalance(balance: ProviderUsageBalance): AccountBala
   if (remaining != null) return { ...base, amount: amount(remaining), remaining: true };
   if (used != null) return { ...base, amount: amount(used), remaining: false };
   return { ...base, amount: "—", remaining: false };
+}
+
+/**
+ * Providers whose details belong on the strip. Every other provider's details (a plan's purchase
+ * date, a subscription status) stay on its full usage card: the strip has room for what decides
+ * where work goes. JEV's details are what its spend buys — each feature, whether it is live or in
+ * shadow, and what it did or would have done today — and a spent lane's warning, which is the only
+ * sign that JEV stopped for the day.
+ */
+const STRIP_DETAIL_PROVIDERS: ReadonlySet<string> = new Set(["jev"]);
+
+function stripDetails(usage: ProviderUsage): AccountDetailViewModel[] {
+  if (!STRIP_DETAIL_PROVIDERS.has(usage.providerId.toLowerCase())) return [];
+  return (usage.details ?? []).map((detail: ProviderUsageDetail) => ({
+    id: detail.id,
+    label: detail.label,
+    value: detail.value,
+    tone: detail.tone ?? "default",
+  }));
 }
 
 export function selectBudgetWindows(usage: ProviderUsage): ProviderUsageWindow[] {
@@ -296,6 +328,9 @@ const ICON_ALIASES: Readonly<Record<string, string>> = { "openai-api": "codex" }
 export function resolveAccountIcon(providerId: string, serverId: string): ProviderIconComponent {
   return getProviderIcon(ICON_ALIASES[providerId.toLowerCase()] ?? providerId, serverId);
 }
+
+// Accounts no agent runs on, so a worker count would only ever read zero.
+const ACCOUNTS_WITHOUT_AGENTS: ReadonlySet<string> = new Set(["jev"]);
 
 // Only a non-Claude account's reason is shown: its own fix ("Add OPENAI_API_KEY to …") is what a
 // reader needs, where a Claude row stays a bare "Usage unavailable".
@@ -330,7 +365,10 @@ function buildAccountRow(
     label: section === "other" ? withVendor(resolvedId, label) : label,
     plan: section === "other" ? formatPlan(usage?.planLabel) : null,
     role,
-    usage: context ? (context.usage.get(resolvedId) ?? { leaders: 0, workers: 0 }) : null,
+    usage:
+      context && !ACCOUNTS_WITHOUT_AGENTS.has(key)
+        ? (context.usage.get(resolvedId) ?? { leaders: 0, workers: 0 })
+        : null,
   };
   if (!usage || usage.status !== "available") {
     return { ...base, kind: "unavailable", ...unavailableReason(section, usage) };
@@ -342,6 +380,7 @@ function buildAccountRow(
     // provider names its own windows ("session"), and they are all it has.
     windows: section === "other" ? usage.windows : selectBudgetWindows(usage),
     balances: (usage.balances ?? []).map(formatAccountBalance),
+    details: stripDetails(usage),
   };
 }
 

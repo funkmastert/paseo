@@ -30,7 +30,8 @@ import { HistoryBackButton } from "@/components/navigation/history-back-button";
 import { buildNavigationHistoryReplayDeps } from "@/navigation/navigation-history-replay";
 import { canGoBack, goBack, useNavigationHistoryStore } from "@/stores/navigation-history-store";
 import { ScreenHeader } from "@/components/headers/screen-header";
-import { ScreenTitle } from "@/components/headers/screen-title";
+import { EditableWorkspaceHeaderTitle } from "@/screens/workspace/workspace-header-title";
+import type { RenamableWorkspace } from "@/hooks/use-workspace-rename";
 import { HostBadge } from "@/hosts/host-badge";
 import { useHostBadges } from "@/hosts/use-host-badges";
 import { Combobox, type ComboboxOption } from "@/components/ui/combobox";
@@ -971,6 +972,7 @@ function WorkspaceHeaderProjectRow({
 interface WorkspaceHeaderTitleBarProps {
   isLoading: boolean;
   title: string;
+  renamableWorkspace: RenamableWorkspace | null;
   subtitle: string;
   isSubtitleDistinct: boolean;
   currentBranchName: string | null;
@@ -1001,6 +1003,7 @@ interface WorkspaceHeaderTitleBarProps {
 function WorkspaceHeaderTitleBar({
   isLoading,
   title,
+  renamableWorkspace,
   subtitle,
   isSubtitleDistinct,
   currentBranchName,
@@ -1035,7 +1038,11 @@ function WorkspaceHeaderTitleBar({
         </View>
       ) : (
         <View style={styles.headerTitleTextGroup}>
-          <ScreenTitle testID="workspace-header-title">{title}</ScreenTitle>
+          <EditableWorkspaceHeaderTitle
+            testID="workspace-header-title"
+            title={title}
+            workspace={renamableWorkspace}
+          />
           <WorkspaceHeaderProjectRow
             subtitle={subtitle}
             isSubtitleDistinct={isSubtitleDistinct}
@@ -1790,6 +1797,18 @@ function WorkspaceScreenContent({
     workspace: workspaceDescriptor,
     checkoutState: workspaceHeaderCheckoutState,
   });
+  const renamableWorkspace = useMemo<RenamableWorkspace | null>(
+    () =>
+      workspaceDescriptor
+        ? {
+            serverId: normalizedServerId,
+            workspaceId: workspaceDescriptor.id,
+            name: workspaceDescriptor.name,
+            title: workspaceDescriptor.title ?? null,
+          }
+        : null,
+    [normalizedServerId, workspaceDescriptor],
+  );
   const hasPullRequest = useHasPullRequest({
     serverId: normalizedServerId,
     cwd: workspaceDirectory,
@@ -3946,6 +3965,7 @@ function WorkspaceScreenContent({
               <WorkspaceHeaderTitleBar
                 isLoading={isWorkspaceHeaderLoading}
                 title={workspaceHeaderTitle}
+                renamableWorkspace={renamableWorkspace}
                 subtitle={workspaceHeaderSubtitle}
                 isSubtitleDistinct={isWorkspaceHeaderSubtitleDistinct}
                 currentBranchName={currentBranchName}
@@ -3999,6 +4019,7 @@ function WorkspaceScreenContent({
       normalizedServerId,
       normalizedWorkspaceId,
       openImportSheet,
+      renamableWorkspace,
       showCreateBrowserTab,
       showScreenHeader,
       showWorkspaceSetup,

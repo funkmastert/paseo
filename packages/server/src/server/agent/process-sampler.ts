@@ -31,6 +31,11 @@ export interface ProcessSampleRow {
   /** Cumulative CPU seconds (`cputime`); undefined when the column didn't parse. */
   cpuSeconds?: number;
   command: string;
+  /**
+   * Windows only: the image name (`bash.exe`), from Win32_Process's `Name`. A command line there
+   * can start with a quoted path with spaces, so this is the reliable way to tell what runs.
+   */
+  name?: string;
 }
 
 const PS_ROW_FIELD_COUNT = 8;
@@ -143,6 +148,7 @@ function parseWindowsProcess(entry: unknown): ProcessSampleRow | undefined {
     cpuSeconds,
     // Protected processes hide their command line from a non-elevated caller.
     command: commandLine || name,
+    ...(name ? { name } : {}),
   };
 }
 

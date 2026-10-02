@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createTestJevService } from "../../server/jev/fake.js";
 import {
   createProviderUsageFetchers,
   deriveClaudeProviderEntries,
@@ -220,5 +221,35 @@ describe("createProviderUsageFetchers", () => {
       status: "available",
       planLabel: "Pro",
     });
+  });
+});
+
+describe("the JEV fetcher", () => {
+  it("reports nothing without readJevStatus, so a daemon without JEV has no row", async () => {
+    const jev = findFetcher(createProviderUsageFetchers({ logger: createLogger() }), "jev");
+    await expect(jev.fetchUsage()).resolves.toBeNull();
+  });
+
+  it("reads the status and decisions it is given on every fetch", async () => {
+    const jevService = createTestJevService();
+    try {
+      const readJevDecisions = vi.fn(() => []);
+      const jev = findFetcher(
+        createProviderUsageFetchers({
+          logger: createLogger(),
+          readJevStatus: () => jevService.status(),
+          readJevDecisions,
+        }),
+        "jev",
+      );
+      await expect(jev.fetchUsage()).resolves.toMatchObject({
+        providerId: "jev",
+        status: "available",
+        planLabel: "fake backend",
+      });
+      expect(readJevDecisions).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(jevService.paseoHome, { recursive: true, force: true });
+    }
   });
 });

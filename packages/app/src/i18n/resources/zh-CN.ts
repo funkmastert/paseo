@@ -1224,6 +1224,7 @@ export const zhCN: TranslationResources = {
         title: "重命名 workspace",
         submit: "重命名",
         invalidBranchName: "无效的分支名称",
+        autoPlaceholder: "自动命名",
       },
       toasts: {
         workspacePathUnavailable: "Workspace 路径不可用",
@@ -1863,6 +1864,8 @@ export const zhCN: TranslationResources = {
       accountLeadersHere: "负责人 {{count}}",
       accountWorkersHere: "工作者 {{count}}",
       accountBalanceLeft: "剩余 {{amount}}",
+      accountDetailsShow: "再显示 {{count}} 项",
+      accountDetailsHide: "收起",
       staleTitle: "未在更新",
       staleLastSynced: "上次同步 {{time}}",
       staleNeverSynced: "尚未同步",
@@ -1933,6 +1936,18 @@ export const zhCN: TranslationResources = {
     },
     notRestorable: "无法恢复",
     error: "恢复失败：{{error}}",
+    reason: {
+      bozeo_quit: "Bozeo 退出并停止了守护进程",
+      update: "守护进程为更新重启了",
+      crashed: "守护进程崩溃了",
+      power_loss: "Mac 重启或断电了",
+      cli_stop: "从命令行停止",
+    },
+    age: "始于 {{when}}",
+    ranFor: "运行了 {{duration}}",
+    keepRunningHint: "退出 Bozeo 会停止守护进程——打开“退出后保持守护进程运行”即可避免。",
+    resumeModeHint:
+      "Bozeo 可以自动恢复这样被中断的代理：在 config.json 中把 agents.restartRecovery.mode 设为 resume。",
     expand: "展开重启恢复",
     collapse: "收起重启恢复",
   },
@@ -2039,6 +2054,10 @@ export const zhCN: TranslationResources = {
     memoryTotalWarning: "记忆文件占用 {{tokens}} tokens，超过 {{limit}} 的建议上限。",
     memoryFileWarning: "{{path}} 为 {{tokens}} tokens，超过 {{limit}}。",
     reReadAdvice: "此会话每轮都会重新读取约 {{tokens}} tokens。新开会话并附上简短交接更省钱。",
+    jevTitle: "JEV 决策",
+    jevShadow: "影子模式",
+    jevDryRun: "试运行",
+    jevOlder: "更早的 {{count}} 条",
   },
   review: {
     comment: {

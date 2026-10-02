@@ -4,14 +4,17 @@ Routes agents across a pool of Claude accounts instead of a single provider
 entry, so an agent that would otherwise fail on a rate limit or credential
 problem can fall through to another account.
 
-Two `before("agent.create")` hooks run in order:
+Three `before("agent.create")` hooks run in order:
 
 1. The **role router** decides *which model* an agent runs, *how hard it
    thinks*, and *which tools it may use*, from the role policy.
 2. The **account router** decides *which pooled account* runs it.
+3. The **compound-engineering policy** puts the CE work policy into every
+   leader's system prompt and checks that the leader's account can run the CE
+   skills. See [Compound-engineering policy for leaders](#compound-engineering-policy-for-leaders).
 
-They never overlap: the role router never picks an account, and the account
-router never picks a model.
+They never overlap: the role router never picks an account, the account
+router never picks a model, and the policy hook changes neither.
 
 See [Where a spawn lands](#where-a-spawn-lands) for how the account router
 ranks accounts, and [Role policy](#role-policy) for the second half — model
@@ -1411,6 +1414,45 @@ what makes delegation the only option left.
 The leader role ships with no models and the `unrestricted` profile, so its
 model and tools change nothing until you configure them. The leader thinking
 level applies from install (see [Thinking level](#thinking-level)).
+
+### Compound-engineering policy for leaders
+
+Every leader works through the
+[compound-engineering](https://github.com/EveryInc/compound-engineering-plugin)
+loop: `ce-plan`, then `ce-work`, then `ce-code-review` before every push and
+PR, then `ce-commit`, then `ce-compound`. A bug starts with `ce-debug`. A
+leader's child briefs name the CE skill each child runs. The third create hook
+(`server/compound-policy.ts`) enforces this, and it runs after the account
+router so it sees the account the leader was actually placed on.
+
+- **Who counts as a leader.** The classifier's leader tier: a create with no
+  `callerAgentId` and no label giving it another role, or any create whose
+  `paseo.agent-type` or `paseo.agent-role` resolves to `leader`. Everything
+  else passes through byte-identical.
+- **The policy.** The hook appends the policy text to
+  `providerOptions.appendSystemPrompt`, after any restriction notice, and sets
+  the label `paseo.compound-policy=injected`. Only claude-family providers
+  get it, because `appendSystemPrompt` is a Claude option.
+- **The plugin check.** The hook resolves the account's `CLAUDE_CONFIG_DIR`
+  in this order: the create's env, then the provider entry and what it
+  `extends`, then the daemon's env, then `~/.claude`. In that profile it
+  requires two things:
+  - `settings.json` sets `enabledPlugins["compound-engineering@compound-engineering-plugin"]`
+    to `true`.
+  - `plugins/installed_plugins.json` has a `user`-scope install.
+
+  When either is missing, the leader is labelled
+  `paseo.compound-policy=ce-plugin-missing` and the daemon log says which
+  profile to fix. The leader still gets the policy, plus a note to read the
+  skills' `SKILL.md` files directly.
+- **Never refused, never blocking.** A root is never refused (see
+  [Root agents](#root-agents)), and a missing plugin is the operator's
+  problem to fix, not the leader's. Any failure in this hook passes the
+  create through unchanged and logs a warning.
+
+A leader can land on any pooled account when its own account is at a cap, so
+every pooled account's profile needs the plugin, not just the leader
+account's.
 
 ### A guessed role may pick a model. It may not take tools away.
 

@@ -11,6 +11,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { isAgentMcpRequestAuthorized } from "../auth.js";
+import { normalizeMcpProtocolVersionHeader } from "../mcp-protocol-compat.js";
 import { McpGatewayUpstreamUnavailableError, type McpGateway } from "./gateway.js";
 
 interface LoggerLike {
@@ -180,6 +181,7 @@ export function installMcpGatewayRoutes(
           void server.close();
         });
         await server.connect(transport);
+        normalizeMcpProtocolVersionHeader(req);
         await transport.handleRequest(
           req as unknown as IncomingMessage,
           res as unknown as ServerResponse,

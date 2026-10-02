@@ -7,6 +7,13 @@ interface ScreenTitleProps {
   numberOfLines?: number;
   testID?: string;
   style?: StyleProp<TextStyle>;
+  /**
+   * Makes the title itself the tap target (click-to-edit, e.g. the workspace header's inline
+   * rename). `Text.onPress` is a native RN capability, not a `<Pressable>` wrapping `<Text>`
+   * (docs/design.md §14 forbids that shape) — no separate wrapper, no extra hit-testing layer.
+   */
+  onPress?: () => void;
+  accessibilityLabel?: string;
 }
 
 /**
@@ -14,10 +21,24 @@ interface ScreenTitleProps {
  * color, responsive weight. Leading icons are siblings (HeaderToggleButton,
  * HeaderIconBadge) — never nested inside this component.
  */
-export function ScreenTitle({ children, numberOfLines = 1, testID, style }: ScreenTitleProps) {
+export function ScreenTitle({
+  children,
+  numberOfLines = 1,
+  testID,
+  style,
+  onPress,
+  accessibilityLabel,
+}: ScreenTitleProps) {
   const combinedStyle = useMemo(() => [styles.text, style], [style]);
   return (
-    <Text style={combinedStyle} numberOfLines={numberOfLines} testID={testID}>
+    <Text
+      style={combinedStyle}
+      numberOfLines={numberOfLines}
+      testID={testID}
+      onPress={onPress}
+      accessibilityRole={onPress ? "button" : undefined}
+      accessibilityLabel={accessibilityLabel}
+    >
       {children}
     </Text>
   );

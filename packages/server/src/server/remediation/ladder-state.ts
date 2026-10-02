@@ -27,6 +27,7 @@ const ObservationSchema = z.object({
   evidence: z.string().optional(),
   attempts: z.array(RemedyAttemptSchema).optional(),
   graceMs: z.number().optional(),
+  holdMs: z.number().optional(),
   level: z.enum(["notice", "alert", "urgent"]).optional(),
   escalation: z
     .object({

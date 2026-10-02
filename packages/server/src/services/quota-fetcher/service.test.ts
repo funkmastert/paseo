@@ -1906,3 +1906,86 @@ describe("KimiQuotaProvider usage windows", () => {
     ]);
   });
 });
+
+describe("live usage rows", () => {
+  it("reads a live fetcher on every list while other rows come from the cache", async () => {
+    let nowMs = Date.parse("2026-09-29T12:00:00.000Z");
+    let networkReads = 0;
+    let liveCalls = 0;
+    const network: ProviderUsageFetcher = {
+      providerId: "network",
+      displayName: "Network",
+      fetchUsage: async () => {
+        networkReads += 1;
+        return {
+          providerId: "network",
+          displayName: "Network",
+          status: "available",
+          planLabel: null,
+          windows: [{ id: "session", label: "Session", usedPct: networkReads }],
+        };
+      },
+    };
+    const live: ProviderUsageFetcher = {
+      providerId: "jev",
+      displayName: "JEV",
+      live: true,
+      fetchUsage: async () => {
+        liveCalls += 1;
+        return {
+          providerId: "jev",
+          displayName: "JEV",
+          status: "available",
+          planLabel: null,
+          windows: [],
+          balances: [
+            { id: "calls-today", label: "Calls today", used: liveCalls, unit: "requests" },
+          ],
+        };
+      },
+    };
+    const service = new ProviderUsageService({
+      logger: createLogger(),
+      now: () => nowMs,
+      fetchers: [network, live],
+    });
+
+    await service.listUsage();
+    nowMs += 60_000;
+    const second = await service.listUsage();
+
+    expect(networkReads).toBe(1);
+    expect(second.providers.map((provider) => provider.providerId)).toEqual(["network", "jev"]);
+    expect(findProvider(second, "jev").balances?.[0]?.used).toBe(2);
+    expect(findProvider(second, "network").windows[0]?.usedPct).toBe(1);
+  });
+
+  it("drops a live row that now reports nothing, and keeps the cache when a live read throws", async () => {
+    let mode: "row" | "none" | "throw" = "row";
+    const live: ProviderUsageFetcher = {
+      providerId: "jev",
+      displayName: "JEV",
+      live: true,
+      fetchUsage: async () => {
+        if (mode === "throw") throw new Error("boom");
+        if (mode === "none") return null;
+        return {
+          providerId: "jev",
+          displayName: "JEV",
+          status: "available",
+          planLabel: null,
+          windows: [],
+        };
+      },
+    };
+    const service = new ProviderUsageService({ logger: createLogger(), fetchers: [live] });
+    await service.listUsage();
+
+    mode = "throw";
+    expect((await service.listUsage()).providers.map((provider) => provider.providerId)).toEqual([
+      "jev",
+    ]);
+    mode = "none";
+    expect((await service.listUsage()).providers).toEqual([]);
+  });
+});
