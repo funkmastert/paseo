@@ -13,6 +13,11 @@
  * See docs/done-janitor.md#manual-pin-vs-auto-pin.
  */
 
+import { readFile } from "node:fs/promises";
+
+import { z } from "zod";
+
+import { writeJsonFileAtomic } from "./atomic-file.js";
 import type { DoneJanitorAgentSummary } from "./agent/agent-manager.js";
 import type {
   PersistedWorkspaceRecord,
@@ -24,11 +29,16 @@ import type {
  * How long after Tyler last used a workspace it still counts as active. `agents.autoPinRecentUseMinutes`
  * overrides it.
  */
-export const AUTO_PIN_RECENT_USE_MS = 2 * 60 * 60 * 1000;
+export const AUTO_PIN_RECENT_USE_MS = 24 * 60 * 60 * 1000;
 
 /** The longest an expired auto pin waits for a sweep. Short windows sweep at a quarter of theirs. */
 const AUTO_PIN_MAX_SWEEP_INTERVAL_MS = 60_000;
 const AUTO_PIN_MIN_SWEEP_INTERVAL_MS = 1_000;
+
+/** How long a burst of uses waits before the uses file is rewritten. */
+const AUTO_PIN_USES_PERSIST_DEBOUNCE_MS = 2_000;
+
+const PersistedUsesSchema = z.record(z.string(), z.number());
 
 type AgentWorkFields = Pick<
   DoneJanitorAgentSummary,
@@ -125,6 +135,13 @@ export interface AutoPinExpiryOptions {
     warn: (obj: object, msg?: string) => void;
   };
   now?: () => number;
+  /**
+   * Where uses are persisted, atomically and debounced, so a restart recovers them instead of
+   * giving every auto pin a fresh window from daemon start. Omit to keep uses in memory only
+   * (tests that don't care about restart durability).
+   */
+  usesFilePath?: string;
+  persistDebounceMs?: number;
 }
 
 /**
@@ -132,9 +149,9 @@ export interface AutoPinExpiryOptions {
  * and in the done janitor without either computing it.
  *
  * A use is a session start (the auto-pin trigger) or a client heartbeat that has an agent in the
- * workspace focused while the app is visible, stamped with that client's last input. Uses live in
- * memory. A restart forgets them, so every auto pin gets one fresh window from daemon start rather
- * than dropping something Tyler looked at a minute before.
+ * workspace focused while the app is visible, stamped with that client's last input. Uses are
+ * held in memory and mirrored to `usesFilePath`, debounced, so a restart recovers them instead of
+ * giving every auto pin a fresh window from daemon start.
  *
  * Expiry never re-pins. A workspace whose agent resumes stays unpinned until Tyler starts a new
  * session there.
@@ -145,9 +162,11 @@ export class AutoPinExpiry {
   private readonly readConfig: AutoPinExpiryOptions["readConfig"];
   private readonly logger: AutoPinExpiryOptions["logger"];
   private readonly now: () => number;
-  private readonly startedAtMs: number;
+  private readonly usesFilePath: string | undefined;
+  private readonly persistDebounceMs: number;
   private readonly lastUsedAtMs = new Map<string, number>();
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private sweeping: Promise<string[]> | null = null;
   private stopped = false;
 
@@ -157,7 +176,8 @@ export class AutoPinExpiry {
     this.readConfig = options.readConfig;
     this.logger = options.logger;
     this.now = options.now ?? Date.now;
-    this.startedAtMs = this.now();
+    this.usesFilePath = options.usesFilePath;
+    this.persistDebounceMs = options.persistDebounceMs ?? AUTO_PIN_USES_PERSIST_DEBOUNCE_MS;
   }
 
   /** Records that a client used `workspaceId` at `atMs` (clamped to now: client clocks drift). */
@@ -165,18 +185,68 @@ export class AutoPinExpiry {
     const usedAtMs = Math.min(Number.isFinite(atMs) ? atMs : this.now(), this.now());
     if (usedAtMs > (this.lastUsedAtMs.get(workspaceId) ?? Number.NEGATIVE_INFINITY)) {
       this.lastUsedAtMs.set(workspaceId, usedAtMs);
+      this.schedulePersist();
     }
   }
 
-  start(): void {
+  async start(): Promise<void> {
+    await this.loadPersistedUses();
     this.stopped = false;
     this.schedule();
   }
 
-  stop(): void {
+  /** Awaits a pending debounced write so a shutdown never races it off disk. */
+  async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+      await this.flushPersistedUses().catch((error) =>
+        this.logger.warn({ err: error }, "auto-pin uses: failed to flush on stop"),
+      );
+    }
+  }
+
+  /** Loads uses recorded before a restart. Missing or unreadable is treated as no prior uses. */
+  private async loadPersistedUses(): Promise<void> {
+    if (!this.usesFilePath) return;
+    let raw: string;
+    try {
+      raw = await readFile(this.usesFilePath, "utf8");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        this.logger.warn({ err: error }, "auto-pin uses: failed to read persisted uses");
+      }
+      return;
+    }
+    try {
+      const parsed = PersistedUsesSchema.parse(JSON.parse(raw));
+      for (const [workspaceId, usedAtMs] of Object.entries(parsed)) {
+        this.lastUsedAtMs.set(workspaceId, usedAtMs);
+      }
+    } catch (error) {
+      this.logger.warn({ err: error }, "auto-pin uses: failed to parse persisted uses");
+    }
+  }
+
+  private schedulePersist(): void {
+    if (!this.usesFilePath || this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.flushPersistedUses().catch((error) =>
+        this.logger.warn({ err: error }, "auto-pin uses: failed to persist"),
+      );
+    }, this.persistDebounceMs);
+    this.persistTimer.unref?.();
+  }
+
+  /** Writes the current uses to `usesFilePath`. Exposed so tests don't need to wait on a timer. */
+  async flushPersistedUses(): Promise<void> {
+    if (!this.usesFilePath) return;
+    await writeJsonFileAtomic(this.usesFilePath, Object.fromEntries(this.lastUsedAtMs));
   }
 
   /** Clears every auto pin whose workspace is finished; returns their ids. */
@@ -207,11 +277,15 @@ export class AutoPinExpiry {
     this.timer.unref?.();
   }
 
+  /**
+   * The newest moment this workspace counts as used: when it was first auto-pinned (always a
+   * use), or a later use the uses map knows of — restored from `usesFilePath` on a restart, so a
+   * relaunch never gives a workspace a fresher clock than it actually had.
+   */
   private lastUsedAt(workspace: PersistedWorkspaceRecord): number {
     const pinnedAtMs = workspace.pinnedAt ? Date.parse(workspace.pinnedAt) : Number.NaN;
     return Math.max(
-      this.startedAtMs,
-      Number.isFinite(pinnedAtMs) ? pinnedAtMs : this.startedAtMs,
+      Number.isFinite(pinnedAtMs) ? pinnedAtMs : Number.NEGATIVE_INFINITY,
       this.lastUsedAtMs.get(workspace.workspaceId) ?? Number.NEGATIVE_INFINITY,
     );
   }
@@ -250,9 +324,14 @@ export class AutoPinExpiry {
       }
     }
     // Uses matter only to a live auto pin; a new one starts from its own session start.
+    let pruned = false;
     for (const workspaceId of this.lastUsedAtMs.keys()) {
-      if (!autoPinned.has(workspaceId)) this.lastUsedAtMs.delete(workspaceId);
+      if (!autoPinned.has(workspaceId)) {
+        this.lastUsedAtMs.delete(workspaceId);
+        pruned = true;
+      }
     }
+    if (pruned) this.schedulePersist();
     if (expired.length > 0) {
       this.logger.info({ workspaceIds: expired }, "auto-pin expiry: cleared finished auto pins");
     }

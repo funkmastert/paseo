@@ -72,7 +72,7 @@ pass, the question, and worktree reclamation all skip it indefinitely.
 
 An **auto** pin lasts only while the workspace is active, and protects nothing from the janitor.
 Active means an agent in the workspace (by `workspaceId`) is running, initializing, mid-turn or
-waiting on a permission, or Tyler used the workspace in the last two hours
+waiting on a permission, or Tyler used the workspace in the last 24 hours
 (`AUTO_PIN_RECENT_USE_MS`). A use is a session start, or a client heartbeat with an agent in the
 workspace focused while the app is visible, dated by that client's last input.
 `isWorkspaceActiveForAutoPin` is that definition; the per-agent half, `describeAgentWork`, is also
@@ -84,8 +84,12 @@ Expiry leaves `updatedAt` alone: it is not activity, and the janitor's quiet clo
 
 The daemon expires the pin rather than each client computing it, so the phone, desktop, web, the
 CLI and the janitor cannot disagree, and a client build older than this rule still shows it.
-Uses are held in memory; a restart forgets them and gives every auto pin one fresh window from
-daemon start.
+Uses are held in memory and mirrored, atomically and debounced, to `$PASEO_HOME/auto-pin-uses.json`.
+A restart reloads that file before the first sweep, so a relaunch expires exactly what would have
+expired without it — never every auto pin at once from one shared fresh window. Before this file
+existed, a restart gave every auto pin the same fresh window from daemon start regardless of how
+long each had actually sat unused, so a relaunch could clear a batch of pins together that had
+each been idle for very different lengths of time.
 
 Expiry never re-pins. A workspace whose agent resumes — a leader's prompt, a nudge, the janitor's
 question — stays unpinned until Tyler starts a new session there. `isProtectivePin`
@@ -99,17 +103,20 @@ Auto-pinning only ever moves a workspace from unpinned to auto-pinned — it nev
 workspace that is already pinned, by either source.
 
 Auto-pin is human-attributable-create only: it fires for a `workspace.create.request` or a
-`create_agent_request` with no `callerAgentId` (both are only reachable over a client connection —
-app or CLI), never for the agent-scoped `create_workspace`/`create_agent` MCP tools, Hub
-executions, schedules, heartbeats, remediation, or restart recovery, which all create through the
-separate `"mcp"`-kind path. The known gap: an agent that runs the CLI with `PASEO_AGENT_ID` cleared
-looks identical to a human on the wire and gets auto-pinned too — harmless, since the pin expires
-once the workspace is finished.
+`create_agent_request` with no `callerAgentId` and no inherited `paseo.parent-agent-id` label (both
+request types are only reachable over a client connection — app or CLI), never for the
+agent-scoped `create_workspace`/`create_agent` MCP tools, Hub executions, schedules, heartbeats,
+remediation, or restart recovery, which all create through the separate `"mcp"`-kind path. The CLI
+sends `callerAgentId` from `PASEO_AGENT_ID` when it is set, on both `workspace create` and
+`agent run`, so an agent running the CLI never pins the workspace it makes. The label check is the
+fallback for the one gap that leaves: a `create_agent_request` whose `labels` already carry
+`paseo.parent-agent-id` (set by whoever created the agent, independent of `callerAgentId`) is
+agent-made even when `callerAgentId` itself is absent or cleared.
 
 Config, both reloadable without a restart: `agents.autoPinSessions` (boolean, default on) turns
-auto-pinning off; pins already set still expire. `agents.autoPinRecentUseMinutes` (default 120)
-sets the recent-use window; the sweep runs every quarter of it, at most once a minute. A daemon
-older than the key rejects the whole config file with `Unrecognized key`, which breaks new
+auto-pinning off; pins already set still expire. `agents.autoPinRecentUseMinutes` (default 1440,
+24 hours) sets the recent-use window; the sweep runs every quarter of it, at most once a minute. A
+daemon older than the key rejects the whole config file with `Unrecognized key`, which breaks new
 connections, reloads and the next boot: `autoPinSessions` needs a build from c14e9ea32 on, and
 `autoPinRecentUseMinutes` one with this change. Remove both before rolling back to Bozeo.prev.app.
 

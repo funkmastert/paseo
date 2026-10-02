@@ -2513,8 +2513,9 @@ export async function createPaseoDaemon(
       autoPinRecentUseMinutes: daemonConfigStore.get().autoPinRecentUseMinutes,
     }),
     logger: logger.child({ module: "auto-pin-expiry" }),
+    usesFilePath: path.join(config.paseoHome, "auto-pin-uses.json"),
   });
-  autoPinExpiry.start();
+  await autoPinExpiry.start();
 
   // Refocus (docs/refocus.md). Needs nothing but the manager and live config, so it is watching
   // before the first prompt can be dispatched.
@@ -3762,7 +3763,7 @@ export async function createPaseoDaemon(
     agentManager.stopProviderSubagentSweep();
     agentTitleTracker.stop();
     workspaceTitleTracker.stop();
-    autoPinExpiry.stop();
+    await autoPinExpiry.stop().catch(() => undefined);
     agentManager.setPromptDispatchInterceptor(null);
     agentRefocus.stop();
     agentTokenBurnMonitor?.stop();

@@ -142,6 +142,59 @@ test("workspace.create.request auto-pins a brand new workspace over a client con
   expect(record?.pinSource).toBe("auto");
 });
 
+test("workspace.create.request with a callerAgentId never auto-pins", async () => {
+  const { cwd, session, workspaceRegistry } = buildHarness();
+
+  await session.handleMessage({
+    type: "workspace.create.request",
+    requestId: "req-agent-create",
+    source: { kind: "directory", path: cwd },
+    callerAgentId: "agent-1",
+  });
+
+  const [record] = await workspaceRegistry.list();
+  expect(record?.pinnedAt).toBeNull();
+  expect(record?.pinSource).toBeUndefined();
+});
+
+test("create_agent_request whose labels carry paseo.parent-agent-id does not pin, even with no callerAgentId", async () => {
+  const { cwd, session, projectRegistry, workspaceRegistry } = buildHarness();
+
+  await projectRegistry.upsert(
+    createPersistedProjectRecord({
+      projectId: "proj-existing",
+      rootPath: cwd,
+      kind: "git",
+      displayName: "repo",
+      createdAt: "2026-05-07T00:00:00.000Z",
+      updatedAt: "2026-05-07T00:00:00.000Z",
+    }),
+  );
+  await workspaceRegistry.upsert(
+    createPersistedWorkspaceRecord({
+      workspaceId: "ws-labeled",
+      projectId: "proj-existing",
+      cwd,
+      kind: "local_checkout",
+      displayName: "repo",
+      createdAt: "2026-05-07T00:00:00.000Z",
+      updatedAt: "2026-05-07T00:00:00.000Z",
+    }),
+  );
+
+  await session.handleMessage({
+    type: "create_agent_request",
+    requestId: "req-labeled",
+    workspaceId: "ws-labeled",
+    config: { provider: "codex", cwd },
+    labels: { "paseo.parent-agent-id": "some-other-agent" },
+    attachments: [],
+  });
+
+  const stored = await workspaceRegistry.get("ws-labeled");
+  expect(stored?.pinnedAt).toBeNull();
+});
+
 test("create_agent_request with no caller agent auto-pins the workspace it targets", async () => {
   const { cwd, session, projectRegistry, workspaceRegistry } = buildHarness();
 
