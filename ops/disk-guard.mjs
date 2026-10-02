@@ -20,8 +20,9 @@
 //  4. `xcrun simctl delete unavailable`, unless xcodebuild runs.
 //  5. ~/Library/Developer/XCTestDevices clones (canonical UDID dirs) unchanged for a day, that no
 //     process names, while no xcodebuild runs at all.
-//  6. mobile-worktrees-report.mjs --apply: ~/mobile-worktrees checkouts that are pushed or merged,
-//     clean, idle 48 h and not in use. Branches are kept. Their caches go as orphans in step 7.
+//  6. mobile-worktrees-report.mjs --apply, at most hourly: ~/mobile-worktrees checkouts that are
+//     pushed or merged, clean, idle 48 h and not in use. Branches are kept. Their caches go as
+//     orphans in step 7.
 //  7. Orphaned caches as in 2, then WonderlyMobileCore caches of live worktrees idle 24 h (no git
 //     activity, no process with the worktree in argv or cwd, no live lease, no cache file written),
 //     oldest first, until free space reaches TARGET_GB. Primary checkouts are never evicted.
@@ -65,6 +66,8 @@ const DAEMON_LOG_MAX_AGE_MS = 7 * 24 * H;
 const CLONE_IDLE_MIN = 24 * 60;
 const IDLE_CACHE_MS = { tight: 24 * H, critical: 6 * H };
 const NOTIFY_EVERY_MS = 6 * H;
+// The report walks every mobile worktree (about 80 s of du), and only frees worktrees idle 48 h.
+const MOBILE_REPORT_EVERY_MS = H;
 
 const env = process.env;
 const SANDBOX_VARS = [
@@ -141,6 +144,7 @@ const skipped = (msg) => {
   return 0;
 };
 let lastCriticalNotice = 0;
+let lastMobileReport = 0;
 let removals = 0;
 
 const FAKE_FREE = env.DISK_GUARD_FREE_GB !== undefined ? { base: Number(env.DISK_GUARD_FREE_GB), step: Number(env.DISK_GUARD_FREE_STEP_GB ?? 0) } : null;
@@ -987,7 +991,11 @@ function sweep() {
     log(`${tag}${freeGB().toFixed(1)} GB free: ${mode} (tight below ${TIGHT_GB} GB, critical below ${CRITICAL_GB} GB, evicting to ${TARGET_GB} GB)`);
     const sims = deleteUnavailableSimulators();
     const clones = sweepTestClones();
-    const worktrees = retireMobileWorktrees();
+    let worktrees = 0;
+    if (ONCE || Date.now() - lastMobileReport >= MOBILE_REPORT_EVERY_MS) {
+      lastMobileReport = Date.now();
+      worktrees = retireMobileWorktrees();
+    }
     tightText = `; ${mode}: ${sims} simulators, ${clones} test clones, ${worktrees} mobile worktrees removed`;
   }
   const r = sweepCaches(mode);
