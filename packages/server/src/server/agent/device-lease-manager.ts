@@ -7,8 +7,9 @@
  *     AgentResourceMonitor already takes, so a device Tyler booted by hand counts too.
  *   - a lease is intent. `checkout` records who wants a device and why, and queues rather than
  *     refusing when the cap is full — the work is usually right, just early.
- *   - the launch gate is enforcement. An agent that boots a device without checking out is
- *     refused at the tool call and told to check out instead (device-launch-commands.ts).
+ *   - the launch gate is enforcement. A launch that would boot a NEW device past the cap is
+ *     refused at the tool call and told to check out instead (device-launch-commands.ts); a
+ *     launch that uses a device already running is allowed, and leased that device.
  *
  * The gate is only as strong as the provider allows: some providers can be refused, some only
  * asked, and one cannot be stopped at all (device-launch-enforcement.ts). A device that appears
@@ -1359,7 +1360,7 @@ export class DeviceLeaseManager {
   /**
    * Leases an agent directly to a device that is already running, skipping the pending state
    * entirely — the device exists, so there is nothing to wait for. Used for reuse at checkout
-   * and for the gate's handover: either way the lease is `running` from the instant it exists,
+   * and for the gate's binding of a launch to a running device: either way the lease is `running` from the instant it exists,
    * never `starting`, so it can never expire as `never-started`.
    */
   private bindLease(input: {

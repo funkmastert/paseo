@@ -76,7 +76,7 @@ export interface DeviceStatusStripModel {
   tone: DeviceStatusTone;
   rows: DeviceStatusRow[];
   waiting: DeviceStatusPayload["waiting"];
-  /** Recent refusals (and, in dry run, what would have been refused or handed over). */
+  /** Recent refusals (and, in dry run, what would have been refused). */
   blocked: DeviceStatusPayload["blocked"];
   /** Simulator/emulator refusals plus the physical install gate's. */
   blockedCount: number;
