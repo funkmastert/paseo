@@ -805,11 +805,6 @@ export class VoiceAssistantWebSocketServer {
       },
       // JEV's spend and features, from memory. A daemon built without JEV reports no row.
       readJevStatus: () => this.jev?.status() ?? null,
-      readJevDecisions: () => {
-        const service = this.jev;
-        if (!service) return [];
-        return this.agentManager.listAgents().flatMap((agent) => service.listDecisions(agent.id));
-      },
     });
 
     this.wss = this.createWebSocketServer(server, wsConfig, auth);

@@ -1183,6 +1183,7 @@ export const ptBR: TranslationResources = {
       search: "Buscar",
       schedules: "Agendamentos",
       askJev: "Perguntar ao JEV",
+      jevDashboard: "Painel do JEV",
     },
     worktreeSetup: {
       title: "Configurar scripts de worktree",
@@ -2117,6 +2118,7 @@ export const ptBR: TranslationResources = {
     jevShadow: "Sombra",
     jevDryRun: "Simulação",
     jevOlder: "{{count}} anteriores",
+    jevAllActivity: "Toda a atividade do JEV",
   },
   review: {
     comment: {

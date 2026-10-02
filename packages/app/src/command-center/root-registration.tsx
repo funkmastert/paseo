@@ -6,6 +6,7 @@ import {
   CircleDashed,
   Folder,
   FolderPlus,
+  Gauge,
   History,
   Home,
   Import,
@@ -29,6 +30,7 @@ import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { clearCommandCenterFocusRestoreElement } from "@/utils/command-center-focus-restore";
 import {
   buildAskJevRoute,
+  buildJevDashboardRoute,
   buildOpenProjectRoute,
   buildSchedulesRoute,
   buildSessionsRoute,
@@ -67,6 +69,9 @@ const ThemedPanelLeft = withUnistyles(PanelLeft, (theme) => ({
 const ThemedMessageCircleQuestion = withUnistyles(MessageCircleQuestion, (theme) => ({
   color: theme.colors.foregroundMuted,
 }));
+const ThemedGauge = withUnistyles(Gauge, (theme) => ({
+  color: theme.colors.foregroundMuted,
+}));
 
 function PlusIcon({ size }: CommandCenterIconProps) {
   return <ThemedPlus size={size} strokeWidth={2.4} />;
@@ -90,6 +95,10 @@ function SchedulesIcon({ size }: CommandCenterIconProps) {
 
 function AskJevIcon({ size }: CommandCenterIconProps) {
   return <ThemedMessageCircleQuestion size={size} strokeWidth={2.2} />;
+}
+
+function JevDashboardIcon({ size }: CommandCenterIconProps) {
+  return <ThemedGauge size={size} strokeWidth={2.2} />;
 }
 
 function KeyboardIcon({ size }: CommandCenterIconProps) {
@@ -128,6 +137,7 @@ export function CommandCenterRootActions() {
   const sessionsRoute = useMemo<Href>(() => buildSessionsRoute(), []);
   const schedulesRoute = useMemo<Href>(() => buildSchedulesRoute(), []);
   const askJevRoute = useMemo<Href>(() => buildAskJevRoute(), []);
+  const jevDashboardRoute = useMemo<Href>(() => buildJevDashboardRoute(), []);
   const setShortcutsDialogOpen = useKeyboardShortcutsStore((state) => state.setShortcutsDialogOpen);
   // Narrow selector on purpose: a whole-store subscription would re-register every root action
   // each time host filters are reconciled.
@@ -275,6 +285,25 @@ export function CommandCenterRootActions() {
         },
       },
       {
+        id: "jev-dashboard",
+        group: "actions",
+        groupRank: 0,
+        // Between Ask JEV (5.5) and Settings (6).
+        rank: 5.75,
+        keywords: ["jev", "dashboard", "savings", "tokens", "typesafe"],
+        visibility: "always",
+        run: () => {
+          clearCommandCenterFocusRestoreElement();
+          router.push(jevDashboardRoute);
+        },
+        presentation: {
+          kind: "action",
+          title: t("sidebar.sections.jevDashboard"),
+          sectionTitle: t("shell.commandCenter.actions"),
+          icon: JevDashboardIcon,
+        },
+      },
+      {
         id: "settings",
         group: "actions",
         groupRank: 0,
@@ -363,6 +392,7 @@ export function CommandCenterRootActions() {
     askJevRoute,
     groupMode,
     homeRoute,
+    jevDashboardRoute,
     keyboardActionDispatcher,
     openAddProject,
     openImportSession,

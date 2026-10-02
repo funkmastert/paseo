@@ -71,7 +71,6 @@ export const PROVIDER_USAGE_FETCHERS: readonly ProviderUsageFetcherManifestEntry
     create: (options) =>
       new JevUsageFetcher({
         readStatus: options.readJevStatus ?? (() => null),
-        readDecisions: options.readJevDecisions,
       }),
   },
 ];

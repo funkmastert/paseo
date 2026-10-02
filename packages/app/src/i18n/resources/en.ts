@@ -1167,6 +1167,7 @@ export const en = {
       search: "Search",
       schedules: "Schedules",
       askJev: "Ask JEV",
+      jevDashboard: "JEV dashboard",
     },
     worktreeSetup: {
       title: "Set up worktree scripts",
@@ -2093,6 +2094,7 @@ export const en = {
     jevShadow: "Shadow",
     jevDryRun: "Dry run",
     jevOlder: "{{count}} older",
+    jevAllActivity: "All JEV activity",
   },
   review: {
     comment: {

@@ -1174,6 +1174,7 @@ export const ru: TranslationResources = {
       search: "Поиск",
       schedules: "Расписания",
       askJev: "Спросить JEV",
+      jevDashboard: "Панель JEV",
     },
     worktreeSetup: {
       title: "Настроить скрипты worktree",
@@ -2117,6 +2118,7 @@ export const ru: TranslationResources = {
     jevShadow: "Теневой режим",
     jevDryRun: "Пробный запуск",
     jevOlder: "Ещё {{count}}",
+    jevAllActivity: "Вся активность JEV",
   },
   review: {
     comment: {

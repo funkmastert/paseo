@@ -1150,6 +1150,7 @@ export const zhCN: TranslationResources = {
       search: "搜索",
       schedules: "计划",
       askJev: "询问 JEV",
+      jevDashboard: "JEV 仪表盘",
     },
     worktreeSetup: {
       title: "设置 worktree scripts",
@@ -2058,6 +2059,7 @@ export const zhCN: TranslationResources = {
     jevShadow: "影子模式",
     jevDryRun: "试运行",
     jevOlder: "更早的 {{count}} 条",
+    jevAllActivity: "所有 JEV 活动",
   },
   review: {
     comment: {

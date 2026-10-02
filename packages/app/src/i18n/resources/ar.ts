@@ -1158,6 +1158,7 @@ export const ar: TranslationResources = {
       search: "بحث",
       schedules: "الجداول",
       askJev: "اسأل JEV",
+      jevDashboard: "لوحة تحكم JEV",
     },
     worktreeSetup: {
       title: "إعداد البرامج النصية لشجرة العمل",
@@ -2084,6 +2085,7 @@ export const ar: TranslationResources = {
     jevShadow: "وضع الظل",
     jevDryRun: "تشغيل تجريبي",
     jevOlder: "{{count}} أقدم",
+    jevAllActivity: "كل نشاط JEV",
   },
   review: {
     comment: {

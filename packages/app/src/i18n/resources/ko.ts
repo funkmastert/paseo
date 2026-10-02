@@ -1165,6 +1165,7 @@ export const ko: TranslationResources = {
       search: "검색",
       schedules: "일정",
       askJev: "JEV에게 묻기",
+      jevDashboard: "JEV 대시보드",
     },
     worktreeSetup: {
       title: "워크트리 스크립트 설정",
@@ -2095,6 +2096,7 @@ export const ko: TranslationResources = {
     jevShadow: "섀도",
     jevDryRun: "드라이 런",
     jevOlder: "이전 {{count}}건",
+    jevAllActivity: "모든 JEV 활동",
   },
   review: {
     comment: {

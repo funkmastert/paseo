@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import type { JevDecisionRecord, JevStatus } from "../../server/jev/contract.js";
+import type { JevStatus } from "../../server/jev/contract.js";
 import type { ProviderUsage } from "../../server/messages.js";
 import type { OpenAiApiUsageConfig } from "./providers/openai-api.js";
 
@@ -25,8 +25,6 @@ export interface ProviderUsageFetcherFactoryOptions {
   readOpenAiApiConfig?: () => OpenAiApiUsageConfig | undefined;
   /** `JevService.status()`; absent or null on a daemon without JEV, which reports no row. */
   readJevStatus?: () => JevStatus | null;
-  /** Every decision the daemon holds for its agents, for the JEV row's shadow summary. */
-  readJevDecisions?: () => readonly JevDecisionRecord[];
 }
 
 export interface ProviderUsageFetcherManifestEntry {

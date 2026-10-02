@@ -1192,6 +1192,7 @@ export const es: TranslationResources = {
       search: "Buscar",
       schedules: "Horarios",
       askJev: "Preguntar a JEV",
+      jevDashboard: "Panel de JEV",
     },
     worktreeSetup: {
       title: "Configurar secuencias de comandos del árbol de trabajo",
@@ -2133,6 +2134,7 @@ export const es: TranslationResources = {
     jevShadow: "Sombra",
     jevDryRun: "Simulación",
     jevOlder: "{{count}} anteriores",
+    jevAllActivity: "Toda la actividad de JEV",
   },
   review: {
     comment: {
