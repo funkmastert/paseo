@@ -39,18 +39,33 @@ export interface PersonalPathRules {
   platform: NodeJS.Platform;
 }
 
+/**
+ * Whether the platform's usual volume ignores case. A case-sensitive APFS volume is possible, and
+ * there folding makes two different files compare equal; the default volume is case-insensitive,
+ * where not folding makes one file compare as two. `egress-scope.ts` folds on the same platforms
+ * for the same comparison, so both answers are wrong in the same places.
+ */
 function foldsCase(platform: NodeJS.Platform): boolean {
   return platform === "darwin" || platform === "win32";
 }
 
 /**
- * The shape two spellings of one path compare in: NFC, `/` separators, case folded where the
+ * Only Windows reads `\` as a path separator. On macOS and Linux it is an ordinary filename
+ * character, so rewriting it would make a sibling directory named `app\private` look like a child
+ * of `app` and let its files through as if they were in the agent's cwd.
+ */
+function separators(platform: NodeJS.Platform): RegExp {
+  return platform === "win32" ? /[\\/]/g : /\//g;
+}
+
+/**
+ * The shape two spellings of one path compare in: NFC, one separator, case folded where the
  * volume folds, and without macOS's data-volume prefix. A rule that compares raw strings stops
  * applying the moment the two sides disagree on a spelling, which is how a private file gets
  * judged and a project file gets refused.
  */
 function comparable(value: string, platform: NodeJS.Platform): string {
-  const slashed = value.replace(/\\/g, "/").normalize("NFC");
+  const slashed = value.replace(separators(platform), "/").normalize("NFC");
   const folded = foldsCase(platform) ? slashed.toLowerCase() : slashed;
   if (platform !== "darwin") return folded;
   if (folded === DATA_VOLUME) return "/";
@@ -62,7 +77,8 @@ function relativeBelow(child: string, parent: string, platform: NodeJS.Platform)
   const relative = path.relative(comparable(parent, platform), comparable(child, platform));
   if (relative === "") return [];
   if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
-  return relative.split(/[\\/]/);
+  // `path.relative` answers in the host's separator, which on Windows is `\`.
+  return relative.split(separators(platform));
 }
 
 /**

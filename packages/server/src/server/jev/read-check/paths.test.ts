@@ -101,6 +101,28 @@ describe("one file spelled two ways compares as one file", () => {
     expect(isPersonalPath(`${decomposed}/x.ts`, rules({ homeDirs: [composed] }))).toBe(false);
   });
 
+  // On macOS and Linux a backslash is an ordinary filename character, so two directories that
+  // differ only by one are different directories.
+  test.skipIf(process.platform === "win32")(
+    "a backslash in a name is not a separator off Windows",
+    () => {
+      const sibling = `${HOME}/projects/app\\private/key.ts`;
+      expect(isInside(sibling, `${HOME}/projects/app`, "linux")).toBe(false);
+      expect(isInside(sibling, `${HOME}/projects/app`, "darwin")).toBe(false);
+      // The segments a rule reads must not split on it either: this is `worktrees/p/<one dir>`,
+      // which is not inside a checkout.
+      expect(isPersonalPath(`${PASEO_HOME}/worktrees/p/a\\b`, rules())).toBe(true);
+    },
+  );
+
+  test("a decomposed home still catches its own dot-entries", () => {
+    const composed = `${HOME}/projets/café`.normalize("NFC");
+    const decomposed = `${HOME}/projets/café`.normalize("NFD");
+    expect(isPersonalPath(`${decomposed}/.ssh/id_ed25519`, rules({ homeDirs: [composed] }))).toBe(
+      true,
+    );
+  });
+
   // `fs.realpath` keeps whichever of the two macOS spellings it was handed, so the file and the
   // cwd can arrive on opposite sides of the firmlink.
   test.skipIf(process.platform === "win32")("macOS's data volume is the same path", () => {
