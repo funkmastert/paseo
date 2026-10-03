@@ -25,6 +25,20 @@ const PERSONAL_HOME_DIRS = [
 /** Where the daemon puts an agent's checkout: `<paseoHome>/worktrees/<project>/<agent>`. */
 const AGENT_WORKTREES_DIR = "worktrees";
 
+/**
+ * The two subtrees feature 16 judges in shadow forever (docs/jev.md, D12). Both sit outside every
+ * agent's cwd and outside any repository, so the ordinary rules refuse them; both are what an
+ * agent loads a lot of and may not need.
+ */
+export const SHADOW_ONLY_KINDS = ["skill-docs", "ce-scratch"] as const;
+export type ShadowOnlyKind = (typeof SHADOW_ONLY_KINDS)[number];
+
+// A plugin's skills and reference docs under `~/.claude<suffix>/plugins/cache/`, nothing else.
+const PLUGIN_CACHE_SEGMENTS = ["plugins", "cache"];
+const CLAUDE_CONFIG_PREFIX = ".claude";
+// What the compound-engineering skills write under the temporary directory and read back.
+const CE_SCRATCH_DIR = "compound-engineering";
+
 // macOS reaches `/Users` and every other firmlinked directory through the data volume too, and
 // `realpath` keeps whichever spelling it was given, so the file and the cwd can arrive spelled
 // differently. `egress-scope.ts` strips the same prefix for the same reason. Folded, as darwin
@@ -36,6 +50,11 @@ export interface PersonalPathRules {
   homeDirs: string[];
   /** Paseo's home as configured and as realpath spells it; both are checked. */
   paseoHomes: string[];
+  /**
+   * Every spelling of the temporary directory: `os.tmpdir()`, its realpath, and on macOS `/tmp`
+   * and `/private/tmp`, which are the same directory through a symlink.
+   */
+  tmpDirs: string[];
   platform: NodeJS.Platform;
 }
 
@@ -99,17 +118,44 @@ function isAgentCheckout(candidate: string, paseoHome: string, platform: NodeJS.
 }
 
 /**
+ * Which shadow-only subtree this path is in, or null. Segment-based, like every other rule here:
+ * `plugins/cache` carves exactly that subtree out of the Claude config dot-entry rule, so the
+ * credentials, settings, history and projects beside it stay personal. Answer this for the real
+ * path as well as the name, since a link inside `plugins/cache` can point anywhere.
+ */
+export function shadowOnlyKind(candidate: string, rules: PersonalPathRules): ShadowOnlyKind | null {
+  const { platform } = rules;
+  const isSkillDocs = rules.homeDirs.some((home) => {
+    const segments = relativeBelow(candidate, home, platform);
+    if (segments === null || segments.length <= PLUGIN_CACHE_SEGMENTS.length + 1) return false;
+    const [configDir, ...rest] = segments;
+    if (configDir === undefined || !configDir.startsWith(CLAUDE_CONFIG_PREFIX)) return false;
+    return PLUGIN_CACHE_SEGMENTS.every((name, index) => rest[index] === name);
+  });
+  if (isSkillDocs) return "skill-docs";
+  const isScratch = rules.tmpDirs.some((tmp) => {
+    const segments = relativeBelow(candidate, tmp, platform);
+    return segments !== null && segments.length > 1 && segments[0] === CE_SCRATCH_DIR;
+  });
+  return isScratch ? "ce-scratch" : null;
+}
+
+/**
  * A personal location: the daemon's own state under Paseo's home — config, credentials, agent
  * records, logs, the JEV directory — everything there but an agent's checkout, so a directory the
  * daemon grows later is private until someone decides otherwise; any dot-entry directly under the
- * home directory (`~/.zsh_history`, `~/.ssh`, `~/.aws`, `~/.config`, `~/.claude*`, `~/.claude.json`,
- * browser and mail profiles on Linux); or `~/Documents`, `~/Desktop`, `~/Downloads`, `~/Library`
- * (mail, Messages, browser profiles on macOS), `~/AppData` and the like.
+ * home directory (`~/.zsh_history`, `~/.ssh`, `~/.aws`, `~/.config`, the Claude config dirs,
+ * `~/.claude.json`, browser and mail profiles on Linux), apart from the plugin cache a
+ * shadow-only subtree carves out of it; or `~/Documents`, `~/Desktop`, `~/Downloads`,
+ * `~/Library` (mail, Messages, browser profiles on macOS), `~/AppData` and the like.
  */
 export function isPersonalPath(candidate: string, rules: PersonalPathRules): boolean {
   const { paseoHomes, platform } = rules;
   if (paseoHomes.some((home) => isAgentCheckout(candidate, home, platform))) return false;
   if (paseoHomes.some((home) => relativeBelow(candidate, home, platform) !== null)) return true;
+  // Checked after Paseo's home, so a shadow-only subtree can only ever relax the home dot-entry
+  // rule below. If someone points `TMPDIR` inside Paseo's home, that is still daemon state.
+  if (shadowOnlyKind(candidate, rules) !== null) return false;
   const personal = new Set(
     PERSONAL_HOME_DIRS.map((name) => (foldsCase(platform) ? name.toLowerCase() : name)),
   );

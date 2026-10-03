@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -59,6 +59,7 @@ class RecordingSavings implements JevSavingsSink {
 let root: string;
 let repo: string;
 let paseoHome: string;
+let tmpDir: string;
 let rows: ReadCheckTimelineRow[];
 
 /** About 5,600 tokens as Read loads it: over the 2,000 floor. */
@@ -123,6 +124,7 @@ function setup(
     agents: agentSource(),
     homeDir: root,
     paseoHome,
+    tmpDir,
     logger: pino({ level: "silent" }),
     sweepIntervalMs: 0,
     ...(options.fs ? { fs: options.fs } : {}),
@@ -199,6 +201,8 @@ beforeEach(() => {
   root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "read-check-")));
   repo = path.join(root, "projects", "app");
   paseoHome = path.join(root, ".paseo");
+  tmpDir = path.join(root, "tmp");
+  mkdirSync(tmpDir, { recursive: true });
   // A git work tree: only files inside one are ever sent.
   initGitRepo(repo);
   mkdirSync(paseoHome, { recursive: true });
@@ -576,5 +580,152 @@ describe("ReadCheckObserver: live mode (D11)", () => {
 
     const outside = setup({ config: { readCheck: { ...LIVE.readCheck, liveShare: 0 } } });
     expect(outside.observer.preToolUse(pre("Read", { file_path: big }))).toBeNull();
+  });
+});
+
+describe("ReadCheckObserver: the shadow-only subtrees (D12)", () => {
+  const LIVE = {
+    readCheck: { shadow: false, liveShare: 1, liveMinTokens: 3000, liveTimeoutMs: 1000 },
+  };
+
+  function writeOutside(full: string, content: string): string {
+    mkdirSync(path.dirname(full), { recursive: true });
+    writeFileSync(full, content);
+    return full;
+  }
+
+  const skillDoc = () =>
+    path.join(root, ".claude", "plugins", "cache", "ce-plugin", "skills", "ce-work", "SKILL.md");
+  const scratchDoc = () =>
+    path.join(tmpDir, "compound-engineering", "ce-compound", "20261002-105557", "solution.md");
+
+  test("a plugin-cache skill doc is judged, and its record says which subtree", async () => {
+    const { observer, savings, jev } = setup();
+    const content = bigSource();
+    const file = writeOutside(skillDoc(), content);
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+    expect(savings.notAsked).toEqual([]);
+    expect(jev.transport.calls).toHaveLength(1);
+    expect(savings.records).toHaveLength(1);
+    expect(savings.records[0]).toMatchObject({
+      callSite: "read-check.shadow",
+      decision: { did: "read" },
+    });
+    expect(savings.records[0]!.facts["shadowOnly"]).toBe("skill-docs");
+  });
+
+  test("the tmp directory's own realpath is recognised, as `os.tmpdir()` needs on darwin", async () => {
+    // `os.tmpdir()` is `/var/folders/…` while a read of a file under it arrives as
+    // `/private/var/folders/…`. Modelled here as a symlinked tmp dir handed to the observer.
+    const realTmp = path.join(root, "real-tmp");
+    mkdirSync(realTmp, { recursive: true });
+    const linkedTmp = path.join(root, "linked-tmp");
+    symlinkSync(realTmp, linkedTmp);
+    tmpDir = linkedTmp;
+    const { observer, savings } = setup();
+    const content = bigSource();
+    const file = writeOutside(
+      path.join(realTmp, "compound-engineering", "x", "solution.md"),
+      content,
+    );
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+    expect(savings.notAsked).toEqual([]);
+    expect(savings.records[0]!.facts["shadowOnly"]).toBe("ce-scratch");
+  });
+
+  test("compound-engineering scratch is judged, through whichever spelling of tmp it arrives by", async () => {
+    const { observer, savings } = setup();
+    const content = bigSource();
+    const file = writeOutside(scratchDoc(), content);
+    // `/tmp` reaches `/private/tmp` through a symlink on darwin; the real path is what classifies.
+    const linkedTmp = path.join(root, "tmplink");
+    symlinkSync(tmpDir, linkedTmp);
+    const named = file.replace(tmpDir, linkedTmp);
+    observer.postToolUse(readPost(named, content));
+    await observer.idle();
+    expect(savings.notAsked).toEqual([]);
+    expect(savings.records[0]!.facts["shadowOnly"]).toBe("ce-scratch");
+  });
+
+  test.each([
+    ".credentials.json",
+    "settings.json",
+    "projects/x/session.jsonl",
+    "plugins/config.json",
+  ])("~/.claude/%s beside the cache is still refused", async (relative) => {
+    const { observer, savings, jev } = setup();
+    const content = bigSource();
+    const file = writeOutside(path.join(root, ".claude", relative), content);
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+    expect(savings.notAsked).toEqual(["outside-cwd"]);
+    expect(jev.transport.calls).toEqual([]);
+    expect(savings.records).toEqual([]);
+  });
+
+  test("a link inside the cache pointing at the credentials is refused", async () => {
+    const content = bigSource();
+    const secret = writeOutside(path.join(root, ".claude", ".credentials.json"), content);
+    const named = path.join(root, ".claude", "plugins", "cache", "ce-plugin", "notes.md");
+    mkdirSync(path.dirname(named), { recursive: true });
+    symlinkSync(secret, named);
+    // The subtree is decided on the real path, so this read is an ordinary one and the cwd rule
+    // catches it: a link out of the cache buys nothing.
+    const outside = setup();
+    outside.observer.postToolUse(readPost(named, content));
+    await outside.observer.idle();
+    expect(outside.savings.notAsked).toEqual(["outside-cwd"]);
+    expect(outside.jev.transport.calls).toEqual([]);
+    expect(outside.savings.records).toEqual([]);
+    // With a cwd that holds both, the name rule is the one that refuses it, on the real path.
+    const inside = setup();
+    const post = readPost(named, content);
+    inside.observer.postToolUse({ ...post, agentCwd: root });
+    await inside.observer.idle();
+    expect(inside.savings.notAsked).toEqual(["secret-path"]);
+    expect(inside.jev.transport.calls).toEqual([]);
+    expect(inside.savings.records).toEqual([]);
+  });
+
+  test("live mode asks and records, and never holds or denies one of these reads", async () => {
+    const { observer, savings, jev } = setup({ config: LIVE });
+    const content = bigSource();
+    const file = writeOutside(skillDoc(), content);
+    // The pre-hook's cheap gate may still open a hold on a read this large; what it cannot do is
+    // come back with a deny, because the live track's file rules refuse the subtree.
+    const event = pre("Read", { file_path: file });
+    const hold = observer.preToolUse(event);
+    expect(await hold?.verdict).toBeNull();
+    // The live track never even asked: no call yet, and no live record.
+    expect(jev.transport.calls).toEqual([]);
+    expect(savings.records).toEqual([]);
+    const post = readPost(file, content);
+    observer.postToolUse({
+      ...post,
+      input: { ...post.input, tool_use_id: event.input.tool_use_id },
+    });
+    await observer.idle();
+    // Asked, recorded and judged by the shadow track while the feature is live.
+    expect(jev.transport.calls).toHaveLength(1);
+    expect(savings.records).toHaveLength(1);
+    expect(savings.records[0]).toMatchObject({
+      callSite: "read-check.shadow",
+      decision: { did: "read", changed: false },
+    });
+    expect(savings.records[0]!.facts["shadowOnly"]).toBe("skill-docs");
+    expect(savings.records.map((r) => r.decision.did)).not.toContain("deny");
+    // Nothing was applied to the agent: a shadow judgment changes nothing by construction.
+    expect(jev.listDecisions(AGENT).filter((decision) => decision.applied)).toEqual([]);
+  });
+
+  test("live mode still holds and denies an ordinary repo read, so the arm is really live", async () => {
+    const { observer, savings } = setup({ config: LIVE });
+    const content = bigSource();
+    const file = writeRepoFile("src/session.ts", content);
+    const hold = observer.preToolUse(pre("Read", { file_path: file }));
+    expect((await hold!.verdict)?.denyReason).toContain("not needed for your task");
+    expect(savings.records[0]).toMatchObject({ decision: { did: "deny" } });
   });
 });

@@ -1,4 +1,5 @@
 import { constants as fsConstants, promises as fsPromises, type Stats } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { Logger } from "pino";
 
@@ -25,7 +26,14 @@ import {
 } from "./decision.js";
 import { JEV_CHARS_PER_TOKEN } from "../savings-formulas.js";
 import { isSecretShapedPath } from "../secret-paths.js";
-import { isHomeOrAbove, isInside, isPersonalPath, type PersonalPathRules } from "./paths.js";
+import {
+  isHomeOrAbove,
+  isInside,
+  isPersonalPath,
+  shadowOnlyKind,
+  type PersonalPathRules,
+  type ShadowOnlyKind,
+} from "./paths.js";
 import {
   editedPath,
   rangeKey,
@@ -150,6 +158,8 @@ export interface ReadCheckObserverOptions {
   agents: ReadCheckAgentSource;
   homeDir: string;
   paseoHome: string;
+  /** Default `os.tmpdir()`. The compound-engineering scratch D12 judges in shadow lives under it. */
+  tmpDir?: string;
   logger: Logger;
   now?: () => number;
   fs?: ReadCheckFileSystem;
@@ -499,9 +509,33 @@ export const defaultReadCheckFs: ReadCheckFileSystem = {
   },
 };
 
-type Eligibility =
-  | { eligible: true; identity: ReadCheckFileIdentity }
-  | { eligible: false; reason: JevNotAskedReason };
+interface Refused {
+  eligible: false;
+  reason: JevNotAskedReason;
+}
+
+/**
+ * What the shadow track may send. `shadowOnly` names the D12 subtree a read came from, which the
+ * record carries so the dashboard can tell those judgments apart; null is an ordinary read.
+ */
+type ShadowEligibility =
+  | { eligible: true; identity: ReadCheckFileIdentity; shadowOnly: ShadowOnlyKind | null }
+  | Refused;
+
+/**
+ * What the live track may send. It has no `shadowOnly` member on purpose: the D12 subtrees are
+ * admitted by `classify` only under `track: "shadow"`, so no value of this type can describe one
+ * of those reads and no live code path can reach a deny for them (docs/jev.md, D12). Widening this
+ * type is the only way to break that, which is what makes the property structural.
+ */
+type LiveEligibility = { eligible: true; identity: ReadCheckFileIdentity } | Refused;
+
+interface EligibilityInput {
+  agentId: string;
+  agentCwd: string;
+  namedPath: string;
+  realPath: string;
+}
 
 export class ReadCheckObserver implements FileReadObserver {
   private readonly logger: Logger;
@@ -527,10 +561,19 @@ export class ReadCheckObserver implements FileReadObserver {
     this.fs = options.fs ?? defaultReadCheckFs;
     this.defer = options.defer ?? ((work) => setImmediate(work));
     this.runGit = options.runGit ?? runGitProcess;
+    const platform = options.platform ?? process.platform;
     this.personal = {
       homeDirs: [options.homeDir],
       paseoHomes: [options.paseoHome],
-      platform: options.platform ?? process.platform,
+      // `/tmp` is a symlink to `/private/tmp` on darwin, so a scratch file arrives spelled either
+      // way depending on whether it came through `realpath`.
+      tmpDirs: [
+        ...new Set([
+          options.tmpDir ?? os.tmpdir(),
+          ...(platform === "darwin" ? ["/tmp", "/private/tmp"] : []),
+        ]),
+      ],
+      platform,
     };
     this.validation = new ReadCheckValidation({
       now: this.now,
@@ -788,19 +831,22 @@ export class ReadCheckObserver implements FileReadObserver {
    * any file under another name, so one is never sent. Then the D7 scope check. Nothing here
    * opens the file.
    */
-  private async eligibility(input: {
-    agentId: string;
-    agentCwd: string;
-    namedPath: string;
-    realPath: string;
-  }): Promise<Eligibility> {
-    const refuse = (reason: JevNotAskedReason): Eligibility => ({ eligible: false, reason });
+  private async classify(
+    input: EligibilityInput & { track: "shadow" | "live" },
+  ): Promise<ShadowEligibility> {
+    const refuse = (reason: JevNotAskedReason): Refused => ({ eligible: false, reason });
     // Taken before any name is checked: the file read later must be this one (`isSameFile`), so
     // a swap during the checks, or during git, sends nothing.
     const stat = await this.fs.lstat(input.realPath).catch(() => null);
     await this.addRealRoots();
-    const realCwd = await this.realpathOf(input.agentCwd);
-    if (!isInside(input.realPath, realCwd, this.personal.platform)) return refuse("outside-cwd");
+    // A D12 subtree, for the shadow track only. The name rules below still run on every name the
+    // file goes by, so a link out of `plugins/cache` into anything private is still refused.
+    const shadowOnly =
+      input.track === "shadow" ? shadowOnlyKind(input.realPath, this.personal) : null;
+    if (shadowOnly === null) {
+      const realCwd = await this.realpathOf(input.agentCwd);
+      if (!isInside(input.realPath, realCwd, this.personal.platform)) return refuse("outside-cwd");
+    }
     const names = [...(await this.symlinkChain(input.namedPath)), input.realPath];
     if (
       names.some(
@@ -813,9 +859,14 @@ export class ReadCheckObserver implements FileReadObserver {
     if (stat?.isSymbolicLink()) return refuse("changed");
     if (!stat?.isFile()) return refuse("not-text");
     if (stat.nlink > 1) return refuse("secret-path");
-    const workTree = await this.workTreeOf(input.realPath);
-    if (workTree === null || isHomeOrAbove(workTree, this.personal)) return refuse("outside-repo");
-    if (await this.isLocalOnly(workTree, input.realPath)) return refuse("secret-path");
+    // A D12 subtree is outside every repository by nature, which is why it needed a decision.
+    if (shadowOnly === null) {
+      const workTree = await this.workTreeOf(input.realPath);
+      if (workTree === null || isHomeOrAbove(workTree, this.personal)) {
+        return refuse("outside-repo");
+      }
+      if (await this.isLocalOnly(workTree, input.realPath)) return refuse("secret-path");
+    }
     const scope = await this.options.jev
       .checkScope({
         cwds: [input.agentCwd],
@@ -825,7 +876,22 @@ export class ReadCheckObserver implements FileReadObserver {
       })
       .catch(() => "excluded" as const);
     if (scope !== "ok") return refuse("excluded");
-    return { eligible: true, identity: identityOf(stat) };
+    return { eligible: true, identity: identityOf(stat), shadowOnly };
+  }
+
+  /** The shadow track's answer, which may admit a D12 subtree. */
+  private eligibilityForShadow(input: EligibilityInput): Promise<ShadowEligibility> {
+    return this.classify({ ...input, track: "shadow" });
+  }
+
+  /**
+   * The live track's answer. `track: "live"` leaves `shadowOnly` null inside `classify`, so a D12
+   * read takes the ordinary rules and is refused `outside-cwd` here — the live track never sees
+   * one, and the read is judged after it ran by the shadow track like any other agent's.
+   */
+  private async eligibilityForLive(input: EligibilityInput): Promise<LiveEligibility> {
+    const answer = await this.classify({ ...input, track: "live" });
+    return answer.eligible ? { eligible: true, identity: answer.identity } : answer;
   }
 
   /**
@@ -919,9 +985,10 @@ export class ReadCheckObserver implements FileReadObserver {
   }
 
   /**
-   * The home directory and Paseo's home as realpath spells them, checked as well as the configured
-   * ones: a file always arrives as its real path, so a symlinked root compared in one spelling
-   * stops refusing the state it is there to protect.
+   * The home directory, Paseo's home and the temporary directory as realpath spells them, checked
+   * as well as the configured ones: a file always arrives as its real path, so a root compared in
+   * one spelling stops refusing the state it is there to protect, or stops recognising the subtree
+   * it is there to judge.
    */
   private async addRealRoots(): Promise<void> {
     if (this.realRootsAdded) return;
@@ -931,6 +998,15 @@ export class ReadCheckObserver implements FileReadObserver {
     const realPaseoHome = await this.realpathOf(this.options.paseoHome);
     if (!this.personal.paseoHomes.includes(realPaseoHome)) {
       this.personal.paseoHomes.push(realPaseoHome);
+    }
+    // `os.tmpdir()` is `/var/folders/…` on darwin and `realpath` spells it
+    // `/private/var/folders/…`, and a read arrives as its real path, so the configured spelling
+    // alone would miss D12's scratch entirely.
+    // Snapshotted, not iterated live: the loop pushes into the same array.
+    const configuredTmpDirs = this.personal.tmpDirs.slice();
+    for (const tmpDir of configuredTmpDirs) {
+      const realTmpDir = await this.realpathOf(tmpDir);
+      if (!this.personal.tmpDirs.includes(realTmpDir)) this.personal.tmpDirs.push(realTmpDir);
     }
   }
 
@@ -1039,7 +1115,7 @@ export class ReadCheckObserver implements FileReadObserver {
     const { event, read, file, realPath, state } = input;
     const key = `${realPath}|${rangeKey(file.range)}`;
     state.judged.set(key, this.now());
-    const eligibility = await this.eligibility({
+    const eligibility = await this.eligibilityForShadow({
       agentId: event.agentId,
       agentCwd: event.agentCwd,
       namedPath: file.path,
@@ -1079,6 +1155,9 @@ export class ReadCheckObserver implements FileReadObserver {
         estimated: false,
         split: read.files.length > 1,
         subagent: input.hook.subagentId !== null,
+        // D12: the subtree this read came from, or null for an ordinary one. The ledger counts
+        // these apart, and they never count toward the shadow-to-live evidence rule.
+        shadowOnly: eligibility.shadowOnly,
       },
       tool: read.tool,
       pending: asked.answer.verdict === "would-skip",
@@ -1451,7 +1530,7 @@ export class ReadCheckObserver implements FileReadObserver {
     if (!stat?.isFile() || this.maxReadTokens(stat.size, file) < config.liveMinTokens) {
       return null;
     }
-    const eligibility = await this.eligibility({
+    const eligibility = await this.eligibilityForLive({
       agentId: event.agentId,
       agentCwd: event.agentCwd,
       namedPath: file.path,

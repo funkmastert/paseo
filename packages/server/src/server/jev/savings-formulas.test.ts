@@ -543,4 +543,51 @@ describe("evidence rules", () => {
       }),
     ).toEqual({ bigWouldSkip: 1, bigWouldSkipProjected: 123_750 });
   });
+
+  // D12: these reads can never be denied, so they get their own counters and must never move the
+  // rule that decides whether to switch the feature live.
+  test("a shadow-only read counts in its own bucket and not toward the live rule", () => {
+    const countersFor = (shadowOnly: string) => {
+      const facts = { contextTokens: 9_000, model: "claude-opus-5-5", shadowOnly };
+      const decision = { did: "read", wouldBe: "would-skip", changed: false };
+      return evidenceCounters({
+        feature: "readCheck",
+        mode: "shadow",
+        decision,
+        facts,
+        validation: held,
+        price: priceSavings({
+          feature: "readCheck",
+          mode: "shadow",
+          decision,
+          facts,
+          validation: held,
+        }),
+      });
+    };
+    expect(countersFor("skill-docs")).toEqual({
+      shadowOnlyJudged: 1,
+      "shadowOnlyJudged.skill-docs": 1,
+      shadowOnlyWouldSkip: 1,
+    });
+    expect(countersFor("ce-scratch")).toEqual({
+      shadowOnlyJudged: 1,
+      "shadowOnlyJudged.ce-scratch": 1,
+      shadowOnlyWouldSkip: 1,
+    });
+  });
+
+  test("the shadow-only counts are reported beside the live rule, never inside it", () => {
+    const base = { bigWouldSkip: 200, bigWouldSkipFalse: 60, bigWouldSkipProjected: 1_000 };
+    const plain = evaluateEvidence("readCheck", base, 0);
+    expect(plain.observed).not.toContain("shadow-only");
+    const withShadowOnly = evaluateEvidence(
+      "readCheck",
+      { ...base, shadowOnlyJudged: 40, shadowOnlyWouldSkip: 10, shadowOnlyFalseSkip: 2 },
+      0,
+    );
+    expect(withShadowOnly.observed).toContain("shadow-only 40 judged, 10 would-skip, 20% false");
+    // The rule's verdict is unchanged by them.
+    expect(withShadowOnly.met).toBe(plain.met);
+  });
 });

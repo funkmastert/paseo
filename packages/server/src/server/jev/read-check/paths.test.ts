@@ -1,13 +1,27 @@
 import { describe, expect, test } from "vitest";
 
-import { isHomeOrAbove, isInside, isPersonalPath, type PersonalPathRules } from "./paths.js";
+import {
+  isHomeOrAbove,
+  isInside,
+  isPersonalPath,
+  shadowOnlyKind,
+  type PersonalPathRules,
+} from "./paths.js";
 
 const HOME = "/Users/tyler";
 const PASEO_HOME = `${HOME}/.paseo`;
 const CHECKOUT = `${PASEO_HOME}/worktrees/3jvw4yw6/pinned-grid`;
 
+const TMP = "/private/tmp";
+
 function rules(overrides: Partial<PersonalPathRules> = {}): PersonalPathRules {
-  return { homeDirs: [HOME], paseoHomes: [PASEO_HOME], platform: "darwin", ...overrides };
+  return {
+    homeDirs: [HOME],
+    paseoHomes: [PASEO_HOME],
+    tmpDirs: [TMP, "/tmp"],
+    platform: "darwin",
+    ...overrides,
+  };
 }
 
 describe("an agent's checkout under Paseo's home is judgeable", () => {
@@ -151,5 +165,83 @@ describe("one file spelled two ways compares as one file", () => {
     // Fail closed: a personal location reached through the firmlink is still personal.
     expect(isPersonalPath(`/System/Volumes/Data${PASEO_HOME}/config.json`, rules())).toBe(true);
     expect(isPersonalPath(`/System/Volumes/Data${HOME}/.ssh/config`, rules())).toBe(true);
+  });
+});
+
+describe("the shadow-only subtrees (D12)", () => {
+  const cache = `${HOME}/.claude/plugins/cache/compound-engineering-plugin/skills/ce-work`;
+
+  test.each([
+    [`${cache}/SKILL.md`, "skill-docs"],
+    [`${cache}/references/execution-engines.md`, "skill-docs"],
+    [`${HOME}/.claude-leader/plugins/cache/p/skills/x/SKILL.md`, "skill-docs"],
+    [`${HOME}/.claude-personal/plugins/cache/p/SKILL.md`, "skill-docs"],
+    ["/tmp/compound-engineering/ce-compound/20261002-105557/solution.md", "ce-scratch"],
+    ["/private/tmp/compound-engineering/ce-compound/20261002-105557/solution.md", "ce-scratch"],
+  ])("%s is %s", (candidate, kind) => {
+    expect(shadowOnlyKind(candidate, rules())).toBe(kind);
+    expect(isPersonalPath(candidate, rules())).toBe(false);
+  });
+
+  test("the carve-out is `plugins/cache` and nothing else under the Claude config dirs", () => {
+    for (const candidate of [
+      `${HOME}/.claude/.credentials.json`,
+      `${HOME}/.claude/settings.json`,
+      `${HOME}/.claude/history.jsonl`,
+      `${HOME}/.claude/projects/x/session.jsonl`,
+      `${HOME}/.claude/plugins/config.json`,
+      `${HOME}/.claude/plugins/marketplaces/x/token`,
+      `${HOME}/.claude-leader/.credentials.json`,
+      `${HOME}/.claude.json`,
+    ]) {
+      expect(shadowOnlyKind(candidate, rules())).toBeNull();
+      expect(isPersonalPath(candidate, rules())).toBe(true);
+    }
+  });
+
+  test("the cache directory itself is not a file in it", () => {
+    expect(shadowOnlyKind(`${HOME}/.claude/plugins/cache`, rules())).toBeNull();
+    expect(shadowOnlyKind("/tmp/compound-engineering", rules())).toBeNull();
+  });
+
+  test("a sibling of the scratch directory is not scratch", () => {
+    expect(shadowOnlyKind("/tmp/compound-engineering-other/x.md", rules())).toBeNull();
+    expect(shadowOnlyKind("/tmp/other/x.md", rules())).toBeNull();
+  });
+
+  test("`..` cannot climb out of either subtree", () => {
+    expect(
+      shadowOnlyKind(`${HOME}/.claude/plugins/cache/../../.credentials.json`, rules()),
+    ).toBeNull();
+    expect(isPersonalPath(`${HOME}/.claude/plugins/cache/../../.credentials.json`, rules())).toBe(
+      true,
+    );
+    expect(shadowOnlyKind("/tmp/compound-engineering/../../etc/passwd", rules())).toBeNull();
+    // A directory merely named `..secret` is still inside the subtree.
+    expect(shadowOnlyKind(`${cache}/..secret/notes.md`, rules())).toBe("skill-docs");
+  });
+
+  test("a tmpdir elsewhere is covered, and only its own scratch", () => {
+    const windowsish = rules({ tmpDirs: ["/var/folders/ab/T"], platform: "linux" });
+    expect(shadowOnlyKind("/var/folders/ab/T/compound-engineering/x.md", windowsish)).toBe(
+      "ce-scratch",
+    );
+    expect(shadowOnlyKind("/tmp/compound-engineering/x.md", windowsish)).toBeNull();
+  });
+
+  test.skipIf(process.platform !== "win32")("a Windows-shaped path matches", () => {
+    const win = rules({
+      homeDirs: ["C:\\Users\\tyler"],
+      paseoHomes: ["C:\\Users\\tyler\\.paseo"],
+      tmpDirs: ["C:\\Users\\tyler\\AppData\\Local\\Temp"],
+      platform: "win32",
+    });
+    expect(shadowOnlyKind("C:\\Users\\tyler\\.claude\\plugins\\cache\\p\\SKILL.md", win)).toBe(
+      "skill-docs",
+    );
+    expect(
+      shadowOnlyKind("C:\\Users\\tyler\\AppData\\Local\\Temp\\compound-engineering\\x.md", win),
+    ).toBe("ce-scratch");
+    expect(shadowOnlyKind("C:\\Users\\tyler\\.claude\\.credentials.json", win)).toBeNull();
   });
 });
