@@ -76,9 +76,12 @@ function comparable(value: string, platform: NodeJS.Platform): string {
 function relativeBelow(child: string, parent: string, platform: NodeJS.Platform): string[] | null {
   const relative = path.relative(comparable(parent, platform), comparable(child, platform));
   if (relative === "") return [];
-  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
-  // `path.relative` answers in the host's separator, which on Windows is `\`.
-  return relative.split(separators(platform));
+  // Absolute means another volume on Windows. `path.relative` answers in the host's separator,
+  // which there is `\`, so split before asking whether it climbed: a first segment that merely
+  // starts with `..` is a directory named `..secret`, which is below `parent` like any other.
+  if (path.isAbsolute(relative)) return null;
+  const segments = relative.split(separators(platform));
+  return segments[0] === ".." ? null : segments;
 }
 
 /**

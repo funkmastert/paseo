@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -22,12 +22,21 @@ const saved = { key: process.env.PASEO_JEV_API_KEY, marker: process.env.JEV_E2E_
 beforeAll(async () => {
   workdir = mkdtempSync(path.join(tmpdir(), "jev-e2e-"));
   mkdirSync(path.join(workdir, "safe"), { recursive: true });
+  mkdirSync(path.join(workdir, "excluded", "app"), { recursive: true });
+  // Nothing is excluded by default since 2026-10-02, so the daemon reads a configured root from
+  // its own `config.json`, which is what the exclusion looks like on a real host.
+  const paseoHomeRoot = mkdtempSync(path.join(tmpdir(), "jev-e2e-home-"));
+  mkdirSync(path.join(paseoHomeRoot, ".paseo"), { recursive: true });
+  writeFileSync(
+    path.join(paseoHomeRoot, ".paseo", "config.json"),
+    JSON.stringify({ agents: { jev: { excludeCwds: [path.join(workdir, "excluded")] } } }),
+  );
   process.env.PASEO_JEV_API_KEY = FAKE_KEY;
   process.env.JEV_E2E_MARKER = MARKER;
   transport = createFakeJevTransport({
     answers: { task_class: { type: "choice", choice: "mechanical", confidence: 0.9 } },
   });
-  ctx = await createDaemonTestContext({ jevOverrides: { transport } });
+  ctx = await createDaemonTestContext({ jevOverrides: { transport }, paseoHomeRoot });
 }, 60_000);
 
 afterAll(async () => {
@@ -95,12 +104,12 @@ describe("the four RPCs over the wire", () => {
     expect(JSON.stringify(status)).not.toContain(FAKE_KEY);
   });
 
-  test("jev.scope.check answers ok for a safe cwd and excluded under a D7 root", async () => {
+  test("jev.scope.check answers ok for a safe cwd and excluded under a configured root", async () => {
     await expect(
       ctx.client.jevScopeCheck({ cwd: path.join(workdir, "safe") }, { timeout: 5_000 }),
     ).resolves.toMatchObject({ scope: "ok" });
     await expect(
-      ctx.client.jevScopeCheck({ cwd: "~/mobile-worktrees/app" }, { timeout: 5_000 }),
+      ctx.client.jevScopeCheck({ cwd: path.join(workdir, "excluded", "app") }, { timeout: 5_000 }),
     ).resolves.toMatchObject({ scope: "excluded" });
   });
 

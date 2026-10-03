@@ -115,6 +115,18 @@ describe("one file spelled two ways compares as one file", () => {
     },
   );
 
+  test("a directory whose name starts with .. is below its parent, not above it", () => {
+    // `path.relative` answers `..secret/x`; a prefix test reads that as having climbed out, and
+    // the daemon's state would stop being personal.
+    expect(isPersonalPath(`${PASEO_HOME}/..secret/tokens.json`, rules())).toBe(true);
+    expect(isInside(`${HOME}/projects/app/..build/out.ts`, `${HOME}/projects/app`, "linux")).toBe(
+      true,
+    );
+    // A real climb is still outside.
+    expect(isPersonalPath(`${HOME}/projects/app/x.ts`, rules())).toBe(false);
+    expect(isInside(`${HOME}/projects/other/x.ts`, `${HOME}/projects/app`, "linux")).toBe(false);
+  });
+
   test("a decomposed home still catches its own dot-entries", () => {
     const composed = `${HOME}/projets/café`.normalize("NFC");
     const decomposed = `${HOME}/projets/café`.normalize("NFD");
