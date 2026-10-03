@@ -379,7 +379,7 @@ function useAgentPanelDescriptor(
 }
 
 function AgentPanel() {
-  const { serverId, workspaceId, target, openFileInWorkspace } = usePaneContext();
+  const { serverId, workspaceId, target, readOnly, openFileInWorkspace } = usePaneContext();
   const { isInteractive } = usePaneFocus();
   invariant(target.kind === "agent", "AgentPanel requires agent target");
 
@@ -389,6 +389,7 @@ function AgentPanel() {
       workspaceId={workspaceId}
       agentId={target.agentId}
       isPaneFocused={isInteractive}
+      readOnly={readOnly}
       onOpenWorkspaceFile={openFileInWorkspace}
     />
   );
@@ -519,12 +520,14 @@ function AgentPanelContent({
   workspaceId,
   agentId,
   isPaneFocused,
+  readOnly,
   onOpenWorkspaceFile,
 }: {
   serverId: string;
   workspaceId: string;
   agentId: string;
   isPaneFocused: boolean;
+  readOnly?: boolean;
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
 }) {
   const { t } = useTranslation();
@@ -575,6 +578,7 @@ function AgentPanelContent({
       workspaceId={workspaceId}
       agentId={resolvedAgentId}
       isPaneFocused={isPaneFocused}
+      readOnly={readOnly}
       client={runtimeClient}
       isConnected={runtimeIsConnected}
       connectionStatus={connectionStatus}
@@ -588,6 +592,7 @@ function AgentPanelBody({
   workspaceId,
   agentId,
   isPaneFocused,
+  readOnly,
   client,
   isConnected,
   connectionStatus,
@@ -597,6 +602,7 @@ function AgentPanelBody({
   workspaceId: string;
   agentId?: string;
   isPaneFocused: boolean;
+  readOnly?: boolean;
   client: ReturnType<typeof useHostRuntimeClient>;
   isConnected: boolean;
   connectionStatus: HostRuntimeConnectionStatus;
@@ -757,6 +763,7 @@ function AgentPanelBody({
       workspaceId={workspaceId}
       agentId={agentId}
       isPaneFocused={isPaneFocused}
+      readOnly={readOnly}
       client={client}
       isConnected={isConnected}
       connectionStatus={connectionStatus}
@@ -770,6 +777,7 @@ function ChatAgentContent({
   workspaceId,
   agentId,
   isPaneFocused,
+  readOnly,
   client,
   isConnected,
   connectionStatus,
@@ -779,6 +787,7 @@ function ChatAgentContent({
   workspaceId: string;
   agentId?: string;
   isPaneFocused: boolean;
+  readOnly?: boolean;
   client: ReturnType<typeof useHostRuntimeClient>;
   isConnected: boolean;
   connectionStatus: HostRuntimeConnectionStatus;
@@ -1186,6 +1195,7 @@ function ChatAgentContent({
       workspaceId={workspaceId}
       agentId={agentId}
       isPaneFocused={isPaneFocused}
+      readOnly={readOnly}
       isArchivingCurrentAgent={isArchivingCurrentAgent}
       agentState={agentState}
       effectiveAgent={effectiveAgent}
@@ -1215,6 +1225,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   workspaceId,
   agentId,
   isPaneFocused,
+  readOnly,
   isArchivingCurrentAgent,
   agentState,
   effectiveAgent,
@@ -1240,6 +1251,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   workspaceId: string;
   agentId: string;
   isPaneFocused: boolean;
+  readOnly?: boolean;
   isArchivingCurrentAgent: boolean;
   agentState: ChatAgentSelectedState;
   effectiveAgent: AgentScreenAgent;
@@ -1272,12 +1284,18 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
     rows: subagentRows,
   });
   const hasPluginComposerPills = useHasPluginComposerPills(serverId, workspaceId, agentId);
-  const hasActiveComposer = !agentState.archivedAt && !isArchivingCurrentAgent;
+  const hasActiveComposer = !agentState.archivedAt && !isArchivingCurrentAgent && !readOnly;
+  // A scalar read rather than a field on selectChatAgentState: the composer does not otherwise
+  // care who this agent's parent is, only the orchestration pill does.
+  const isSubagent = useSessionStore((state) =>
+    Boolean(resolveChatAgentFromSession(state, serverId, agentId)?.parentAgentId),
+  );
   const hasVisibleAgentTracks = hasAgentTracks({
     subagentRows,
     tasks,
     archiveFinishedStatus: archiveFinishedSubagents.status,
     hasPluginComposerPills,
+    isSubagent,
   });
   const rawAgentInputDraft = useAgentInputDraft({
     draftKey: buildDraftStoreKey({
@@ -1358,6 +1376,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
           hasVisibleAgentTracks={hasVisibleAgentTracks}
           toast={toastApi}
           onOpenWorkspaceFile={onOpenWorkspaceFile}
+          readOnly={readOnly}
         />
       </RenderProfile>
       {hasActiveComposer ? (
@@ -1371,6 +1390,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
           archiveFinishedStatus={archiveFinishedSubagents.status}
           onArchiveFinished={archiveFinishedSubagents.archiveFinished}
           hasPluginComposerPills={hasPluginComposerPills}
+          isSubagent={isSubagent}
         />
       ) : null}
     </View>
@@ -1384,7 +1404,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
       onRewindComplete={handleRewindComplete}
     >
       <View style={styles.root} collapsable={false}>
-        <DockedChatSurface disabled={isArchivingCurrentAgent}>
+        <DockedChatSurface disabled={isArchivingCurrentAgent || Boolean(readOnly)}>
           {contentContainer}
 
           {showHistorySyncError ? (
@@ -1410,7 +1430,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
             </View>
           ) : null}
 
-          {composerSection}
+          {readOnly ? null : composerSection}
 
           {showHistorySyncOverlay ? (
             <View style={styles.historySyncOverlay} testID="agent-history-overlay">
@@ -1455,6 +1475,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
   hasVisibleAgentTracks,
   toast,
   onOpenWorkspaceFile,
+  readOnly,
 }: {
   streamViewRef: React.RefObject<AgentStreamViewHandle | null>;
   serverId: string;
@@ -1467,6 +1488,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
   hasVisibleAgentTracks: boolean;
   toast: ReturnType<typeof useToastHost>["api"];
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
+  readOnly?: boolean;
 }) {
   const isCompactFormFactor = useIsCompactFormFactor();
   const hasWorkspaceDiffStat = useWorkspaceHasDiffStat(serverId, workspaceId);
@@ -1539,6 +1561,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
       pendingMessageSubmissions={pendingMessageSubmissions}
       turnPresentation={turnPresentation}
       onOpenWorkspaceFile={onOpenWorkspaceFile}
+      readOnly={readOnly}
     />
   );
 });

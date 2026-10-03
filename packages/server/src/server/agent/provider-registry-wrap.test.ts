@@ -1,13 +1,20 @@
-import { describe, expect, test } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, test } from "vitest";
 
 import type {
   AgentCapabilityFlags,
+  AgentClient,
   AgentPromptInput,
   AgentSession,
   AgentStreamEvent,
   AgentRuntimeInfo,
+  SteerActiveTurnOptions,
 } from "./agent-sdk-types.js";
-import { wrapSessionProvider } from "./provider-registry.js";
+import { createTestLogger } from "../../test-utils/test-logger.js";
+import { findPerDirMcpServer } from "../mcp-gateway/per-dir-stdio.js";
+import { createAllClients, wrapClientProvider, wrapSessionProvider } from "./provider-registry.js";
 
 type OptionalAgentSessionMethodName = {
   [K in keyof AgentSession]-?: undefined extends AgentSession[K]
@@ -18,7 +25,9 @@ type OptionalAgentSessionMethodName = {
 }[keyof AgentSession];
 
 const OPTIONAL_AGENT_SESSION_METHOD_NAMES = [
+  "steerActiveTurn",
   "listCommands",
+  "getContextUsage",
   "setModel",
   "setThinkingOption",
   "setFeature",
@@ -69,6 +78,11 @@ class FakeSession implements AgentSession {
   async startTurn() {
     this.recordedCalls.push("startTurn");
     return { turnId: "turn-1" };
+  }
+
+  async steerActiveTurn(_prompt: AgentPromptInput, options: SteerActiveTurnOptions) {
+    this.recordedCalls.push(`steerActiveTurn:${options.expectedTurnId}`);
+    return { status: "accepted" as const };
   }
 
   subscribe(_callback: (event: AgentStreamEvent) => void) {
@@ -127,6 +141,11 @@ class FakeSession implements AgentSession {
     return [];
   }
 
+  async getContextUsage() {
+    this.recordedCalls.push("getContextUsage");
+    return null;
+  }
+
   async setModel() {
     this.recordedCalls.push("setModel");
   }
@@ -172,7 +191,13 @@ describe("wrapSessionProvider", () => {
     const session = new FakeSession();
     const wrapped = wrapSessionProvider("custom-claude", session);
 
+    // A derived provider (every account-pool account) that drops this steers nothing: the
+    // manager treats the steer as unavailable and interrupts the running turn instead.
+    await expect(
+      wrapped.steerActiveTurn?.("follow-up", { expectedTurnId: "turn-1" }),
+    ).resolves.toEqual({ status: "accepted" });
     await wrapped.listCommands?.();
+    await wrapped.getContextUsage?.({ allowStart: false });
     await wrapped.setModel?.("sonnet");
     await wrapped.setThinkingOption?.("high");
     await wrapped.setFeature?.("feature-1", true);
@@ -183,7 +208,9 @@ describe("wrapSessionProvider", () => {
     await handler?.run({ emit: () => {} });
 
     expect(session.recordedCalls).toEqual([
+      "steerActiveTurn:turn-1",
       "listCommands",
+      "getContextUsage",
       "setModel",
       "setThinkingOption",
       "setFeature",
@@ -193,5 +220,222 @@ describe("wrapSessionProvider", () => {
       "tryHandleOutOfBand",
       "tryHandleOutOfBand.run",
     ]);
+  });
+});
+
+describe("wrapClientProvider forwarding", () => {
+  // Every account-pool account is a derived provider, so this wrapper sits in front of every
+  // pooled Claude client. Anything it drops is lost only when a derived account serves the call.
+  test("forwards createSession's options and every optional client member, as the base provider", async () => {
+    const calls: unknown[][] = [];
+    const inner: AgentClient = {
+      provider: "claude",
+      capabilities: CAPABILITIES,
+      async createSession(config, _launchContext, options) {
+        calls.push(["createSession", config.provider, options]);
+        return new FakeSession();
+      },
+      async resumeSession() {
+        return new FakeSession();
+      },
+      async fetchCatalog() {
+        return { models: [], modes: [] };
+      },
+      async isAvailable() {
+        return true;
+      },
+      async listCommands(config) {
+        calls.push(["listCommands", config.provider]);
+        return [];
+      },
+      async archiveNativeSession(handle) {
+        calls.push(["archiveNativeSession", handle.provider, handle.sessionId]);
+      },
+      async unarchiveNativeSession(handle) {
+        calls.push(["unarchiveNativeSession", handle.provider, handle.sessionId]);
+      },
+      async shutdown() {
+        calls.push(["shutdown"]);
+      },
+    };
+
+    const wrapped = wrapClientProvider("claude-personal", inner, [], [], false);
+    const session = await wrapped.createSession(
+      { provider: "claude-personal", cwd: "/tmp" },
+      undefined,
+      {
+        persistSession: false,
+      },
+    );
+    await wrapped.listCommands?.({ provider: "claude-personal", cwd: "/tmp" });
+    await wrapped.archiveNativeSession?.({ provider: "claude-personal", sessionId: "s-1" });
+    await wrapped.unarchiveNativeSession?.({ provider: "claude-personal", sessionId: "s-1" });
+    await wrapped.shutdown?.();
+
+    expect(session.provider).toBe("claude-personal");
+    expect(calls).toEqual([
+      ["createSession", "claude", { persistSession: false }],
+      ["listCommands", "claude"],
+      ["archiveNativeSession", "claude", "s-1"],
+      ["unarchiveNativeSession", "claude", "s-1"],
+      ["shutdown"],
+    ]);
+  });
+
+  test("leaves an optional member absent when the base client has none", () => {
+    const inner: AgentClient = {
+      provider: "claude",
+      capabilities: CAPABILITIES,
+      createSession: async () => new FakeSession(),
+      resumeSession: async () => new FakeSession(),
+      fetchCatalog: async () => ({ models: [], modes: [] }),
+      isAvailable: async () => true,
+    };
+
+    const wrapped = wrapClientProvider("claude-personal", inner, [], [], false);
+
+    expect(wrapped.listCommands).toBeUndefined();
+    expect(wrapped.archiveNativeSession).toBeUndefined();
+    expect(wrapped.unarchiveNativeSession).toBeUndefined();
+    expect(wrapped.shutdown).toBeUndefined();
+  });
+});
+
+describe("wrapClientProvider", () => {
+  const originalConfigDirVar = process.env.PASEO_TEST_ACCOUNTS_HOME;
+  const tempDirs: string[] = [];
+
+  function createAccountDir(name: string, servers: Record<string, unknown>): string {
+    const dir = mkdtempSync(join(tmpdir(), `paseo-claude-account-${name}-`));
+    tempDirs.push(dir);
+    writeFileSync(join(dir, ".claude.json"), JSON.stringify({ mcpServers: servers }));
+    return dir;
+  }
+
+  afterEach(() => {
+    if (originalConfigDirVar === undefined) {
+      delete process.env.PASEO_TEST_ACCOUNTS_HOME;
+    } else {
+      process.env.PASEO_TEST_ACCOUNTS_HOME = originalConfigDirVar;
+    }
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop();
+      if (dir) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a derived claude provider's client still takes the gateway's brokered servers", () => {
+    const clients = createAllClients(createTestLogger(), {
+      providerOverrides: {
+        "claude-personal": { extends: "claude", label: "Claude Personal" },
+      },
+    });
+
+    expect(clients["claude-personal"]?.provider).toBe("claude-personal");
+    expect(clients["claude-personal"]?.acceptsMcpGatewayServers).toBe(true);
+    expect(clients.claude?.acceptsMcpGatewayServers).toBe(true);
+    expect(clients.codex?.acceptsMcpGatewayServers).toBeUndefined();
+  });
+
+  test("a derived claude provider adopts from its own account's config dir, not the base provider's", () => {
+    const leaderDir = createAccountDir("leader", {
+      amplitude: { type: "http", url: "https://amplitude.example/leader" },
+    });
+    const backupDir = createAccountDir("backup", {
+      amplitude: { type: "http", url: "https://amplitude.example/backup" },
+    });
+
+    const clients = createAllClients(createTestLogger(), {
+      providerOverrides: {
+        claude: { env: { CLAUDE_CONFIG_DIR: leaderDir } },
+        "claude-backup": {
+          extends: "claude",
+          label: "Claude Backup",
+          env: { CLAUDE_CONFIG_DIR: backupDir },
+        },
+      },
+    });
+
+    const scope = clients["claude-backup"]?.resolveMcpConfigScope?.("/workspace");
+    expect(scope?.configDir).toBe(backupDir);
+    expect(clients.claude?.resolveMcpConfigScope?.("/workspace")?.configDir).toBe(leaderDir);
+
+    // What adopt actually reads: the definition must come from the backup account's file.
+    expect(
+      findPerDirMcpServer({
+        configDir: scope?.configDir ?? "",
+        projectDir: "/workspace",
+        name: "amplitude",
+      }),
+    ).toEqual({
+      kind: "remote",
+      server: { url: "https://amplitude.example/backup", transport: "http" },
+    });
+  });
+
+  test("a derived provider's config dir expands ${VAR} against the env its sessions run with", () => {
+    const accountsHome = mkdtempSync(join(tmpdir(), "paseo-claude-accounts-"));
+    tempDirs.push(accountsHome);
+    const personalDir = join(accountsHome, ".claude-personal");
+    mkdirSync(personalDir);
+    writeFileSync(
+      join(personalDir, ".claude.json"),
+      JSON.stringify({
+        mcpServers: { aspire: { type: "sse", url: "https://aspire.example/mcp" } },
+      }),
+    );
+    process.env.PASEO_TEST_ACCOUNTS_HOME = accountsHome;
+
+    const clients = createAllClients(createTestLogger(), {
+      providerOverrides: {
+        "claude-personal": {
+          extends: "claude",
+          label: "Claude Personal",
+          env: { CLAUDE_CONFIG_DIR: "${PASEO_TEST_ACCOUNTS_HOME}/.claude-personal" },
+        },
+      },
+    });
+
+    const scope = clients["claude-personal"]?.resolveMcpConfigScope?.("/workspace");
+    // ${VAR} expansion is plain string substitution against the literal template below, which
+    // writes "/" (same as a real provider config would) — not the native-separator path.join
+    // used to create the fixture directory on disk.
+    expect(scope?.configDir).toBe(`${accountsHome}/.claude-personal`);
+    expect(
+      findPerDirMcpServer({
+        configDir: scope?.configDir ?? "",
+        projectDir: "/workspace",
+        name: "aspire",
+      }),
+    ).toEqual({ kind: "remote", server: { url: "https://aspire.example/mcp", transport: "sse" } });
+  });
+
+  test("a derived claude provider answers for its own account's sign-in state", async () => {
+    const signedIn = createAccountDir("signed-in", {});
+    writeFileSync(
+      join(signedIn, ".claude.json"),
+      JSON.stringify({ oauthAccount: { emailAddress: "worker@example.com" } }),
+    );
+    const signedOut = createAccountDir("signed-out", {});
+
+    const clients = createAllClients(createTestLogger(), {
+      providerOverrides: {
+        claude: { env: { CLAUDE_CONFIG_DIR: signedIn } },
+        "claude-personal": {
+          extends: "claude",
+          label: "Claude Personal",
+          env: { CLAUDE_CONFIG_DIR: signedOut },
+        },
+      },
+    });
+
+    expect(await clients.claude?.describeAccountAuth?.()).toEqual({
+      state: "signed-in",
+      accountLabel: "worker@example.com",
+    });
+    expect(await clients["claude-personal"]?.describeAccountAuth?.()).toEqual({
+      state: "signed-out",
+      signInCommand: `CLAUDE_CONFIG_DIR=${signedOut} claude /login`,
+    });
   });
 });

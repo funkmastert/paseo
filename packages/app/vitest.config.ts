@@ -113,7 +113,7 @@ export default defineConfig({
       // Vite alias resolution).
       {
         find: "react-native",
-        replacement: path.resolve(rootNodeModules, "react-native-web/dist/index.js"),
+        replacement: path.resolve(__dirname, "test-stubs/react-native-web-with-toast-android.ts"),
       },
       { find: "react", replacement: resolvePackageEntry("react") },
       {
@@ -153,6 +153,11 @@ export default defineConfig({
       {
         find: /^expo-linking$/,
         replacement: path.resolve(__dirname, "test-stubs/expo-linking.ts"),
+      },
+      // Ships untranspiled JSX in a .js file, which esbuild's dependency scan refuses to parse.
+      {
+        find: /^expo-clipboard$/,
+        replacement: path.resolve(__dirname, "test-stubs/expo-clipboard.ts"),
       },
       {
         find: /^lucide-react-native$/,

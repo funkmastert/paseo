@@ -12,7 +12,7 @@ import {
   startGitCommandTrace,
   submitGitCommandTrace,
 } from "./git-command-trace.js";
-import { spawnProcess } from "./spawn.js";
+import { spawnProcess, type SpawnPriority } from "./spawn.js";
 import {
   GitProcessScheduler,
   type GitProcessPriority,
@@ -52,6 +52,8 @@ export interface GitCommandOptions {
   timeout?: number;
   maxOutputBytes?: number;
   acceptExitCodes?: number[];
+  /** Opt-in low priority for periodic work nobody is waiting on; see utils/spawn.ts. */
+  priority?: SpawnPriority;
 }
 
 export interface GitCommandResult {
@@ -385,6 +387,7 @@ function runGitCommandWithProvenance(
             cwd: options.cwd,
             envOverlay,
             shell: false,
+            priority: options.priority,
             stdio: ["ignore", "pipe", "pipe"],
           },
         );

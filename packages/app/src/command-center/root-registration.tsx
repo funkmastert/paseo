@@ -6,10 +6,12 @@ import {
   CircleDashed,
   Folder,
   FolderPlus,
+  Gauge,
   History,
   Home,
   Import,
   Keyboard,
+  MessageCircleQuestion,
   PanelLeft,
   Plus,
   Settings,
@@ -27,6 +29,8 @@ import { usePanelStore } from "@/stores/panel-store";
 import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { clearCommandCenterFocusRestoreElement } from "@/utils/command-center-focus-restore";
 import {
+  buildAskJevRoute,
+  buildJevDashboardRoute,
   buildOpenProjectRoute,
   buildSchedulesRoute,
   buildSessionsRoute,
@@ -62,6 +66,12 @@ const ThemedCircleDashed = withUnistyles(CircleDashed, (theme) => ({
 const ThemedPanelLeft = withUnistyles(PanelLeft, (theme) => ({
   color: theme.colors.foregroundMuted,
 }));
+const ThemedMessageCircleQuestion = withUnistyles(MessageCircleQuestion, (theme) => ({
+  color: theme.colors.foregroundMuted,
+}));
+const ThemedGauge = withUnistyles(Gauge, (theme) => ({
+  color: theme.colors.foregroundMuted,
+}));
 
 function PlusIcon({ size }: CommandCenterIconProps) {
   return <ThemedPlus size={size} strokeWidth={2.4} />;
@@ -81,6 +91,14 @@ function HistoryIcon({ size }: CommandCenterIconProps) {
 
 function SchedulesIcon({ size }: CommandCenterIconProps) {
   return <ThemedCalendarClock size={size} strokeWidth={2.2} />;
+}
+
+function AskJevIcon({ size }: CommandCenterIconProps) {
+  return <ThemedMessageCircleQuestion size={size} strokeWidth={2.2} />;
+}
+
+function JevDashboardIcon({ size }: CommandCenterIconProps) {
+  return <ThemedGauge size={size} strokeWidth={2.2} />;
 }
 
 function KeyboardIcon({ size }: CommandCenterIconProps) {
@@ -118,6 +136,8 @@ export function CommandCenterRootActions() {
   const homeRoute = useMemo<Href>(() => buildOpenProjectRoute(), []);
   const sessionsRoute = useMemo<Href>(() => buildSessionsRoute(), []);
   const schedulesRoute = useMemo<Href>(() => buildSchedulesRoute(), []);
+  const askJevRoute = useMemo<Href>(() => buildAskJevRoute(), []);
+  const jevDashboardRoute = useMemo<Href>(() => buildJevDashboardRoute(), []);
   const setShortcutsDialogOpen = useKeyboardShortcutsStore((state) => state.setShortcutsDialogOpen);
   // Narrow selector on purpose: a whole-store subscription would re-register every root action
   // each time host filters are reconciled.
@@ -246,6 +266,44 @@ export function CommandCenterRootActions() {
         },
       },
       {
+        id: "ask-jev",
+        group: "actions",
+        groupRank: 0,
+        // Between Schedules (5) and Settings (6).
+        rank: 5.5,
+        keywords: ["jev", "ask", "question", "decide", "classify", "typesafe"],
+        visibility: "always",
+        run: () => {
+          clearCommandCenterFocusRestoreElement();
+          router.push(askJevRoute);
+        },
+        presentation: {
+          kind: "action",
+          title: t("sidebar.sections.askJev"),
+          sectionTitle: t("shell.commandCenter.actions"),
+          icon: AskJevIcon,
+        },
+      },
+      {
+        id: "jev-dashboard",
+        group: "actions",
+        groupRank: 0,
+        // Between Ask JEV (5.5) and Settings (6).
+        rank: 5.75,
+        keywords: ["jev", "dashboard", "savings", "tokens", "typesafe"],
+        visibility: "always",
+        run: () => {
+          clearCommandCenterFocusRestoreElement();
+          router.push(jevDashboardRoute);
+        },
+        presentation: {
+          kind: "action",
+          title: t("sidebar.sections.jevDashboard"),
+          sectionTitle: t("shell.commandCenter.actions"),
+          icon: JevDashboardIcon,
+        },
+      },
+      {
         id: "settings",
         group: "actions",
         groupRank: 0,
@@ -331,8 +389,10 @@ export function CommandCenterRootActions() {
 
     return availableActions;
   }, [
+    askJevRoute,
     groupMode,
     homeRoute,
+    jevDashboardRoute,
     keyboardActionDispatcher,
     openAddProject,
     openImportSession,

@@ -1,5 +1,5 @@
 import { router, usePathname } from "expo-router";
-import { CalendarClock, History, Plus, Search } from "lucide-react-native";
+import { CalendarClock, History, MessageCircleQuestion, Plus, Search } from "lucide-react-native";
 import { memo, useCallback, useMemo, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import { View, type StyleProp, type ViewStyle } from "react-native";
@@ -18,6 +18,7 @@ import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useWorkspace } from "@/stores/session-store-hooks";
 import {
+  buildAskJevRoute,
   buildNewWorkspaceRoute,
   buildSchedulesRoute,
   buildSessionsRoute,
@@ -170,9 +171,30 @@ function SidebarSchedulesRow({ onBeforeNavigate }: SidebarNavRowProps) {
   );
 }
 
+function SidebarAskJevRow({ onBeforeNavigate }: SidebarNavRowProps) {
+  const { t } = useTranslation();
+  const pathname = usePathname();
+  const handlePress = useCallback(() => {
+    onBeforeNavigate?.();
+    router.push(buildAskJevRoute());
+  }, [onBeforeNavigate]);
+
+  return (
+    <SidebarHeaderRow
+      icon={MessageCircleQuestion}
+      label={t(builtinSidebarNavLabelKey("ask-jev"))}
+      onPress={handlePress}
+      isActive={pathname.includes("/ask-jev")}
+      testID="sidebar-ask-jev"
+      variant="compact"
+    />
+  );
+}
+
 const BUILTIN_ROWS: Record<BuiltinSidebarNavId, ComponentType<SidebarNavRowProps>> = {
   "new-workspace": SidebarNewWorkspaceRow,
   history: SidebarHistoryRow,
   search: SidebarSearchRow,
   schedules: SidebarSchedulesRow,
+  "ask-jev": SidebarAskJevRow,
 };

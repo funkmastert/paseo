@@ -45,6 +45,11 @@ import { useProjects } from "@/hooks/use-projects";
 import { useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import { buildScheduleProjectTargets } from "@/schedules/schedule-project-targets";
+import {
+  HEARTBEAT_WAKE_LABELS,
+  HEARTBEAT_WAKE_ORDER,
+  type HeartbeatWake,
+} from "@/schedules/schedule-wake";
 import { useScheduleFormModel } from "@/schedules/use-schedule-form-model";
 import { useScheduleFormProviderSnapshot } from "@/schedules/use-schedule-form-provider-snapshot";
 import type {
@@ -121,6 +126,8 @@ function selectScheduleHosts(
       label: host.label,
       supportsWorkspaceMultiplicity:
         state.sessions[host.serverId]?.serverInfo?.features?.workspaceMultiplicity === true,
+      supportsScheduleConditions:
+        state.sessions[host.serverId]?.serverInfo?.features?.scheduleConditions === true,
     }));
 }
 
@@ -315,15 +322,16 @@ function OpenScheduleFormSheet({
   ]);
 
   const submitAgentTarget = useCallback(async (): Promise<boolean> => {
-    if (!schedule || !state.submitCadence) {
+    if (!schedule) {
       return false;
     }
     await updateSchedule({
       id: schedule.id,
-      cadence: state.submitCadence,
+      ...(state.submitCadence ? { cadence: state.submitCadence } : {}),
+      ...(state.submitCondition !== undefined ? { condition: state.submitCondition } : {}),
     });
     return true;
-  }, [schedule, state.submitCadence, updateSchedule]);
+  }, [schedule, state.submitCadence, state.submitCondition, updateSchedule]);
 
   const submitNewAgent = useCallback(async (): Promise<boolean> => {
     const provider = state.selectedProvider;
@@ -484,6 +492,9 @@ function ScheduleFormFields({
           error={cadenceError ?? undefined}
           size={controlSize}
         />
+        {state.disclosure.showWakeField ? (
+          <ScheduleWakeField model={model} state={state} size={controlSize} />
+        ) : null}
         {state.submitError ? <Text style={styles.submitError}>{state.submitError}</Text> : null}
       </>
     );
@@ -809,6 +820,54 @@ function ScheduleTargetFields({
         </Field>
       ) : null}
     </>
+  );
+}
+
+function ScheduleWakeField({
+  model,
+  state,
+  size,
+}: {
+  model: ScheduleFormModel;
+  state: ScheduleFormState;
+  size: FieldControlSize;
+}): ReactElement {
+  const options = useMemo<SelectFieldOption<HeartbeatWake>[]>(
+    () =>
+      HEARTBEAT_WAKE_ORDER.map((wake) => ({
+        id: wake,
+        value: wake,
+        label: HEARTBEAT_WAKE_LABELS[wake],
+        testID: `schedule-wake-${wake}`,
+      })),
+    [],
+  );
+  const selectedDisplay = useMemo<SelectFieldDisplay>(
+    () => ({ label: HEARTBEAT_WAKE_LABELS[state.wake] }),
+    [state.wake],
+  );
+  const handleSelectWake = useCallback(
+    (value: HeartbeatWake) => {
+      model.setWake(value);
+    },
+    [model],
+  );
+
+  return (
+    <SelectField
+      label="Wake"
+      value={state.wake}
+      selectedDisplay={selectedDisplay}
+      options={options}
+      onChange={handleSelectWake}
+      placeholder="Select when to wake"
+      emptyText="No options found"
+      searchable={false}
+      title="Wake"
+      size={size}
+      testID="schedule-wake"
+      triggerTestID="schedule-wake-trigger"
+    />
   );
 }
 

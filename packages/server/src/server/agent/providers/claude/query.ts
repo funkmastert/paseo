@@ -90,6 +90,7 @@ function applyRuntimeSettingsToClaudeOptions(
           ? { env: selfNodeCommand.env, envMode: "internal" as const }
           : providerEnvSpec),
         signal: spawnOptions.signal,
+        priority: "agent",
         stdio: ["pipe", "pipe", "pipe"],
         // Bypass cmd.exe on Windows: the SDK passes --mcp-config with inline JSON
         // containing double quotes, which cmd.exe mangles (strips quotes, breaks parsing).

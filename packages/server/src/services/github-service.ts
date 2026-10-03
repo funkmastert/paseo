@@ -6,7 +6,7 @@ import {
 } from "@getpaseo/protocol/git-remote";
 import { findExecutable } from "../executable-resolution/executable-resolution.js";
 import { runGitCommand } from "../utils/run-git-command.js";
-import { execCommand } from "../utils/spawn.js";
+import { execCommand, runWithSpawnPriority } from "../utils/spawn.js";
 import { resolveSshHostname } from "../utils/ssh-hostname.js";
 import {
   CLI_AUTH_PROBE_TIMEOUT_MS,
@@ -1510,10 +1510,13 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       batchGroups.set(key, group);
     }
 
-    await Promise.all([
-      ...legacyTargets.map((target) => runGitHubPoll(target)),
-      ...[...batchGroups.values()].map((group) => runGitHubPollGroup(group, now)),
-    ]);
+    // Periodic polling nobody is waiting on: its `gh` calls run at background priority.
+    await runWithSpawnPriority("background", () =>
+      Promise.all([
+        ...legacyTargets.map((target) => runGitHubPoll(target)),
+        ...[...batchGroups.values()].map((group) => runGitHubPollGroup(group, now)),
+      ]),
+    );
   }
 
   async function runGitHubPollGroup(

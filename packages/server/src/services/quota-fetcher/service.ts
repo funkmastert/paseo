@@ -1,7 +1,13 @@
 import type { Logger } from "pino";
 import type { ProviderUsage } from "../../server/messages.js";
+import type { ClaudeDerivedProviderEntry } from "./manifest.js";
 import { createProviderUsageFetchers } from "./manifest.js";
-import type { ProviderApiFetch, ProviderUsageFetcher } from "./provider.js";
+import type {
+  ProviderApiFetch,
+  ProviderUsageFetcher,
+  ProviderUsageFetcherFactoryOptions,
+} from "./provider.js";
+import type { OpenAiApiUsageConfig } from "./providers/openai-api.js";
 import { unavailableUsage } from "./usage.js";
 
 export interface ProviderUsageServiceOptions {
@@ -10,6 +16,11 @@ export interface ProviderUsageServiceOptions {
   fetch?: ProviderApiFetch;
   cacheTtlMs?: number;
   now?: () => number;
+  /** Claude-derived custom provider entries, e.g. from `deriveClaudeProviderEntries`. */
+  claudeDerivedProviders?: readonly ClaudeDerivedProviderEntry[];
+  /** `agents.providerUsage.openaiApi`, read on every fetch. */
+  readOpenAiApiConfig?: () => OpenAiApiUsageConfig | undefined;
+  readJevStatus?: ProviderUsageFetcherFactoryOptions["readJevStatus"];
 }
 
 export interface ProviderUsageListResult {
@@ -31,10 +42,15 @@ export class ProviderUsageService {
     this.logger = options.logger.child({ module: "provider-usage-service" });
     this.fetchers =
       options.fetchers ??
-      createProviderUsageFetchers({
-        logger: this.logger,
-        fetch: options.fetch,
-      });
+      createProviderUsageFetchers(
+        {
+          logger: this.logger,
+          fetch: options.fetch,
+          readOpenAiApiConfig: options.readOpenAiApiConfig,
+          readJevStatus: options.readJevStatus,
+        },
+        options.claudeDerivedProviders,
+      );
     this.cacheTtlMs = options.cacheTtlMs ?? DEFAULT_PROVIDER_USAGE_CACHE_TTL_MS;
     this.now = options.now ?? Date.now;
   }
@@ -46,7 +62,7 @@ export class ProviderUsageService {
       this.cached &&
       nowMs - this.cached.fetchedAtMs < this.cacheTtlMs
     ) {
-      return this.cached.result;
+      return this.withLiveRows(this.cached.result);
     }
 
     if (this.inFlight) {
@@ -64,22 +80,48 @@ export class ProviderUsageService {
     }
   }
 
+  /** The cached rows with every live fetcher's row read again, in the same place. */
+  private async withLiveRows(result: ProviderUsageListResult): Promise<ProviderUsageListResult> {
+    const live = this.fetchers.filter((fetcher) => fetcher.live);
+    if (live.length === 0) return result;
+    const fresh = new Map<string, ProviderUsage | null>();
+    await Promise.all(
+      live.map(async (fetcher) => {
+        try {
+          fresh.set(fetcher.providerId, await fetcher.fetchUsage());
+        } catch (err) {
+          this.logger.debug({ err, providerId: fetcher.providerId }, "Live usage read failed");
+        }
+      }),
+    );
+    const providers = result.providers.flatMap((provider): ProviderUsage[] => {
+      if (!fresh.has(provider.providerId)) return [provider];
+      const row = fresh.get(provider.providerId);
+      fresh.delete(provider.providerId);
+      return row ? [row] : [];
+    });
+    for (const row of fresh.values()) if (row) providers.push(row);
+    return { ...result, providers };
+  }
+
   private async fetchFreshUsage(nowMs: number): Promise<ProviderUsageListResult> {
     const settled = await Promise.allSettled(this.fetchers.map((fetcher) => fetcher.fetchUsage()));
-    const providers = settled.map((result, index) => {
+    const providers = settled.flatMap((result, index): ProviderUsage[] => {
       const fetcher = this.fetchers[index];
       if (result.status === "fulfilled") {
-        return result.value;
+        return result.value ? [result.value] : [];
       }
       this.logger.debug(
         { err: result.reason, providerId: fetcher.providerId },
         "Provider usage fetch failed",
       );
-      return unavailableUsage({
-        providerId: fetcher.providerId,
-        displayName: fetcher.displayName,
-        error: result.reason instanceof Error ? result.reason.message : String(result.reason),
-      });
+      return [
+        unavailableUsage({
+          providerId: fetcher.providerId,
+          displayName: fetcher.displayName,
+          error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+        }),
+      ];
     });
 
     const result = { fetchedAt: new Date(nowMs).toISOString(), providers };

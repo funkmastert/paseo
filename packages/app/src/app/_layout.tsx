@@ -135,6 +135,7 @@ import {
 } from "@/utils/host-routes";
 import { buildNotificationRoute, resolveNotificationTarget } from "@/utils/notification-routing";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
+import { AgentMoveNoticeToast } from "@/components/agent-move-notice-toast";
 import { PluginCatalogSync } from "@/plugins";
 import {
   ensureOsNotificationPermission,
@@ -881,6 +882,9 @@ function AppWithSidebar({ children }: { children: ReactNode }) {
       pathname === "/new" ||
       pathname === "/sessions" ||
       pathname === "/schedules" ||
+      pathname === "/ask-jev" ||
+      pathname === "/jev" ||
+      pathname === "/pinned-grid" ||
       routeHasKnownHost);
 
   return <AppContainer chromeEnabled={shouldShowAppChrome}>{children}</AppContainer>;
@@ -913,6 +917,9 @@ function RootStack() {
         <Stack.Screen name="open-project" />
         <Stack.Screen name="sessions" />
         <Stack.Screen name="schedules" />
+        <Stack.Screen name="ask-jev" />
+        <Stack.Screen name="jev" />
+        <Stack.Screen name="pinned-grid" />
         <Stack.Screen name="pair-scan" />
       </Stack.Protected>
       <Stack.Screen name="h/[serverId]" />
@@ -941,6 +948,7 @@ function AppShell() {
       <HorizontalScrollProvider>
         <OpenProjectListener />
         <AgentNavigationListener />
+        <AgentMoveNoticeToast />
         <AppWithSidebar>
           <WorkspaceRouteNavigationBridge />
           <RootStack />

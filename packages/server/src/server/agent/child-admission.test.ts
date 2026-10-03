@@ -1,0 +1,663 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, test } from "vitest";
+
+import { createTestLogger } from "../../test-utils/test-logger.js";
+import {
+  type AdmissionAgentView,
+  type AdmissionOutcome,
+  type ChildAdmissionConfig,
+  ChildAdmissionController,
+  defaultMaxConcurrentChildTurns,
+  loadHeldTurns,
+  mergeHeldPrompts,
+  resolveChildAdmissionSettings,
+  restoreHeldTurns,
+  type HeldTurn,
+} from "./child-admission.js";
+import { ResumePacer } from "./resume-pacer.js";
+
+/** A fake fleet: the controller reads lifecycle state from here, as it does from the manager. */
+function harness(
+  config: ChildAdmissionConfig = { maxConcurrentChildTurns: 2 },
+  queueFilePath?: string,
+) {
+  const agents = new Map<string, AdmissionAgentView>();
+  let currentConfig = config;
+  // Each request a second after the last, so line order is by time as it is in production.
+  let clockMs = Date.parse("2026-09-24T10:00:00.000Z");
+  const controller = new ChildAdmissionController({
+    readConfig: () => currentConfig,
+    listAgents: () => [...agents.values()],
+    logger: createTestLogger(),
+    queueFilePath,
+    now: () => new Date((clockMs += 1000)),
+  });
+  const set = (
+    id: string,
+    parentAgentId: string | null,
+    lifecycle: AdmissionAgentView["lifecycle"],
+  ) => {
+    agents.set(id, { id, parentAgentId, lifecycle });
+  };
+  /** Mirrors the manager: an admitted child runs; a queued one shows running while it waits. */
+  const start = (id: string, parentAgentId: string | null) => {
+    const result = controller.request({ agentId: id, parentAgentId, prompt: `task ${id}` });
+    set(id, parentAgentId, "running");
+    if (result.status === "admitted") controller.settleStart(id);
+    return result;
+  };
+  const finish = (id: string) => {
+    const view = agents.get(id)!;
+    set(id, view.parentAgentId, "idle");
+    controller.pump();
+  };
+  return {
+    controller,
+    agents,
+    set,
+    start,
+    finish,
+    setConfig: (next: ChildAdmissionConfig) => {
+      currentConfig = next;
+      controller.pump();
+    },
+  };
+}
+
+async function settled(result: Promise<AdmissionOutcome>): Promise<AdmissionOutcome | "pending"> {
+  return await Promise.race([
+    result,
+    new Promise<"pending">((r) => setTimeout(() => r("pending"), 5)),
+  ]);
+}
+
+describe("resolveChildAdmissionSettings", () => {
+  test("defaults the cap to half the cores, never below two, and pacing to four a minute", () => {
+    expect(resolveChildAdmissionSettings(undefined, 16)).toEqual({
+      enabled: true,
+      maxConcurrentChildTurns: 8,
+      bulkResumesPerMinute: 4,
+    });
+    expect(defaultMaxConcurrentChildTurns(2)).toBe(2);
+    expect(defaultMaxConcurrentChildTurns(5)).toBe(2);
+    expect(
+      resolveChildAdmissionSettings({ maxConcurrentChildTurns: 3 }, 16).maxConcurrentChildTurns,
+    ).toBe(3);
+  });
+});
+
+describe("ChildAdmissionController", () => {
+  test("never queues a root, even past the cap or under a hold", () => {
+    const h = harness({ maxConcurrentChildTurns: 1 });
+    h.start("child-1", "root");
+    h.controller.setHold("saturation", true);
+    expect(h.start("root", null).status).toBe("admitted");
+    expect(h.start("root-2", null).status).toBe("admitted");
+  });
+
+  test("queues a child past the cap and admits FIFO as child turns end", async () => {
+    const h = harness({ maxConcurrentChildTurns: 2 });
+    h.set("root", null, "running");
+    expect(h.start("c1", "root").status).toBe("admitted");
+    expect(h.start("c2", "root").status).toBe("admitted");
+    const q3 = h.start("c3", "root");
+    const q4 = h.start("c4", "root");
+    expect(q3.status).toBe("queued");
+    expect(q4.status).toBe("queued");
+    expect(h.controller.queueLength()).toBe(2);
+
+    h.finish("c1");
+    expect(await settled((q3 as { result: Promise<AdmissionOutcome> }).result)).toMatchObject({
+      outcome: "admitted",
+      prompt: "task c3",
+    });
+    expect(await settled((q4 as { result: Promise<AdmissionOutcome> }).result)).toBe("pending");
+
+    // An errored child frees its slot the same way an idle one does.
+    h.set("c2", "root", "error");
+    h.controller.pump();
+    expect(await settled((q4 as { result: Promise<AdmissionOutcome> }).result)).toMatchObject({
+      outcome: "admitted",
+    });
+  });
+
+  test("a new child joins the back of a non-empty queue even if a slot looks free", () => {
+    const h = harness({ maxConcurrentChildTurns: 1 });
+    h.start("c1", "root");
+    h.start("c2", "root");
+    // c1 goes idle but nobody pumped yet: c3 must not jump ahead of c2.
+    h.set("c1", "root", "idle");
+    expect(h.start("c3", "root").status).toBe("queued");
+  });
+
+  test("an admitted child that has not started yet still holds its slot", () => {
+    const h = harness({ maxConcurrentChildTurns: 1 });
+    expect(h.controller.request({ agentId: "c1", parentAgentId: "root", prompt: "x" }).status).toBe(
+      "admitted",
+    );
+    // c1 is still idle in lifecycle state (startTurn in flight), yet the slot is taken.
+    h.set("c1", "root", "idle");
+    expect(h.start("c2", "root").status).toBe("queued");
+  });
+
+  test("a child replacing its own running turn keeps its slot and is never queued", () => {
+    const h = harness({ maxConcurrentChildTurns: 1 });
+    h.start("c1", "root");
+    h.start("c2", "root");
+    expect(
+      h.controller.request({
+        agentId: "c1",
+        parentAgentId: "root",
+        prompt: "again",
+        keepsSlot: true,
+      }).status,
+    ).toBe("admitted");
+  });
+
+  test("sub-leaders waiting on their own children do not deadlock the cap", async () => {
+    const h = harness({ maxConcurrentChildTurns: 2 });
+    h.set("root", null, "running");
+    // Two sub-leaders fill both slots...
+    h.start("lead-a", "root");
+    h.start("lead-b", "root");
+    // ...and each spawns a worker and waits on it.
+    const workerA = h.start("worker-a", "lead-a");
+    const workerB = h.start("worker-b", "lead-b");
+    // A sub-leader with a live child frees its slot, so both workers run.
+    expect(workerA.status).toBe("admitted");
+    expect(workerB.status).toBe("admitted");
+  });
+
+  test("a worker queued behind a hold runs once released, while its leader holds the only slot", async () => {
+    const h = harness({ maxConcurrentChildTurns: 1 });
+    h.start("lead", "root");
+    h.controller.setHold("saturation", true);
+    const worker = h.start("worker", "lead");
+    expect(worker.status).toBe("queued");
+    h.controller.setHold("saturation", false);
+    // lead waits on worker, so lead stops counting and worker takes the slot.
+    expect(await settled((worker as { result: Promise<AdmissionOutcome> }).result)).toMatchObject({
+      outcome: "admitted",
+    });
+  });
+
+  test("holds keep queued children queued until every source releases", async () => {
+    const h = harness({ maxConcurrentChildTurns: 4 });
+    h.controller.setHold("saturation", true, "load 38 on 16 cores");
+    h.controller.setHold("other", true);
+    const queued = h.start("c1", "root");
+    expect(queued.status).toBe("queued");
+    h.controller.setHold("saturation", false);
+    expect(await settled((queued as { result: Promise<AdmissionOutcome> }).result)).toBe("pending");
+    h.controller.setHold("other", false);
+    expect(await settled((queued as { result: Promise<AdmissionOutcome> }).result)).toMatchObject({
+      outcome: "admitted",
+    });
+  });
+
+  test("a second prompt to a queued child is merged into the held one and keeps its place", async () => {
+    const h = harness({ maxConcurrentChildTurns: 1 });
+    h.start("c1", "root");
+    const q2 = h.start("c2", "root");
+    const q3 = h.start("c3", "root");
+    expect(h.controller.mergeHeld("c2", "and also this", { clientMessageId: "m2" })).toBe(true);
+    expect(h.controller.mergeHeld("c1", "not queued")).toBe(false);
+    h.finish("c1");
+    expect(await settled((q2 as { result: Promise<AdmissionOutcome> }).result)).toEqual({
+      outcome: "admitted",
+      prompt: "task c2\n\nand also this",
+      runOptions: { clientMessageId: "m2" },
+    });
+    expect(await settled((q3 as { result: Promise<AdmissionOutcome> }).result)).toBe("pending");
+  });
+
+  test("dropping a queued child settles its waiter and leaves the rest of the line intact", async () => {
+    const h = harness({ maxConcurrentChildTurns: 1 });
+    h.start("c1", "root");
+    const q2 = h.start("c2", "root");
+    const q3 = h.start("c3", "root");
+    expect(h.controller.drop("c2", "canceled")).toBe(true);
+    expect(h.controller.drop("c2", "canceled")).toBe(false);
+    expect(await settled((q2 as { result: Promise<AdmissionOutcome> }).result)).toEqual({
+      outcome: "dropped",
+      reason: "canceled",
+    });
+    h.agents.delete("c2");
+    h.finish("c1");
+    expect(await settled((q3 as { result: Promise<AdmissionOutcome> }).result)).toMatchObject({
+      outcome: "admitted",
+    });
+  });
+
+  test("a reload detaches a held turn and it goes back in at its old place", async () => {
+    const h = harness({ maxConcurrentChildTurns: 1 });
+    h.start("c1", "root");
+    const q2 = h.start("c2", "root");
+    h.start("c3", "root");
+    const held = h.controller.detach("c2");
+    expect(held).toMatchObject({ agentId: "c2", prompt: "task c2" });
+    expect(await settled((q2 as { result: Promise<AdmissionOutcome> }).result)).toEqual({
+      outcome: "dropped",
+      reason: "reloaded",
+    });
+    const again = h.controller.request({
+      agentId: "c2",
+      parentAgentId: "root",
+      prompt: held!.prompt,
+      queuedAt: held!.queuedAt,
+    });
+    expect(again.status).toBe("queued");
+    expect(h.controller.heldTurns().map((turn) => turn.agentId)).toEqual(["c2", "c3"]);
+  });
+
+  test("turning admission off admits everything queued", async () => {
+    const h = harness({ maxConcurrentChildTurns: 1 });
+    h.start("c1", "root");
+    const q2 = h.start("c2", "root");
+    h.setConfig({ enabled: false });
+    expect(await settled((q2 as { result: Promise<AdmissionOutcome> }).result)).toMatchObject({
+      outcome: "admitted",
+    });
+    expect(h.start("c3", "root").status).toBe("admitted");
+  });
+
+  test("raising the cap live admits the waiting children", async () => {
+    const h = harness({ maxConcurrentChildTurns: 1 });
+    h.start("c1", "root");
+    const q2 = h.start("c2", "root");
+    h.setConfig({ maxConcurrentChildTurns: 2 });
+    expect(await settled((q2 as { result: Promise<AdmissionOutcome> }).result)).toMatchObject({
+      outcome: "admitted",
+    });
+  });
+});
+
+/** A controller whose clock and timers the test moves by hand. */
+function pacedHarness(config: ChildAdmissionConfig) {
+  const agents = new Map<string, AdmissionAgentView>();
+  const clock = { ms: Date.parse("2026-09-28T05:23:05.000Z") };
+  const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+  let currentConfig = config;
+  const controller = new ChildAdmissionController({
+    readConfig: () => currentConfig,
+    listAgents: () => [...agents.values()],
+    logger: createTestLogger(),
+    now: () => new Date(clock.ms),
+    setTimer: (fn, ms) => {
+      const timer = { fn, ms, cleared: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimer: (handle) => {
+      (handle as { cleared: boolean }).cleared = true;
+    },
+  });
+  const admitted: string[] = [];
+  const recordAdmission = async (id: string, result: Promise<AdmissionOutcome>) => {
+    if ((await result).outcome === "admitted") admitted.push(id);
+  };
+  const queue = (id: string) => {
+    const result = controller.request({ agentId: id, parentAgentId: "leader", prompt: id });
+    agents.set(id, { id, parentAgentId: "leader", lifecycle: "running" });
+    if (result.status === "queued") void recordAdmission(id, result.result);
+    else admitted.push(id);
+  };
+  /** Moves the clock and fires every timer that is due, the way the event loop would. */
+  const advance = async (ms: number) => {
+    clock.ms += ms;
+    for (const timer of timers.splice(0)) {
+      if (!timer.cleared) timer.fn();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  return {
+    controller,
+    agents,
+    clock,
+    queue,
+    admitted,
+    timers,
+    advance,
+    setConfig: (next: ChildAdmissionConfig) => {
+      currentConfig = next;
+      controller.pump();
+    },
+    flush: () => new Promise((resolve) => setTimeout(resolve, 0)),
+  };
+}
+
+describe("draining the line after a hold", () => {
+  test("a release admits one waiting child, then one per sweep, never all at once", async () => {
+    // 09-28 05:23:05Z: the CPU hold released with six children waiting and eight free slots,
+    // and all six started in the same millisecond into 0.2 GB of free memory.
+    const h = pacedHarness({ maxConcurrentChildTurns: 8, bulkResumesPerMinute: 4 });
+    h.controller.setHold("cpu-saturation", true);
+    for (const id of ["c1", "c2", "c3", "c4", "c5", "c6"]) h.queue(id);
+    expect(h.controller.queueLength()).toBe(6);
+
+    h.controller.setHold("cpu-saturation", false);
+    await h.flush();
+    expect(h.admitted).toEqual(["c1"]);
+    expect(h.timers.at(-1)?.ms).toBe(60_000);
+
+    // Anything that pumps in between (a turn ending, a config change) does not skip the wait.
+    h.controller.pump();
+    h.controller.settleStart("c1");
+    await h.flush();
+    expect(h.admitted).toEqual(["c1"]);
+
+    await h.advance(60_000);
+    expect(h.admitted).toEqual(["c1", "c2"]);
+    for (let index = 0; index < 4; index += 1) await h.advance(60_000);
+    expect(h.admitted).toEqual(["c1", "c2", "c3", "c4", "c5", "c6"]);
+    expect(h.controller.queueLength()).toBe(0);
+  });
+
+  test("the drain never outruns the resource monitor's sweep, however fast bulk resumes are", async () => {
+    // fix-review-A A-03: at 15s a release with eight waiting started all eight inside two
+    // sweeps, before the memory brake could read what the first of them did.
+    const fast = pacedHarness({ maxConcurrentChildTurns: 8, bulkResumesPerMinute: 60 });
+    fast.controller.setHold("memory-pressure", true);
+    for (const id of ["c1", "c2", "c3"]) fast.queue(id);
+    fast.controller.setHold("memory-pressure", false);
+    await fast.flush();
+    expect(fast.timers.at(-1)?.ms).toBe(60_000);
+    await fast.advance(59_000);
+    expect(fast.admitted).toEqual(["c1"]);
+    await fast.advance(1_000);
+    expect(fast.admitted).toEqual(["c1", "c2"]);
+
+    // A slower setting still slows it down.
+    const slow = pacedHarness({ maxConcurrentChildTurns: 8, bulkResumesPerMinute: 0.5 });
+    slow.controller.setHold("memory-pressure", true);
+    for (const id of ["c1", "c2"]) slow.queue(id);
+    slow.controller.setHold("memory-pressure", false);
+    await slow.flush();
+    expect(slow.timers.at(-1)?.ms).toBe(120_000);
+  });
+
+  test("only the line at the release is paced: a child queued after it starts when a slot is free", async () => {
+    const h = pacedHarness({ maxConcurrentChildTurns: 8, bulkResumesPerMinute: 4 });
+    h.controller.setHold("memory-pressure", true);
+    for (const id of ["c1", "c2", "c3"]) h.queue(id);
+    h.controller.setHold("memory-pressure", false);
+    await h.flush();
+    expect(h.admitted).toEqual(["c1"]);
+
+    h.clock.ms += 1_000;
+    h.queue("later");
+    await h.flush();
+    expect(h.admitted).toEqual(["c1", "later"]);
+    expect(h.controller.queueLength()).toBe(2);
+
+    await h.advance(60_000);
+    expect(h.admitted).toEqual(["c1", "later", "c2"]);
+  });
+
+  test("the paced backlog keeps its turn over later children when slots are short", async () => {
+    const h = pacedHarness({ maxConcurrentChildTurns: 2, bulkResumesPerMinute: 4 });
+    h.controller.setHold("memory-pressure", true);
+    for (const id of ["c1", "c2"]) h.queue(id);
+    h.controller.setHold("memory-pressure", false);
+    await h.flush();
+    h.clock.ms += 1_000;
+    h.queue("later-1");
+    h.queue("later-2");
+    await h.flush();
+    // c1 and later-1 fill the cap; later-2 waits behind them.
+    expect(h.admitted).toEqual(["c1", "later-1"]);
+
+    // c2 is due and a slot frees: the backlog goes first.
+    h.clock.ms += 60_000;
+    h.agents.set("c1", { id: "c1", parentAgentId: "leader", lifecycle: "idle" });
+    h.controller.settleStart("c1");
+    h.controller.settleStart("later-1");
+    h.controller.pump();
+    await h.flush();
+    expect(h.admitted).toEqual(["c1", "later-1", "c2"]);
+  });
+
+  test("children arriving faster than the drain leave the line when the backlog is through", () => {
+    // fix-review-A A-02: eight slots, six waiting at the release, then a new child every 10s
+    // that runs for 5s. Pacing the whole line until it was empty never ended: after an hour
+    // 125 were queued and one slot of eight was in use.
+    const h = pacedHarness({ maxConcurrentChildTurns: 8, bulkResumesPerMinute: 4 });
+    h.controller.setHold("memory-pressure", true);
+    const backlog = ["b1", "b2", "b3", "b4", "b5", "b6"];
+    for (const id of backlog) h.queue(id);
+    const releasedAtMs = h.clock.ms;
+    const arrivedAtMs = new Map<string, number>();
+    const startedAtMs = new Map<string, number>();
+    const noteStarts = () => {
+      for (const id of [...backlog, ...arrivedAtMs.keys()]) {
+        if (!startedAtMs.has(id) && !h.controller.isQueued(id)) startedAtMs.set(id, h.clock.ms);
+      }
+    };
+    h.controller.setHold("memory-pressure", false);
+    noteStarts();
+
+    let peakRunning = 0;
+    for (let second = 1; second <= 3600; second += 1) {
+      h.clock.ms += 1_000;
+      for (const timer of h.timers.splice(0)) if (!timer.cleared) timer.fn();
+      for (const [id, startedAt] of startedAtMs) {
+        const view = h.agents.get(id)!;
+        if (view.lifecycle === "running" && h.clock.ms - startedAt >= 5_000) {
+          h.agents.set(id, { ...view, lifecycle: "idle" });
+          h.controller.settleStart(id);
+          h.controller.pump();
+        }
+      }
+      if (second % 10 === 0) {
+        const id = `n${second}`;
+        arrivedAtMs.set(id, h.clock.ms);
+        h.queue(id);
+      }
+      noteStarts();
+      const running = [...h.agents.values()].filter((view) => view.lifecycle === "running");
+      peakRunning = Math.max(
+        peakRunning,
+        running.filter((view) => !h.controller.isQueued(view.id)).length,
+      );
+    }
+
+    // The backlog went one per sweep.
+    const backlogStarts = backlog.map((id) => (startedAtMs.get(id)! - releasedAtMs) / 1_000);
+    expect(backlogStarts).toEqual([0, 60, 120, 180, 240, 300]);
+    // Every later child started the moment it arrived, and nothing is left waiting.
+    const waits = [...arrivedAtMs].map(([id, at]) => (startedAtMs.get(id) ?? Infinity) - at);
+    expect(waits.every((waitedMs) => waitedMs === 0)).toBe(true);
+    expect(h.controller.queueLength()).toBe(0);
+    expect(peakRunning).toBeLessThanOrEqual(8);
+  });
+
+  test("once the line is empty a new child is admitted straight away", async () => {
+    const h = pacedHarness({ maxConcurrentChildTurns: 8, bulkResumesPerMinute: 4 });
+    h.controller.setHold("memory-pressure", true);
+    h.queue("c1");
+    h.controller.setHold("memory-pressure", false);
+    await h.flush();
+    h.queue("c2");
+    await h.flush();
+    expect(h.admitted).toEqual(["c1", "c2"]);
+  });
+
+  test("a hold that comes back mid-drain stops it, and the next release paces again", async () => {
+    const h = pacedHarness({ maxConcurrentChildTurns: 8, bulkResumesPerMinute: 4 });
+    h.controller.setHold("memory-pressure", true);
+    for (const id of ["c1", "c2", "c3"]) h.queue(id);
+    h.controller.setHold("memory-pressure", false);
+    await h.flush();
+    h.controller.setHold("memory-pressure", true);
+    await h.advance(60_000);
+    expect(h.admitted).toEqual(["c1"]);
+
+    h.controller.setHold("memory-pressure", false);
+    await h.flush();
+    expect(h.admitted).toEqual(["c1", "c2"]);
+    await h.advance(1_000);
+    expect(h.admitted).toEqual(["c1", "c2"]);
+    await h.advance(59_000);
+    expect(h.admitted).toEqual(["c1", "c2", "c3"]);
+  });
+
+  test("the drain still respects the cap", async () => {
+    const h = pacedHarness({ maxConcurrentChildTurns: 1, bulkResumesPerMinute: 4 });
+    h.controller.setHold("cpu-saturation", true);
+    for (const id of ["c1", "c2"]) h.queue(id);
+    h.controller.setHold("cpu-saturation", false);
+    await h.flush();
+    h.controller.settleStart("c1");
+    await h.advance(60_000);
+    expect(h.admitted).toEqual(["c1"]);
+
+    h.agents.set("c1", { id: "c1", parentAgentId: "leader", lifecycle: "idle" });
+    h.controller.pump();
+    await h.flush();
+    expect(h.admitted).toEqual(["c1", "c2"]);
+  });
+
+  test("turning admission off mid-drain admits everything left", async () => {
+    const h = pacedHarness({ maxConcurrentChildTurns: 8, bulkResumesPerMinute: 4 });
+    h.controller.setHold("cpu-saturation", true);
+    for (const id of ["c1", "c2", "c3"]) h.queue(id);
+    h.controller.setHold("cpu-saturation", false);
+    await h.flush();
+    h.setConfig({ enabled: false });
+    await h.flush();
+    expect(h.admitted).toEqual(["c1", "c2", "c3"]);
+  });
+});
+
+describe("held-turn persistence", () => {
+  let dir: string | null = null;
+  afterEach(async () => {
+    if (dir) await rm(dir, { recursive: true, force: true });
+    dir = null;
+  });
+
+  test("the queue is written on change and survives shutdown closes", async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), "child-admission-"));
+    const file = path.join(dir, "admission", "queue.json");
+    const h = harness({ maxConcurrentChildTurns: 1 }, file);
+    h.start("c1", "root");
+    h.start("c2", "root");
+    h.controller.request({
+      agentId: "c3",
+      parentAgentId: "root",
+      prompt: [{ type: "text", text: "blocks" }],
+      runOptions: { maxThinkingTokens: 10 },
+    });
+    await h.controller.flush();
+    expect(await loadHeldTurns(file, createTestLogger())).toEqual([
+      expect.objectContaining({ agentId: "c2", parentAgentId: "root", prompt: "task c2" }),
+      expect.objectContaining({
+        agentId: "c3",
+        prompt: [{ type: "text", text: "blocks" }],
+        runOptions: { maxThinkingTokens: 10 },
+      }),
+    ]);
+
+    // Shutdown closes every agent, which drops queued children; the file must keep them.
+    h.controller.prepareForShutdown();
+    h.controller.drop("c2", "closed");
+    h.controller.drop("c3", "closed");
+    await h.controller.flush();
+    expect(await loadHeldTurns(file, createTestLogger())).toHaveLength(2);
+  });
+
+  test("a prompt queued just before shutdown is in the file even if its write had not run", async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), "child-admission-"));
+    const file = path.join(dir, "admission", "queue.json");
+    const h = harness({ maxConcurrentChildTurns: 1 }, file);
+    h.start("c1", "root");
+    // Queued, and in the same tick shutdown freezes the file and closes every agent. The write
+    // the queueing scheduled has not run yet.
+    h.start("c2", "root");
+    h.controller.prepareForShutdown();
+    h.controller.drop("c2", "closed");
+    await h.controller.flush();
+    expect(await loadHeldTurns(file, createTestLogger())).toEqual([
+      expect.objectContaining({ agentId: "c2", prompt: "task c2" }),
+    ]);
+  });
+
+  test("a restart re-admits held turns oldest first, and keeps them on disk until dispatched", async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), "child-admission-"));
+    const file = path.join(dir, "admission", "queue.json");
+    const h = harness({ maxConcurrentChildTurns: 1 }, file);
+    const held: HeldTurn[] = [
+      { agentId: "late", parentAgentId: "root", prompt: "b", queuedAt: "2026-09-24T10:00:02.000Z" },
+      {
+        agentId: "early",
+        parentAgentId: "root",
+        prompt: "a",
+        queuedAt: "2026-09-24T10:00:01.000Z",
+      },
+      { agentId: "gone", parentAgentId: "root", prompt: "c", queuedAt: "2026-09-24T10:00:03.000Z" },
+    ];
+    // One resume a minute on a hand-driven clock: only "early" goes before the clock moves.
+    let pacerNowMs = 0;
+    const timers: (() => void)[] = [];
+    const pacer = new ResumePacer({
+      readSettings: () => ({ enabled: true, perMinute: 1 }),
+      logger: createTestLogger(),
+      now: () => pacerNowMs,
+      setTimer: (fn) => timers.push(fn),
+      clearTimer: () => {},
+    });
+    const dispatched: string[] = [];
+    h.start("c-busy", "root");
+    const restoring = restoreHeldTurns({
+      controller: h.controller,
+      pacer,
+      held,
+      logger: createTestLogger(),
+      dispatch: async (turn) => {
+        if (turn.agentId === "gone") throw new Error("Agent gone not found");
+        dispatched.push(turn.agentId);
+        h.start(turn.agentId, "root");
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(dispatched).toEqual(["early"]);
+    await h.controller.flush();
+    // "early" is queued live now; "late" and "gone" are only in the file, and still there.
+    expect((await loadHeldTurns(file, createTestLogger())).map((t) => t.agentId).sort()).toEqual([
+      "early",
+      "gone",
+      "late",
+    ]);
+
+    for (let i = 0; i < 2; i += 1) {
+      pacerNowMs += 60_000;
+      timers.shift()?.();
+      await new Promise((r) => setImmediate(r));
+    }
+    await restoring;
+    expect(dispatched).toEqual(["early", "late"]);
+    await h.controller.flush();
+    // "gone" could not be dispatched and is let go; the other two are in the live queue.
+    expect((await loadHeldTurns(file, createTestLogger())).map((t) => t.agentId)).toEqual([
+      "early",
+      "late",
+    ]);
+  });
+
+  test("a missing or corrupt file loads as empty", async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), "child-admission-"));
+    expect(await loadHeldTurns(path.join(dir, "missing.json"), createTestLogger())).toEqual([]);
+  });
+});
+
+describe("mergeHeldPrompts", () => {
+  test("joins strings and concatenates blocks", () => {
+    expect(mergeHeldPrompts("a", "b")).toBe("a\n\nb");
+    expect(mergeHeldPrompts("a", [{ type: "text", text: "b" }])).toEqual([
+      { type: "text", text: "a" },
+      { type: "text", text: "b" },
+    ]);
+  });
+});

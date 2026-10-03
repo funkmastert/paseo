@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { resolvePaseoNodeEnv } from "./paseo-env.js";
 import { z } from "zod";
 import { expandTilde } from "../utils/path.js";
+import { isSameOrDescendantPath } from "./path-utils.js";
 
 import type { PaseoDaemonConfig } from "./bootstrap.js";
 import {
@@ -494,9 +495,17 @@ function resolveWorktreesRoot(
   }
 
   const expandedRoot = expandTilde(configuredRoot);
-  return path.isAbsolute(expandedRoot)
+  const resolvedRoot = path.isAbsolute(expandedRoot)
     ? path.resolve(expandedRoot)
     : path.resolve(paseoHome, expandedRoot);
+  // A worktrees root at or above $PASEO_HOME carves the whole denial out for it (m6): the agent
+  // tools' worktrees-carve-out widens to cover every other agent's config and secrets under
+  // $PASEO_HOME, not only worktrees. Ignored outright, not merely logged, so a misconfiguration
+  // never silently widens what an agent's cwd can read.
+  if (isSameOrDescendantPath(resolvedRoot, path.resolve(paseoHome))) {
+    return undefined;
+  }
+  return resolvedRoot;
 }
 
 function resolveAppendSystemPrompt(persisted: ReturnType<typeof loadPersistedConfig>): string {
@@ -546,6 +555,55 @@ interface ResolveConfigFromPersistedOptions {
   env?: NodeJS.ProcessEnv;
   cli?: CliConfigOverrides;
   relayEnabledFallback?: boolean;
+}
+
+// Every monitor defaults to off or to report-only, so a section missing here is indistinguishable
+// from one configured off. resourceMonitor and deviceLeases were missing, and on every real boot
+// and reload the reaper and the device cap ran on their defaults — the same gap mcpGateway had.
+// Every agents.* monitor section goes through here, and bootstrap.smoke.test.ts boots a real
+// config.json through it; a new section added here belongs in that test too.
+function resolveAgentMonitorConfig(
+  persisted: PersistedConfig,
+): Pick<
+  PaseoDaemonConfig,
+  | "tokenBurnMonitor"
+  | "resourceMonitor"
+  | "processPriority"
+  | "deviceLeases"
+  | "artifactJanitor"
+  | "accountFailover"
+  | "budgetPacing"
+  | "leaderCompaction"
+  | "contextMeter"
+  | "doneJanitor"
+  | "admission"
+  | "refocus"
+  | "remediation"
+  | "daemonVitals"
+  | "restartRecovery"
+  | "catastropheGate"
+  | "childEnvStrip"
+> {
+  const agents = persisted.agents;
+  return {
+    tokenBurnMonitor: agents?.tokenBurnMonitor,
+    resourceMonitor: agents?.resourceMonitor,
+    processPriority: agents?.processPriority,
+    deviceLeases: agents?.deviceLeases,
+    artifactJanitor: agents?.artifactJanitor,
+    accountFailover: agents?.accountFailover,
+    budgetPacing: agents?.budgetPacing,
+    leaderCompaction: agents?.leaderCompaction,
+    contextMeter: agents?.contextMeter,
+    doneJanitor: agents?.doneJanitor,
+    admission: agents?.admission,
+    refocus: agents?.refocus,
+    remediation: agents?.remediation,
+    daemonVitals: agents?.daemonVitals,
+    restartRecovery: agents?.restartRecovery,
+    catastropheGate: agents?.catastropheGate,
+    childEnvStrip: agents?.childEnv?.strip,
+  };
 }
 
 export function resolveConfigFromPersisted(
@@ -638,7 +696,14 @@ export function resolveConfigFromPersisted(
     voiceLlmModel: voiceLlm.model,
     agentProviderSettings: extractAgentProviderSettings(providerOverrides),
     providerCatalogRefreshTimeoutMs: persisted.agents?.catalogRefreshTimeoutMs,
+    autoPinSessions: persisted.agents?.autoPinSessions,
+    autoPinRecentUseMinutes: persisted.agents?.autoPinRecentUseMinutes,
     metadataGeneration: persisted.agents?.metadataGeneration,
+    ...resolveAgentMonitorConfig(persisted),
+    diskSweeper: persisted.worktrees?.diskSweeper,
+    // bootstrap.ts constructs McpGateway from this field; the e2e tests hand it in directly,
+    // which is why its absence here went unnoticed until a real daemon booted with the section.
+    mcpGateway: persisted.mcpGateway,
     providerOverrides,
     log: resolveLogConfigFromEnv(env, persisted),
     configReload: {

@@ -32,9 +32,14 @@ import {
   type ArchiveDependencies,
 } from "../../workspace-archive-service.js";
 import { createAgentCommand, type CreateAgentFromMcpInput } from "../create-agent/create.js";
+import { SPEND_BUDGET_LABEL } from "../spend-governor.js";
 import type { VoiceCallerContext, VoiceSpeakHandler } from "../../voice-types.js";
 import type { FirstAgentContext } from "../../messages.js";
 import { everyMsToFiveFieldCron } from "@getpaseo/protocol/schedule/cadence";
+import {
+  SCHEDULE_CONDITION_NAMES,
+  conditionFromNames,
+} from "@getpaseo/protocol/schedule/condition";
 import { expandUserPath, isSameOrDescendantPath, resolvePathFromBase } from "../../path-utils.js";
 import type { TerminalManager } from "../../../terminal/terminal-manager.js";
 import type { CreatePaseoWorktreeWorkflowFn } from "../../worktree-session.js";
@@ -70,6 +75,7 @@ import {
   updateAgentCommand,
 } from "../lifecycle-command.js";
 import type { ForgeService } from "../../../services/forge-service.js";
+import { resolveAgentNice } from "../../../utils/process-priority.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
 import type {
   PersistedWorkspaceRecord,
@@ -84,7 +90,19 @@ import {
   createPaseoWorktreeCommand,
 } from "../../worktree/commands.js";
 import { registerBrowserTools } from "../../browser-tools/tools.js";
+import { registerDeviceLeaseTools } from "./device-lease-tools.js";
+import { registerJevTools, type JevToolsDependencies } from "./jev-tools.js";
+import { isDefaultAgentCreateConfigUnattended } from "../create-agent-mode.js";
+import { resolveProviderExtends } from "../device-launch-enforcement.js";
+import { registerCoordinationTools } from "./coordination-tools.js";
+import {
+  COMPACT_ACTIVITY_LIMIT,
+  toCompactAgentListItem,
+  toCompactAgentSnapshot,
+} from "./tool-output-projection.js";
 import type { BrowserToolsBroker } from "../../browser-tools/broker.js";
+import type { DeviceLeaseManager } from "../device-lease-manager.js";
+import type { PhysicalDeviceLeaseManager } from "../physical-device-lease-manager.js";
 import type {
   PaseoToolCatalog,
   PaseoToolConfig,
@@ -94,6 +112,18 @@ import type {
 } from "./types.js";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
 import { isPaseoToolEnabled } from "../paseo-tool-policy.js";
+import {
+  checkCatastrophe,
+  formatCatastropheDenial,
+  resolveCurrentBranchWithGit,
+} from "../catastrophe-gate.js";
+import { TypedTerminalLines } from "../typed-terminal-lines.js";
+
+/**
+ * The lines agents have typed into each terminal, for the catastrophe gate. One per daemon: a
+ * terminal outlives any one agent's tool catalog, and two agents can type into the same one.
+ */
+const typedTerminalLines = new TypedTerminalLines();
 
 export interface PaseoToolHostDependencies {
   agentManager: AgentManager;
@@ -130,6 +160,16 @@ export interface PaseoToolHostDependencies {
   ) => Promise<string>;
   browserToolsEnabled?: boolean;
   browserToolsBroker?: BrowserToolsBroker | null;
+  /** The device cap (docs/device-leases.md). Absent means no checkout tools are offered. */
+  deviceLeaseManager?: Pick<DeviceLeaseManager, "checkout" | "checkin" | "getSnapshot"> | null;
+  /** The JEV agent tools (docs/jev.md, "Features 4–6"). Absent means no JEV tools are offered. */
+  jevTools?: JevToolsDependencies | null;
+  /** Physical devices (docs/device-leases.md, Physical devices). Absent means `device_checkout`
+   * only offers simulators/emulators. */
+  physicalDeviceLeaseManager?: Pick<
+    PhysicalDeviceLeaseManager,
+    "checkout" | "checkin" | "getSnapshot"
+  > | null;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
   paseoHome?: string;
   worktreesRoot?: string;
@@ -558,6 +598,45 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
   const childLogger = logger.child({ module: "agent", component: "paseo-tool-catalog" });
   const callerContext = callerAgentId ? (resolveCallerContext?.(callerAgentId) ?? null) : null;
 
+  /**
+   * The catastrophe gate on the terminal route (docs/catastrophe-gate.md): keys sent here land in
+   * a real shell, so each line they submit is checked like a Bash call, from the terminal's
+   * starting cwd. Throws the denial, which is what the agent reads; refused input is never sent.
+   */
+  const gateTerminalInput = async (terminalId: string, cwd: string, data: string) => {
+    const before = typedTerminalLines.snapshot(terminalId);
+    const submitted = typedTerminalLines.feed(terminalId, data);
+    if (daemonConfigStore?.get().catastropheGate?.enabled === false) return;
+    for (const script of submitted) {
+      let decision: Awaited<ReturnType<typeof checkCatastrophe>>;
+      try {
+        decision = await checkCatastrophe(script, cwd, resolveCurrentBranchWithGit);
+      } catch (error) {
+        // Fails open, like the Claude hook (docs/catastrophe-gate.md): a broken gate must never
+        // block real work, so an error here allows the input through rather than swallowing it.
+        childLogger.warn(
+          { err: error, agentId: callerAgentId, terminalId, cwd, command: script.slice(0, 500) },
+          "Catastrophe gate threw while checking terminal input; allowing it through",
+        );
+        continue;
+      }
+      if (!decision.block) continue;
+      // Nothing from this call reaches the terminal, so the line is still sitting at its prompt.
+      typedTerminalLines.restore(terminalId, before);
+      childLogger.warn(
+        {
+          rule: decision.rule,
+          agentId: callerAgentId,
+          terminalId,
+          cwd,
+          command: script.slice(0, 500),
+        },
+        "Catastrophe gate blocked terminal input",
+      );
+      throw new Error(formatCatastropheDenial(decision, script));
+    }
+  };
+
   const parseToolInput = async (tool: PaseoToolDefinition, input: unknown): Promise<unknown> => {
     const inputSchema = tool.inputSchema;
     if (!inputSchema) {
@@ -673,6 +752,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
 
     return expandUserPath(trimmedCwd);
   };
+
+  // A terminal or script an agent starts is where its builds and tests run, so it gets the agent
+  // nice; a person's stays normal. Without a caller agent this is not an agent's request.
+  function callerNice(): number | undefined {
+    return callerAgentId ? resolveAgentNice() : undefined;
+  }
 
   async function resolveTerminalWorkspaceId(resolvedCwd: string): Promise<string> {
     // An agent-spawned terminal belongs to the caller agent's workspace. Only if
@@ -988,7 +1073,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     provider: ProviderModelInputSchema.describe(
       "Required provider/model pair, for example codex/gpt-5.4.",
     ),
-    labels: z.record(z.string(), z.string()).optional().describe("Labels to set on the agent"),
+    labels: z
+      .record(z.string(), z.string())
+      .optional()
+      .describe(
+        `Labels to set on the agent. Set "${SPEND_BUDGET_LABEL}" to what this task ought to cost in weighted tokens (e.g. "300k", "1.5M") so the spend governor can stop it running away; a small edit is ~200k, a feature with tests ~1.5M.`,
+      ),
     settings: CreateAgentSettingsInputSchema.optional().describe(
       "Initial runtime settings for the new agent.",
     ),
@@ -1214,6 +1304,75 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     });
   }
 
+  if (options.deviceLeaseManager) {
+    registerDeviceLeaseTools({
+      registerTool,
+      manager: options.deviceLeaseManager,
+      ...(options.physicalDeviceLeaseManager
+        ? { physicalManager: options.physicalDeviceLeaseManager }
+        : {}),
+      callerAgentId,
+      // The cap binds different providers to different degrees, and the agent asking is the
+      // one that needs to know which it is (docs/device-leases.md).
+      resolveCallerProvider: () => resolveCallerAgent()?.provider,
+      resolveCallerExtendsProviderId: () =>
+        resolveProviderExtends(resolveCallerAgent()?.provider, daemonConfigStore?.get().providers),
+    });
+  }
+
+  // Only for callers `JevToolsEligibility` decided at first sight (labelled `on`, Read allowed,
+  // D7 ok), primed before this build, so a reload, resume or relabel lists the same tools. The
+  // caller is read without `resolveCallerAgent`, which throws for an agent missing from the
+  // manager: a failed lookup withholds the JEV tools, never the rest of the catalog.
+  if (options.jevTools && callerAgentId) {
+    const jevTools = options.jevTools;
+    try {
+      if (jevTools.eligibility.eligible(callerAgentId)) {
+        registerJevTools({
+          registerTool,
+          deps: jevTools,
+          callerAgentId,
+          readCallerAgent: () => {
+            const agent = agentManager.getAgent(callerAgentId);
+            if (!agent) return null;
+            return {
+              id: agent.id,
+              provider: agent.provider,
+              cwd: agent.cwd,
+              launchEnv: agentManager.getAgentLaunchEnv(agent.id) ?? null,
+              labels: agent.labels,
+              providerOptions: agent.config?.providerOptions,
+              // Same lookup bootstrap.ts used for the now-removed tool-use.jsonl adapter
+              // (`readAgentModel`): the running model, falling back to the configured one.
+              model: agent.runtimeInfo?.model ?? agent.config?.model ?? null,
+              contextTokens: agent.lastUsage?.contextWindowUsedTokens ?? null,
+              unattended: isDefaultAgentCreateConfigUnattended({
+                modeId: agent.currentModeId,
+                config: agent.config,
+                features: agent.features,
+                availableModes: agent.availableModes ?? [],
+              }),
+            };
+          },
+          logger: childLogger,
+        });
+      }
+    } catch (error) {
+      childLogger.warn(
+        { err: error, agentId: callerAgentId },
+        "JEV tools withheld: reading the caller failed",
+      );
+    }
+  }
+
+  registerCoordinationTools({
+    registerTool,
+    agentManager,
+    agentStorage,
+    callerAgentId,
+    logger: childLogger,
+  });
+
   registerTool(
     "create_workspace",
     {
@@ -1322,7 +1481,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
             ...(projectId ? { projectId } : {}),
             ...(worktreeSlug ? { worktreeSlug } : {}),
             ...worktreeTarget,
-            ...(title ? { title } : {}),
+            // An agent named it, so the title tracker may refresh it later.
+            ...(title ? { title, titleSource: "auto" as const } : {}),
           },
         );
         if (!result.ok) {
@@ -1424,6 +1584,22 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async (args: unknown) => {
+      // Checked before anything is parsed or provisioned: a caller the spend governor has cut
+      // off must not create a workspace or a worktree on the way to being refused. The message
+      // is the agent's only notice — it names the budget, the spend, and the fact that this is
+      // a cap rather than a broken tool, because an agent that retries a refusal blindly burns
+      // exactly the budget this is protecting. See agent/spend-governor.ts.
+      const fanOutDenial = callerAgentId ? agentManager.getSpendFanOutDenial(callerAgentId) : null;
+      if (fanOutDenial) {
+        throw new Error(
+          `create_agent refused: the Bozeo spend governor has cut off this task's fan-out. ` +
+            `You have used ${Math.round(fanOutDenial.spentTokens)} of this task's ` +
+            `${fanOutDenial.budgetTokens} weighted-token budget. This is a budget cap, not a ` +
+            `transient failure — retrying will keep failing, and no agent was created. Finish ` +
+            `the remaining work yourself, or stop and report what is left so a human can raise ` +
+            `the ${SPEND_BUDGET_LABEL} label or split the task.`,
+        );
+      }
       const resolvedArgs = await resolveCreateAgentToolArgs(args);
       const { parsedArgs, worktree } = resolvedArgs;
       let requestedBackground: boolean;
@@ -1878,10 +2054,16 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         lastMessage: z.string().nullable().optional(),
         permission: AgentPermissionRequestPayloadSchema.nullable().optional(),
         guidance: z.string().optional(),
+        deliveredToAgentId: z
+          .string()
+          .optional()
+          .describe(
+            "Set when agentId had moved to another account: the agent the prompt went to. Use it from now on.",
+          ),
       },
     },
     async ({
-      agentId,
+      agentId: requestedAgentId,
       prompt,
       sessionMode,
       background = Boolean(callerAgentId),
@@ -1889,14 +2071,25 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     }) => {
       const shouldNotifyOnFinish = Boolean(callerAgentId && notifyOnFinish && background);
 
-      await sendPromptToAgent({
+      // A handle account failover retired delivers to where its conversation lives now, and
+      // everything after this (the finish watcher, the wait) follows the prompt there.
+      const { agentId } = await sendPromptToAgent({
         agentManager,
         agentStorage,
-        agentId,
+        agentId: requestedAgentId,
         prompt,
         sessionMode,
         logger: childLogger,
       });
+      const moved =
+        agentId === requestedAgentId
+          ? null
+          : {
+              deliveredToAgentId: agentId,
+              note:
+                `${requestedAgentId} moved to ${agentId} (account failover), so the prompt went ` +
+                `to ${agentId}. Address ${agentId} from now on.`,
+            };
 
       if (shouldNotifyOnFinish && callerAgentId) {
         setupFinishNotification({
@@ -1919,6 +2112,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           status: result.status,
           lastMessage: result.lastMessage,
           permission: sanitizePermissionRequest(result.permission),
+          ...(moved ? { deliveredToAgentId: moved.deliveredToAgentId, guidance: moved.note } : {}),
         };
         const validJson = ensureValidJson(responseData);
 
@@ -1933,17 +2127,17 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       // Re-fetch snapshot since the state may have changed
       const currentSnapshot = agentManager.getAgent(agentId);
 
+      const notifyGuidance = shouldNotifyOnFinish
+        ? "You will get notified when the prompted agent finishes, errors, or needs permission. Do not poll for status; continue with other work until the notification arrives."
+        : null;
+      const guidance = [moved?.note, notifyGuidance].filter(Boolean).join(" ");
       const responseData = {
         success: true,
         status: currentSnapshot?.lifecycle ?? "idle",
         lastMessage: null,
         permission: null,
-        ...(shouldNotifyOnFinish
-          ? {
-              guidance:
-                "You will get notified when the prompted agent finishes, errors, or needs permission. Do not poll for status; continue with other work until the notification arrives.",
-            }
-          : {}),
+        ...(moved ? { deliveredToAgentId: moved.deliveredToAgentId } : {}),
+        ...(guidance ? { guidance } : {}),
       };
       const validJson = ensureValidJson(responseData);
 
@@ -1960,16 +2154,28 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     {
       title: "Get agent status",
       description:
-        "Return the latest snapshot for an agent, including lifecycle state, capabilities, and pending permissions.",
+        "Return the latest snapshot for an agent: lifecycle state, model, mode, pending permissions, " +
+        "labels and activity. Compact by default; full=true adds the provider resume handle, " +
+        "capabilities, the mode catalogue and MCP server status.",
       inputSchema: {
         agentId: z.string(),
+        full: z
+          .boolean()
+          .optional()
+          .describe("Include persistence, capabilities, availableModes and MCP status."),
       },
       outputSchema: {
         status: AgentStatusEnum,
-        snapshot: AgentSnapshotPayloadSchema,
+        snapshot: AgentSnapshotPayloadSchema.partial({
+          persistence: true,
+          capabilities: true,
+          availableModes: true,
+        }),
       },
     },
-    async ({ agentId }) => {
+    async ({ agentId, full = false }) => {
+      const shapeSnapshot = <T extends z.infer<typeof AgentSnapshotPayloadSchema>>(snapshot: T) =>
+        full ? snapshot : toCompactAgentSnapshot(snapshot);
       const snapshot = agentManager.getAgent(agentId);
       if (snapshot) {
         const structuredSnapshot = await serializeSnapshotWithMetadata(
@@ -1981,7 +2187,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           content: [],
           structuredContent: ensureValidJson({
             status: snapshot.lifecycle,
-            snapshot: structuredSnapshot,
+            snapshot: shapeSnapshot(structuredSnapshot),
           }),
         };
       }
@@ -1999,7 +2205,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         content: [],
         structuredContent: ensureValidJson({
           status: structuredSnapshot.status,
-          snapshot: structuredSnapshot,
+          snapshot: shapeSnapshot(structuredSnapshot),
         }),
       };
     },
@@ -2009,8 +2215,16 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     "list_agents",
     {
       title: "List agents",
-      description: "List recent agents as compact metadata.",
+      description:
+        "List recent agents as compact metadata. Rows carry id, title, provider, model, status, cwd, " +
+        "labels and live activity; full=true adds ids' short form, timestamps and thinking options.",
       inputSchema: {
+        full: z
+          .boolean()
+          .optional()
+          .describe(
+            "Include createdAt, lastUserMessageAt, shortId, thinking options and UI labels.",
+          ),
         includeArchived: z.boolean().optional().default(false),
         cwd: z.string().optional(),
         sinceHours: z
@@ -2024,10 +2238,23 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         limit: z.number().int().positive().max(200).optional().default(50),
       },
       outputSchema: {
-        agents: z.array(AgentListItemPayloadSchema),
+        agents: z.array(
+          AgentListItemPayloadSchema.partial({
+            shortId: true,
+            createdAt: true,
+            lastUserMessageAt: true,
+          }),
+        ),
       },
     },
-    async ({ includeArchived = false, cwd, sinceHours = 48, statuses, limit = 50 }) => {
+    async ({
+      full = false,
+      includeArchived = false,
+      cwd,
+      sinceHours = 48,
+      statuses,
+      limit = 50,
+    }) => {
       const callerCwd = callerAgentId ? resolveCallerAgent()?.cwd : undefined;
       const requestedCwd = cwd?.trim() ? expandUserPath(cwd) : callerCwd;
       const statusFilter = statuses && statuses.length > 0 ? new Set(statuses) : null;
@@ -2059,7 +2286,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
 
       return {
         content: [],
-        structuredContent: ensureValidJson({ agents }),
+        structuredContent: ensureValidJson({
+          agents: full ? agents : agents.map(toCompactAgentListItem),
+        }),
       };
     },
   );
@@ -2225,6 +2454,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       await options.workspaceRegistry.upsert({
         ...existing,
         title,
+        // An agent's rename, not a person's: the title tracker may refresh it as the work moves.
+        titleSource: "auto",
         updatedAt: new Date().toISOString(),
       });
       await options.emitWorkspaceUpdatesForWorkspaceIds([workspaceId]);
@@ -2285,7 +2516,11 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       return {
         content: [],
         structuredContent: ensureValidJson({
-          script: await workspaceScripts.launch({ workspaceId, scriptName }),
+          script: await workspaceScripts.launch({
+            workspaceId,
+            scriptName,
+            ...(callerNice() !== undefined ? { nice: callerNice() } : {}),
+          }),
         }),
       };
     },
@@ -2386,11 +2621,13 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
 
       const resolvedCwd = resolveScopedCwd(cwd, { required: true });
       const workspaceId = await resolveTerminalWorkspaceId(resolvedCwd);
+      const nice = callerNice();
 
       const terminal = await terminalManager.createTerminal({
         cwd: resolvedCwd,
         workspaceId,
         ...(name?.trim() ? { name: name.trim() } : {}),
+        ...(nice !== undefined ? { nice } : {}),
       });
 
       return {
@@ -2427,6 +2664,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       }
 
       terminal.kill();
+      typedTerminalLines.forget(terminalId);
 
       return {
         content: [],
@@ -2503,10 +2741,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         throw new Error(`Terminal ${terminalId} not found`);
       }
 
-      terminal.send({
-        type: "input",
-        data: resolveTerminalKeyToken(keys, literal),
-      });
+      const data = resolveTerminalKeyToken(keys, literal);
+      await gateTerminalInput(terminalId, terminal.cwd, data);
+      terminal.send({ type: "input", data });
 
       return {
         content: [],
@@ -2569,7 +2806,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     "create_heartbeat",
     {
       title: "Create heartbeat",
-      description: "Create a recurring heartbeat that sends you a prompt on a cron cadence.",
+      description:
+        "Create a recurring heartbeat that sends you a prompt on a cron cadence. Every tick is a full turn for you, re-reading your whole context, so set `when` unless you need to be woken regardless. With `when`, a tick that does not qualify sends nothing and costs no turn.",
       inputSchema: {
         prompt: z.string().trim().min(1, "prompt is required"),
         cron: z.string().trim().min(1, "cron is required"),
@@ -2582,10 +2820,17 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         name: z.string().optional(),
         maxRuns: z.number().int().positive().optional(),
         expiresIn: z.string().optional(),
+        when: z
+          .array(z.enum(SCHEDULE_CONDITION_NAMES))
+          .min(1)
+          .optional()
+          .describe(
+            "Fire only when one of these holds; omit to fire on every tick. hasActiveChildren: an agent you spawned is still running. childFinishedSince: an agent you spawned finished after you last acted. always: fire on every tick. A busy caller is never woken.",
+          ),
       },
       outputSchema: ScheduleSummarySchema.shape,
     },
-    async ({ prompt, cron, timezone, name, maxRuns, expiresIn }) => {
+    async ({ prompt, cron, timezone, name, maxRuns, expiresIn, when }) => {
       if (!scheduleService) {
         throw new Error("Schedule service is not configured");
       }
@@ -2605,6 +2850,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         ...(name?.trim() ? { name: name.trim() } : {}),
         ...(maxRuns === undefined ? {} : { maxRuns }),
         ...(expiresAt === undefined ? {} : { expiresAt }),
+        ...(when === undefined ? {} : { condition: conditionFromNames(when) }),
       });
 
       return {
@@ -3019,13 +3265,19 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     "get_agent_activity",
     {
       title: "Get agent activity",
-      description: "Return recent agent timeline entries as a curated summary.",
+      description:
+        `Return recent agent timeline entries as a curated summary. Shows the last ${COMPACT_ACTIVITY_LIMIT} ` +
+        "entries unless you pass limit or full=true.",
       inputSchema: {
         agentId: z.string(),
         limit: z
           .number()
           .optional()
           .describe("Optional limit for number of activities to include (most recent first)."),
+        full: z
+          .boolean()
+          .optional()
+          .describe("Return the whole timeline instead of the last entries."),
       },
       outputSchema: {
         agentId: z.string(),
@@ -3034,7 +3286,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         content: z.string(),
       },
     },
-    async ({ agentId, limit }) => {
+    async ({ agentId, limit: requestedLimit, full = false }) => {
+      const limit = requestedLimit ?? (full ? undefined : COMPACT_ACTIVITY_LIMIT);
       await ensureAgentLoaded(agentId, {
         agentManager,
         agentStorage,
@@ -3054,7 +3307,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       const noun = totalProjected === 1 ? "activity" : "activities";
       const countHeader =
         limit && shownProjected < totalProjected
-          ? `Showing ${shownProjected} of ${totalProjected} ${noun} (limited to ${limit})`
+          ? `Showing ${shownProjected} of ${totalProjected} ${noun} (limited to ${limit}${requestedLimit === undefined ? "; pass full=true for all" : ""})`
           : `Showing all ${totalProjected} ${noun}`;
 
       const contentWithCount = `${countHeader}\n\n${curatedContent}`;

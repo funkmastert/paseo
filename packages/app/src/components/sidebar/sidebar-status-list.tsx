@@ -27,6 +27,8 @@ import { SidebarFilterEmptyState } from "@/components/sidebar/empty-states";
 import type { HostBadgeModel } from "@/hosts/appearance";
 import { isWeb as platformIsWeb, isNative as platformIsNative } from "@/constants/platform";
 import { useIsCompactFormFactor } from "@/constants/layout";
+import { InlineWorkspaceTitleField } from "@/components/inline-workspace-title-field";
+import { useSidebarWorkspaceInlineRename } from "@/components/sidebar/use-sidebar-workspace-inline-rename";
 import { StyleSheet } from "react-native-unistyles";
 import type { Theme } from "@/styles/theme";
 import type { SidebarSurfaceBackdrop } from "@/styles/surface-backdrop";
@@ -73,6 +75,7 @@ import {
   SidebarWorkspaceMenu,
 } from "@/components/sidebar/sidebar-workspace-menu";
 import { PinnedSectionHeader } from "@/components/sidebar/pinned-section-header";
+import { useOpenPinnedGrid } from "@/pinned-grid/use-open-pinned-grid";
 import { SidebarGroupToggleRow } from "@/components/sidebar/sidebar-group-toggle-row";
 import { useLimitedSidebarGroup } from "@/components/sidebar/use-limited-sidebar-group";
 import type { ToggleSidebarWorkspacePin } from "@/hooks/use-sidebar-workspace-pin";
@@ -158,6 +161,7 @@ export function SidebarStatusWorkspaceList({
     canToggle: canTogglePinnedWorkspaces,
     toggleExpanded: togglePinnedWorkspacesExpanded,
   } = useLimitedSidebarGroup(pinnedWorkspaces);
+  const handleOpenPinnedGrid = useOpenPinnedGrid(pinnedWorkspaces, onWorkspacePress);
 
   const statusShortcutIndex = showShortcutBadges
     ? shortcutIndexByWorkspaceKey
@@ -201,7 +205,11 @@ export function SidebarStatusWorkspaceList({
     <>
       {pinnedWorkspaces.length > 0 ? (
         <View style={styles.pinnedSection} testID="sidebar-pinned-section">
-          <PinnedSectionHeader collapsed={pinnedCollapsed} onToggle={togglePinnedCollapsed} />
+          <PinnedSectionHeader
+            collapsed={pinnedCollapsed}
+            onToggle={togglePinnedCollapsed}
+            onOpenGrid={handleOpenPinnedGrid}
+          />
           {pinnedCollapsed ? null : (
             <>
               <DraggableList
@@ -597,6 +605,30 @@ function StatusWorkspaceRowWithMenu({
   const [isHidingWorkspace, setIsHidingWorkspace] = useState(false);
   const [isRenameOpen, setIsRenameOpen] = useState(false);
   const isArchiving = workspace.archivingAt !== null || isHidingWorkspace;
+  // The same second-click-to-edit as project grouping (sidebar-workspace-list.tsx): a desktop
+  // mouse gesture only; phones rename from the workspace header.
+  const isCompact = useIsCompactFormFactor();
+  const inlineRenameEnabled = !platformIsNative && !isCompact;
+  const {
+    isEditing: isInlineEditing,
+    handlePress: handleRowPress,
+    stopEditing,
+  } = useSidebarWorkspaceInlineRename({
+    selected: inlineRenameEnabled && selected,
+    onPress,
+  });
+  const titleSlot = useMemo(
+    () =>
+      inlineRenameEnabled && isInlineEditing ? (
+        <InlineWorkspaceTitleField
+          workspace={workspace}
+          onDone={stopEditing}
+          variant="row"
+          testID={`sidebar-workspace-row-${workspace.workspaceKey}-title-input`}
+        />
+      ) : undefined,
+    [inlineRenameEnabled, isInlineEditing, workspace, stopEditing],
+  );
 
   const redirectAfterArchive = useCallback(() => {
     redirectIfArchivingActiveWorkspace({
@@ -678,7 +710,7 @@ function StatusWorkspaceRowWithMenu({
         selected={selected}
         shortcutNumber={shortcutNumber}
         showShortcutBadge={showShortcutBadge}
-        onPress={onPress}
+        onPress={inlineRenameEnabled ? handleRowPress : onPress}
         isArchiving={isArchiving}
         archiveLabel={t("sidebar.workspace.actions.archive")}
         archiveStatus={isArchiving ? "pending" : "idle"}
@@ -697,6 +729,7 @@ function StatusWorkspaceRowWithMenu({
         drag={drag}
         isDragging={isDragging}
         dragHandleProps={dragHandleProps}
+        titleSlot={titleSlot}
       />
       <WorkspaceRenameModal
         visible={isRenameOpen}
@@ -716,7 +749,8 @@ interface StatusWorkspaceRowInnerProps {
   selected: boolean;
   shortcutNumber: number | null;
   showShortcutBadge: boolean;
-  onPress: () => void;
+  /** Receives the press event so the inline-rename gesture can tell a double-click apart. */
+  onPress: (event?: GestureResponderEvent) => void;
   isArchiving: boolean;
   archiveLabel?: string;
   archiveStatus?: "idle" | "pending" | "success";
@@ -736,6 +770,8 @@ interface StatusWorkspaceRowInnerProps {
   drag?: () => void;
   isDragging?: boolean;
   dragHandleProps?: DraggableListDragHandleProps;
+  /** Replaces the name while the row is being renamed inline. */
+  titleSlot?: ReactNode;
 }
 
 function StatusWorkspaceRowInner(props: StatusWorkspaceRowInnerProps) {
@@ -782,6 +818,7 @@ function StatusWorkspaceRowInnerContent({
   isDragging = false,
   dragHandleProps,
   dragInteraction,
+  titleSlot,
 }: StatusWorkspaceRowInnerProps & {
   dragInteraction?: ReturnType<typeof useLongPressDragInteraction>;
 }) {
@@ -804,13 +841,16 @@ function StatusWorkspaceRowInnerContent({
   const startDragPress = dragInteraction?.handlePressIn;
   const moveDragPress = dragInteraction?.handleTouchMove;
   const endDragPress = dragInteraction?.handlePressOut;
-  const handlePress = useCallback(() => {
-    if (didLongPressRef?.current) {
-      didLongPressRef.current = false;
-      return;
-    }
-    onPress();
-  }, [didLongPressRef, onPress]);
+  const handlePress = useCallback(
+    (event: GestureResponderEvent) => {
+      if (didLongPressRef?.current) {
+        didLongPressRef.current = false;
+        return;
+      }
+      onPress(event);
+    },
+    [didLongPressRef, onPress],
+  );
   const handlePressIn = useCallback(
     (event: GestureResponderEvent) => {
       setIsPressed(true);
@@ -901,6 +941,7 @@ function StatusWorkspaceRowInnerContent({
                 shortcutNumber={shortcutNumber}
                 showShortcutBadge={showShortcutBadge}
                 reserveIdleStatusIndicatorSpace={reserveIdleStatusIndicatorSpace}
+                titleSlot={titleSlot}
               >
                 {renderSlot ? (
                   <StatusWorkspaceActionSlot

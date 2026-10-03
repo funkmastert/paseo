@@ -212,6 +212,14 @@ export class ClaudeTaskProtocolSource {
     return this.sawAnyTask;
   }
 
+  /** Whether a declared subagent or workflow is still running. Each lives in the Claude process. */
+  get hasRunningTasks(): boolean {
+    for (const status of this.lastStatusById.values()) {
+      if (status === "running") return true;
+    }
+    return false;
+  }
+
   /**
    * Whether this source declared the given subagent. Callers route frames through this before
    * attributing anything to an id: a frame for a task that was never declared belongs to work

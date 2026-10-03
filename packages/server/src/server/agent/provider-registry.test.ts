@@ -26,6 +26,7 @@ const mockState = vi.hoisted(() => {
     runtimeSettings?: unknown;
     providerParams?: unknown;
     commandsRpcType?: unknown;
+    configDir?: string;
   }
 
   return {
@@ -96,10 +97,11 @@ vi.mock("./providers/claude/agent.js", async () => {
       readonly provider = "claude";
       readonly runtimeSettings?: unknown;
 
-      constructor(options: { runtimeSettings?: unknown }) {
+      constructor(options: { runtimeSettings?: unknown; configDir?: string }) {
         this.runtimeSettings = options.runtimeSettings;
         mockState.constructorArgs.claude.push({
           runtimeSettings: options.runtimeSettings,
+          configDir: options.configDir,
         });
       }
 
@@ -577,6 +579,7 @@ test("built-in override applies command", () => {
       },
       env: undefined,
     },
+    configDir: undefined,
   });
 });
 
@@ -598,6 +601,31 @@ test("built-in override applies env", () => {
         CLAUDE_CONFIG_DIR: "/tmp/claude",
       },
     },
+    configDir: "/tmp/claude",
+  });
+});
+
+test("derived provider entry resolves configDir from its own env.CLAUDE_CONFIG_DIR", () => {
+  buildProviderRegistry(logger, {
+    providerOverrides: {
+      "claude-work": {
+        extends: "claude",
+        label: "Claude (work)",
+        env: {
+          CLAUDE_CONFIG_DIR: "/tmp/claude-work",
+        },
+      },
+    },
+  });
+
+  expect(mockState.constructorArgs.claude[1]).toEqual({
+    runtimeSettings: {
+      command: undefined,
+      env: {
+        CLAUDE_CONFIG_DIR: "/tmp/claude-work",
+      },
+    },
+    configDir: "/tmp/claude-work",
   });
 });
 

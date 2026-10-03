@@ -20,6 +20,12 @@ export interface AdaptiveRenameModalProps {
   onClose: () => void;
   onSubmit: (value: string) => Promise<void> | void;
   validate?: (value: string) => string | null;
+  /**
+   * Submit an empty value instead of demanding a name. For a field layered over a
+   * derived fallback — a workspace title over its branch or directory name — clearing
+   * it means "use the fallback", which the placeholder is already showing.
+   */
+  allowEmpty?: boolean;
   maxLength?: number;
   testID?: string;
 }
@@ -33,6 +39,7 @@ export function AdaptiveRenameModal({
   onClose,
   onSubmit,
   validate,
+  allowEmpty,
   maxLength,
   testID,
 }: AdaptiveRenameModalProps) {
@@ -67,10 +74,10 @@ export function AdaptiveRenameModal({
 
   const computeError = useCallback(
     (value: string): string | null => {
-      if (!value.trim()) return t("common.errors.nameRequired");
+      if (!value.trim()) return allowEmpty ? null : t("common.errors.nameRequired");
       return validate ? validate(value) : null;
     },
-    [validate, t],
+    [validate, allowEmpty, t],
   );
 
   const handleChange = useCallback((value: string) => {

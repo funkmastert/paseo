@@ -951,6 +951,27 @@ function mergeOpenCodeStepFinishUsage(
   }
 }
 
+/**
+ * Diffs a monotonically-growing cumulative total against the snapshot taken at the previous
+ * turn boundary, returning the turn's own delta plus the baseline to carry forward. Local to
+ * OpenCode's own step-token tracking — deliberately not shared with other providers' diffing,
+ * since each adapter's usage semantics differ and a shared helper invites a shared bug.
+ * Undefined `previousBaseline` means "first observation this session" (start or resume): only
+ * re-baseline, never report the whole pre-existing total as one giant turn. A non-positive diff
+ * (a reset or reconnect dropped the total) is also never reported — the baseline still advances
+ * so the reset self-heals for the next turn instead of compounding a bad reading.
+ */
+function consumeCumulativeTokenDelta(
+  total: number,
+  previousBaseline: number | undefined,
+): { delta: number | undefined; nextBaseline: number } {
+  if (previousBaseline === undefined) {
+    return { delta: undefined, nextBaseline: total };
+  }
+  const delta = total - previousBaseline;
+  return { delta: delta > 0 ? delta : undefined, nextBaseline: total };
+}
+
 function hasNormalizedOpenCodeUsage(usage: AgentUsage): boolean {
   return [
     usage.inputTokens,
@@ -1362,6 +1383,7 @@ export const __openCodeInternals = {
   buildOpenCodeModelContextWindowLookup,
   buildOpenCodeModelDefinition,
   buildOpenCodeModelLookupKey,
+  consumeCumulativeTokenDelta,
   extractOpenCodeModelContextWindow,
   hasNormalizedOpenCodeUsage,
   mergeOpenCodeStepFinishUsage,
@@ -1568,6 +1590,8 @@ export class OpenCodeAgentClient implements AgentClient {
       sessionId,
       env: launchContext.env ?? {},
       tools: launchContext.paseoTools,
+      // The device cap counts per agent, and the bridge only sees OpenCode session ids.
+      ...(launchContext.agentId ? { agentId: launchContext.agentId } : {}),
     });
   }
 
@@ -3307,6 +3331,21 @@ class OpenCodeAgentSession implements AgentSession {
   private abortController: AbortController | null = null;
   private accumulatedUsage: AgentUsage = {};
   private sessionTotalCostUsd: number | undefined;
+  /**
+   * Session-lifetime running total of tokens burned across every step-finish part (input +
+   * output + reasoning + cache read/write), fed as each `usage_updated` event arrives. Unlike
+   * `accumulatedUsage` — which is reset to `{}` after every turn for display purposes —
+   * this never resets, mirroring `sessionTotalCostUsd`. `turnTokenDelta` is derived by diffing
+   * this against `tokenTotalAtLastTurn` at turn completion, since OpenCode's own usage figures
+   * are per-step, not natively scoped to a whole turn.
+   */
+  private cumulativeStepTokenTotal = 0;
+  /**
+   * Snapshot of `cumulativeStepTokenTotal` as of the last turn_completed emission. Undefined
+   * until the first turn completes this session — the first observation only re-baselines, so
+   * a resumed/reconnected session never reports its entire pre-existing total as one giant turn.
+   */
+  private tokenTotalAtLastTurn: number | undefined;
   private mcpConfigured = false;
   private mcpSetupPromise: Promise<void> | null = null;
   private messageRoles = new Map<string, OpenCodeMessageRole>();
@@ -5275,14 +5314,7 @@ class OpenCodeAgentSession implements AgentSession {
         this.pendingPermissions.set(translatedEvent.request.id, translatedEvent.request);
         this.pendingPermissionDirectories.set(translatedEvent.request.id, directory);
       }
-      if (translatedEvent.type === "turn_completed") {
-        if (hasNormalizedOpenCodeUsage(this.accumulatedUsage)) {
-          translatedEvent.usage = this.accumulatedUsage;
-        }
-        const contextWindowMaxTokens = this.resolveSelectedModelContextWindowMaxTokens();
-        this.accumulatedUsage =
-          contextWindowMaxTokens !== undefined ? { contextWindowMaxTokens } : {};
-      }
+      this.applyTurnTokenAccounting(translatedEvent);
       events.push(translatedEvent);
     }
 
@@ -5315,6 +5347,42 @@ class OpenCodeAgentSession implements AgentSession {
 
   private resolveSelectedModelContextWindowMaxTokens(): number | undefined {
     return this.selectedModelContextWindowMaxTokens;
+  }
+
+  /**
+   * Feeds `cumulativeStepTokenTotal` from each step's `usage_updated` snapshot, then — on
+   * `turn_completed` — attaches the turn's usage/turnTokenDelta and resets the per-turn display
+   * usage. Split out of `translateEvent`'s loop purely to keep that method's complexity in check.
+   */
+  private applyTurnTokenAccounting(translatedEvent: AgentStreamEvent): void {
+    if (
+      translatedEvent.type === "usage_updated" &&
+      typeof translatedEvent.usage.contextWindowUsedTokens === "number"
+    ) {
+      this.cumulativeStepTokenTotal += translatedEvent.usage.contextWindowUsedTokens;
+      return;
+    }
+    if (translatedEvent.type !== "turn_completed") {
+      return;
+    }
+    if (hasNormalizedOpenCodeUsage(this.accumulatedUsage)) {
+      translatedEvent.usage = this.accumulatedUsage;
+    }
+    const turnTokenDelta = this.consumeTurnTokenDelta();
+    if (turnTokenDelta !== undefined) {
+      translatedEvent.turnTokenDelta = turnTokenDelta;
+    }
+    const contextWindowMaxTokens = this.resolveSelectedModelContextWindowMaxTokens();
+    this.accumulatedUsage = contextWindowMaxTokens !== undefined ? { contextWindowMaxTokens } : {};
+  }
+
+  private consumeTurnTokenDelta(): number | undefined {
+    const { delta, nextBaseline } = consumeCumulativeTokenDelta(
+      this.cumulativeStepTokenTotal,
+      this.tokenTotalAtLastTurn,
+    );
+    this.tokenTotalAtLastTurn = nextBaseline;
+    return delta;
   }
 
   private resolveConfiguredModelContextWindowMaxTokens(

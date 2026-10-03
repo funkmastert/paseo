@@ -1,16 +1,24 @@
-import { expect, it, test, vi } from "vitest";
+import { describe, expect, it, test, vi } from "vitest";
 import pino, { type Logger } from "pino";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import {
+  ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
+  PARENT_AGENT_ID_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import { createTestLogger } from "../../test-utils/test-logger.js";
+import { createTestAgentClient } from "../test-utils/fake-agent-client.js";
 import { AgentManager } from "./agent-manager.js";
 import { AgentStorage } from "./agent-storage.js";
+import { FinishObligationService } from "./finish-obligation-service.js";
 import {
   formatSystemNotificationPrompt,
   isSystemInjectedEnvelope,
+  MigratedToLoopError,
+  sendPromptToAgent,
   setupFinishNotification,
   waitForAgentRunStartWithTimeout,
 } from "./agent-prompt.js";
@@ -28,14 +36,14 @@ interface CapturedLogger {
   nextRecord: Promise<void>;
 }
 
-function createCapturedLogger(): CapturedLogger {
+function createCapturedLogger(level: "error" | "warn" = "error"): CapturedLogger {
   const records: Array<Record<string, unknown>> = [];
   let resolveNextRecord!: () => void;
   const nextRecord = new Promise<void>((resolve) => {
     resolveNextRecord = resolve;
   });
   const logger = pino(
-    { level: "error" },
+    { level },
     {
       write(line: string) {
         records.push(JSON.parse(line) as Record<string, unknown>);
@@ -52,30 +60,69 @@ interface FinishNotificationScenarioOptions {
   requireParentOwnership?: boolean;
   parentPromptError?: Error;
   logger?: Logger;
+  /** The caller's live labels, e.g. the `migrated-to` account failover retires it with. */
+  callerLabels?: Record<string, string>;
+  /** More live, idle agents by id, with their labels: a caller's successor, its orchestrator. */
+  liveAgents?: Record<string, Record<string, string>>;
+  /** Agents that exist only as stored records, such as an archived successor. */
+  storedRecords?: Record<string, { labels?: Record<string, string>; archivedAt?: string }>;
 }
 
 interface FinishNotificationScenario {
   startWatchingChild(): void;
+  finishObligations: FinishObligationService;
   requestChildPermission(requestId?: string): void;
   resolveChildPermission(requestId?: string): void;
   resolveChildPermissionFromState(requestId?: string): void;
   resolveChildPermissionWhileIdle(requestId?: string): void;
   finishChild(): void;
   finishChildAndReadParentPrompt(): Promise<string>;
+  cancelChildAndReadParentPrompt(): Promise<string>;
+  isChildObserved(): boolean;
   closeChildAndReadParentPrompt(): Promise<string>;
   parentPrompts(): string[];
+  /** Which agent each prompt went to, in order. */
+  promptedAgentIds(): string[];
   steerAttemptCount(): number;
   wasParentPrompted(): boolean;
+  flaggedOutcomes(): string[];
+}
+
+/**
+ * The durable ledger that owns every finish report. Tests wire the real service: a watcher only
+ * notices an outcome, so without it nothing is ever delivered.
+ */
+function wireFinishObligations(
+  agentManager: AgentManager,
+  agentStorage: AgentStorage,
+  logger: Logger = createTestLogger(),
+): FinishObligationService {
+  Reflect.set(agentStorage, "list", async () => []);
+  Reflect.set(agentStorage, "updateFinishObligations", async () => true);
+  Reflect.set(agentManager, "setOwedFinishReport", () => {});
+  const service = new FinishObligationService({
+    agentManager,
+    agentStorage,
+    serverId: "srv_test",
+    logger,
+  });
+  agentManager.setFinishObligations(service);
+  return service;
 }
 
 function createFinishNotificationScenario(
   options?: FinishNotificationScenarioOptions,
 ): FinishNotificationScenario {
-  let subscriber: ((event: AgentManagerEvent) => void) | null = null;
+  const subscribers = new Set<(event: AgentManagerEvent) => void>();
+  const publish = (event: AgentManagerEvent) => {
+    for (const callback of subscribers) callback(event);
+  };
   let resolveParentPrompt: ((prompt: string) => void) | null = null;
   let parentPrompted = false;
   let steerAttemptCount = 0;
   const parentPrompts: string[] = [];
+  const promptedAgentIds: string[] = [];
+  const flaggedOutcomes: string[] = [];
 
   const childAgent: ManagedAgent = Object.create(null);
   Reflect.set(childAgent, "id", "child-agent");
@@ -87,6 +134,19 @@ function createFinishNotificationScenario(
   Reflect.set(callerAgent, "id", "caller-agent");
   Reflect.set(callerAgent, "lifecycle", "idle");
   Reflect.set(callerAgent, "config", { title: "Caller Agent" });
+  Reflect.set(callerAgent, "labels", options?.callerLabels ?? {});
+  Reflect.set(callerAgent, "pendingPermissions", new Map());
+
+  const liveAgents = new Map<string, ManagedAgent>();
+  for (const [agentId, labels] of Object.entries(options?.liveAgents ?? {})) {
+    const agent: ManagedAgent = Object.create(null);
+    Reflect.set(agent, "id", agentId);
+    Reflect.set(agent, "lifecycle", "idle");
+    Reflect.set(agent, "config", { title: agentId });
+    Reflect.set(agent, "labels", labels);
+    Reflect.set(agent, "pendingPermissions", new Map());
+    liveAgents.set(agentId, agent);
+  }
 
   const agentManager = new AgentManager({ clients: {}, logger: createTestLogger() });
   Reflect.set(agentManager, "getAgent", (agentId: string) => {
@@ -96,27 +156,32 @@ function createFinishNotificationScenario(
     if (agentId === "caller-agent") {
       return callerAgent;
     }
-    return null;
+    return liveAgents.get(agentId) ?? null;
   });
   Reflect.set(agentManager, "subscribe", (callback: (event: AgentManagerEvent) => void) => {
-    subscriber = callback;
+    subscribers.add(callback);
     return () => {
-      subscriber = null;
+      subscribers.delete(callback);
     };
   });
   Reflect.set(agentManager, "getLastAssistantMessage", async () => {
     return options?.childLastAssistantMessage ?? null;
   });
   Reflect.set(agentManager, "tryRunOutOfBand", () => false);
-  Reflect.set(agentManager, "hasInFlightRun", () => Boolean(options?.parentPromptError));
-  Reflect.set(agentManager, "steerOrReplaceActiveTurn", async () => {
+  Reflect.set(agentManager, "flagUndeliveredDelegatedOutcome", (_id: string, reason: string) => {
+    flaggedOutcomes.push(reason);
+  });
+  Reflect.set(agentManager, "hasInFlightRun", () => false);
+  Reflect.set(agentManager, "steerIntoActiveTurn", async () => {
     steerAttemptCount += 1;
     return { status: "inactive" };
   });
-  Reflect.set(agentManager, "streamAgent", (_agentId: string, prompt: string) => {
+  Reflect.set(agentManager, "streamAgent", (agentId: string, prompt: string) => {
     parentPrompted = true;
     parentPrompts.push(prompt);
+    promptedAgentIds.push(agentId);
     resolveParentPrompt?.(prompt);
+    if (options?.parentPromptError) throw options.parentPromptError;
     return (async function* noop() {})();
   });
   Reflect.set(agentManager, "replaceAgentRun", async (_agentId: string, prompt: string) => {
@@ -134,10 +199,16 @@ function createFinishNotificationScenario(
         labels: parentAgentId ? { "paseo.parent-agent-id": parentAgentId } : {},
       };
     }
+    const stored = options?.storedRecords?.[agentId];
+    if (stored) {
+      return { id: agentId, labels: stored.labels ?? {}, archivedAt: stored.archivedAt ?? null };
+    }
     return null;
   });
+  const finishObligations = wireFinishObligations(agentManager, agentStorage, options?.logger);
 
   return {
+    finishObligations,
     startWatchingChild() {
       setupFinishNotification({
         agentManager,
@@ -161,11 +232,11 @@ function createFinishNotificationScenario(
           content: "PASEO_PERMISSION_NOTIFY_QA_OK\n",
         },
       });
-      subscriber?.({
+      publish({
         type: "agent_state",
         agent: childAgent,
       });
-      subscriber?.({
+      publish({
         type: "agent_stream",
         agentId: "child-agent",
         event: {
@@ -177,7 +248,7 @@ function createFinishNotificationScenario(
     },
     resolveChildPermission(requestId = "permission-1") {
       childAgent.pendingPermissions.delete(requestId);
-      subscriber?.({
+      publish({
         type: "agent_stream",
         agentId: "child-agent",
         event: {
@@ -190,13 +261,13 @@ function createFinishNotificationScenario(
     },
     resolveChildPermissionFromState(requestId = "permission-1") {
       childAgent.pendingPermissions.delete(requestId);
-      subscriber?.({ type: "agent_state", agent: childAgent });
+      publish({ type: "agent_state", agent: childAgent });
     },
     resolveChildPermissionWhileIdle(requestId = "permission-1") {
       childAgent.pendingPermissions.delete(requestId);
       childAgent.lifecycle = "idle";
-      subscriber?.({ type: "agent_state", agent: childAgent });
-      subscriber?.({
+      publish({ type: "agent_state", agent: childAgent });
+      publish({
         type: "agent_stream",
         agentId: "child-agent",
         event: {
@@ -209,13 +280,13 @@ function createFinishNotificationScenario(
     },
     finishChild() {
       childAgent.lifecycle = "running";
-      subscriber?.({
+      publish({
         type: "agent_state",
         agent: childAgent,
       });
 
       childAgent.lifecycle = "idle";
-      subscriber?.({
+      publish({
         type: "agent_state",
         agent: childAgent,
       });
@@ -228,27 +299,49 @@ function createFinishNotificationScenario(
 
       return parentPrompt;
     },
+    async cancelChildAndReadParentPrompt() {
+      const parentPrompt = new Promise<string>((resolve) => {
+        resolveParentPrompt = resolve;
+      });
+      childAgent.lifecycle = "running";
+      publish({ type: "agent_state", agent: childAgent });
+
+      // The shape emitState dispatches for a cancelled turn: idle, and carrying the outcome.
+      childAgent.lifecycle = "idle";
+      publish({
+        type: "agent_state",
+        agent: { ...childAgent, turnCanceled: true },
+      });
+
+      return parentPrompt;
+    },
     async closeChildAndReadParentPrompt() {
       const parentPrompt = new Promise<string>((resolve) => {
         resolveParentPrompt = resolve;
       });
 
       childAgent.lifecycle = "running";
-      subscriber?.({
+      publish({
         type: "agent_state",
         agent: childAgent,
       });
 
       childAgent.lifecycle = "closed";
-      subscriber?.({
+      publish({
         type: "agent_state",
         agent: childAgent,
       });
 
       return parentPrompt;
     },
+    isChildObserved() {
+      return agentManager.hasFinishObserver("child-agent");
+    },
     parentPrompts() {
       return parentPrompts;
+    },
+    promptedAgentIds() {
+      return promptedAgentIds;
     },
     steerAttemptCount() {
       return steerAttemptCount;
@@ -256,12 +349,64 @@ function createFinishNotificationScenario(
     wasParentPrompted() {
       return parentPrompted;
     },
+    flaggedOutcomes() {
+      return flaggedOutcomes;
+    },
   };
 }
 
 test("isSystemInjectedEnvelope matches the envelope formatSystemNotificationPrompt produces", () => {
   expect(isSystemInjectedEnvelope(formatSystemNotificationPrompt("child finished"))).toBe(true);
   expect(isSystemInjectedEnvelope("hello world")).toBe(false);
+});
+
+test("a watched child is registered as observed, and released when it finishes", async () => {
+  // The registry is what tells the manager a blocked delegated child has somebody who can
+  // answer it. It has to be true while watching and false the moment the observer stops.
+  const scenario = createFinishNotificationScenario({ childLastAssistantMessage: "Done." });
+
+  scenario.startWatchingChild();
+  expect(scenario.isChildObserved()).toBe(true);
+
+  await scenario.finishChildAndReadParentPrompt();
+
+  expect(scenario.isChildObserved()).toBe(false);
+});
+
+// The 20:42 kill: create_agent and a later send_agent_prompt each armed a watcher for the same
+// child and owner, both delivered the finish, and the second delivery replaced the turn the first
+// had started. The durable ledger owns the report, so it is sent once.
+test("a child's finish reaches its owner once, however many watchers were armed for it", async () => {
+  const scenario = createFinishNotificationScenario({ childLastAssistantMessage: "Fixed." });
+
+  scenario.startWatchingChild();
+  scenario.startWatchingChild();
+  await scenario.finishChildAndReadParentPrompt();
+  await vi.waitFor(() =>
+    expect(scenario.finishObligations.getObligations("child-agent")).toEqual([
+      expect.objectContaining({ ownerAgentId: "caller-agent", state: "delivered" }),
+    ]),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  expect(scenario.parentPrompts()).toHaveLength(1);
+  expect(scenario.parentPrompts()[0]).toContain("Agent child-agent (Child Agent) finished.");
+});
+
+test("a watcher never sends a finish report itself: without the durable ledger it refuses", () => {
+  const agentManager = new AgentManager({ clients: {}, logger: createTestLogger() });
+  const agentStorage: AgentStorage = Object.create(AgentStorage.prototype);
+
+  expect(() =>
+    setupFinishNotification({
+      agentManager,
+      agentStorage,
+      childAgentId: "child-agent",
+      callerAgentId: "caller-agent",
+      logger: createTestLogger(),
+    }),
+  ).toThrow("Finish reports need the finish-obligation service");
+  expect(agentManager.hasFinishObserver("child-agent")).toBe(false);
 });
 
 test("finish notifications tell the parent the child's last assistant message", async () => {
@@ -278,6 +423,36 @@ test("finish notifications tell the parent the child's last assistant message", 
     ),
   );
   expect(scenario.steerAttemptCount()).toBe(1);
+});
+
+test("a cancelled delegation is reported as cancelled, not as a finish with no answer", async () => {
+  // The bug this pins: a cancelled child reached its parent as "finished" with an empty
+  // response, which reads as a result the parent did not understand. One parent created four
+  // copies of the same subagent in 45 seconds on that signal.
+  const scenario = createFinishNotificationScenario({ childLastAssistantMessage: null });
+
+  scenario.startWatchingChild();
+  const parentPrompt = await scenario.cancelChildAndReadParentPrompt();
+
+  expect(parentPrompt).toContain("Agent child-agent (Child Agent) was canceled.");
+  expect(parentPrompt).not.toContain("finished");
+  // And the instruction that stops the retry loop.
+  expect(parentPrompt).toContain("did not finish its work");
+  expect(parentPrompt).toContain("Do not create another agent for the same task");
+  expect(scenario.steerAttemptCount()).toBe(1);
+});
+
+test("an ordinary finish is untouched by the cancel path", async () => {
+  const scenario = createFinishNotificationScenario({
+    childLastAssistantMessage: "Done.",
+  });
+
+  scenario.startWatchingChild();
+  const parentPrompt = await scenario.finishChildAndReadParentPrompt();
+
+  expect(parentPrompt).toContain("Agent child-agent (Child Agent) finished.");
+  expect(parentPrompt).not.toContain("was canceled");
+  expect(parentPrompt).not.toContain("Do not create another agent");
 });
 
 test("finish notifications truncate oversized child responses", async () => {
@@ -429,10 +604,12 @@ test("follow-up finish notifications do not require a parent relationship", asyn
   expect(parentPrompt).toContain("Agent child-agent (Child Agent) finished.");
 });
 
-test("finish notifications log a rejected parent prompt without an unhandled rejection", async () => {
-  const captured = createCapturedLogger();
+test("a finish report the parent rejected stays owed for the ladder, logged, not thrown", async () => {
+  // The durable ledger owns the report, so a failed delivery is a retry on its ladder (owner,
+  // then orchestrator, then a push), not a one-shot flag.
+  const captured = createCapturedLogger("warn");
   const scenario = createFinishNotificationScenario({
-    parentPromptError: new Error("parent provider rejected replacement"),
+    parentPromptError: new Error("parent provider rejected the prompt"),
     logger: captured.logger,
   });
 
@@ -442,13 +619,134 @@ test("finish notifications log a rejected parent prompt without an unhandled rej
 
   expect(captured.records).toEqual([
     expect.objectContaining({
-      msg: "Failed to notify caller agent",
+      msg: "Finish report delivery failed",
       childAgentId: "child-agent",
-      callerAgentId: "caller-agent",
-      reason: "finished",
-      err: expect.objectContaining({ message: "parent provider rejected replacement" }),
+      ownerAgentId: "caller-agent",
+      err: "parent provider rejected the prompt",
     }),
   ]);
+  expect(scenario.finishObligations.getObligations("child-agent")).toEqual([
+    expect.objectContaining({
+      ownerAgentId: "caller-agent",
+      state: "owed",
+      attempts: 1,
+      lastError: "parent provider rejected the prompt",
+    }),
+  ]);
+  expect(scenario.flaggedOutcomes()).toEqual([]);
+});
+
+test("a permission the parent never heard about falls back to flagging the child", async () => {
+  // Worse than a stranded finish: the child does not run again until somebody answers.
+  const scenario = createFinishNotificationScenario({
+    parentPromptError: new Error("parent provider rejected the prompt"),
+  });
+
+  scenario.startWatchingChild();
+  scenario.requestChildPermission();
+  await vi.waitFor(() => expect(scenario.flaggedOutcomes()).toEqual(["permission"]));
+});
+
+describe("a caller account failover moved", () => {
+  test("hears about a permission its child blocks on where its conversation lives now", async () => {
+    const scenario = createFinishNotificationScenario({
+      callerLabels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-successor" },
+      liveAgents: { "caller-successor": {} },
+    });
+    scenario.startWatchingChild();
+
+    scenario.requestChildPermission();
+
+    await vi.waitFor(() => expect(scenario.promptedAgentIds()).toEqual(["caller-successor"]));
+    expect(scenario.parentPrompts()[0]).toContain("Respond with `respond_to_permission`");
+  });
+
+  test("gets its child's finish report at the agent it moved to", async () => {
+    const scenario = createFinishNotificationScenario({
+      callerLabels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-successor" },
+      liveAgents: { "caller-successor": {} },
+    });
+    scenario.startWatchingChild();
+
+    await scenario.finishChildAndReadParentPrompt();
+
+    expect(scenario.promptedAgentIds()).toEqual(["caller-successor"]);
+  });
+
+  test("whose moves loop sends the report up to its orchestrator, never into the loop", async () => {
+    const scenario = createFinishNotificationScenario({
+      callerLabels: {
+        [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-successor",
+        [PARENT_AGENT_ID_LABEL]: "orchestrator-agent",
+      },
+      liveAgents: {
+        "caller-successor": { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-agent" },
+        "orchestrator-agent": {},
+      },
+    });
+    scenario.startWatchingChild();
+
+    const report = await scenario.finishChildAndReadParentPrompt();
+
+    expect(scenario.promptedAgentIds()).toEqual(["orchestrator-agent"]);
+    expect(report).toContain("caller-agent → caller-successor → caller-agent");
+  });
+
+  test("whose moves loop sends the report to where its orchestrator's conversation moved", async () => {
+    const scenario = createFinishNotificationScenario({
+      callerLabels: {
+        [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-successor",
+        [PARENT_AGENT_ID_LABEL]: "orchestrator-old",
+      },
+      liveAgents: {
+        "caller-successor": { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-agent" },
+        "orchestrator-old": { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "orchestrator-new" },
+        "orchestrator-new": {},
+      },
+    });
+    scenario.startWatchingChild();
+
+    await scenario.finishChildAndReadParentPrompt();
+
+    expect(scenario.promptedAgentIds()).toEqual(["orchestrator-new"]);
+  });
+
+  test("passes over an orchestrator whose own moves loop, for the agent above it", async () => {
+    const scenario = createFinishNotificationScenario({
+      callerLabels: {
+        [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-successor",
+        [PARENT_AGENT_ID_LABEL]: "orchestrator-a",
+      },
+      liveAgents: {
+        "caller-successor": { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-agent" },
+        "orchestrator-a": {
+          [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "orchestrator-b",
+          [PARENT_AGENT_ID_LABEL]: "grandparent",
+        },
+        "orchestrator-b": { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "orchestrator-a" },
+        grandparent: {},
+      },
+    });
+    scenario.startWatchingChild();
+
+    await scenario.finishChildAndReadParentPrompt();
+
+    expect(scenario.promptedAgentIds()).toEqual(["grandparent"]);
+  });
+
+  test("whose successor was archived still gets the report, at the handle it left", async () => {
+    // A report never unarchives anything, so it stops at the last agent it can reach. Following
+    // the label again at send time would land on the archived successor and drop it silently.
+    const scenario = createFinishNotificationScenario({
+      callerLabels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-successor" },
+      storedRecords: { "caller-successor": { archivedAt: "2026-10-01T00:00:00.000Z" } },
+    });
+    scenario.startWatchingChild();
+
+    scenario.finishChild();
+
+    await vi.waitFor(() => expect(scenario.promptedAgentIds()).toEqual(["caller-agent"]));
+  });
 });
 
 it("does not notify archived callers", async () => {
@@ -464,6 +762,8 @@ it("does not notify archived callers", async () => {
   Reflect.set(callerAgent, "id", "caller-agent");
   Reflect.set(callerAgent, "lifecycle", "idle");
   Reflect.set(callerAgent, "config", { title: "Caller Agent" });
+  Reflect.set(callerAgent, "labels", {});
+  Reflect.set(callerAgent, "pendingPermissions", new Map());
 
   const streamAgentSpy = vi.fn(() => (async function* noop() {})());
   const replaceAgentRunSpy = vi.fn(() => (async function* noop() {})());
@@ -501,6 +801,7 @@ it("does not notify archived callers", async () => {
   );
   const agentStorage: AgentStorage = Object.create(AgentStorage.prototype);
   Reflect.set(agentStorage, "get", agentStorageGetSpy);
+  wireFinishObligations(agentManager, agentStorage);
 
   setupFinishNotification({
     agentManager,
@@ -530,6 +831,9 @@ it("does not notify archived callers", async () => {
 
   expect(streamAgentSpy).not.toHaveBeenCalled();
   expect(replaceAgentRunSpy).not.toHaveBeenCalled();
+  // And it stops watching. While it counted as a watcher, a permission the child blocked on
+  // was suppressed as "someone will answer it" when nobody ever would.
+  expect(agentManager.hasFinishObserver("child-agent")).toBe(false);
 });
 
 // Deliberately independent literals rather than the production constants these tests
@@ -761,4 +1065,228 @@ test("waiting for a run start still gives up at the run start budget", async () 
     vi.useRealTimers();
     await scenario.cleanup();
   }
+});
+
+interface MovedConversationScenario {
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  /** A fresh agent, live. */
+  createAgent(): Promise<string>;
+  /** What account failover writes on a handle it retires. */
+  retire(agentId: string, successorId: string): Promise<void>;
+  /** The agents a turn started on, in order. */
+  promptedAgentIds(): string[];
+  cleanup(): Promise<void>;
+}
+
+/** A real manager and real storage, so a send loads, unarchives and runs the way the daemon does. */
+function createMovedConversationScenario(): MovedConversationScenario {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-prompt-moved-"));
+  const logger = createTestLogger();
+  const agentIdBySession = new Map<string, string>();
+  const prompted: string[] = [];
+  const agentStorage = new AgentStorage(join(workdir, "agents"), logger);
+  const agentManager = new AgentManager({
+    clients: {
+      codex: createTestAgentClient("codex", {
+        onStartTurn: (_prompt, sessionId) => {
+          prompted.push(agentIdBySession.get(sessionId) ?? sessionId);
+        },
+      }),
+    },
+    registry: agentStorage,
+    logger,
+  });
+  return {
+    agentManager,
+    agentStorage,
+    async createAgent() {
+      const agent = await agentManager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+        workspaceId: undefined,
+      });
+      const sessionId = agent.persistence?.sessionId;
+      if (sessionId) agentIdBySession.set(sessionId, agent.id);
+      return agent.id;
+    },
+    async retire(agentId, successorId) {
+      await agentManager.updateAgentMetadata(agentId, {
+        labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: successorId },
+      });
+    },
+    promptedAgentIds: () => prompted,
+    async cleanup() {
+      for (const agent of agentManager.listAgents()) {
+        await agentManager.closeAgent(agent.id).catch(() => undefined);
+      }
+      rmSync(workdir, { recursive: true, force: true });
+    },
+  };
+}
+
+// Tyler's messages to e8e58ad7's retired handle went to the capped account it had left, and
+// failed there (2026-10-01). A message follows the conversation to where it lives now.
+describe("a prompt to a handle account failover retired", () => {
+  test("is delivered to the live end of its chain, which the result names", async () => {
+    const scenario = createMovedConversationScenario();
+    try {
+      const first = await scenario.createAgent();
+      const second = await scenario.createAgent();
+      const live = await scenario.createAgent();
+      await scenario.retire(first, second);
+      await scenario.retire(second, live);
+      await scenario.agentManager.closeAgent(first);
+      await scenario.agentManager.closeAgent(second);
+
+      const result = await sendPromptToAgent({
+        agentManager: scenario.agentManager,
+        agentStorage: scenario.agentStorage,
+        agentId: first,
+        prompt: "are you there?",
+        logger: createTestLogger(),
+      });
+
+      expect(result.agentId).toBe(live);
+      await vi.waitFor(() => expect(scenario.promptedAgentIds()).toEqual([live]));
+      // Neither retired handle is resumed on the account it left.
+      expect(scenario.agentManager.getAgent(first)).toBeNull();
+      expect(scenario.agentManager.getAgent(second)).toBeNull();
+    } finally {
+      await scenario.cleanup();
+    }
+  });
+
+  test("whose label was blanked is the live end again, and takes the prompt itself", async () => {
+    const scenario = createMovedConversationScenario();
+    try {
+      const revived = await scenario.createAgent();
+      const other = await scenario.createAgent();
+      await scenario.retire(revived, other);
+      // How account failover revives a handle: there is no label removal, a blank reads as unset.
+      await scenario.agentManager.updateAgentMetadata(revived, {
+        labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "" },
+      });
+
+      const result = await sendPromptToAgent({
+        agentManager: scenario.agentManager,
+        agentStorage: scenario.agentStorage,
+        agentId: revived,
+        prompt: "resume",
+        logger: createTestLogger(),
+      });
+
+      expect(result.agentId).toBe(revived);
+      await vi.waitFor(() => expect(scenario.promptedAgentIds()).toEqual([revived]));
+    } finally {
+      await scenario.cleanup();
+    }
+  });
+
+  test("whose successor no longer exists stays with the last agent that does", async () => {
+    const scenario = createMovedConversationScenario();
+    try {
+      const handle = await scenario.createAgent();
+      await scenario.retire(handle, "00000000-0000-4000-8000-00000000dead");
+
+      const result = await sendPromptToAgent({
+        agentManager: scenario.agentManager,
+        agentStorage: scenario.agentStorage,
+        agentId: handle,
+        prompt: "hello",
+        logger: createTestLogger(),
+      });
+
+      expect(result.agentId).toBe(handle);
+      await vi.waitFor(() => expect(scenario.promptedAgentIds()).toEqual([handle]));
+    } finally {
+      await scenario.cleanup();
+    }
+  });
+
+  test("reaches an archived successor: a user send unarchives it, a system send leaves it be", async () => {
+    const scenario = createMovedConversationScenario();
+    try {
+      const retired = await scenario.createAgent();
+      const successor = await scenario.createAgent();
+      await scenario.retire(retired, successor);
+      await scenario.agentManager.closeAgent(retired);
+      await scenario.agentManager.archiveAgent(successor);
+
+      const system = await sendPromptToAgent({
+        agentManager: scenario.agentManager,
+        agentStorage: scenario.agentStorage,
+        agentId: retired,
+        prompt: formatSystemNotificationPrompt("a report"),
+        unarchive: false,
+        logger: createTestLogger(),
+      });
+      expect(system.agentId).toBe(successor);
+      expect((await scenario.agentStorage.get(successor))?.archivedAt).toBeTruthy();
+      expect(scenario.promptedAgentIds()).toEqual([]);
+      expect(scenario.agentManager.getAgent(retired)).toBeNull();
+
+      const user = await sendPromptToAgent({
+        agentManager: scenario.agentManager,
+        agentStorage: scenario.agentStorage,
+        agentId: retired,
+        prompt: "pick this back up",
+        logger: createTestLogger(),
+      });
+      expect(user.agentId).toBe(successor);
+      expect((await scenario.agentStorage.get(successor))?.archivedAt).toBeNull();
+      await vi.waitFor(() => expect(scenario.promptedAgentIds()).toEqual([successor]));
+    } finally {
+      await scenario.cleanup();
+    }
+  });
+
+  test("whose moves loop is refused with an error naming the loop, and nothing is sent", async () => {
+    const scenario = createMovedConversationScenario();
+    try {
+      const first = await scenario.createAgent();
+      const second = await scenario.createAgent();
+      await scenario.retire(first, second);
+      await scenario.retire(second, first);
+      await scenario.agentManager.closeAgent(first);
+      await scenario.agentManager.closeAgent(second);
+
+      const sent = sendPromptToAgent({
+        agentManager: scenario.agentManager,
+        agentStorage: scenario.agentStorage,
+        agentId: first,
+        prompt: "hello",
+        logger: createTestLogger(),
+      });
+
+      await expect(sent).rejects.toBeInstanceOf(MigratedToLoopError);
+      await expect(sent).rejects.toThrow(`${first} → ${second} → ${first}`);
+      expect(scenario.promptedAgentIds()).toEqual([]);
+      expect(scenario.agentManager.getAgent(first)).toBeNull();
+      expect(scenario.agentManager.getAgent(second)).toBeNull();
+    } finally {
+      await scenario.cleanup();
+    }
+  });
+
+  test("goes to exactly that handle when the sender already resolved where to deliver", async () => {
+    const scenario = createMovedConversationScenario();
+    try {
+      const retired = await scenario.createAgent();
+      const successor = await scenario.createAgent();
+      await scenario.retire(retired, successor);
+
+      const result = await sendPromptToAgent({
+        agentManager: scenario.agentManager,
+        agentStorage: scenario.agentStorage,
+        agentId: retired,
+        prompt: formatSystemNotificationPrompt("a report"),
+        followMigration: false,
+        logger: createTestLogger(),
+      });
+
+      expect(result.agentId).toBe(retired);
+      await vi.waitFor(() => expect(scenario.promptedAgentIds()).toEqual([retired]));
+    } finally {
+      await scenario.cleanup();
+    }
+  });
 });

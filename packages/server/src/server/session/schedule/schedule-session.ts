@@ -80,6 +80,7 @@ export class ScheduleSession {
         maxRuns: request.maxRuns,
         expiresAt: request.expiresAt,
         runOnCreate: request.runOnCreate,
+        condition: request.condition,
       });
       this.host.emit({
         type: "schedule/create/response",
@@ -232,6 +233,7 @@ export class ScheduleSession {
         ...(request.newAgentConfig !== undefined ? { newAgentConfig: request.newAgentConfig } : {}),
         ...(request.maxRuns !== undefined ? { maxRuns: request.maxRuns } : {}),
         ...(request.expiresAt !== undefined ? { expiresAt: request.expiresAt } : {}),
+        ...(request.condition !== undefined ? { condition: request.condition } : {}),
       });
       this.host.emit({
         type: "schedule/update/response",

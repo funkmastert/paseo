@@ -1,7 +1,7 @@
 npmRebuild: false
 appId: sh.paseo.desktop
-productName: Paseo
-executableName: Paseo
+productName: Bozeo
+executableName: Bozeo
 protocols:
   - name: Paseo agent link
     schemes:
@@ -31,9 +31,12 @@ extraResources:
     to: app-dist
   - from: assets/editor-targets
     to: editor-target-icons
+# The installed app polls this repo for updates. Pointed at getpaseo/paseo, a
+# Bozeo install on Windows or Linux would update itself to upstream Paseo.
+# desktop-release.yml overrides owner/repo with the repo that runs it.
 publish:
   provider: github
-  owner: getpaseo
+  owner: funkmastert
   repo: paseo
 mac:
   artifactName: "Paseo-${version}-${arch}.${ext}"

@@ -357,9 +357,9 @@ async function runUiScenario(params: {
         throw new Error(`[${scenario.name}] ${action.label}: missing queued prompt`);
       }
 
-      // Model UI "send now" as one atomic submit path.
-      // The daemon send path interrupts any active run before starting the new one.
-      await client.sendMessage(agentId, selected.prompt);
+      // Model UI "send now" as one atomic submit path that interrupts any active run. Only an
+      // explicit interrupt may cancel one; the default steers.
+      await client.sendMessage(agentId, selected.prompt, { activeTurnBehavior: "interrupt" });
       continue;
     }
 

@@ -12,6 +12,8 @@ import {
   type ProviderSelectorProvider,
 } from "@/provider-selection/provider-selection";
 import { filterSelectableModels } from "@/provider-selection/model-catalog";
+import { buildAccountBudgetNotes } from "@/provider-selection/account-budget";
+import { useAccountBudget } from "@/provider-selection/use-account-budget";
 import { OptimisticFormPreferences } from "@/create-agent-preferences/optimistic-preferences";
 import { applyAgentProfilePreferences } from "@/create-agent-preferences/preferences";
 import { useProvidersSnapshot } from "./use-providers-snapshot";
@@ -219,9 +221,11 @@ export function useAgentFormState(options: UseAgentFormStateOptions): UseAgentFo
     () => buildProviderModelsByProvider(snapshotEntries),
     [snapshotEntries],
   );
+  const accountBudget = useAccountBudget(serverId, { enabled: isVisible && isCreateFlow });
+  const accountBudgetNotes = useMemo(() => buildAccountBudgetNotes(accountBudget), [accountBudget]);
   const snapshotModelSelectorProviders = useMemo(
-    () => buildSelectableProviderSelectorProviders(snapshotEntries),
-    [snapshotEntries],
+    () => buildSelectableProviderSelectorProviders(snapshotEntries, accountBudgetNotes),
+    [accountBudgetNotes, snapshotEntries],
   );
   const snapshotSelectedEntry = useMemo(
     () =>
@@ -262,8 +266,10 @@ export function useAgentFormState(options: UseAgentFormStateOptions): UseAgentFo
       preferences,
       providerModelsByProvider: snapshotProviderModelsByProvider,
       allowedProviderMap: snapshotResolvableProviderDefinitionMap,
+      accountBudget,
     });
   }, [
+    accountBudget,
     serverId,
     isVisible,
     isCreateFlow,

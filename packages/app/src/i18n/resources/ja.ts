@@ -245,6 +245,20 @@ export const ja: TranslationResources = {
       callout: "このエージェントはアーカイブされています",
       unarchive: "アーカイブ解除",
     },
+    moved: {
+      toAccount: "{{account}} に移動しました",
+      toAgent: "エージェント {{agentId}} に移動しました",
+    },
+  },
+  agentIdChip: {
+    copiedLabel: "エージェントID",
+  },
+  pinnedGrid: {
+    title: "固定済み ({{count}})",
+    close: "グリッドを閉じる",
+    openWorkspace: "ワークスペースを開く",
+    noChat: "このワークスペースにはまだチャットがありません",
+    empty: "固定したチャットはありません",
   },
   sessions: {
     title: "履歴",
@@ -274,12 +288,21 @@ export const ja: TranslationResources = {
       running: "実行中",
       error: "エラー",
       closed: "クローズ",
+      queued: "順番待ち",
     },
     badges: {
       archived: "アーカイブ済み",
       pending: "{{count}}件保留中",
       attention: "注意",
+      needsInput: "入力が必要",
+      failed: "失敗",
+      owesReport: "報告待ち",
+      reportUndelivered: "報告未配信",
+      tokenBurnWarning: "高消費",
+      tokenBurnDanger: "非常に高い消費",
+      modelDiverged: "想定外のモデル",
     },
+    tokenBurnTooltip: "{{rate}} tok/min · 合計 {{total}}",
     archiveSheet: {
       hostOffline: "ホストオフライン",
       runningAgent: "このエージェントはまだ実行中です。アーカイブするとエージェントが停止します。",
@@ -343,6 +366,7 @@ export const ja: TranslationResources = {
       next: "次へ",
       answerPlaceholder: "回答を入力...",
       otherPlaceholder: "その他...",
+      answerInConversation: "会話全体で回答してください",
     },
     todo: {
       title: "タスク",
@@ -705,6 +729,10 @@ export const ja: TranslationResources = {
         workspacePathCopiedLabel: "ワークスペースパス",
         branchNameCopiedLabel: "ブランチ名",
       },
+      history: {
+        recentMenu: "最近",
+        empty: "最近の履歴はありません",
+      },
     },
     scripts: {
       title: "スクリプト",
@@ -845,7 +873,7 @@ export const ja: TranslationResources = {
           updateCurrent: "このブランチはすでに{{baseRef}}と最新の状態のため、更新は利用できません",
           mergePrNoGithub: "GitHubが接続されていないため、PRのマージは現在利用できません",
           archiveNotWorktree:
-            "このワークスペースはPaseoワークツリーとして作成されていないため、アーカイブはここでは利用できません",
+            "このワークスペースはBozeoワークツリーとして作成されていないため、アーカイブはここでは利用できません",
           mergePrNoForge: "{{brand}}が接続されていないため、{{noun}}のマージは現在利用できません",
           mergePrMissing: "プルリクエストがまだないため、PRのマージは利用できません",
           mergePrDraft: "プルリクエストがまだドラフトのため、PRのマージは利用できません",
@@ -1010,6 +1038,9 @@ export const ja: TranslationResources = {
         generic: "このホストで {{brand}} をセットアップすると、その機能を使えます。",
       },
     },
+    diskUsage: {
+      accessible: "{{size}} · {{timeAgo}}前にサンプリング",
+    },
   },
   workspaceLabels: {
     title: "ラベル",
@@ -1086,6 +1117,7 @@ export const ja: TranslationResources = {
         changeRequest: "プルリクエスト",
         checks: "チェック",
         services: "サービス",
+        diskUsage: "ディスク使用量",
         labels: "ラベル",
         diff: "差分統計",
         timestamp: "最終アクティビティ",
@@ -1112,6 +1144,7 @@ export const ja: TranslationResources = {
     },
     pinned: {
       title: "固定済み",
+      openGrid: "固定したチャットをグリッドで開く",
     },
     host: {
       noHost: "ホストなし",
@@ -1134,12 +1167,14 @@ export const ja: TranslationResources = {
       discord: "Discord",
       github: "GitHub Issueを作成",
       whatsNew: "新着情報",
-      appName: "Paseo",
+      appName: "Bozeo",
     },
     sections: {
       sessions: "履歴",
       search: "検索",
       schedules: "スケジュール",
+      askJev: "JEV に質問",
+      jevDashboard: "JEV ダッシュボード",
     },
     worktreeSetup: {
       title: "ワークツリースクリプトを設定",
@@ -1217,6 +1252,7 @@ export const ja: TranslationResources = {
         title: "ワークスペースの名前を変更",
         submit: "名前を変更",
         invalidBranchName: "無効なブランチ名",
+        autoPlaceholder: "自動的に名前を付ける",
       },
       toasts: {
         workspacePathUnavailable: "ワークスペースパスが利用できません",
@@ -1281,7 +1317,7 @@ export const ja: TranslationResources = {
       close: "ウィンドウを閉じる",
     },
     quitting: {
-      title: "Paseoを終了中...",
+      title: "Bozeoを終了中...",
       detail: "ローカルデーモンを停止中。",
     },
     daemon: {
@@ -1295,20 +1331,31 @@ export const ja: TranslationResources = {
       },
       management: {
         title: "組み込みデーモンを管理",
-        hint: "Paseoが組み込みデーモンを起動・停止できるようにする",
+        hint: "Bozeoが組み込みデーモンを起動・停止できるようにする",
         pauseTitle: "組み込みデーモンを一時停止",
         pauseMessage:
           "これにより組み込みデーモンが即座に停止します。組み込みデーモンに接続されている実行中のエージェントとターミナルが停止されます。",
         pauseAndStop: "一時停止して停止",
         registrationFailed:
-          "組み込みデーモンは起動しましたが、Paseoがlocalhostの接続を保存できませんでした。デーモン管理をオフにしてから再度オンにするか、localhostを手動で追加してください。",
+          "組み込みデーモンは起動しましたが、Bozeoがlocalhostの接続を保存できませんでした。デーモン管理をオフにしてから再度オンにするか、localhostを手動で追加してください。",
         pausedStopFailed:
-          "組み込みデーモン管理は一時停止されましたが、Paseoがデーモンを停止できませんでした。",
+          "組み込みデーモン管理は一時停止されましたが、Bozeoがデーモンを停止できませんでした。",
         updateFailed: "組み込みデーモン管理を更新できません。",
       },
       keepRunning: {
         title: "終了後もデーモンを実行し続ける",
-        hint: "Paseoを終了してもデーモンは実行し続けます",
+        hint: "Bozeoを終了してもデーモンは実行し続けます",
+      },
+      keepAwake: {
+        title: "Mac をスリープさせない",
+        hint: "Bozeo を開いている間は Mac をスリープさせず、エージェントを動かし続けます",
+      },
+      keepDisplayAwake: {
+        title: "ディスプレイをオンのままにする",
+        hint: "ディスプレイをオンにするとバッテリーの消耗が早くなります",
+        always: "常に",
+        onPowerAdapter: "電源接続時",
+        never: "しない",
       },
       logs: {
         title: "ログファイル",
@@ -1376,7 +1423,7 @@ export const ja: TranslationResources = {
     },
     rosetta: {
       title: "Apple Siliconビルドをダウンロード",
-      runningIntel: "Apple Silicon上のRosettaでPaseoのIntelビルドを実行しています。",
+      runningIntel: "Apple Silicon上のRosettaでBozeoのIntelビルドを実行しています。",
       highCpu:
         "これにより高いCPU使用率が発生します。修正するにはApple Siliconビルドをダウンロードしてください。",
       download: "ダウンロード",
@@ -1419,7 +1466,7 @@ export const ja: TranslationResources = {
         microphone: "マイクのステータスはまだ確認されていません。",
       },
       testNotification: {
-        title: "Paseo通知テスト",
+        title: "Bozeo通知テスト",
         body: "これが見えれば、デスクトップ通知は機能しています。",
         notDelivered: "通知が届きませんでした。システム設定 > 通知を確認してください。",
         failed: "通知の送信に失敗しました。",
@@ -1433,7 +1480,7 @@ export const ja: TranslationResources = {
     },
   },
   rootError: {
-    title: "Paseo で問題が発生しました。",
+    title: "Bozeo で問題が発生しました。",
     body: "アプリを再読み込みするにはもう一度お試しください。繰り返し発生する場合は、以下の詳細を添えて報告してください。",
     details: "詳細",
   },
@@ -1528,7 +1575,7 @@ export const ja: TranslationResources = {
     },
   },
   onboarding: {
-    title: "Paseoへようこそ",
+    title: "Bozeoへようこそ",
     subtitle: "始めるにはコンピューターに接続してください",
     actions: {
       settings: "設定",
@@ -1616,7 +1663,7 @@ export const ja: TranslationResources = {
     },
     direct: {
       title: "直接接続",
-      helper: "Paseoサーバーのアドレスを入力してください。",
+      helper: "Bozeoサーバーのアドレスを入力してください。",
       fields: {
         host: "ホスト",
         port: "ポート",
@@ -1658,7 +1705,7 @@ export const ja: TranslationResources = {
     },
     remoteSsh: {
       title: "リモート SSH",
-      helper: "リモートホストで動作する Paseo デーモンに接続します。",
+      helper: "リモートホストで動作する Bozeo デーモンに接続します。",
       fields: {
         target: "SSH ホスト",
       },
@@ -1716,15 +1763,15 @@ export const ja: TranslationResources = {
       enableDescription:
         "リレーを使うと、このデバイスからどこでも接続できます。ペアリング通信はエンドツーエンドで暗号化されます。",
       relayDocs: "リレーの仕組み",
-      relayDocsAccessibility: "Paseo リレーの仕組みを読む",
+      relayDocsAccessibility: "Bozeo リレーの仕組みを読む",
       enableRelay: "リレーを有効にする",
       enablingRelay: "有効化中...",
       notNow: "今はしない",
       directConnectionHint:
         "リレーを使わない場合は、TCP、Tailscale、または別の VPN で直接接続してください。QR コードは作成されません。",
-      updateRequired: "Paseo Desktop からリレーを有効にするにはホストを更新してください。",
+      updateRequired: "Bozeo Desktop からリレーを有効にするにはホストを更新してください。",
       unavailable: "ペアリングオファーが利用できません。",
-      hint: "スマートフォンのPaseoでこのQRコードをスキャンするか、以下のリンクをコピーしてください。",
+      hint: "スマートフォンのBozeoでこのQRコードをスキャンするか、以下のリンクをコピーしてください。",
       securityWarning:
         "このペアリングリンクはパスワードと同様に扱ってください。リンクを知っている人は誰でもこのデーモンにアクセスできます。",
       qrUnavailable: "QRコードが利用できません。",
@@ -1759,7 +1806,7 @@ export const ja: TranslationResources = {
   serviceUrl: {
     title: "サービスURLを開く",
     message: "{{url}}を開きますか？",
-    inPaseo: "Paseoで",
+    inBozeo: "Bozeoで",
     externalBrowser: "外部ブラウザ",
     dontAskAgain: "次回から確認しない",
   },
@@ -1838,6 +1885,36 @@ export const ja: TranslationResources = {
       emptyDescription:
         "このチェックアウトのプルリクエストを作成すると、ここに詳細が表示されます。",
     },
+    orchestration: {
+      label: "オーケストレーション",
+      subtitle: "エージェントツリー",
+      tooltip: "リーダーとサブエージェントのツリーを表示",
+      emptyState: "このホストにはまだエージェントがありません",
+      labelAll: "オーケストレーション: すべてのエージェント",
+      subtitleAll: "すべてのエージェント",
+      subtitleLeader: "このツリー",
+      scopeLeader: "このツリー",
+      scopeAll: "すべて",
+      scopeMissing: "このツリーはもうありません。すべてに切り替えると残りを表示します。",
+      emptyStateFiltered:
+        "稼働中のものはありません。{{count}}件の古いエージェントを非表示にしています。",
+      showOlder: "古い{{count}}件を表示",
+      hideOlder: "古いものを隠す",
+      usageUnavailable: "使用状況は利用できません",
+      usageAsOf: "{{time}}時点の使用状況",
+      accountRoleLeader: "リーダー",
+      accountRolePrimary: "メインワーカー",
+      accountRoleBackup: "予備",
+      accountLeaderHere: "リーダーあり",
+      accountLeadersHere: "リーダー {{count}}",
+      accountWorkersHere: "ワーカー {{count}}",
+      accountBalanceLeft: "残り {{amount}}",
+      accountDetailsShow: "さらに {{count}} 件を表示",
+      accountDetailsHide: "表示を減らす",
+      staleTitle: "更新されていません",
+      staleLastSynced: "最終同期 {{time}}",
+      staleNeverSynced: "まだ同期していません",
+    },
     diff: {
       changesLabel: "変更",
       diffLabel: "差分",
@@ -1892,12 +1969,194 @@ export const ja: TranslationResources = {
   sidebarCallout: {
     dismiss: "閉じる",
   },
+  restartRecovery: {
+    summary_one: "{{count}} 件のエージェントがターンの途中で中断されました",
+    summary_other: "{{count}} 件のエージェントがターンの途中で中断されました",
+    resumeAll: "すべて再開",
+    dismissAll: "破棄",
+    state: {
+      pending: "待機中",
+      resuming: "再開中",
+      failed: "再開に失敗",
+    },
+    notRestorable: "再開できません",
+    error: "復旧に失敗しました: {{error}}",
+    reason: {
+      bozeo_quit: "Bozeo が終了してデーモンを停止しました",
+      update: "デーモンは更新のために再起動しました",
+      crashed: "デーモンがクラッシュしました",
+      power_loss: "Mac が再起動または電源が失われました",
+      cli_stop: "コマンドラインから停止されました",
+    },
+    age: "{{when}}から",
+    ranFor: "{{duration}}実行していました",
+    keepRunningHint:
+      "Bozeo を終了するとデーモンも停止します。「終了後もデーモンを実行し続ける」を有効にすると回避できます。",
+    resumeModeHint:
+      "Bozeo はこのように中断されたエージェントを自動で再開できます: config.json の agents.restartRecovery.mode を resume に設定してください。",
+    expand: "再起動後の復旧を展開",
+    collapse: "再起動後の復旧を折りたたむ",
+  },
+  deviceStatus: {
+    summary: "{{total}} 台中 {{used}} 台使用中",
+    summaryCapOff: "{{used}} 台が実行中",
+    dryRun: "ドライラン",
+    platform: {
+      ios: "シミュレータ",
+      android: "エミュレータ",
+    },
+    heldBy: "{{agent}} が使用中",
+    unleased: "予約なし",
+    starting: "起動中",
+    waiting_one: "{{count}} 件のエージェントが空きを待機中",
+    waiting_other: "{{count}} 件のエージェントが空きを待機中",
+    unleasedCount_one: "予約のないデバイス {{count}} 台",
+    unleasedCount_other: "予約のないデバイス {{count}} 台",
+    unenforced: "上限が適用されない: {{providers}}",
+    enforcement: {
+      asks: "拒否できない場合あり",
+      observes: "拒否できません",
+    },
+    expand: "デバイス状態を展開",
+    collapse: "デバイス状態を折りたたむ",
+    free: "空き — 最初にリクエストしたエージェントが使用します",
+    reservedForYou: "あなたのために予約済み",
+    runningFor: "{{duration}} 実行中",
+    heldFor: "{{duration}} 保持中",
+    enforce: "適用",
+    openAgent: "{{agent}} を開く",
+    actionFailed: "デバイス操作に失敗しました: {{message}}",
+    mode: {
+      off: "オフ",
+      offDescription: "カウントも拒否も行われません。",
+      dryRun: "ドライラン",
+      dryRunDescription: "カウントのみ — 何も拒否されません。",
+      enforcing: "適用中",
+      enforcingDescription: "上限を超えるデバイス起動を拒否します。",
+    },
+    floorNote: "Android 1台、iOS 1台は常に許可されます。それ以降はメモリ次第です。",
+    actions: {
+      menuLabel: "デバイス操作",
+      release: "予約を解放",
+      reserve: "自分用に予約",
+      unreserve: "予約を解除",
+      shutdown: "シャットダウン",
+    },
+    confirmShutdown: {
+      title: "このデバイスをシャットダウンしますか？",
+      message: "デバイスがシャットダウンされます。マシン上の他の処理には影響しません。",
+      midTurnTitle: "このデバイスは現在使用中です",
+      midTurnMessage:
+        "{{agent}} が現在このデバイスを使用しています。シャットダウンするとそのターンが中断されます。それでもシャットダウンしますか？",
+      confirmLabel: "シャットダウン",
+    },
+    blocked_one: "最近の拒否 {{count}} 件",
+    blocked_other: "最近の拒否 {{count}} 件",
+    blockedDryRun_one: "{{count}} 件の起動が拒否されていたはずです",
+    blockedDryRun_other: "{{count}} 件の起動が拒否されていたはずです",
+    physical: {
+      sectionTitle: "実機",
+      platform: {
+        ios: "iPhone",
+        android: "Androidスマートフォン",
+      },
+      transport: {
+        usb: "USB",
+        network: "Wi-Fi",
+      },
+      disconnected: "切断済み — {{duration}} 後に解放されます",
+    },
+  },
+  mcpStatus: {
+    collapsedSummary: {
+      healthy: "MCPサーバーは接続済み",
+      issues: "MCPの問題: {{names}}",
+    },
+    status: {
+      connected: "接続済み",
+      connecting: "接続中",
+      needsAuth: "認証が必要",
+      error: "エラー",
+      disabled: "無効",
+      sessionReported: "セッションの問題",
+      claudeAiConnector: "Claude アカウントごとにサインイン",
+    },
+    authAction: "認証する",
+    reauthAction: "再認証する",
+    adoptAction: "中継して認証する",
+    openClaudeAiAction: "claude.ai を開く",
+    authError: "認証に失敗しました: {{error}}",
+    failure: {
+      gatewayDisabled: "このホストでは MCP ゲートウェイが無効です。",
+      unknownAgent:
+        "報告したエージェントは開かれていません。使用中のエージェントを開いてください。",
+      providerHasNoConfig: "Paseo は {{provider}} の MCP 設定を読めないため、中継できません。",
+      accountSignedOut:
+        "{{provider}} はログインしていません。ホストで次を実行してから再試行してください:",
+      serverNotInConfig:
+        "{{name}} は Paseo が {{provider}} 用に読む MCP 設定にありません。エージェントは別の場所から読み込んでおり、Paseo にはその場所が分かりません。",
+      serverIsLocal:
+        "{{name}} はローカルコマンドとして動作します。中継できるのは http と sse のサーバーだけです。",
+      adoptFailed: "{{name}} を中継できませんでした: {{error}}",
+      unknownServer: "ゲートウェイは {{name}} という名前のサーバーを中継していません。",
+      staticAuth: "{{name}} は保存済みヘッダーでサインインするため、認可するものはありません。",
+      noRedirectUrl:
+        "このホストには {{name}} が戻り先にできるアドレスがありません。デーモンの公開 URL を設定してから再試行してください。",
+      clientNotRegistered:
+        "{{name}} 用の OAuth アプリをご自身で登録し、クライアント ID とシークレットをホストのトークンファイルに追加してください。{{name}} は自動登録に対応していないため、Paseo が代行することはできません。",
+      clientRegistrationRefused:
+        "{{name}} は Paseo をクライアントとして登録しないため、サインインを開始できません。一部のプロバイダーは自社の許可リストにある MCP クライアントしか受け付けず、ここでの設定では変えられません。{{name}} がローカルサーバーを提供していないか確認し、この項目をそちらに向けてください。",
+      serverRejected: "{{error}}",
+      serverUnreachable: "{{error}}",
+      authorizationFailed: "ログインに失敗しました: {{error}}",
+      unknown: "{{name}} を中継できませんでした: {{error}}",
+    },
+    remedy: {
+      redirectUrl: "登録するリダイレクト URI",
+      path: "ホスト上のファイル",
+      snippet: "追加する内容",
+      command: "ホストで実行",
+    },
+    showFullError: "メッセージ全体を表示",
+    showLessError: "メッセージを短く表示",
+    copyError: "メッセージをコピー",
+    copiedError: "コピーしました",
+    reportedBy: "{{agent}} が報告",
+    reportedByOn: "{{provider}} の {{agent}}",
+    reportedByCount: "エージェント {{count}} 件が報告",
+    reportedOn: "{{provider}} 上",
+    expand: "MCPステータスを展開",
+    collapse: "MCPステータスを折りたたむ",
+  },
   contextWindow: {
     title: "コンテキストウィンドウ",
     used: "{{percentage}}%使用",
     tokens: "{{used}} / {{max}}トークン",
     sessionCost: "セッションコスト: {{cost}}",
     accessibility: "コンテキストウィンドウ{{percentage}}%使用",
+    spendTitle: "消費",
+    spendSummary: "{{span}}で加重トークン{{total}}",
+    breakdownLoading: "コンテキストを読み込み中…",
+    breakdownPending: "内訳はこのターンの終了後に表示されます。",
+    breakdownUnsupported: "このプロバイダーはコンテキストの内訳を取得できません。",
+    breakdownError: "コンテキストの内訳を読み込めませんでした。",
+    breakdownAsOf: "{{time}}時点",
+    breakdownBarAccessibility: "コンテキストウィンドウの内訳",
+    deferredTitle: "ウィンドウ外",
+    messageToolResults: "ツール結果",
+    messageAttachments: "添付ファイル",
+    messageAssistant: "アシスタント",
+    messageToolCalls: "ツール呼び出し",
+    messageUser: "ユーザーメッセージ",
+    memoryTotalWarning: "メモリファイルが{{tokens}}トークンで、目安の{{limit}}を超えています。",
+    memoryFileWarning: "{{path}}は{{tokens}}トークンで、{{limit}}を超えています。",
+    reReadAdvice:
+      "このセッションは毎ターン約{{tokens}}トークンを読み直しています。短い引き継ぎで新しいセッションを始める方が安上がりです。",
+    jevTitle: "JEV の判断",
+    jevShadow: "シャドー",
+    jevDryRun: "ドライラン",
+    jevOlder: "ほか {{count}} 件",
+    jevAllActivity: "すべての JEV アクティビティ",
   },
   review: {
     comment: {
@@ -1962,7 +2221,7 @@ export const ja: TranslationResources = {
       send: "送信",
       sending: "送信中...",
       sentTitle: "テスト通知を送信しました",
-      sentDescription: "Paseo が通知をオペレーティングシステムに渡しました。",
+      sentDescription: "Bozeo が通知をオペレーティングシステムに渡しました。",
       sendFailedTitle: "テスト通知を送信できません",
     },
     hostSections: {
@@ -1985,10 +2244,10 @@ export const ja: TranslationResources = {
       selection: "モデル選択",
       automatic: "自動",
       preferred: "手動",
-      automaticHint: "Paseo が利用可能な高速モデルを選択します",
-      preferredHint: "Paseo が使用するモデルを選択します",
+      automaticHint: "Bozeo が利用可能な高速モデルを選択します",
+      preferredHint: "Bozeo が使用するモデルを選択します",
       model: "モデル",
-      fallbackHint: "利用できない場合、Paseo は別の利用可能なモデルを使用します",
+      fallbackHint: "利用できない場合、Bozeo は別の利用可能なモデルを使用します",
       docs: "ドキュメント",
       saveError: "メタデータ生成を更新できません",
     },
@@ -2024,7 +2283,7 @@ export const ja: TranslationResources = {
         description: "実行中のスクリプトからURLを開く場所",
         options: {
           ask: "確認する",
-          inApp: "Paseoで",
+          inApp: "Bozeoで",
           external: "外部ブラウザ",
         },
       },
@@ -2109,7 +2368,7 @@ export const ja: TranslationResources = {
         label: "アプリの更新",
         readyToInstall: "インストール準備完了: {{version}}",
         installTitle: "デスクトップの更新をインストール",
-        installMessage: "このコンピューターのPaseoを更新します",
+        installMessage: "このコンピューターのBozeoを更新します",
         installConfirm: "更新をインストール",
         update: "更新",
         updateTo: "{{version}}に更新",
@@ -2228,6 +2487,8 @@ export const ja: TranslationResources = {
         closePane: "ペインを閉じる",
         newTerminal: "新しいターミナル",
         searchFiles: "ファイルを検索",
+        historyBack: "戻る",
+        historyForward: "進む",
         toggleCommandCenter: "コマンドセンターを切り替え",
         showKeyboardShortcuts: "キーボードショートカットを表示",
         toggleLeftSidebar: "左サイドバーを切り替え",
@@ -2280,6 +2541,68 @@ export const ja: TranslationResources = {
       },
     },
     host: {
+      notifications: {
+        title: "通知",
+        info: "すぐに届けるものと、まとめて届けるものを選びます。アラートは対応が必要なもの、お知らせは知っておくと便利ですが後回しにできるものです。",
+        loadError: "通知設定を読み込めません",
+        unsupported: "通知設定を変更するには、このホストを更新してください",
+        availability: {
+          label: "応答可否",
+          options: {
+            available: "対応可能",
+            focus: "集中",
+            away: "離席",
+            off: "オフ",
+          },
+          hints: {
+            available: "アラートは即時に通知し、お知らせはまとめて届きます",
+            focus: "緊急のアラートだけ音が鳴り、お知らせは待機します",
+            away: "アラートは通知され、お知らせは戻るまで待機します",
+            off: "音は鳴らず、すべて静かに配信されます",
+          },
+        },
+        duration: {
+          label: "期間",
+          options: {
+            oneHour: "1時間",
+            fourHours: "4時間",
+            untilChanged: "変更するまで",
+          },
+          endsAt: "{{time}}まで",
+        },
+        interrupt: {
+          label: "割り込みを許可",
+          hint: "それ以外はまとめて届きます",
+          options: {
+            urgent: "緊急のみ",
+            alert: "アラートと緊急",
+            notice: "すべて",
+          },
+        },
+        notices: {
+          label: "お知らせ",
+          hint: "知っておくと便利ですが、今すぐ対応する必要はありません",
+          options: {
+            digest: "まとめて送信",
+            off: "オフ",
+          },
+        },
+        digestInterval: {
+          label: "まとめの送信間隔",
+          options: {
+            m15: "15分",
+            m30: "30分",
+            m60: "1時間",
+            m180: "3時間",
+          },
+        },
+        status: {
+          held: "次のまとめを待機中",
+          unreached: "未配信（{{count}}）",
+          unreachedHint:
+            "プロバイダーに拒否された通知、または登録済みデバイスがない状態で送信された通知",
+        },
+      },
       appearance: {
         title: "外観",
         name: {
@@ -2341,11 +2664,11 @@ export const ja: TranslationResources = {
         title: "オーケストレーションスキル",
         description: "エージェントがCLI経由でオーケストレーションできるようにします。",
         updateAvailable: "更新が利用可能",
-        updateTitle: "Paseoスキルを更新しますか？",
+        updateTitle: "Bozeoスキルを更新しますか？",
         updateFallback: "バンドルされたスキルをマシンに同期します。",
-        uninstallTitle: "Paseoスキルをアンインストールしますか？",
+        uninstallTitle: "Bozeoスキルをアンインストールしますか？",
         uninstallMessage:
-          "~/.agents、~/.claude、~/.codexからすべてのPaseoオーケストレーションスキルを削除します。",
+          "~/.agents、~/.claude、~/.codexからすべてのBozeoオーケストレーションスキルを削除します。",
         choose: "スキルを選択",
         chooseAll: "すべてのスキル",
         chooseAllHint:
@@ -2489,15 +2812,15 @@ export const ja: TranslationResources = {
             "このホストは接続されていません。再起動する前にオンラインになるまでお待ちください。",
           offlineTitle: "ホストオフライン",
           offlineMessage:
-            "このホストはオフラインです。Paseoが自動再接続します。再起動は、ホストがオンラインに戻ってから行ってください。",
+            "このホストはオフラインです。Bozeoが自動再接続します。再起動は、ホストがオンラインに戻ってから行ってください。",
           requestFailedTitle: "エラー",
           requestFailedMessage:
-            "再起動リクエストの送信に失敗しました。Paseoは自動的に再接続します。ホストがオンラインになったら再試行してください。",
+            "再起動リクエストの送信に失敗しました。Bozeoは自動的に再接続します。ホストがオンラインになったら再試行してください。",
           dialogFailedMessage: "再起動確認ダイアログを開けませんでした。",
         },
         update: {
           desktopManagedHint:
-            "このデーモンはPaseo Desktopによって管理されています。ホスト上のPaseo Desktopを更新してください。",
+            "このデーモンはBozeo Desktopによって管理されています。ホスト上のBozeo Desktopを更新してください。",
           title: "デーモンを更新",
           hint: "デーモンを最新バージョンに更新して再起動します",
           confirm: "更新",
@@ -2659,7 +2982,7 @@ export const ja: TranslationResources = {
         newScript: "新しいスクリプト",
         editScript: "{{name}}を編集",
         runAsService: "サービスとして実行",
-        serviceHint: "Paseoがプロセスを監督し、$PASEO_PORTを通じてポートを割り当てます",
+        serviceHint: "Bozeoがプロセスを監督し、$PASEO_PORTを通じてポートを割り当てます",
         actions: {
           add: "スクリプトを追加",
           edit: "編集",
@@ -2668,7 +2991,7 @@ export const ja: TranslationResources = {
       },
       metadata: {
         title: "メタデータ生成",
-        info: "Paseoがメタデータ生成に使うAIプロンプトへ追加する、プロジェクト固有の指示です。ブランチ名、コミット形式、PR形式など、チームの規約を反映するために使います。",
+        info: "Bozeoがメタデータ生成に使うAIプロンプトへ追加する、プロジェクト固有の指示です。ブランチ名、コミット形式、PR形式など、チームの規約を反映するために使います。",
         branchName: "ブランチ名",
         branchNamePlaceholder: "ブランチ名は feat/ または fix/ で始め、個人ブランチは mb/ にする",
         commitMessage: "コミットメッセージ",

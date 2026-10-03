@@ -17,6 +17,7 @@ import {
   useEffect,
   useRef,
   type ReactElement,
+  type ReactNode,
   type MutableRefObject,
   type Ref,
   type ComponentProps,
@@ -35,6 +36,8 @@ import type { SidebarSurfaceBackdrop } from "@/styles/surface-backdrop";
 import { getSidebarRowBackdrop } from "@/components/sidebar/sidebar-row-backdrop";
 import { type GestureType } from "react-native-gesture-handler";
 import { WorkspaceRenameModal } from "@/components/workspace-rename-modal";
+import { InlineWorkspaceTitleField } from "@/components/inline-workspace-title-field";
+import { useSidebarWorkspaceInlineRename } from "@/components/sidebar/use-sidebar-workspace-inline-rename";
 import { useWorkspaceClipboardActions } from "@/hooks/use-workspace-clipboard-actions";
 import { ExternalLink, Settings, MoreVertical, Plus, Trash2 } from "lucide-react-native";
 import { NestableScrollContainer } from "react-native-draggable-flatlist";
@@ -97,6 +100,7 @@ import {
 } from "@/components/sidebar/sidebar-workspace-menu";
 import { useLongPressDragInteraction } from "@/components/sidebar/use-long-press-drag-interaction";
 import { PinnedSectionHeader } from "@/components/sidebar/pinned-section-header";
+import { useOpenPinnedGrid } from "@/pinned-grid/use-open-pinned-grid";
 import { SidebarGroupToggleRow } from "@/components/sidebar/sidebar-group-toggle-row";
 import { useLimitedSidebarGroup } from "@/components/sidebar/use-limited-sidebar-group";
 import {
@@ -269,7 +273,8 @@ interface WorkspaceRowInnerProps {
   selected: boolean;
   shortcutNumber: number | null;
   showShortcutBadge: boolean;
-  onPress: () => void;
+  /** Receives the press event so the inline-rename gesture can tell a double-click apart. */
+  onPress: (event?: GestureResponderEvent) => void;
   drag: () => void;
   isDragging: boolean;
   isArchiving: boolean;
@@ -289,6 +294,8 @@ interface WorkspaceRowInnerProps {
   isPinned?: boolean;
   onTogglePin?: () => void;
   reserveIdleStatusIndicatorSpace?: boolean;
+  /** Replaces the name `Text` with the active row's click-to-edit field while set. */
+  titleSlot?: ReactNode;
 }
 
 export function PrBadge({ hint, style }: { hint: PrHint; style?: StyleProp<ViewStyle> }) {
@@ -1075,6 +1082,7 @@ function WorkspaceRowInner({
   isPinned,
   onTogglePin,
   reserveIdleStatusIndicatorSpace = true,
+  titleSlot,
 }: WorkspaceRowInnerProps) {
   const isCompact = useIsCompactFormFactor();
   const [isPressed, setIsPressed] = useState(false);
@@ -1090,13 +1098,16 @@ function WorkspaceRowInner({
     ...dragAttributes
   } = dragHandleProps?.attributes ?? {};
 
-  const handlePress = useCallback(() => {
-    if (interaction.didLongPressRef.current) {
-      interaction.didLongPressRef.current = false;
-      return;
-    }
-    onPress();
-  }, [interaction.didLongPressRef, onPress]);
+  const handlePress = useCallback(
+    (event: GestureResponderEvent) => {
+      if (interaction.didLongPressRef.current) {
+        interaction.didLongPressRef.current = false;
+        return;
+      }
+      onPress(event);
+    },
+    [interaction.didLongPressRef, onPress],
+  );
   const handleWorkspacePressIn = useCallback(
     (event: GestureResponderEvent) => {
       setIsPressed(true);
@@ -1176,6 +1187,7 @@ function WorkspaceRowInner({
                 shortcutNumber={shortcutNumber}
                 showShortcutBadge={showShortcutBadge}
                 reserveIdleStatusIndicatorSpace={reserveIdleStatusIndicatorSpace}
+                titleSlot={titleSlot}
               >
                 <WorkspaceRowRightGroup
                   workspace={workspace}
@@ -1247,6 +1259,18 @@ function WorkspaceRowWithMenu({
   const [isHidingWorkspace, setIsHidingWorkspace] = useState(false);
   const [isRenameOpen, setIsRenameOpen] = useState(false);
   const isArchiving = workspace.archivingAt !== null || isHidingWorkspace;
+  // Second-click-to-edit is a desktop mouse gesture (Finder's "click the selected name again");
+  // touch has no equivalent, and Compact/phone uses the workspace header for inline rename instead.
+  const isCompact = useIsCompactFormFactor();
+  const inlineRenameEnabled = !platformIsNative && !isCompact;
+  const {
+    isEditing: isInlineEditing,
+    handlePress: handleRowPress,
+    stopEditing,
+  } = useSidebarWorkspaceInlineRename({
+    selected: inlineRenameEnabled && selected,
+    onPress,
+  });
   const redirectAfterArchive = useCallback(() => {
     redirectIfArchivingActiveWorkspace({
       serverId: workspace.serverId,
@@ -1323,6 +1347,19 @@ function WorkspaceRowWithMenu({
     },
   });
 
+  const titleSlot = useMemo(
+    () =>
+      inlineRenameEnabled && isInlineEditing ? (
+        <InlineWorkspaceTitleField
+          workspace={workspace}
+          onDone={stopEditing}
+          variant="row"
+          testID={`sidebar-workspace-row-${workspace.workspaceKey}-title-input`}
+        />
+      ) : undefined,
+    [inlineRenameEnabled, isInlineEditing, workspace, stopEditing],
+  );
+
   return (
     <>
       <WorkspaceRowInner
@@ -1333,7 +1370,7 @@ function WorkspaceRowWithMenu({
         selected={selected}
         shortcutNumber={shortcutNumber}
         showShortcutBadge={showShortcutBadge}
-        onPress={onPress}
+        onPress={inlineRenameEnabled ? handleRowPress : onPress}
         drag={drag}
         isDragging={isDragging}
         isArchiving={isArchiving}
@@ -1353,6 +1390,7 @@ function WorkspaceRowWithMenu({
         isPinned={isPinned}
         onTogglePin={onTogglePin}
         reserveIdleStatusIndicatorSpace={reserveIdleStatusIndicatorSpace}
+        titleSlot={titleSlot}
       />
       <WorkspaceRenameModal
         visible={isRenameOpen}
@@ -2142,6 +2180,7 @@ function ProjectModeList({
   const selectionEnabled = isWorkspaceRoute;
   const activeWorkspaceSelection = useActiveWorkspaceSelection();
   const { pinnedChats, unpinnedProjects } = pinnedGroups;
+  const handleOpenPinnedGrid = useOpenPinnedGrid(pinnedChats, onWorkspacePress);
   const {
     visibleItems: visiblePinnedChats,
     expanded: pinnedChatsExpanded,
@@ -2418,7 +2457,11 @@ function ProjectModeList({
     <>
       {pinnedChats.length > 0 ? (
         <View style={styles.pinnedSection} testID="sidebar-pinned-section">
-          <PinnedSectionHeader collapsed={pinnedCollapsed} onToggle={togglePinnedCollapsed} />
+          <PinnedSectionHeader
+            collapsed={pinnedCollapsed}
+            onToggle={togglePinnedCollapsed}
+            onOpenGrid={handleOpenPinnedGrid}
+          />
           {pinnedCollapsed ? null : (
             <>
               <DraggableList

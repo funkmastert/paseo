@@ -1,18 +1,25 @@
+import type { WorkspaceDiskUsage } from "@getpaseo/protocol/messages";
 import type { WorkspaceLabelDefinition } from "@getpaseo/protocol/workspace-labels";
 import type { PrHint } from "@/git/pr-hint";
 import type { SidebarChecksDisplay } from "@/components/sidebar/display-preferences/checks-display";
 import type { SidebarRowItems } from "@/components/sidebar/display-preferences/row-items";
+import { resolveDiskUsageTone, type DiskUsageTone } from "@/utils/disk-usage-tone-model";
 import { selectCheckSummary, type CheckSummary } from "./check-summary";
 import type { WorkspaceServiceSummary } from "./service-summary";
 
 /**
  * What ends up on the line under a workspace title, in the order it is read: where the
  * workspace lives, what change it belongs to, whether that change is passing, what it is
- * running, and what someone filed it under. Identity first, then the work, then the work's
- * state, then the labels a person put on it.
+ * running, how much disk it holds, and what someone filed it under. Identity first, then the
+ * work, then the work's state, then the workspace's own footprint, then the labels a person
+ * put on it.
+ *
+ * Disk usage sits after services rather than beside identity — it is a workspace-state fact
+ * like checks or a running service, not something that identifies the workspace. It only ever
+ * appears once a workspace crosses the tone model's floor, so most rows never draw it.
  *
  * Labels are one item rather than one per label: they are drawn as a run of chips with a single
- * separator in front of them, so the line reads as four peers however many labels a workspace
+ * separator in front of them, so the line reads as five peers however many labels a workspace
  * carries.
  */
 export type MetaRowItem =
@@ -22,6 +29,7 @@ export type MetaRowItem =
   | { kind: "changeRequest"; hint: PrHint }
   | { kind: "checks"; summary: CheckSummary; label: boolean }
   | { kind: "services"; summary: WorkspaceServiceSummary }
+  | { kind: "diskUsage"; diskUsage: WorkspaceDiskUsage; tone: DiskUsageTone }
   | { kind: "labels"; labels: readonly WorkspaceLabelDefinition[] };
 
 /**
@@ -40,6 +48,7 @@ export function selectMetaRowItems(input: {
   hasHostBadge: boolean;
   prHint: PrHint | null;
   serviceSummary: WorkspaceServiceSummary | null;
+  diskUsage: WorkspaceDiskUsage | null;
   labels: readonly WorkspaceLabelDefinition[];
   visible: SidebarRowItems;
   checksDisplay: SidebarChecksDisplay;
@@ -50,6 +59,7 @@ export function selectMetaRowItems(input: {
     hasHostBadge,
     prHint,
     serviceSummary,
+    diskUsage,
     labels,
     visible,
     checksDisplay,
@@ -82,6 +92,13 @@ export function selectMetaRowItems(input: {
 
   if (serviceSummary && visible.services) {
     items.push({ kind: "services", summary: serviceSummary });
+  }
+
+  if (visible.diskUsage && diskUsage != null) {
+    const tone = resolveDiskUsageTone(diskUsage.bytes);
+    if (tone !== undefined) {
+      items.push({ kind: "diskUsage", diskUsage, tone });
+    }
   }
 
   if (labels.length > 0 && visible.labels) {

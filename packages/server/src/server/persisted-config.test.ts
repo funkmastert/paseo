@@ -21,6 +21,100 @@ function modeOf(filePath: string): number {
   return statSync(filePath).mode & MODE_MASK;
 }
 
+/** Every 6-character run of `secret` found in `text`: none may survive into an error. */
+function secretFragmentsIn(text: string, secret: string): string[] {
+  const found: string[] = [];
+  for (let index = 0; index + 6 <= secret.length; index += 1) {
+    const fragment = secret.slice(index, index + 6);
+    if (text.includes(fragment)) found.push(fragment);
+  }
+  return found;
+}
+
+describe("loadPersistedConfig: a config.json that is not JSON", () => {
+  const SECRET = "SK9QZXWVUTS8RQPONM7LKJIHG6FEDCBA5ZYXWV";
+
+  test.each([
+    [
+      "a stray word after a value",
+      `{\n  "providers": {\n    "x": { "env": { "KEY": "${SECRET}" oops } }\n  }\n}\n`,
+    ],
+    ["a value cut off mid-string", `{\n  "providers": {\n    "x": { "env": { "KEY": "${SECRET}`],
+    ["a quote missing before the value", `{\n  "agents": {\n    "token": ${SECRET}"\n  }\n}\n`],
+  ])("reports %s by line and column only, never the file's text", (_name, text) => {
+    const home = createTempHome();
+    try {
+      const configPath = path.join(home, "config.json");
+      writeFileSync(configPath, text);
+      let error: unknown = null;
+      try {
+        loadPersistedConfig(home);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toBeInstanceOf(Error);
+      const message = (error as Error).message;
+      expect(message).toMatch(
+        /^\[Config\] config\.json is not valid JSON at line \d+, column \d+ \(.*config\.json\)$/,
+      );
+      const everything = [
+        message,
+        (error as Error).stack ?? "",
+        String((error as Error).cause ?? ""),
+        JSON.stringify(error, Object.getOwnPropertyNames(error)),
+      ].join("\n");
+      expect(secretFragmentsIn(everything, SECRET)).toEqual([]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("names the line and column where the text stops being JSON", () => {
+    const home = createTempHome();
+    try {
+      writeFileSync(
+        path.join(home, "config.json"),
+        '{\n  "version": 1,\n  "agents": { oops }\n}\n',
+      );
+      expect(() => loadPersistedConfig(home)).toThrow(
+        "config.json is not valid JSON at line 3, column 15",
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("PersistedConfigSchema agents.providerUsage", () => {
+  test("accepts the OpenAI API usage source, which names the key and never holds it", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        providerUsage: {
+          openaiApi: {
+            enabled: true,
+            label: "OpenAI API (image gen)",
+            keyEnv: "OPENAI_API_KEY",
+            adminKeyEnv: "OPENAI_ADMIN_KEY",
+            envFile: "~/.config/openai/env",
+            monthlyBudgetUsd: 50,
+            refreshMinutes: 30,
+          },
+        },
+      },
+    });
+    expect(parsed.agents?.providerUsage?.openaiApi?.monthlyBudgetUsd).toBe(50);
+  });
+
+  test("accepts an empty section and rejects unknown keys, so a pasted key is not kept", () => {
+    expect(PersistedConfigSchema.safeParse({ agents: { providerUsage: {} } }).success).toBe(true);
+    expect(
+      PersistedConfigSchema.safeParse({
+        agents: { providerUsage: { openaiApi: { apiKey: "sk-proj-x" } } },
+      }).success,
+    ).toBe(false);
+  });
+});
+
 describe("PersistedConfigSchema daemon auth config", () => {
   test("accepts optional daemon password hash", () => {
     const hash = "$2b$12$OLxyuuP9uLK30Uzc4wQX0O6liuU/Q1t5P2b0Ebf36mULvpVK3DRZW";
@@ -31,6 +125,90 @@ describe("PersistedConfigSchema daemon auth config", () => {
     });
 
     expect(parsed.daemon?.auth?.password).toBe(hash);
+  });
+});
+
+describe("PersistedConfigSchema agents.doneJanitor config", () => {
+  test("every key is optional: an empty section parses", () => {
+    expect(
+      PersistedConfigSchema.parse({ agents: { doneJanitor: {} } }).agents?.doneJanitor,
+    ).toEqual({});
+  });
+
+  test("accepts the full section", () => {
+    const doneJanitor = {
+      enabled: true,
+      dryRun: true,
+      quietHours: 96,
+      maxQuestionsPerSweep: 2,
+      maxArchivesPerSweep: 4,
+      answerTimeoutMinutes: 5,
+      reclaimWorkspaces: false,
+      archiveDead: true,
+      deadQuietHours: 48,
+      maxDeadArchivesPerSweep: 20,
+      askFinished: false,
+    };
+    expect(PersistedConfigSchema.parse({ agents: { doneJanitor } }).agents?.doneJanitor).toEqual(
+      doneJanitor,
+    );
+  });
+
+  test("rejects an unknown key, like its siblings", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({ agents: { doneJanitor: { quietDays: 3 } } }),
+    ).toThrow();
+  });
+
+  test("accepts the workspace sweep section, every key optional", () => {
+    const workspaceSweep = {
+      enabled: true,
+      dryRun: true,
+      idleHours: 96,
+      emptyIdleHours: 12,
+      maxArchivesPerSweep: 5,
+      projectGraceHours: 48,
+      maxProjectRemovalsPerSweep: 5,
+    };
+    expect(
+      PersistedConfigSchema.parse({ agents: { doneJanitor: { workspaceSweep } } }).agents
+        ?.doneJanitor?.workspaceSweep,
+    ).toEqual(workspaceSweep);
+    expect(
+      PersistedConfigSchema.parse({ agents: { doneJanitor: { workspaceSweep: {} } } }).agents
+        ?.doneJanitor?.workspaceSweep,
+    ).toEqual({});
+  });
+
+  test("rejects an unknown workspace sweep key", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({
+        agents: { doneJanitor: { workspaceSweep: { idleDays: 3 } } },
+      }),
+    ).toThrow();
+  });
+});
+
+describe("PersistedConfigSchema agents.accountFailover config", () => {
+  test("accepts settleBack, the switch for roots going back to the leader account", () => {
+    expect(
+      PersistedConfigSchema.parse({ agents: { accountFailover: { settleBack: false } } }).agents
+        ?.accountFailover,
+    ).toEqual({ settleBack: false });
+  });
+
+  test("still loads a config that sets the retired return keys", () => {
+    // COMPAT(failoverReturn): an old config.json must keep loading.
+    const accountFailover = { settleBack: true, returnHome: false, returnMinIdleMinutes: 20 };
+    expect(
+      PersistedConfigSchema.parse({ agents: { accountFailover } }).agents?.accountFailover,
+    ).toEqual(accountFailover);
+  });
+
+  test("rejects an unknown key, like its siblings", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({ agents: { accountFailover: { settleHome: true } } }),
+    ).toThrow();
   });
 });
 
@@ -134,6 +312,81 @@ describe("PersistedConfigSchema worktrees config", () => {
     });
 
     expect(parsed.worktrees?.servicePorts).toEqual({ range: "3000-4000" });
+  });
+});
+
+describe("PersistedConfigSchema mcpGateway config", () => {
+  test("accepts an OAuth server with criticality seeded", () => {
+    const parsed = PersistedConfigSchema.parse({
+      mcpGateway: {
+        enabled: true,
+        servers: {
+          zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+        },
+      },
+    });
+
+    expect(parsed.mcpGateway).toEqual({
+      enabled: true,
+      servers: {
+        zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+      },
+    });
+  });
+
+  test("accepts a static-auth server config without ever accepting a token value", () => {
+    const parsed = PersistedConfigSchema.parse({
+      mcpGateway: {
+        servers: {
+          slack: { url: "https://slack.example.test/mcp", transport: "sse", auth: "static" },
+        },
+      },
+    });
+
+    expect(parsed.mcpGateway?.servers?.slack).toEqual({
+      url: "https://slack.example.test/mcp",
+      transport: "sse",
+      auth: "static",
+    });
+  });
+
+  test("rejects an unknown transport", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({
+        mcpGateway: {
+          servers: { github: { url: "https://github.example.test/mcp", transport: "websocket" } },
+        },
+      }),
+    ).toThrow();
+  });
+
+  test("accepts either session injection mode", () => {
+    for (const sessionMode of ["overlay", "strict"] as const) {
+      const parsed = PersistedConfigSchema.parse({ mcpGateway: { enabled: true, sessionMode } });
+      expect(parsed.mcpGateway?.sessionMode).toBe(sessionMode);
+    }
+  });
+
+  test("rejects an unknown session injection mode", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({ mcpGateway: { enabled: true, sessionMode: "loose" } }),
+    ).toThrow();
+  });
+
+  test("rejects an unknown field, e.g. a stray token value", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({
+        mcpGateway: {
+          servers: {
+            github: {
+              url: "https://github.example.test/mcp",
+              transport: "http",
+              token: "should-never-be-here",
+            },
+          },
+        },
+      }),
+    ).toThrow();
   });
 });
 
@@ -250,6 +503,66 @@ describe("PersistedConfigSchema agent provider runtime settings", () => {
         { provider: "codex", model: "gpt-5.4-mini", thinkingOptionId: "low" },
       ],
     });
+  });
+
+  test("accepts a title tracking refresh interval", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        metadataGeneration: {
+          titleTracking: { enabled: true, refreshIntervalMinutes: 15 },
+        },
+      },
+    });
+
+    expect(parsed.agents?.metadataGeneration).toEqual({
+      titleTracking: { enabled: true, refreshIntervalMinutes: 15 },
+    });
+  });
+
+  test("accepts workspace title tracking settings", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        metadataGeneration: {
+          workspaceTitleTracking: {
+            enabled: false,
+            refreshIntervalMinutes: 45,
+            activityWindowMinutes: 120,
+          },
+        },
+      },
+    });
+
+    expect(parsed.agents?.metadataGeneration).toEqual({
+      workspaceTitleTracking: {
+        enabled: false,
+        refreshIntervalMinutes: 45,
+        activityWindowMinutes: 120,
+      },
+    });
+  });
+
+  test("rejects an unknown workspace title tracking key", () => {
+    const result = PersistedConfigSchema.safeParse({
+      agents: {
+        metadataGeneration: {
+          workspaceTitleTracking: { intervalMinutes: 45 },
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  test("rejects a non-positive title tracking refresh interval", () => {
+    const result = PersistedConfigSchema.safeParse({
+      agents: {
+        metadataGeneration: {
+          titleTracking: { refreshIntervalMinutes: 0 },
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
   });
 
   test("accepts a custom provider catalog refresh timeout", () => {
@@ -779,4 +1092,61 @@ describe.skipIf(process.platform === "win32")("persisted config file permissions
       rmSync(home, { recursive: true, force: true });
     }
   });
+});
+
+describe("PersistedConfigSchema agents.processPriority config", () => {
+  test("accepts nice values from 0 to 19", () => {
+    const processPriority = { enabled: true, agentNice: 0, backgroundNice: 19 };
+    expect(
+      PersistedConfigSchema.parse({ agents: { processPriority } }).agents?.processPriority,
+    ).toEqual(processPriority);
+  });
+
+  test.each([-1, 20, 10.5])("rejects a nice of %s (the daemon never raises priority)", (nice) => {
+    expect(
+      PersistedConfigSchema.safeParse({ agents: { processPriority: { agentNice: nice } } }).success,
+    ).toBe(false);
+    expect(
+      PersistedConfigSchema.safeParse({ agents: { processPriority: { backgroundNice: nice } } })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe("PersistedConfigSchema agents.childEnv", () => {
+  test("accepts a strip list of names and trailing-* prefixes", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: { childEnv: { strip: ["BIBLIO_*", "CLAUDE_CODE_OAUTH_TOKEN"] } },
+    });
+    expect(parsed.agents?.childEnv?.strip).toEqual(["BIBLIO_*", "CLAUDE_CODE_OAUTH_TOKEN"]);
+  });
+});
+
+describe("loadPersistedConfig: agents.jev never locks the file", () => {
+  test.each([
+    ["an out-of-range rate", { maxRequestsPerSecond: 20 }],
+    ["agentTools.shadow, which the resolver ignores", { agentTools: { shadow: true } }],
+    ["a zero timeout", { spawnHint: { timeoutMs: 0 } }],
+    ["a fractional concurrency", { maxConcurrent: 2.5 }],
+    ["a string where a boolean goes", { enabled: "false" }],
+    ["an unknown provider", { provider: "typsafe" }],
+    ["an unknown key", { maxConcurent: 4 }],
+    ["not an object at all", "on"],
+  ])(
+    "loads a config.json whose agents.jev has %s, and keeps the section as written",
+    (_name, jev) => {
+      const home = createTempHome();
+      try {
+        writeFileSync(
+          path.join(home, "config.json"),
+          JSON.stringify({ version: 1, agents: { jev, autoPinSessions: false } }),
+        );
+        const config = loadPersistedConfig(home);
+        expect(config.agents?.autoPinSessions).toBe(false);
+        expect(config.agents?.jev).toEqual(jev);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
 });

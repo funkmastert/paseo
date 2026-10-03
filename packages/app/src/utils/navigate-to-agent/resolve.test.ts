@@ -20,14 +20,21 @@ function createFakeNavigators(target: AgentNavTarget): {
   deps: NavigateToAgentDeps;
   hostNavigations: RecordedHostNav[];
   tabNavigations: RecordedTabNav[];
+  announcements: { serverId: string; agentId: string }[];
 } {
   const hostNavigations: RecordedHostNav[] = [];
   const tabNavigations: RecordedTabNav[] = [];
+  const announcements: { serverId: string; agentId: string }[] = [];
   return {
     hostNavigations,
     tabNavigations,
+    announcements,
     deps: {
       readAgentNavTarget: () => target,
+      resolveShownAgent: () => ({ kind: "self" }),
+      announceAgentMove: (input) => {
+        announcements.push(input);
+      },
       navigateToHostAgent: (route) => {
         hostNavigations.push({ route });
       },
@@ -96,5 +103,58 @@ describe("resolveNavigateToAgent", () => {
     expect(route).toBe("/h/server-1/agent/missing-agent");
     expect(hostNavigations).toEqual([{ route: "/h/server-1/agent/missing-agent" }]);
     expect(tabNavigations).toEqual([]);
+  });
+
+  it("opens the live end of a moved agent in its own workspace and says where it went", () => {
+    const { deps, tabNavigations, announcements } = createFakeNavigators({
+      agentWorkspaceId: null,
+    });
+    deps.resolveShownAgent = ({ agentId }) =>
+      agentId === "retired" ? { kind: "moved", agentId: "successor" } : { kind: "self" };
+    deps.readAgentNavTarget = ({ agentId }) => ({
+      agentWorkspaceId: agentId === "successor" ? "workspace-2" : WORKSPACE_ID,
+    });
+
+    resolveNavigateToAgent(
+      { serverId: SERVER_ID, agentId: "retired", workspaceId: WORKSPACE_ID, pin: true },
+      deps,
+    );
+
+    expect(tabNavigations).toEqual([
+      {
+        serverId: SERVER_ID,
+        workspaceId: "workspace-2",
+        target: { kind: "agent", agentId: "successor" },
+        pin: true,
+      },
+    ]);
+    expect(announcements).toEqual([{ serverId: SERVER_ID, agentId: "successor" }]);
+  });
+
+  it("opens a stranded handle where it is and names where it went", () => {
+    const { deps, tabNavigations, announcements } = createFakeNavigators({
+      agentWorkspaceId: WORKSPACE_ID,
+    });
+    deps.resolveShownAgent = () => ({ kind: "stranded", movedToAgentId: "elsewhere" });
+
+    resolveNavigateToAgent({ serverId: SERVER_ID, agentId: "retired" }, deps);
+
+    expect(tabNavigations).toEqual([
+      {
+        serverId: SERVER_ID,
+        workspaceId: WORKSPACE_ID,
+        target: { kind: "agent", agentId: "retired" },
+        pin: undefined,
+      },
+    ]);
+    expect(announcements).toEqual([{ serverId: SERVER_ID, agentId: "elsewhere" }]);
+  });
+
+  it("says nothing for an agent that never moved", () => {
+    const { deps, announcements } = createFakeNavigators({ agentWorkspaceId: WORKSPACE_ID });
+
+    resolveNavigateToAgent({ serverId: SERVER_ID, agentId: AGENT_ID }, deps);
+
+    expect(announcements).toEqual([]);
   });
 });

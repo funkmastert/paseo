@@ -48,6 +48,13 @@ interface TestPaseoDaemonOptions {
   trustedProxies?: PaseoDaemonConfig["trustedProxies"];
   agentProfiles?: AgentProfile[];
   autoArchiveAfterMerge?: boolean;
+  doneJanitor?: PaseoDaemonConfig["doneJanitor"];
+  doneJanitorOverrides?: PaseoDaemonConfig["doneJanitorOverrides"];
+  refocus?: PaseoDaemonConfig["refocus"];
+  catastropheGate?: PaseoDaemonConfig["catastropheGate"];
+  jevOverrides?: PaseoDaemonConfig["jevOverrides"];
+  daemonVitals?: PaseoDaemonConfig["daemonVitals"];
+  restartRecovery?: PaseoDaemonConfig["restartRecovery"];
   pluginsEnabled?: PaseoDaemonConfig["pluginsEnabled"];
   plugins?: PaseoDaemonConfig["plugins"];
 }
@@ -201,6 +208,13 @@ async function prepareTestDaemonConfig(
     downloadTokenTtlMs: options.downloadTokenTtlMs,
     agentProfiles: options.agentProfiles,
     autoArchiveAfterMerge: options.autoArchiveAfterMerge,
+    doneJanitor: options.doneJanitor,
+    doneJanitorOverrides: options.doneJanitorOverrides,
+    refocus: options.refocus,
+    catastropheGate: options.catastropheGate,
+    jevOverrides: options.jevOverrides,
+    daemonVitals: options.daemonVitals,
+    restartRecovery: options.restartRecovery,
     pluginsEnabled: options.pluginsEnabled,
     plugins: options.plugins,
   };

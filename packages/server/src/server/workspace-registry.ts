@@ -48,7 +48,7 @@ const PersistedProjectRecordSchema = z.object({
   archivedAt: z.string().nullable(),
 });
 
-const PersistedWorkspaceRecordSchema = z.object({
+export const PersistedWorkspaceRecordSchema = z.object({
   workspaceId: z.string(),
   projectId: z.string(),
   cwd: z.string(),
@@ -62,6 +62,13 @@ const PersistedWorkspaceRecordSchema = z.object({
     .nullable()
     .optional()
     .transform((value) => value ?? null),
+  // COMPAT(workspaceTitleSource): added in v0.2.7, remove optional parsing after 2027-03-31.
+  // Whether Paseo may rename this workspace. "manual" is a person's own edit in the app and is
+  // never touched; "auto" is everything else — a title Paseo generated or an agent supplied.
+  // Absent is a record written before provenance was tracked — see isAutoTitledWorkspace, which
+  // reads it as hand-set. Never add a value here: every daemon parses this file with
+  // z.array(schema), so one record an older build can't parse hides every workspace from it.
+  titleSource: z.enum(["auto", "manual"]).optional(),
   // The worktree's git branch. Decoupled from displayName/title by construction:
   // displayName holds the human name (title), branch holds the git branch. Only
   // worktree workspaces carry a branch; directory/local_checkout leave it null.
@@ -100,12 +107,34 @@ const PersistedWorkspaceRecordSchema = z.object({
     .nullable()
     .optional()
     .transform((value) => value ?? null),
+  // COMPAT(workspacePinSource): added in v0.9.0, remove optional after 2027-09-28.
+  // Who pinned this workspace: "manual" for a person's pin gesture (protected from the done
+  // janitor indefinitely), "auto" for the daemon pinning a session Tyler just started (kept at
+  // the top of the sidebar while active, but reclaimable by the janitor's normal rules once quiet
+  // and done — see isProtectivePin in workspace-auto-pin.ts). Absent predates the field and reads
+  // as manual for every already-pinned workspace, matching pin behavior before auto-pin existed.
+  pinSource: z.enum(["auto", "manual"]).optional(),
   labels: z.array(z.string()).optional(),
   untrustedSource: UntrustedWorkspaceSourceSchema.optional(),
 });
 
 export type PersistedProjectRecord = z.infer<typeof PersistedProjectRecordSchema>;
 export type PersistedWorkspaceRecord = z.infer<typeof PersistedWorkspaceRecordSchema>;
+export type WorkspaceTitleSource = NonNullable<PersistedWorkspaceRecord["titleSource"]>;
+export type WorkspacePinSource = NonNullable<PersistedWorkspaceRecord["pinSource"]>;
+
+/**
+ * Whether Paseo may rewrite this workspace's title. A title Paseo generated or an agent
+ * supplied is "auto" and fair game; only a person's own edit is protected. An absent titleSource
+ * is a record written before provenance existed, and silently renaming something the user named
+ * is worse than leaving a stale name, so unknown reads as hand-set (the one-time pass in
+ * workspace-title-source-migration.ts classifies those records).
+ */
+export function isAutoTitledWorkspace(
+  record: Pick<PersistedWorkspaceRecord, "titleSource">,
+): boolean {
+  return record.titleSource === "auto";
+}
 
 export interface WorkspaceMutation {
   kind: "upsert" | "archive" | "remove";
@@ -159,6 +188,7 @@ export interface WorkspaceRegistry {
   update(
     workspaceId: string,
     updater: (record: PersistedWorkspaceRecord) => PersistedWorkspaceRecord,
+    context?: WorkspaceMutationContext,
   ): Promise<PersistedWorkspaceRecord | null>;
   upsert(record: PersistedWorkspaceRecord, context?: WorkspaceMutationContext): Promise<void>;
   archive(
@@ -542,10 +572,16 @@ export class FileBackedWorkspaceRegistry
   override async update(
     workspaceId: string,
     updater: (record: PersistedWorkspaceRecord) => PersistedWorkspaceRecord,
+    context?: WorkspaceMutationContext,
   ): Promise<PersistedWorkspaceRecord | null> {
     const workspace = await super.update(workspaceId, updater);
     if (workspace) {
-      await this.notifyMutation({ kind: "upsert", workspaceId, workspace });
+      await this.notifyMutation({
+        kind: "upsert",
+        workspaceId,
+        workspace,
+        ...(context?.expectsInitialAgent ? { expectsInitialAgent: true } : {}),
+      });
     }
     return workspace;
   }
@@ -672,6 +708,7 @@ export function createPersistedWorkspaceRecord(input: {
   kind: PersistedWorkspaceKind;
   displayName: string;
   title?: string | null;
+  titleSource?: WorkspaceTitleSource;
   branch?: string | null;
   worktreeRoot?: string | null;
   baseBranch?: string | null;
@@ -682,12 +719,18 @@ export function createPersistedWorkspaceRecord(input: {
   archivedAt?: string | null;
   autoArchivedChangeRequestUrl?: string | null;
   pinnedAt?: string | null;
+  pinSource?: WorkspacePinSource;
   labels?: string[];
   untrustedSource?: UntrustedWorkspaceSource;
 }): PersistedWorkspaceRecord {
+  const title = input.title ?? null;
   return PersistedWorkspaceRecordSchema.parse({
     ...input,
-    title: input.title ?? null,
+    title,
+    // Provenance describes a name, so a workspace created without one carries none:
+    // "nobody has named this" and "Paseo owns naming this" are different states, and
+    // only an explicit rename to empty produces the second.
+    titleSource: title === null ? undefined : input.titleSource,
     branch: input.branch ?? null,
     worktreeRoot: input.worktreeRoot ?? null,
     baseBranch: input.baseBranch ?? null,

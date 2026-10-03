@@ -130,6 +130,37 @@ test("workspace.create accepts a Git-valid branch-off name outside Paseo slug sy
   }
 }, 180000);
 
+// docs/done-janitor.md#manual-pin-vs-auto-pin: a worktree create forwarded the same way never
+// auto-pins when it carries callerAgentId — the CLI sends it from PASEO_AGENT_ID, so an agent
+// running `paseo workspace create` never pins the workspace it makes.
+test("workspace.create worktree source with callerAgentId never auto-pins", async () => {
+  const daemon = await createTestPaseoDaemon();
+  const { repoDir, tempRoot } = createGitRepoWithBranch();
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    appVersion: "0.1.82",
+  });
+
+  try {
+    await client.connect();
+
+    const result = await client.createWorkspace({
+      source: { kind: "worktree", cwd: repoDir, action: "branch-off", baseBranch: "main" },
+      // workspace.create.request never resolves callerAgentId against a real agent (unlike
+      // create_agent_request) — it only uses it to tell an agent-made create from a person's,
+      // so any non-empty id exercises that branch.
+      callerAgentId: "fake-caller-agent-id",
+    });
+
+    expect(result.error).toBeNull();
+    expect(result.workspace?.pinnedAt).toBeNull();
+  } finally {
+    await client.close().catch(() => undefined);
+    await daemon.close();
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+}, 180000);
+
 test("workspace.create always creates a new worktree when the slug is already occupied", async () => {
   const daemon = await createTestPaseoDaemon();
   const { repoDir, tempRoot } = createGitRepoWithBranch();

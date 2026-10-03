@@ -1,5 +1,5 @@
 import type { AgentManager } from "./agent/agent-manager.js";
-import { stripInternalPaseoMcpServer } from "./agent/runtime-mcp-config.js";
+import { stripInternalPaseoMcpServer, stripMcpGatewayServers } from "./agent/runtime-mcp-config.js";
 import type {
   AgentPersistenceHandle,
   AgentProvider,
@@ -62,13 +62,21 @@ export function attachAgentStoragePersistence(
   return unsubscribe;
 }
 
+// Defensive on both strips (paseo entry, gateway entries): neither should ever reach a stored
+// record given per-launch-only injection (KTD6), but a historical record or a future bug
+// persisting one must never resurrect it on reload.
+function stripRuntimeOnlyMcpServers(config: AgentSessionConfig): AgentSessionConfig {
+  return stripMcpGatewayServers(stripInternalPaseoMcpServer(config));
+}
+
 export function buildConfigOverrides(record: StoredAgentRecord): Partial<AgentSessionConfig> {
-  return stripInternalPaseoMcpServer({
+  return stripRuntimeOnlyMcpServers({
     provider: record.provider,
     cwd: record.cwd,
     modeId: record.config?.modeId ?? undefined,
     model: record.config?.model ?? undefined,
     thinkingOptionId: record.config?.thinkingOptionId ?? undefined,
+    outputStyle: record.config?.outputStyle ?? undefined,
     featureValues: record.config?.featureValues ?? undefined,
     providerOptions: record.config?.providerOptions ?? undefined,
     toolPolicy: record.config?.toolPolicy ?? undefined,
@@ -85,12 +93,13 @@ export function buildSessionConfig(
     return null;
   }
   const overrides = buildConfigOverrides(record);
-  return stripInternalPaseoMcpServer({
+  return stripRuntimeOnlyMcpServers({
     provider: record.provider,
     cwd: record.cwd,
     modeId: overrides.modeId,
     model: overrides.model,
     thinkingOptionId: overrides.thinkingOptionId,
+    outputStyle: overrides.outputStyle,
     featureValues: overrides.featureValues,
     providerOptions: overrides.providerOptions,
     toolPolicy: overrides.toolPolicy,

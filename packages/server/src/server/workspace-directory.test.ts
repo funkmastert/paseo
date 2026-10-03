@@ -645,3 +645,110 @@ describe("WorkspaceDirectory empty projects", () => {
     expect(result.emptyProjects.map((p) => p.projectId)).toEqual(["empty"]);
   });
 });
+
+describe("WorkspaceDirectory disk usage merge", () => {
+  const project: PersistedProjectRecord = {
+    projectId: "project-1",
+    rootPath: "/workspace/project",
+    kind: "git",
+    displayName: "project",
+    customName: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+    archivedAt: null,
+  };
+
+  function makeDirectory(input: {
+    workspace: PersistedWorkspaceRecord;
+    getDiskUsage?: (workspaceId: string) => WorkspaceDescriptorPayload["diskUsage"] | undefined;
+    requestDiskUsageSample?: (workspaceId: string, cwd: string) => void;
+  }): WorkspaceDirectory {
+    return new WorkspaceDirectory({
+      logger: createTestLogger(),
+      projectRegistry: { list: async () => [project] },
+      workspaceRegistry: { list: async () => [input.workspace] },
+      listAgentPayloads: async () => [],
+      listProviderSubagentActivity: async () => [],
+      listTerminalActivityContributions: async () => [],
+      isProviderVisibleToClient: () => true,
+      buildWorkspaceDescriptor: async ({ workspace }) => ({
+        id: workspace.workspaceId,
+        projectId: workspace.projectId,
+        projectDisplayName: "project",
+        projectCustomName: null,
+        projectRootPath: project.rootPath,
+        workspaceDirectory: workspace.cwd,
+        projectKind: "git",
+        workspaceKind: workspace.kind,
+        name: workspace.displayName,
+        archivingAt: null,
+        status: "done",
+        activityAt: null,
+        diffStat: null,
+        scripts: [],
+        gitRuntime: null,
+        githubRuntime: null,
+      }),
+      getDiskUsage: input.getDiskUsage,
+      requestDiskUsageSample: input.requestDiskUsageSample,
+    });
+  }
+
+  const worktreeWorkspace: PersistedWorkspaceRecord = {
+    workspaceId: "workspace-worktree",
+    projectId: project.projectId,
+    cwd: "/workspace/project/.paseo/worktrees/feature",
+    kind: "worktree",
+    displayName: "feature",
+    createdAt: NOW,
+    updatedAt: NOW,
+    archivedAt: null,
+  };
+
+  test("merges a sampled disk usage onto the descriptor, like archivingAt", async () => {
+    const sample = { bytes: 123, sampledAt: NOW };
+    const directory = makeDirectory({
+      workspace: worktreeWorkspace,
+      getDiskUsage: () => sample,
+    });
+
+    const map = await directory.buildDescriptorMap({ includeGitData: false });
+
+    expect(map.get(worktreeWorkspace.workspaceId)?.diskUsage).toEqual(sample);
+  });
+
+  test("defaults an unsampled worktree's disk usage to null and requests a lazy sample", async () => {
+    const requested: Array<{ workspaceId: string; cwd: string }> = [];
+    const directory = makeDirectory({
+      workspace: worktreeWorkspace,
+      getDiskUsage: () => undefined,
+      requestDiskUsageSample: (workspaceId, cwd) => requested.push({ workspaceId, cwd }),
+    });
+
+    const map = await directory.buildDescriptorMap({ includeGitData: false });
+
+    expect(map.get(worktreeWorkspace.workspaceId)?.diskUsage).toBeNull();
+    expect(requested).toEqual([
+      { workspaceId: worktreeWorkspace.workspaceId, cwd: worktreeWorkspace.cwd },
+    ]);
+  });
+
+  test("never requests a lazy sample for a non-worktree workspace", async () => {
+    const checkoutWorkspace: PersistedWorkspaceRecord = {
+      ...worktreeWorkspace,
+      workspaceId: "workspace-checkout",
+      kind: "local_checkout",
+    };
+    const requested: Array<{ workspaceId: string; cwd: string }> = [];
+    const directory = makeDirectory({
+      workspace: checkoutWorkspace,
+      getDiskUsage: () => undefined,
+      requestDiskUsageSample: (workspaceId, cwd) => requested.push({ workspaceId, cwd }),
+    });
+
+    const map = await directory.buildDescriptorMap({ includeGitData: false });
+
+    expect(map.get(checkoutWorkspace.workspaceId)?.diskUsage).toBeNull();
+    expect(requested).toEqual([]);
+  });
+});

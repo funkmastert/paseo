@@ -7,7 +7,8 @@ const { setTimeout: delay } = require("node:timers/promises");
 const { chromium } = require("playwright");
 const { extractFile } = require("@electron/asar");
 
-const EXECUTABLE_NAME = "Paseo";
+const { readExecutableNameFromConfig } = require("../scripts/executable-name.js");
+
 const SMOKE_TIMEOUT_MS = 60_000;
 const EXIT_TIMEOUT_MS = 10_000;
 const TERMINAL_CAPTURE_ATTEMPTS = 20;
@@ -40,16 +41,16 @@ function assertExecutable(filePath, label) {
   }
 }
 
-function getExecutablePath(appPath) {
+function getExecutablePath(appPath, executableName) {
   if (process.platform === "darwin") {
-    return path.join(appPath, "Contents", "MacOS", EXECUTABLE_NAME);
+    return path.join(appPath, "Contents", "MacOS", executableName);
   }
 
   if (process.platform === "win32") {
-    return path.join(appPath, `${EXECUTABLE_NAME}.exe`);
+    return path.join(appPath, `${executableName}.exe`);
   }
 
-  return path.join(appPath, EXECUTABLE_NAME);
+  return path.join(appPath, executableName);
 }
 
 function getCliShimPath(appPath) {
@@ -64,8 +65,8 @@ function getCliShimPath(appPath) {
   return path.join(appPath, "resources", "bin", "paseo");
 }
 
-function getMacMainExecutablePath(appPath) {
-  return path.join(appPath, "Contents", "MacOS", EXECUTABLE_NAME);
+function getMacMainExecutablePath(appPath, executableName) {
+  return path.join(appPath, "Contents", "MacOS", executableName);
 }
 
 function ensureLinuxSandboxPermissions(appPath) {
@@ -287,8 +288,8 @@ function listDarwinTextExecutables(pid) {
     .map((line) => line.slice(1));
 }
 
-function assertDarwinProcessDoesNotUseMainAppExecutable({ appPath, pid, label }) {
-  const mainExecutablePath = getMacMainExecutablePath(appPath);
+function assertDarwinProcessDoesNotUseMainAppExecutable({ appPath, executableName, pid, label }) {
+  const mainExecutablePath = getMacMainExecutablePath(appPath, executableName);
   assertExecutable(mainExecutablePath, "Packaged app executable");
 
   const textExecutables = listDarwinTextExecutables(pid);
@@ -652,7 +653,7 @@ async function smokeCliShim({ appPath, env }) {
   assertCleanDaemonStatusOutput(`${result.stdout}\n${result.stderr}`);
 }
 
-async function smokeColdCliDaemonStart({ appPath }) {
+async function smokeColdCliDaemonStart({ appPath, executableName }) {
   const home = createTempDir("paseo-smoke-cli-daemon-home-");
   const pidPath = path.join(home, "paseo.pid");
   const port = await reserveLocalTcpPort();
@@ -686,6 +687,7 @@ async function smokeColdCliDaemonStart({ appPath }) {
     if (process.platform === "darwin") {
       assertDarwinProcessDoesNotUseMainAppExecutable({
         appPath,
+        executableName,
         pid: pidInfo.pid,
         label: "Cold CLI daemon supervisor",
       });
@@ -693,6 +695,7 @@ async function smokeColdCliDaemonStart({ appPath }) {
       for (const childPid of childPids) {
         assertDarwinProcessDoesNotUseMainAppExecutable({
           appPath,
+          executableName,
           pid: childPid,
           label: "Cold CLI daemon worker",
         });
@@ -806,25 +809,28 @@ async function stopCliDaemon({ appPath, env }) {
   });
 }
 
-function assertLinuxDesktopIdentity(appPath) {
+function assertLinuxDesktopIdentity(appPath, executableName) {
   if (process.platform === "linux") {
     const metadata = JSON.parse(
       extractFile(path.join(appPath, "resources", "app.asar"), "package.json").toString(),
     );
-    if (metadata.desktopName !== `${EXECUTABLE_NAME}.desktop`) {
+    if (metadata.desktopName !== `${executableName}.desktop`) {
       throw new Error(
-        `Packaged Linux desktop identity ${JSON.stringify(metadata.desktopName)} does not match ${EXECUTABLE_NAME}.desktop`,
+        `Packaged Linux desktop identity ${JSON.stringify(metadata.desktopName)} does not match ${executableName}.desktop`,
       );
     }
   }
 }
 
-async function smokePackagedDesktopApp({ appPath }) {
-  const executablePath = getExecutablePath(appPath);
+async function smokePackagedDesktopApp({
+  appPath,
+  executableName = readExecutableNameFromConfig(),
+}) {
+  const executablePath = getExecutablePath(appPath, executableName);
   assertExecutable(executablePath, "Packaged app executable");
-  assertLinuxDesktopIdentity(appPath);
+  assertLinuxDesktopIdentity(appPath, executableName);
   ensureLinuxSandboxPermissions(appPath);
-  await smokeColdCliDaemonStart({ appPath });
+  await smokeColdCliDaemonStart({ appPath, executableName });
 
   const userData = createTempDir("paseo-smoke-user-data-");
   const daemonHome = createTempDir("paseo-smoke-daemon-home-");
@@ -938,7 +944,9 @@ if (require.main === module) {
   const appIndex = process.argv.indexOf("--app");
   const appPath = appIndex >= 0 ? process.argv[appIndex + 1] : null;
   if (!appPath) {
-    process.stderr.write("Usage: node smoke-packaged-desktop-app.js --app <Paseo.app>\n");
+    process.stderr.write(
+      "Usage: node smoke-packaged-desktop-app.js --app <path to packaged app>\n",
+    );
     process.exit(2);
   }
 

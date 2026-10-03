@@ -13,7 +13,12 @@ import {
   parseClaudeCodeVersion,
   resolveClaudeDisabledThinkingForModel,
 } from "./model-manifest.js";
-import { findClaudeModel, getClaudeModels, normalizeClaudeRuntimeModelId } from "./models.js";
+import {
+  findClaudeModel,
+  getClaudeModels,
+  normalizeClaudeRuntimeModelId,
+  resolveObservedClaudeModelId,
+} from "./models.js";
 
 const createdClaudeConfigDirs: string[] = [];
 
@@ -50,6 +55,7 @@ describe("getClaudeModels", () => {
   it("returns all claude models", () => {
     const models = getClaudeModels();
     expect(models.map((m) => m.id)).toEqual([
+      "claude-opus-5-5",
       "claude-opus-5",
       "claude-fable-5-1",
       "claude-fable-5",
@@ -72,7 +78,7 @@ describe("getClaudeModels", () => {
     const models = getClaudeModels();
     const defaults = models.filter((m) => m.isDefault);
     expect(defaults).toHaveLength(1);
-    expect(defaults[0].id).toBe("claude-opus-5");
+    expect(defaults[0].id).toBe("claude-opus-5-5");
   });
 
   it("defines context window sizes in the catalog", () => {
@@ -82,6 +88,7 @@ describe("getClaudeModels", () => {
 
     expect(contextWindows).toEqual(
       new Map([
+        ["claude-opus-5-5", 1_000_000],
         ["claude-opus-5", 1_000_000],
         ["claude-fable-5-1", 1_000_000],
         ["claude-fable-5", 1_000_000],
@@ -104,11 +111,58 @@ describe("getClaudeModels", () => {
   it("filters models by their minimum Claude Code version", () => {
     const oldVersionModels = getClaudeModels("2.1.218");
     expect(oldVersionModels.map((model) => model.id)).not.toContain("claude-opus-5");
+    expect(oldVersionModels.map((model) => model.id)).not.toContain("claude-opus-5-5");
     expect(oldVersionModels.find((model) => model.isDefault)?.id).toBe("claude-opus-4-8");
     expect(getClaudeModels("2.1.219").map((model) => model.id)).toContain("claude-opus-5");
 
     expect(getClaudeModels("2.1.168").map((model) => model.id)).not.toContain("claude-fable-5");
     expect(getClaudeModels("2.1.169").map((model) => model.id)).toContain("claude-fable-5");
+  });
+
+  it("offers no Off thinking option for Opus 5.5, which cannot disable thinking", () => {
+    const opus55 = getClaudeModels().find((model) => model.id === "claude-opus-5-5");
+    expect(opus55?.thinkingOptions?.map((option) => option.id)).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      CLAUDE_ULTRACODE_THINKING_OPTION_ID,
+    ]);
+  });
+
+  it("preselects Extra High as Opus 5.5's default thinking option, and still offers Ultra Code", () => {
+    const opus55 = getClaudeModels().find((model) => model.id === "claude-opus-5-5");
+    expect(opus55?.defaultThinkingOptionId).toBe("xhigh");
+    expect(opus55?.thinkingOptions?.filter((option) => option.isDefault)).toEqual([
+      { id: "xhigh", label: "Extra High", isDefault: true },
+    ]);
+    expect(opus55?.thinkingOptions).toContainEqual({
+      id: CLAUDE_ULTRACODE_THINKING_OPTION_ID,
+      label: "Ultra Code",
+    });
+  });
+
+  it("never preselects Ultra Code for any model", () => {
+    for (const model of getClaudeModels()) {
+      expect(model.defaultThinkingOptionId).not.toBe(CLAUDE_ULTRACODE_THINKING_OPTION_ID);
+    }
+  });
+
+  it("keeps every model's default thinking option among its own advertised options", () => {
+    // A manifest entry could name a defaultThinkingOptionId that its own effortLevels/
+    // supportsThinkingDisabled never advertise (e.g. "ultracode" without xhigh) — the type alone
+    // permits that. buildThinkingOptions only sets isDefault on an option it actually built, so
+    // catching zero (or more than one) isDefault option catches the mistake here.
+    for (const model of getClaudeModels()) {
+      if (!model.thinkingOptions) {
+        expect(model.defaultThinkingOptionId).toBeUndefined();
+        continue;
+      }
+      const defaults = model.thinkingOptions.filter((option) => option.isDefault);
+      expect(defaults).toHaveLength(1);
+      expect(defaults[0]?.id).toBe(model.defaultThinkingOptionId);
+    }
   });
 
   it("derives thinking options from model effort capabilities", () => {
@@ -169,6 +223,8 @@ describe("getClaudeModels", () => {
   });
 
   it.each([
+    // Never Opus 5.5's own default: this fallback also runs for subagents.
+    ["claude-opus-5-5", false, "high"],
     ["claude-opus-5", true, "high"],
     ["claude-opus-5-20260724", true, "high"],
     ["claude-sonnet-5", true, "high"],
@@ -406,6 +462,44 @@ describe("normalizeClaudeRuntimeModelId", () => {
     expect(normalizeClaudeRuntimeModelId("random")).toBeNull();
   });
 
+  // Opus 5.7 is not in the manifest, so it must not normalize to Opus 5, which is: an unknown id
+  // stays unknown (null) and callers show the raw id instead.
+  it("keeps a minor version from collapsing onto its major", () => {
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-7")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-7[1m]")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-7-20260901")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-7-20260901[1m]")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("us.anthropic.claude-opus-5-7")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("us.anthropic.claude-opus-5-7-v1:0")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("openrouter/anthropic/claude-opus-5-7[1m]")).toBeNull();
+
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-5")).toBe("claude-opus-5-5");
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-5-20260901[1m]")).toBe("claude-opus-5-5");
+    expect(normalizeClaudeRuntimeModelId("us.anthropic.claude-opus-5-5-v1:0")).toBe(
+      "claude-opus-5-5",
+    );
+
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5")).toBe("claude-opus-5");
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5[1m]")).toBe("claude-opus-5");
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-20260724")).toBe("claude-opus-5");
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-20260724[1m]")).toBe("claude-opus-5");
+    expect(normalizeClaudeRuntimeModelId("us.anthropic.claude-opus-5")).toBe("claude-opus-5");
+    expect(normalizeClaudeRuntimeModelId("us.anthropic.claude-opus-5-20260724-v1:0")).toBe(
+      "claude-opus-5",
+    );
+
+    expect(normalizeClaudeRuntimeModelId("claude-fable-5-1")).toBe("claude-fable-5-1");
+    expect(normalizeClaudeRuntimeModelId("us.anthropic.claude-fable-5-1[1m]")).toBe(
+      "claude-fable-5-1",
+    );
+  });
+
+  it("shows Opus 5.5 as itself, not as Opus 5", () => {
+    expect(resolveObservedClaudeModelId("claude-opus-5-5")).toBe("claude-opus-5-5");
+    expect(resolveObservedClaudeModelId("claude-opus-5-5[1m]")).toBe("claude-opus-5-5");
+    expect(resolveObservedClaudeModelId("claude-opus-5-20260724")).toBe("claude-opus-5");
+  });
+
   it("normalizes provider-form runtime model strings", () => {
     expect(normalizeClaudeRuntimeModelId("openrouter/anthropic/claude-opus-4-8")).toBe(
       "claude-opus-4-8",
@@ -438,12 +532,22 @@ describe("findClaudeModel", () => {
 describe("Claude Opus 5 catalog", () => {
   it("offers a single Opus 5 entry with a 1M context window", () => {
     const opus5Models = getClaudeModels()
-      .filter((model) => model.id.startsWith("claude-opus-5"))
+      .filter((model) => /^claude-opus-5(\[|$)/.test(model.id))
       .map(({ id, label, contextWindowMaxTokens }) => ({ id, label, contextWindowMaxTokens }));
 
     expect(opus5Models).toEqual([
       { id: "claude-opus-5", label: "Opus 5", contextWindowMaxTokens: 1_000_000 },
     ]);
+  });
+
+  it("lists Opus 5.5 by name, first, as the default", () => {
+    const [first] = getClaudeModels();
+    expect(first).toMatchObject({
+      id: "claude-opus-5-5",
+      label: "Opus 5.5",
+      isDefault: true,
+      contextWindowMaxTokens: 1_000_000,
+    });
   });
 
   it("resolves retired and dated Opus 5 IDs to the single catalog entry", () => {

@@ -231,11 +231,16 @@ test("createPaseoApi borrows daemon capabilities without exposing connection own
   expect(Object.keys(paseo).sort()).toEqual([
     "agents",
     "config",
+    "jev",
+    "mcpGateway",
     "projects",
     "providers",
     "terminals",
     "workspaces",
   ]);
+  expect(typeof paseo.jev?.decide).toBe("function");
+  expect(typeof paseo.jev?.status).toBe("function");
+  expect(typeof paseo.jev?.checkScope).toBe("function");
   expect("connect" in paseo).toBe(false);
   expect("close" in paseo).toBe(false);
   expect("skills" in paseo.agents).toBe(false);
@@ -709,6 +714,7 @@ test("agent handles delegate create, send, timeline refetch, archive, and local 
     text: "hello",
     messageId: "message-sdk",
   });
+  expect(sendRequest.activeTurnBehavior).toBeUndefined();
 
   ws.message(
     sessionMessage({
@@ -722,6 +728,32 @@ test("agent handles delegate create, send, timeline refetch, archive, and local 
     }),
   );
   await sendPromise;
+
+  const steerSendPromise = agent.send("keep going", {
+    messageId: "message-sdk-steer",
+    activeTurnBehavior: "steer",
+  });
+  const steerSendRequest = parseSentSessionMessage(ws.sent.at(-1));
+  expect(steerSendRequest).toMatchObject({
+    type: "send_agent_message_request",
+    agentId: "agent_sdk",
+    text: "keep going",
+    messageId: "message-sdk-steer",
+    activeTurnBehavior: "steer",
+  });
+
+  ws.message(
+    sessionMessage({
+      type: "send_agent_message_response",
+      payload: {
+        requestId: steerSendRequest.requestId,
+        agentId: "agent_sdk",
+        accepted: true,
+        error: null,
+      },
+    }),
+  );
+  await steerSendPromise;
 
   const runPromise = agent.run("finish the task", {
     messageId: "run-message-sdk",
@@ -873,6 +905,79 @@ test("agent handles delegate create, send, timeline refetch, archive, and local 
   expect(agent.archivedAt).toBe("2026-05-16T01:00:00.000Z");
 
   unsubscribe();
+  await client.close();
+});
+
+test("agent run waits on the agent a moved message was delivered to", async () => {
+  const { client, ws } = await connectClient();
+  const agent = client.agents.ref("agent_retired");
+
+  const runPromise = agent.run("pick it up", { messageId: "run-moved", timeoutMs: 30_000 });
+  const sendRequest = parseSentSessionMessage(ws.sent.at(-1));
+  expect(sendRequest).toMatchObject({
+    type: "send_agent_message_request",
+    agentId: "agent_retired",
+  });
+  // Account failover moved the conversation; the daemon delivered to where it lives now.
+  ws.message(
+    sessionMessage({
+      type: "send_agent_message_response",
+      payload: {
+        requestId: sendRequest.requestId,
+        agentId: "agent_retired",
+        accepted: true,
+        error: null,
+        deliveredToAgentId: "agent_successor",
+      },
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const waitRequest = parseSentSessionMessage(ws.sent.at(-1));
+  expect(waitRequest).toMatchObject({
+    type: "wait_for_finish_request",
+    agentId: "agent_successor",
+  });
+  ws.message(
+    sessionMessage({
+      type: "wait_for_finish_response",
+      payload: {
+        requestId: waitRequest.requestId,
+        status: "idle",
+        final: createAgent({ id: "agent_successor" }),
+        error: null,
+        lastMessage: "DONE",
+      },
+    }),
+  );
+  await expect(runPromise).resolves.toMatchObject({ status: "idle", lastMessage: "DONE" });
+  // The snapshot that came back is the successor's; the handle still names the retired agent.
+  expect(agent.current()).toBeNull();
+  await client.close();
+});
+
+test("agent send says where a message to a moved agent was delivered", async () => {
+  const { client, ws } = await connectClient();
+  const agent = client.agents.ref("agent_retired");
+
+  const sendPromise = agent.send("pick it up", { messageId: "send-moved" });
+  const sendRequest = parseSentSessionMessage(ws.sent.at(-1));
+  ws.message(
+    sessionMessage({
+      type: "send_agent_message_response",
+      payload: {
+        requestId: sendRequest.requestId,
+        agentId: "agent_retired",
+        accepted: true,
+        error: null,
+        deliveredToAgentId: "agent_successor",
+      },
+    }),
+  );
+
+  await expect(sendPromise).resolves.toEqual({
+    agentId: "agent_retired",
+    deliveredToAgentId: "agent_successor",
+  });
   await client.close();
 });
 

@@ -257,8 +257,9 @@ describe("Claude runtime exit", () => {
       session.subscribe((event) => events.push(event));
 
       // Restarts the query on the next call, which retires the current process
-      // while no turn is running.
-      await session.setThinkingOption(null);
+      // while no turn is running. A restart correctness requires (a rewind, a rebound
+      // session); a thinking change waits for the workflow instead.
+      (session as unknown as { queryRestartNeeded: boolean }).queryRestartNeeded = true;
       await session.listCommands();
 
       expect(events.some((event) => event.type === "turn_failed")).toBe(false);

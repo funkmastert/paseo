@@ -7,6 +7,7 @@ import {
   ArrowUp,
   CalendarClock,
   History,
+  MessageCircleQuestion,
   Plus,
   Search,
   type LucideIcon,
@@ -41,6 +42,7 @@ const BUILTIN_ICONS: Record<BuiltinSidebarNavId, LucideIcon> = {
   history: History,
   search: Search,
   schedules: CalendarClock,
+  "ask-jev": MessageCircleQuestion,
 };
 
 function NavIcon({ Icon, color = "" }: { Icon: LucideIcon; color?: string }) {

@@ -5,7 +5,7 @@ import {
   expectNewWorkspaceProjectSelected,
   openNewWorkspaceComposer,
 } from "../support/helpers/new-workspace";
-import { seedWorkspace, type SeededWorkspace } from "../support/helpers/seed-client";
+import { seedWorkspace, settleAutoPin, type SeededWorkspace } from "../support/helpers/seed-client";
 import { getServerId } from "../support/helpers/server-id";
 import { selectSidebarStatusGrouping } from "../support/helpers/sidebar";
 
@@ -20,6 +20,12 @@ function workspaceRow(page: Page, workspaceId: string) {
 
 function pinnedSection(page: Page) {
   return page.getByTestId("sidebar-pinned-section");
+}
+
+// Every test here presses the pin shortcut expecting it to pin from unpinned. seedWorkspace's
+// session-start auto pin would otherwise make the first press an unpin instead.
+async function startUnpinned(workspace: SeededWorkspace): Promise<void> {
+  await settleAutoPin(workspace.client, workspace.workspaceId);
 }
 
 // Opens the workspace so it becomes the active route selection, which is what the shortcut acts on.
@@ -153,6 +159,7 @@ test.describe("Pin workspace shortcut", () => {
     });
 
     try {
+      await startUnpinned(workspace);
       const gate = await installPinRpcGate(page);
 
       await gotoAppShell(page);
@@ -186,6 +193,7 @@ test.describe("Pin workspace shortcut", () => {
     const workspace = await seedWorkspace({ repoPrefix: "pin-shortcut-collapsed-" });
 
     try {
+      await startUnpinned(workspace);
       await gotoAppShell(page);
       await openWorkspace(page, workspace.workspaceId);
       await collapseProjectSection(page, workspace);
@@ -207,6 +215,7 @@ test.describe("Pin workspace shortcut", () => {
     const workspace = await seedWorkspace({ repoPrefix: "pin-shortcut-unpin-" });
 
     try {
+      await startUnpinned(workspace);
       await gotoAppShell(page);
       await openWorkspace(page, workspace.workspaceId);
 
@@ -228,6 +237,7 @@ test.describe("Pin workspace shortcut", () => {
     const workspace = await seedWorkspace({ repoPrefix: "pin-shortcut-status-" });
 
     try {
+      await startUnpinned(workspace);
       await gotoAppShell(page);
       await openWorkspace(page, workspace.workspaceId);
       await switchToStatusGrouping(page);
@@ -252,6 +262,7 @@ test.describe("Pin workspace shortcut", () => {
     const workspace = await seedWorkspace({ repoPrefix: "pin-shortcut-failure-" });
 
     try {
+      await startUnpinned(workspace);
       const gate = await installPinRpcGate(page, { rejectFirst: 1 });
 
       await gotoAppShell(page);

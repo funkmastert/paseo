@@ -23,9 +23,11 @@ const testTheme = {
     borderAccent: "#a1a1aa",
     palette: {
       amber: { 500: "#f59e0b" },
-      blue: { 300: "#93c5fd" },
+      blue: { 300: "#93c5fd", 500: "#3b82f6" },
       green: { 500: "#22c55e" },
+      purple: { 500: "#a855f7" },
       red: { 300: "#fca5a5" },
+      teal: { 200: "#99f6e4" },
       white: "#ffffff",
     },
   },

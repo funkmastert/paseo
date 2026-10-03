@@ -513,6 +513,7 @@ describe("loadSettingsFromStorage", () => {
         releaseChannel: "beta",
         notifications: { playSound: true },
         daemon: { manageBuiltInDaemon: false, keepRunningAfterQuit: true },
+        power: { keepAwake: true, keepDisplayAwake: "always" },
       },
     });
     const deps = makeDeps({
