@@ -491,10 +491,15 @@ describe("a stall candidate's judgment", () => {
     expect(h.stallObservations("a1").at(-1)?.escalation?.personFirst).toBeUndefined();
   });
 
-  test("an agent in company code is never sent, and is nudged as today (D7)", async () => {
-    const h = new Harness({ jev: ANSWERED, answers: choice("blocked_missing_info", 0.95) });
+  test("an agent in a configured exclusion is never sent, and is nudged as today (D7)", async () => {
+    // Nothing is excluded by default since 2026-10-02, so the test configures the root it needs.
+    const excludedRoot = mkdtempSync(path.join(os.tmpdir(), "stall-sweep-excluded-"));
+    const h = new Harness({
+      jev: { ...ANSWERED, excludeCwds: [excludedRoot] },
+      answers: choice("blocked_missing_info", 0.95),
+    });
     const agent = h.add("a1");
-    agent.summary.cwd = path.join(h.root, "mobile-worktrees", "feature");
+    agent.summary.cwd = path.join(excludedRoot, "feature");
     mkdirSync(agent.summary.cwd, { recursive: true });
     await h.warmUp();
     expect(h.jev.transport.calls).toHaveLength(0);

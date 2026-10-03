@@ -147,8 +147,13 @@ function bashEvent(cwd: string, command: string, stdout: string) {
   };
 }
 
-async function readCase(filePath: string, content: string, cwd = repo): Promise<Harness> {
-  const harness = setup({ cwd });
+async function readCase(
+  filePath: string,
+  content: string,
+  cwd = repo,
+  config?: Record<string, unknown>,
+): Promise<Harness> {
+  const harness = setup(config === undefined ? { cwd } : { cwd, config });
   harness.observer.postToolUse(readEvent(cwd, filePath, content));
   await harness.observer.idle();
   return harness;
@@ -318,6 +323,11 @@ describe("B5: personal locations are never sent, whatever the agent's cwd", () =
     "Library/Messages/chat.db.txt",
     ".mozilla/firefox/profile/prefs.js",
     ".paseo/agents/x.json",
+    ".paseo/config.json",
+    ".paseo/credentials.json",
+    ".paseo/jev/audit.jsonl",
+    ".paseo/daemon.log",
+    ".paseo/worktrees/stray.md",
   ])("cwd is HOME: ~/%s", async (relative) => {
     const file = write(home, relative, pad(`note ${SECRET}`));
     const { jev, sent } = await readCase(file, pad(`note ${SECRET}`), home);
@@ -347,6 +357,94 @@ describe("B5: personal locations are never sent, whatever the agent's cwd", () =
     const file = write(repo, "src/app.ts", pad("export const app = 1;"));
     const { jev } = await readCase(file, pad("export const app = 1;"), home);
     expect(jev.transport.calls).toHaveLength(1);
+  });
+});
+
+describe("B6: an agent's checkout under Paseo's home is judged, the daemon's state is not", () => {
+  function checkoutIn(project: string, agent: string, remote?: string): string {
+    const checkout = path.join(paseoHome, "worktrees", project, agent);
+    initGitRepo(checkout, remote === undefined ? {} : { remote });
+    return checkout;
+  }
+
+  test("a read inside ~/.paseo/worktrees/<project>/<agent> is judged like any other checkout", async () => {
+    const checkout = checkoutIn("3jvw4yw6", "pinned-grid");
+    const content = pad("export const app = 1;");
+    const file = write(checkout, "src/app.ts", content);
+    const { jev, notAsked } = await readCase(file, content, checkout);
+    expect(notAsked).toEqual([]);
+    expect(jev.transport.calls).toHaveLength(1);
+  });
+
+  test("the daemon's own state beside that checkout is still refused", async () => {
+    checkoutIn("3jvw4yw6", "pinned-grid");
+    for (const relative of ["config.json", "agents/x.json", "jev/audit.jsonl", "tokens/x.json"]) {
+      const file = write(paseoHome, relative, pad(`state ${SECRET}`));
+      const { jev, notAsked, sent } = await readCase(file, pad(`state ${SECRET}`), paseoHome);
+      expect(jev.transport.calls).toEqual([]);
+      expect(notAsked).toEqual(["secret-path"]);
+      expect(sent()).not.toContain(SECRET);
+    }
+  });
+
+  test("a secret-shaped name inside the checkout is still refused", async () => {
+    const checkout = checkoutIn("3jvw4yw6", "pinned-grid");
+    const file = write(checkout, ".env", pad(`TOKEN=${SECRET}`));
+    const { jev, notAsked, sent } = await readCase(file, pad(`TOKEN=${SECRET}`), checkout);
+    expect(jev.transport.calls).toEqual([]);
+    expect(notAsked).toEqual(["secret-path"]);
+    expect(sent()).not.toContain(SECRET);
+  });
+
+  test("a name inside that checkout pointing at the daemon's state is refused", async () => {
+    const checkout = checkoutIn("3jvw4yw6", "pinned-grid");
+    const real = write(paseoHome, "credentials.json", pad(`token ${SECRET}`));
+    const named = path.join(checkout, "notes.txt");
+    symlinkSync(real, named);
+    // The cwd rule catches it first: the file it resolves to is not in the checkout.
+    const outside = await readCase(named, pad(`token ${SECRET}`), checkout);
+    expect(outside.jev.transport.calls).toEqual([]);
+    expect(outside.notAsked).toEqual(["outside-cwd"]);
+    expect(outside.sent()).not.toContain(SECRET);
+    // With a cwd that does contain both, the name rule is the one that refuses it: the exempt
+    // name is inside a checkout, and it is the real path that says what the file is.
+    const inside = await readCase(named, pad(`token ${SECRET}`), paseoHome);
+    expect(inside.jev.transport.calls).toEqual([]);
+    expect(inside.notAsked).toEqual(["secret-path"]);
+    expect(inside.sent()).not.toContain(SECRET);
+  });
+
+  test("a file that checkout's git ignores is still refused", async () => {
+    const checkout = checkoutIn("3jvw4yw6", "pinned-grid");
+    write(checkout, ".gitignore", "dev.secret\n");
+    const file = write(checkout, "dev.secret", pad(`TOKEN=${SECRET}`));
+    const { jev, notAsked, sent } = await readCase(file, pad(`TOKEN=${SECRET}`), checkout);
+    expect(jev.transport.calls).toEqual([]);
+    expect(notAsked).toEqual(["secret-path"]);
+    expect(sent()).not.toContain(SECRET);
+  });
+
+  // Nothing is excluded by default since 2026-10-02, so these configure the signal they need.
+  test("D7: a configured remote excludes a checkout under Paseo's home", async () => {
+    const checkout = checkoutIn("03e22r4d", "camp-cohort", "https://git.example.com/acme/app.git");
+    const content = pad("export const app = 1;");
+    const file = write(checkout, "src/app.ts", content);
+    const { jev, notAsked } = await readCase(file, content, checkout, {
+      excludeRemotes: ["git.example.com/acme/"],
+    });
+    expect(jev.transport.calls).toEqual([]);
+    expect(notAsked).toEqual(["excluded"]);
+  });
+
+  test("D7: a configured root excludes a checkout under Paseo's home", async () => {
+    const checkout = checkoutIn("acme-project", "acme-agent");
+    const content = pad("export const app = 1;");
+    const file = write(checkout, "src/app.ts", content);
+    const { jev, notAsked } = await readCase(file, content, checkout, {
+      excludeCwds: [path.join(paseoHome, "worktrees", "acme-project")],
+    });
+    expect(jev.transport.calls).toEqual([]);
+    expect(notAsked).toEqual(["excluded"]);
   });
 });
 

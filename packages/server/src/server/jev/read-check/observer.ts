@@ -515,7 +515,7 @@ export class ReadCheckObserver implements FileReadObserver {
   private readonly runGit: (args: string[], options: JevGitOptions) => Promise<JevGitResult>;
   /** Paths written by a copy or move of a secret file, folded, to when they stop being refused. */
   private readonly tainted = new Map<string, number>();
-  private realHomeAdded = false;
+  private realRootsAdded = false;
   private judging = 0;
   private liveSnapshot: LiveSnapshot = { enabled: false, live: false, liveShare: 0 };
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -529,7 +529,7 @@ export class ReadCheckObserver implements FileReadObserver {
     this.runGit = options.runGit ?? runGitProcess;
     this.personal = {
       homeDirs: [options.homeDir],
-      paseoHome: options.paseoHome,
+      paseoHomes: [options.paseoHome],
       platform: options.platform ?? process.platform,
     };
     this.validation = new ReadCheckValidation({
@@ -798,9 +798,9 @@ export class ReadCheckObserver implements FileReadObserver {
     // Taken before any name is checked: the file read later must be this one (`isSameFile`), so
     // a swap during the checks, or during git, sends nothing.
     const stat = await this.fs.lstat(input.realPath).catch(() => null);
-    await this.addRealHome();
+    await this.addRealRoots();
     const realCwd = await this.realpathOf(input.agentCwd);
-    if (!isInside(input.realPath, realCwd)) return refuse("outside-cwd");
+    if (!isInside(input.realPath, realCwd, this.personal.platform)) return refuse("outside-cwd");
     const names = [...(await this.symlinkChain(input.namedPath)), input.realPath];
     if (
       names.some(
@@ -918,12 +918,20 @@ export class ReadCheckObserver implements FileReadObserver {
     this.taint(realWritten, at);
   }
 
-  /** The home directory as realpath spells it, checked as well as the configured one. */
-  private async addRealHome(): Promise<void> {
-    if (this.realHomeAdded) return;
-    this.realHomeAdded = true;
+  /**
+   * The home directory and Paseo's home as realpath spells them, checked as well as the configured
+   * ones: a file always arrives as its real path, so a symlinked root compared in one spelling
+   * stops refusing the state it is there to protect.
+   */
+  private async addRealRoots(): Promise<void> {
+    if (this.realRootsAdded) return;
+    this.realRootsAdded = true;
     const realHome = await this.realpathOf(this.options.homeDir);
     if (!this.personal.homeDirs.includes(realHome)) this.personal.homeDirs.push(realHome);
+    const realPaseoHome = await this.realpathOf(this.options.paseoHome);
+    if (!this.personal.paseoHomes.includes(realPaseoHome)) {
+      this.personal.paseoHomes.push(realPaseoHome);
+    }
   }
 
   /** The path as named and every path its symlinks point at on the way to the real file. */

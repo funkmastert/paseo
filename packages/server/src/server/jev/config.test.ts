@@ -73,10 +73,17 @@ describe("resolveJevConfig defaults", () => {
     expect(config.inputUsdPerMillion).toBe(JEV_MIN_INPUT_USD_PER_MILLION);
   });
 
-  test("the D7 exclusion defaults", () => {
-    expect(config.excludeCwds).toEqual(JEV_DEFAULT_EXCLUDE_CWDS);
-    expect(config.excludeRemotes).toEqual(JEV_DEFAULT_EXCLUDE_REMOTES);
-    expect(config.excludeTextMarkers).toEqual(JEV_DEFAULT_EXCLUDE_TEXT_MARKERS);
+  // Tyler answered D7 on 2026-10-02: company code may go to JEV. Spelled out rather than compared
+  // to the constants, so the decision is what the test pins.
+  test("the D7 exclusion defaults exclude nothing", () => {
+    expect(config.excludeCwds).toEqual([]);
+    expect(config.excludeRemotes).toEqual([]);
+    expect(config.excludeTextMarkers).toEqual([]);
+    expect([
+      JEV_DEFAULT_EXCLUDE_CWDS,
+      JEV_DEFAULT_EXCLUDE_REMOTES,
+      JEV_DEFAULT_EXCLUDE_TEXT_MARKERS,
+    ]).toEqual([[], [], []]);
   });
 
   test("audit defaults", () => {
@@ -254,7 +261,11 @@ describe("resolveJevConfig fallbacks for malformed values", () => {
     ).toEqual(JEV_DEFAULT_EXCLUDE_REMOTES);
   });
 
-  test("an empty array is honoured, turning the signal off", () => {
+  test("a configured list turns the signal on, an empty array leaves it off", () => {
+    expect(
+      resolveJevConfig({ excludeTextMarkers: ["acmeinternal"] }, { homeDir: HOME })
+        .excludeTextMarkers,
+    ).toEqual(["acmeinternal"]);
     expect(
       resolveJevConfig({ excludeTextMarkers: [] }, { homeDir: HOME }).excludeTextMarkers,
     ).toEqual([]);

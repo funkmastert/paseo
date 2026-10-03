@@ -179,9 +179,13 @@ describe("decideTitleRefresh", () => {
   });
 
   it("sends nothing to JEV for a D7-excluded workspace and uses the cadence", async () => {
-    const jev = createJevForTest({ answers: { fit: { type: "score", score: 3 } } });
+    // Nothing is excluded by default since 2026-10-02, so the test configures the marker it needs.
+    const jev = createJevForTest({
+      answers: { fit: { type: "score", score: 3 } },
+      config: { excludeTextMarkers: ["acme-internal"] },
+    });
     const excluded = [
-      session({ lastActivitySummary: "Read ~/mobile-worktrees/android/build.gradle" }),
+      session({ lastActivitySummary: "Read ~/acme-internal/android/build.gradle" }),
     ];
     const early = await decideTitleRefresh({
       ...baseInput,

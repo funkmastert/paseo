@@ -66,7 +66,7 @@ function makeHarness(
   const home = path.join(root, "home");
   const paseoHome = path.join(root, "paseo-home");
   mkdirSync(path.join(home, "safe"), { recursive: true });
-  mkdirSync(path.join(home, "mobile-worktrees", "app"), { recursive: true });
+  mkdirSync(path.join(home, "excluded-code", "app"), { recursive: true });
   mkdirSync(paseoHome, { recursive: true });
   let logText = "";
   const logger = pino(
@@ -253,11 +253,16 @@ describe("JevService.decide: egress fails closed", () => {
     expect(auditLines(paseoHome)).toEqual([]);
   });
 
+  // Nothing is excluded by default since 2026-10-02, so each test configures the signal it needs.
   it("a D7-scoped call sends nothing and audits nothing", async () => {
     const transport = forbiddenTransport();
-    const { service, home, paseoHome } = makeHarness({ transport, key: FAKE_KEY });
+    const { service, home, paseoHome } = makeHarness({
+      transport,
+      key: FAKE_KEY,
+      config: { excludeCwds: ["~/excluded-code"] },
+    });
     const outcome = await service.decide(
-      spawnHint(home, { scope: { cwds: [path.join(home, "mobile-worktrees", "app")] } }),
+      spawnHint(home, { scope: { cwds: [path.join(home, "excluded-code", "app")] } }),
     );
     expect(kindAndReason(outcome)).toBe("unavailable:excluded");
     expect(transport.calls).toBe(0);
@@ -265,15 +270,17 @@ describe("JevService.decide: egress fails closed", () => {
     expect(auditLines(paseoHome)).toEqual([]);
   });
 
-  it("a Wonderly marker inside a question's criteria excludes the call", async () => {
-    const { service, home, transport } = makeHarness();
+  it("a configured marker inside a question's criteria excludes the call", async () => {
+    const { service, home, transport } = makeHarness({
+      config: { excludeTextMarkers: ["acmeinternal"] },
+    });
     const outcome = await service.decide(
       spawnHint(home, {
         questions: {
           repo: {
             type: "choice",
             instructions: "Which repository?",
-            criteria: { a: "github.com/WonderlyDotCom/mobile", other: "none" },
+            criteria: { a: "github.com/AcmeInternal/mobile", other: "none" },
           },
         },
       }),
@@ -283,9 +290,11 @@ describe("JevService.decide: egress fails closed", () => {
   });
 
   it("a marker that redaction removes still excludes the call", async () => {
-    const { service, home, transport } = makeHarness();
+    const { service, home, transport } = makeHarness({
+      config: { excludeTextMarkers: ["acmeinternal"] },
+    });
     const outcome = await service.decide(
-      spawnHint(home, { state: { prompt: "mail someone@wonderly.com about the rollout" } }),
+      spawnHint(home, { state: { prompt: "mail someone@acmeinternal.example about the rollout" } }),
     );
     expect(kindAndReason(outcome)).toBe("unavailable:excluded");
     expect(transport.calls).toHaveLength(0);

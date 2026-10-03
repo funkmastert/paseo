@@ -22,10 +22,20 @@ const PERSONAL_HOME_DIRS = [
   "Dropbox",
 ];
 
+/** Where the daemon puts an agent's checkout: `<paseoHome>/worktrees/<project>/<agent>`. */
+const AGENT_WORKTREES_DIR = "worktrees";
+
+// macOS reaches `/Users` and every other firmlinked directory through the data volume too, and
+// `realpath` keeps whichever spelling it was given, so the file and the cwd can arrive spelled
+// differently. `egress-scope.ts` strips the same prefix for the same reason. Folded, as darwin
+// paths compare.
+const DATA_VOLUME = "/system/volumes/data";
+
 export interface PersonalPathRules {
   /** The home directory as configured and as realpath spells it; both are checked. */
   homeDirs: string[];
-  paseoHome: string;
+  /** Paseo's home as configured and as realpath spells it; both are checked. */
+  paseoHomes: string[];
   platform: NodeJS.Platform;
 }
 
@@ -33,28 +43,59 @@ function foldsCase(platform: NodeJS.Platform): boolean {
   return platform === "darwin" || platform === "win32";
 }
 
-/** `child` relative to `parent`, or null when it is not at or below it. Case-folded where the volume folds. */
+/**
+ * The shape two spellings of one path compare in: NFC, `/` separators, case folded where the
+ * volume folds, and without macOS's data-volume prefix. A rule that compares raw strings stops
+ * applying the moment the two sides disagree on a spelling, which is how a private file gets
+ * judged and a project file gets refused.
+ */
+function comparable(value: string, platform: NodeJS.Platform): string {
+  const slashed = value.replace(/\\/g, "/").normalize("NFC");
+  const folded = foldsCase(platform) ? slashed.toLowerCase() : slashed;
+  if (platform !== "darwin") return folded;
+  if (folded === DATA_VOLUME) return "/";
+  return folded.startsWith(`${DATA_VOLUME}/`) ? folded.slice(DATA_VOLUME.length) : folded;
+}
+
+/** `child` relative to `parent`, or null when it is not at or below it. */
 function relativeBelow(child: string, parent: string, platform: NodeJS.Platform): string[] | null {
-  const fold = (value: string) => (foldsCase(platform) ? value.toLowerCase() : value);
-  const relative = path.relative(fold(parent), fold(child));
+  const relative = path.relative(comparable(parent, platform), comparable(child, platform));
   if (relative === "") return [];
   if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
   return relative.split(/[\\/]/);
 }
 
 /**
- * A personal location: Paseo's own state; any dot-entry directly under the home directory
- * (`~/.zsh_history`, `~/.ssh`, `~/.aws`, `~/.config`, `~/.claude*`, `~/.claude.json`, browser
- * and mail profiles on Linux); or `~/Documents`, `~/Desktop`, `~/Downloads`, `~/Library` (mail,
- * Messages, browser profiles on macOS), `~/AppData` and the like.
+ * A file inside an agent's checkout: `<paseoHome>/worktrees/<project>/<agent>/…`. That is the
+ * agent's own working code, so it is judged like any other repository. The exemption has to beat
+ * the home dot-entry rule as well as the Paseo-home rule, because Paseo's home is `~/.paseo`.
+ *
+ * Path shape is all this can tell; what carries the exemption is the rest of rule 3 in
+ * docs/jev.md, which the observer applies to the same file: it must be inside the reading agent's
+ * cwd, inside a git work tree, not ignored there, and not excluded by D7.
+ */
+function isAgentCheckout(candidate: string, paseoHome: string, platform: NodeJS.Platform): boolean {
+  const segments = relativeBelow(candidate, paseoHome, platform);
+  return segments !== null && segments[0] === AGENT_WORKTREES_DIR && segments.length > 3;
+}
+
+/**
+ * A personal location: the daemon's own state under Paseo's home — config, credentials, agent
+ * records, logs, the JEV directory — everything there but an agent's checkout, so a directory the
+ * daemon grows later is private until someone decides otherwise; any dot-entry directly under the
+ * home directory (`~/.zsh_history`, `~/.ssh`, `~/.aws`, `~/.config`, `~/.claude*`, `~/.claude.json`,
+ * browser and mail profiles on Linux); or `~/Documents`, `~/Desktop`, `~/Downloads`, `~/Library`
+ * (mail, Messages, browser profiles on macOS), `~/AppData` and the like.
  */
 export function isPersonalPath(candidate: string, rules: PersonalPathRules): boolean {
-  if (relativeBelow(candidate, rules.paseoHome, rules.platform) !== null) return true;
+  const { paseoHomes, platform } = rules;
+  if (paseoHomes.some((home) => isAgentCheckout(candidate, home, platform))) return false;
+  if (paseoHomes.some((home) => relativeBelow(candidate, home, platform) !== null)) return true;
   const personal = new Set(
-    PERSONAL_HOME_DIRS.map((name) => (foldsCase(rules.platform) ? name.toLowerCase() : name)),
+    PERSONAL_HOME_DIRS.map((name) => (foldsCase(platform) ? name.toLowerCase() : name)),
   );
   return rules.homeDirs.some((home) => {
-    const segments = relativeBelow(candidate, home, rules.platform);
+    const segments = relativeBelow(candidate, home, platform);
     const first = segments?.[0];
     if (first === undefined) return false;
     return first.startsWith(".") || personal.has(first);
@@ -66,7 +107,7 @@ export function isHomeOrAbove(candidate: string, rules: PersonalPathRules): bool
   return rules.homeDirs.some((home) => relativeBelow(home, candidate, rules.platform) !== null);
 }
 
-export function isInside(child: string, parent: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+/** Whether `child` is `parent` or below it, in the shape two spellings of one path compare in. */
+export function isInside(child: string, parent: string, platform: NodeJS.Platform): boolean {
+  return relativeBelow(child, parent, platform) !== null;
 }

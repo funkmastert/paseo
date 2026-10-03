@@ -96,24 +96,18 @@ export const JEV_PROVIDER_DEFAULTS: Record<
   typesafe: { url: "https://api.typesafe.ai/v1/systemone", model: "jev-latest" },
 };
 
-/** docs/jev.md, "The D7 exclusion". A configured value replaces its default; `[]` turns it off. */
-export const JEV_DEFAULT_EXCLUDE_CWDS: string[] = [
-  "~/mobile-worktrees",
-  "~/.paseo/worktrees/1rlfnz6g",
-  "~/backend-net",
-  "~/bn-worktrees",
-  "~/ts-monorepo*",
-  "~/wonderly-orchestration",
-];
-export const JEV_DEFAULT_EXCLUDE_REMOTES: string[] = [
-  "github.com/wonderlydotcom/",
-  "git.wonderly.info/",
-];
-export const JEV_DEFAULT_EXCLUDE_TEXT_MARKERS: string[] = [
-  "wonderlydotcom",
-  "git.wonderly.info",
-  "wonderly",
-];
+/**
+ * docs/jev.md, "The D7 exclusion". A configured value replaces its default; `[]` turns it off.
+ *
+ * Empty since 2026-10-02, when Tyler answered the question D7 was waiting on: company code may go
+ * to JEV. The mechanism stays — configure any of the three to exclude a tree, a remote or a
+ * string again, and `decide` enforces it for every feature, fail-closed. Nothing is excluded until
+ * someone asks for it, so a fresh `PASEO_HOME` or a config that loses its `agents.jev` section
+ * behaves like his does.
+ */
+export const JEV_DEFAULT_EXCLUDE_CWDS: string[] = [];
+export const JEV_DEFAULT_EXCLUDE_REMOTES: string[] = [];
+export const JEV_DEFAULT_EXCLUDE_TEXT_MARKERS: string[] = [];
 
 /** The list price. `inputUsdPerMillion` cannot go below it, so config cannot zero the estimate. */
 export const JEV_MIN_INPUT_USD_PER_MILLION = 0.042;
