@@ -158,12 +158,19 @@ function click(element: Element | null | undefined): void {
   });
 }
 
-function Strip({ onOpenJevDashboard }: { onOpenJevDashboard?: (serverId: string) => void }) {
+function Strip({
+  onOpenJevDashboard,
+  capMinutes,
+}: {
+  onOpenJevDashboard?: (serverId: string) => void;
+  capMinutes?: ReadonlyMap<string, number>;
+}) {
   return (
     <AccountBudgetStripView
       rows={FIXTURE_ROWS}
       serverId="fixture-host"
       fetchedAt={FETCHED_AT}
+      capMinutes={capMinutes}
       onOpenJevDashboard={onOpenJevDashboard}
     />
   );
@@ -178,10 +185,22 @@ describe.each([
   { name: "phone", width: 390, compact: true },
   { name: "desktop", width: 760, compact: false },
 ])("account budget strip on $name", ({ name, width, compact }) => {
-  function mountStrip(onOpenJevDashboard?: (serverId: string) => void) {
+  function mountStrip(
+    onOpenJevDashboard?: (serverId: string) => void,
+    capMinutes?: ReadonlyMap<string, number>,
+  ) {
     layout.compact = compact;
-    return mount(<Strip onOpenJevDashboard={onOpenJevDashboard} />, width);
+    return mount(<Strip onOpenJevDashboard={onOpenJevDashboard} capMinutes={capMinutes} />, width);
   }
+
+  it("says when an account caps, and only for an account the history projects to cap", () => {
+    const container = mountStrip(undefined, new Map([["claude-personal", 150]]));
+    const caps = (id: string) =>
+      container.querySelector(`[data-testid="orchestration-account-caps-${id}"]`)?.textContent;
+    expect(caps("claude-personal")).toContain("Caps in");
+    expect(caps("claude-backup")).toBeUndefined();
+    expect(caps("claude")).toBeUndefined();
+  });
 
   it("shows the Claude pool, then the OpenAI account set apart from it", () => {
     const container = mountStrip();

@@ -3,6 +3,8 @@ import { router } from "expo-router";
 import { useDaemonConfig } from "@/hooks/use-daemon-config";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { useProviderUsage } from "@/provider-usage/use-provider-usage";
+import { earliestProjectedCap } from "@/usage-history/account-cap-projection";
+import { useUsageHistory } from "@/usage-history/use-usage-history";
 import { buildJevDashboardRoute } from "@/utils/host-routes";
 import {
   buildAccountBudgetRows,
@@ -37,6 +39,7 @@ export function AccountBudgetStrip({
   const { entries } = useProvidersSnapshot(serverId);
   const { config } = useDaemonConfig(serverId);
   const pool = useMemo(() => resolveAccountPool(config?.providers), [config]);
+  const { data: history } = useUsageHistory(serverId);
 
   const rows = useMemo(() => {
     // The account list comes from the pool, or from what the host reports, then every other
@@ -64,6 +67,16 @@ export function AccountBudgetStrip({
     () => (view.kind === "ready" ? new Date(view.fetchedAt) : null),
     [view],
   );
+  // Time to cap per account, from the usage history: only a window projected to cap before its
+  // reset counts. An account with no projection gets no line rather than a guess.
+  const capMinutes = useMemo(() => {
+    const minutes = new Map<string, number>();
+    for (const row of rows) {
+      const cap = earliestProjectedCap(history?.accounts ?? [], row.providerId);
+      if (cap) minutes.set(row.providerId, cap.minutesToCap);
+    }
+    return minutes;
+  }, [history, rows]);
   const openJevDashboard = useCallback(
     (targetServerId: string) => router.push(buildJevDashboardRoute(targetServerId)),
     [],
@@ -74,6 +87,7 @@ export function AccountBudgetStrip({
       rows={rows}
       serverId={serverId}
       fetchedAt={fetchedAt}
+      capMinutes={capMinutes}
       onOpenJevDashboard={openJevDashboard}
     />
   );

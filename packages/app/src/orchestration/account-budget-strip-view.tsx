@@ -10,6 +10,7 @@ import { useCompactTimeAgo } from "@/hooks/use-compact-time-ago";
 import { formatPct, formatResetLabel } from "@/provider-usage/format";
 import { ProviderUsageMeter, ProviderUsageWindowBar } from "@/provider-usage/window-bar";
 import type { Theme } from "@/styles/theme";
+import { formatDuration } from "@/utils/time";
 import {
   resolveAccountIcon,
   selectAccountWorstWindow,
@@ -33,11 +34,14 @@ export function AccountBudgetStripView({
   rows,
   serverId,
   fetchedAt,
+  capMinutes,
   onOpenJevDashboard,
 }: {
   rows: AccountBudgetRowViewModel[];
   serverId: string;
   fetchedAt: Date | null;
+  /** Minutes until each account's first window caps, from usage history, keyed by provider id. */
+  capMinutes?: ReadonlyMap<string, number>;
   /** Absent in a capture or a test: the row renders without the chevron and never presses. */
   onOpenJevDashboard?: (serverId: string) => void;
 }) {
@@ -55,6 +59,7 @@ export function AccountBudgetStripView({
               row={row}
               serverId={serverId}
               compact={isCompact}
+              capMinutes={capMinutes?.get(row.providerId) ?? null}
               onOpenJevDashboard={onOpenJevDashboard}
             />
           </Fragment>
@@ -295,13 +300,16 @@ function AccountBudgetRow({
   row,
   serverId,
   compact,
+  capMinutes,
   onOpenJevDashboard,
 }: {
   row: AccountBudgetRowViewModel;
   serverId: string;
   compact: boolean;
+  capMinutes: number | null;
   onOpenJevDashboard?: (serverId: string) => void;
 }) {
+  const { t } = useTranslation();
   const roleLabel = useAccountRoleLabel(row.role);
   const worst = useMemo(() => selectAccountWorstWindow(row), [row]);
   const worstAtRisk =
@@ -347,6 +355,17 @@ function AccountBudgetRow({
         {isJev ? <ThemedChevronRight size={14} uniProps={mutedIconColor} /> : null}
       </View>
       {row.usage ? <AccountPresence providerId={row.providerId} usage={row.usage} /> : null}
+      {capMinutes != null && row.kind === "available" ? (
+        <Text
+          style={styles.freshness}
+          numberOfLines={1}
+          testID={`orchestration-account-caps-${row.providerId}`}
+        >
+          {t("panels.orchestration.accountCapsIn", {
+            time: formatDuration(capMinutes * 60_000),
+          })}
+        </Text>
+      ) : null}
       <AccountBudgetBody row={row} worst={worst} reset={reset} compact={compact} />
     </Pressable>
   );

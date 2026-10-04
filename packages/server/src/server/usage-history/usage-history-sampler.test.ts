@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentManager, TokenBurnMonitorAgentSummary } from "../agent/agent-manager.js";
 import type { AgentStorage } from "../agent/agent-storage.js";
 import { AgentTokenBurnMonitor } from "../agent-token-burn-monitor.js";
+import { ProviderUsageService } from "../../services/quota-fetcher/service.js";
 import { UsageHistorySampler, accountSamplesFromUsage } from "./usage-history-sampler.js";
 import { UsageHistoryStore } from "./usage-history-store.js";
 import { buildAccountUsageView } from "./usage-history-view.js";
@@ -296,5 +297,51 @@ describe("end to end: from sweeps to a time-to-cap", () => {
     expect(window?.projection.status).toBe("projected");
     expect(window?.projection.minutesToCap).toBeCloseTo(60, 0);
     expect(Date.parse(window?.projection.capsAt ?? "")).toBeCloseTo(T0 + 2 * HOUR, -3);
+  });
+});
+
+describe("the rows the real usage service hands the sampler", () => {
+  test("a Claude account row the fetcher returns without a timestamp is still a reading", async () => {
+    let usedPct = 58;
+    const service = new ProviderUsageService({
+      logger: { debug: () => undefined, warn: () => undefined, child: () => ({}) } as never,
+      now: () => T0,
+      cacheTtlMs: 0,
+      fetchers: [
+        {
+          providerId: "claude-personal",
+          displayName: "Claude Personal",
+          fetchUsage: async () => ({
+            providerId: "claude-personal",
+            displayName: "Claude Personal",
+            status: "available",
+            planLabel: "Max",
+            windows: [
+              {
+                id: "five_hour",
+                label: "Session",
+                usedPct,
+                remainingPct: 100 - usedPct,
+                resetsAt: new Date(T0 + 5 * HOUR).toISOString(),
+              },
+            ],
+          }),
+        },
+      ],
+    });
+
+    const providers = (await service.listUsage()).providers;
+    usedPct = 59;
+
+    expect(accountSamplesFromUsage(providers)).toEqual([
+      {
+        providerId: "claude-personal",
+        windowId: "five_hour",
+        label: "Session",
+        atMs: T0,
+        usedPct: 58,
+        resetsAtMs: T0 + 5 * HOUR,
+      },
+    ]);
   });
 });

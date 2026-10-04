@@ -30,6 +30,16 @@ export interface ProviderUsageListResult {
 
 const DEFAULT_PROVIDER_USAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 
+/**
+ * Stamps a row with the instant it was read, unless its fetcher already did. The usage history
+ * sampler can only place a reading in time from this field, and a row without it is dropped. It is
+ * stamped here, not on read, so a row served from the five-minute cache keeps its real age.
+ */
+function withFetchedAt(row: ProviderUsage, atMs: number): ProviderUsage {
+  if (row.fetchedAt) return row;
+  return { ...row, fetchedAt: new Date(atMs).toISOString() };
+}
+
 export class ProviderUsageService {
   private readonly logger: Logger;
   private readonly fetchers: ProviderUsageFetcher[];
@@ -88,7 +98,8 @@ export class ProviderUsageService {
     await Promise.all(
       live.map(async (fetcher) => {
         try {
-          fresh.set(fetcher.providerId, await fetcher.fetchUsage());
+          const row = await fetcher.fetchUsage();
+          fresh.set(fetcher.providerId, row && withFetchedAt(row, Date.now()));
         } catch (err) {
           this.logger.debug({ err, providerId: fetcher.providerId }, "Live usage read failed");
         }
@@ -109,7 +120,7 @@ export class ProviderUsageService {
     const providers = settled.flatMap((result, index): ProviderUsage[] => {
       const fetcher = this.fetchers[index];
       if (result.status === "fulfilled") {
-        return result.value ? [result.value] : [];
+        return result.value ? [withFetchedAt(result.value, nowMs)] : [];
       }
       this.logger.debug(
         { err: result.reason, providerId: fetcher.providerId },

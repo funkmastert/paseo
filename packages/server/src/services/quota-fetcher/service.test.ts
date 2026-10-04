@@ -214,6 +214,7 @@ describe("ProviderUsageService", () => {
           displayName: "GLM coding plan",
           status: "available",
           planLabel: "GLM coding plan",
+          fetchedAt: "2026-06-19T00:00:00.000Z",
           windows: [
             {
               id: "biweekly",
@@ -251,6 +252,59 @@ describe("ProviderUsageService", () => {
     const result = await service.listUsage();
 
     expect(result.providers.map((provider) => provider.providerId)).toEqual(["glm"]);
+  });
+
+  it("stamps a row its fetcher left undated with the read time, and keeps a fetcher's own stamp", async () => {
+    const service = new ProviderUsageService({
+      logger: createLogger(),
+      now: () => Date.parse("2026-06-19T00:00:00.000Z"),
+      fetchers: [
+        usageFetcher({
+          providerId: "claude-personal",
+          displayName: "Claude Personal",
+          status: "available",
+          planLabel: null,
+          windows: [{ id: "five_hour", label: "Session", usedPct: 58, remainingPct: 42 }],
+        }),
+        usageFetcher({
+          providerId: "jev",
+          displayName: "JEV",
+          status: "available",
+          planLabel: null,
+          fetchedAt: "2026-06-18T23:59:00.000Z",
+          windows: [],
+        }),
+      ],
+    });
+
+    const result = await service.listUsage();
+
+    expect(findProvider(result, "claude-personal").fetchedAt).toBe("2026-06-19T00:00:00.000Z");
+    expect(findProvider(result, "jev").fetchedAt).toBe("2026-06-18T23:59:00.000Z");
+  });
+
+  it("keeps a cached row's original read time instead of restamping it on a cache hit", async () => {
+    let now = Date.parse("2026-06-19T00:00:00.000Z");
+    const service = new ProviderUsageService({
+      logger: createLogger(),
+      now: () => now,
+      cacheTtlMs: 60_000,
+      fetchers: [
+        usageFetcher({
+          providerId: "claude-personal",
+          displayName: "Claude Personal",
+          status: "available",
+          planLabel: null,
+          windows: [{ id: "weekly", label: "Weekly", usedPct: 13, remainingPct: 87 }],
+        }),
+      ],
+    });
+
+    await service.listUsage();
+    now += 30_000;
+    const cached = await service.listUsage();
+
+    expect(findProvider(cached, "claude-personal").fetchedAt).toBe("2026-06-19T00:00:00.000Z");
   });
 
   it("caches usage until forced to refresh", async () => {
@@ -365,6 +419,7 @@ describe("ProviderUsageService", () => {
           displayName: "Codex",
           status: "available",
           planLabel: "Pro 20x",
+          fetchedAt: "2026-06-19T00:00:00.000Z",
           windows: [{ id: "weekly", label: "Weekly", usedPct: 29 }],
         },
       ],

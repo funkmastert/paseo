@@ -20,8 +20,9 @@ const dotColorMapping = (theme: Theme) => ({ fill: theme.colors.foreground });
 
 /**
  * An agent's weighted-token spend over its life, as a line, for the context meter's tooltip. It
- * fetches only while the tooltip is open, and renders nothing when the daemon predates usage
- * history or has no spend recorded for the agent, so the tooltip never grows an error row.
+ * fetches only while the tooltip is open. A daemon that predates usage history renders nothing, so
+ * the tooltip never grows an error row; a daemon that has the history but too little of it for a
+ * line says so, rather than leaving an empty gap where the graph should be.
  */
 export function AgentSpendSparkline({
   serverId,
@@ -33,9 +34,21 @@ export function AgentSpendSparkline({
   enabled: boolean;
 }) {
   const { t } = useTranslation();
-  const { data } = useUsageHistory(serverId, { agentId, enabled: enabled && Boolean(agentId) });
+  const { data, isSupported } = useUsageHistory(serverId, {
+    agentId,
+    enabled: enabled && Boolean(agentId),
+  });
   const model = buildSpendSparklineModel(data?.agent);
-  if (model.kind !== "line") return null;
+  if (!isSupported || !data) return null;
+  if (model.kind !== "line") {
+    return (
+      <>
+        <View style={styles.divider} />
+        <Text style={styles.title}>{t("contextWindow.spendTitle")}</Text>
+        <Text style={styles.detail}>{t("contextWindow.spendEmpty")}</Text>
+      </>
+    );
+  }
 
   const summary = t("contextWindow.spendSummary", {
     total: formatWeightedTokens(model.totalWeightedTokens),
