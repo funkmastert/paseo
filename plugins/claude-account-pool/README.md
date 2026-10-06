@@ -97,19 +97,19 @@ validates against the daemon's config schema and this plugin's policy schema:
         "extends": "claude",
         "label": "Claude (Leader)",
         "env": { "CLAUDE_CONFIG_DIR": "/Users/you/.claude-accounts/leader" },
-        "params": { "accountPool": { "role": "leader", "priority": 1 } }
+        "params": { "accountPool": { "role": "leader", "priority": 1, "email": "leader@example.com" } }
       },
       "claude-worker-1": {
         "extends": "claude",
         "label": "Claude (Worker 1)",
         "env": { "CLAUDE_CONFIG_DIR": "/Users/you/.claude-accounts/worker-1" },
-        "params": { "accountPool": { "role": "worker", "priority": 1 } }
+        "params": { "accountPool": { "role": "worker", "priority": 1, "email": "worker-1@example.com" } }
       },
       "claude-worker-2": {
         "extends": "claude",
         "label": "Claude (Worker 2)",
         "env": { "CLAUDE_CONFIG_DIR": "/Users/you/.claude-accounts/worker-2" },
-        "params": { "accountPool": { "role": "worker", "priority": 2 } }
+        "params": { "accountPool": { "role": "worker", "priority": 2, "email": "worker-2@example.com" } }
       }
     }
   },
@@ -132,7 +132,10 @@ validates against the daemon's config schema and this plugin's policy schema:
 }
 ```
 
-`role` is `"leader"` or `"worker"`. `priority` is a positive integer; it
+`role` is `"leader"` or `"worker"`. `email` is the Claude login the entry should
+be signed into. It is optional. When set, the daemon's sign-in commands
+pre-fill it, and it flags an entry whose config dir is signed into another
+login or shares one with another entry. `priority` is a positive integer; it
 breaks ties between workers with the same headroom (see [Where a spawn
 lands](#where-a-spawn-lands) — it is no longer the primary order). At most one
 entry may be the `leader`: it is the last-resort target once no worker can run
@@ -165,10 +168,15 @@ For every `CLAUDE_CONFIG_DIR` in the config:
 mkdir -p ~/.claude-accounts/worker-1
 ln -s ~/.claude/projects ~/.claude-accounts/worker-1/projects
 ln -s ~/.claude/CLAUDE.md ~/.claude-accounts/worker-1/CLAUDE.md   # if you have one
-CLAUDE_CONFIG_DIR=~/.claude-accounts/worker-1 claude /login
+CLAUDE_CONFIG_DIR=~/.claude-accounts/worker-1 claude auth login --email worker-1@example.com
 ```
 
-Sign each directory in to a different Claude account. The usage windows the
+Sign each directory in to a different Claude account, and pass its
+`--email`. The flag pre-fills the browser's sign-in page with that address,
+so a browser already signed into your main account does not sign the worker
+directory into it. Give each entry the same `email` in `config.json`.
+Two directories on one login are one budget, and the pool then has one
+account, not two. The usage windows the
 pool ranks accounts by come from that login. An entry authenticated some other
 way, such as an API key, reports no usage, and the pool places work on it
 blind. The shared `projects/` is what lets a session move between accounts,
@@ -263,7 +271,14 @@ agent spends one short turn; `paseo archive <id>` clears them away.
   is strict. See [docs/doctor.md](../../docs/doctor.md).
 - **An agent on a pooled account ends in `error` on its first turn.** That
   account is not signed in. `paseo doctor` names it and prints
-  `CLAUDE_CONFIG_DIR=<dir> claude /login`.
+  `CLAUDE_CONFIG_DIR=<dir> claude auth login --email <address>`, or
+  `claude /login` when the entry declares no `email`.
+- **Two pool entries show the same login, or a budget row says it is signed
+  into the wrong account.** The leader and a worker share one account, so
+  failover between them moves nothing. `paseo doctor` names the entry and
+  prints the sign-in command, and the orchestration panel's budget row shows
+  the same line with that command to copy. Sign the entry in again with its
+  own `--email`.
 - **Children stay on the account they asked for, and the plugin log shows
   `pool: FAIL-OPEN`.** The pool config is malformed: two `leader` entries, two
   workers with one `priority`, or a `priority` that is not a positive integer.

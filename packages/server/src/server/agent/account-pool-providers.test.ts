@@ -305,3 +305,38 @@ describe("providersShareAccount", () => {
     expect(providersShareAccount(null, null)).toBe(false);
   });
 });
+
+describe("expected identity and account key", () => {
+  it("carries params.accountPool.email as the entry's expected login", () => {
+    const entries = resolveAccountPoolEntries({
+      claude: { params: { accountPool: { role: "leader", priority: 1 } } },
+      "claude-personal": {
+        extends: "claude",
+        params: { accountPool: { role: "worker", priority: 2, email: "worker@example.com" } },
+      },
+    });
+
+    expect(entries.find((e) => e.providerId === "claude-personal")?.expectedEmail).toBe(
+      "worker@example.com",
+    );
+    expect(entries.find((e) => e.providerId === "claude")?.expectedEmail).toBeUndefined();
+  });
+
+  it("treats two config dirs with one account id as one login, whatever their emails say", () => {
+    expect(
+      providersShareAccount(
+        { state: "signed-in", accountLabel: "a@example.com", accountUuid: "uuid-1" },
+        { state: "signed-in", accountLabel: "b@example.com", accountUuid: "uuid-1" },
+      ),
+    ).toBe(true);
+  });
+
+  it("falls back to the email when an account id is not known", () => {
+    expect(
+      providersShareAccount(
+        { state: "signed-in", accountLabel: "a@example.com" },
+        { state: "signed-in", accountLabel: "a@example.com", accountUuid: null },
+      ),
+    ).toBe(true);
+  });
+});

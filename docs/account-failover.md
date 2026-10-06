@@ -42,6 +42,19 @@ A session family is the built-in provider whose client owns the transcript forma
 
 The pool is the `params.accountPool` of each Claude account entry in `agents.providers` (`{ role: "leader" | "worker", priority: <n> }`; [custom-providers.md](custom-providers.md) covers the entries themselves). A Claude account entry is the built-in `claude` entry or any entry with `extends: "claude"`. Entries without a valid `accountPool` are ignored. A pool with workers and no leader gets the built-in `claude` entry as its leader.
 
+Each entry can also declare the login it should be signed into, with `params.accountPool.email`. Sign-in commands use it: `CLAUDE_CONFIG_DIR=<dir> claude auth login --email <address>` pre-fills the OAuth page, so a browser that is signed into another account does not win by default. Without an email the command is the bare `claude /login`. The label is never parsed for one.
+
+### Which login each account is
+
+Every sweep reads each entry's `oauthAccount` from its config dir's `.claude.json` and flags two things:
+
+- **Shared login.** Two entries report one account id (email when there is no id). They share one budget, so failing over between them moves nothing. The entry whose declared email matches the login is kept; otherwise the leader is. The rest are flagged.
+- **Wrong login.** An entry declares an email and is signed into a different one.
+
+A new problem raises one `alert` push, naming the entry, the login it is on, and the command that fixes it. It re-arms when a later sweep no longer finds it. Its budget row shows the same line with the command to copy. The check is `pool-account-identity.ts`; `paseo doctor`'s `account.login` check runs the same one.
+
+The rescue filter treats two entries with one account id as one account (`providersShareAccount`, `account-pool-providers.ts`). The plugin's router counts accounts from their usage windows, so it collapses a duplicate only once the two report matching windows.
+
 ## Where a rescued agent goes
 
 A **usable** account: enabled, not the one being left, not dead this sweep, and with every usage window that limits the agent's model under 90% (`USABLE_BELOW_PCT`, `account-pool-headroom.ts`). An account at 90% is not dead, but it would cap the agent again within a turn or two, so it is never a target for a rescue or an idle move. An account whose usage cannot be read counts as usable; a failed usage poll must not strand every agent. Among equals, the one with the most budget left wins. Which role comes first depends on the agent:

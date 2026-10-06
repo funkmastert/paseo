@@ -4,7 +4,10 @@ import pLimit from "p-limit";
 import {
   buildAccountFailoverNotificationPayload,
   buildAccountFailoverReturnNotificationPayload,
+  buildAccountIdentityNotificationPayload,
 } from "@getpaseo/protocol/account-failover-notification";
+import { homedir } from "node:os";
+import path from "node:path";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type { AccountFailoverAgentSummary, AgentManager } from "./agent/agent-manager.js";
 import type { AgentAccountAuth } from "./agent/agent-sdk-types.js";
@@ -28,6 +31,13 @@ import {
   resolveAccountPoolEntries,
   type AccountPoolProviderEntry,
 } from "./agent/account-pool-providers.js";
+import {
+  findPoolAccountIdentityProblems,
+  PoolAccountIdentityTracker,
+  type PoolAccountIdentityProblem,
+  type PoolAccountReading,
+} from "./agent/pool-account-identity.js";
+import { deriveClaudeProviderEntries } from "../services/quota-fetcher/manifest.js";
 import {
   migrateStuckAgent,
   rehomeIdleAgent,
@@ -119,6 +129,11 @@ export interface AccountFailoverMonitorOptions {
   isClaimedByRestartRecovery?: (agentId: string) => boolean;
   /** The daemon's shared ResumePacer; every resume prompt this monitor sends goes through it. */
   paceResume?: PaceResume;
+  /**
+   * Standing account-identity problems. Shared with the provider-usage service, which shows them on
+   * the budget rows; the monitor raises the push when one first appears.
+   */
+  accountIdentity?: PoolAccountIdentityTracker;
   sweepIntervalMs?: number;
   reactiveSignalTtlMs?: number;
   now?: () => number;
@@ -171,6 +186,7 @@ export class AccountFailoverMonitor {
   private readonly sweepIntervalMs: number;
   private readonly reactiveSignalTtlMs: number;
   private readonly now: () => number;
+  private readonly accountIdentity: PoolAccountIdentityTracker;
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweepInFlight = false;
   private sightings = new Map<string, LimitErrorSighting>();
@@ -197,6 +213,7 @@ export class AccountFailoverMonitor {
     this.sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     this.reactiveSignalTtlMs = options.reactiveSignalTtlMs ?? DEFAULT_REACTIVE_SIGNAL_TTL_MS;
     this.now = options.now ?? Date.now;
+    this.accountIdentity = options.accountIdentity ?? new PoolAccountIdentityTracker();
   }
 
   start(): void {
@@ -234,6 +251,11 @@ export class AccountFailoverMonitor {
 
   private async sweep(): Promise<void> {
     const daemonConfig = this.options.readDaemonConfig();
+    // Before the enabled check: an identity problem is worth a push whether or not failover moves
+    // anything. Its own failure must not stop the sweep it rides on.
+    await this.observeAccountIdentity(daemonConfig.providers).catch((error) => {
+      this.options.logger.warn({ err: error }, "Account identity check failed");
+    });
     if (daemonConfig.accountFailover?.enabled === false) {
       return;
     }
@@ -619,6 +641,49 @@ export class AccountFailoverMonitor {
   }
 
   /**
+   * Reads each pool entry's login and raises one push per problem that is new this sweep. Problems
+   * are re-derived every sweep, so an entry that is fixed clears on its own and re-arms.
+   */
+  private async observeAccountIdentity(
+    providers: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    const entries = resolveAccountPoolEntries(providers);
+    const dirs = new Map(
+      deriveClaudeProviderEntries(providers).map((entry) => [entry.providerId, entry.claudeHome]),
+    );
+    const readings: PoolAccountReading[] = await Promise.all(
+      entries.map(async (entry) => ({
+        providerId: entry.providerId,
+        role: entry.role,
+        configDir: expandHome(dirs.get(entry.providerId) ?? defaultClaudeDir(entry.providerId)),
+        expectedEmail: entry.expectedEmail ?? null,
+        auth: await this.options.agentManager.describeProviderAccount(entry.providerId),
+      })),
+    );
+    const raised = this.accountIdentity.observe(findPoolAccountIdentityProblems(readings));
+    for (const problem of raised) {
+      await this.notifyAccountIdentity(problem);
+    }
+  }
+
+  private async notifyAccountIdentity(problem: PoolAccountIdentityProblem): Promise<void> {
+    try {
+      await this.options.pushNotificationSender.send(
+        buildAccountIdentityNotificationPayload({
+          serverId: this.options.serverId,
+          providerId: problem.providerId,
+          kind: problem.kind,
+          summary: problem.summary,
+          fixCommand: problem.fixCommand,
+        }),
+        { level: "alert", dedupeKey: `account-identity:${problem.providerId}` },
+      );
+    } catch (error) {
+      this.options.logger.warn({ err: error }, "Account identity: push notification failed");
+    }
+  }
+
+  /**
    * Which Claude login each pool account is signed into, so two providers that turn out to be one
    * account are never a rescue target for each other. A file read per
    * entry (docs/providers.md), so it is cheap enough to do every sweep and does not need caching.
@@ -973,4 +1038,16 @@ function strandingEvidence(input: {
     "Stranded agents:",
     ...lines,
   ].join("\n");
+}
+
+/** `~/` in a config path, expanded the way the sign-in command needs it. */
+function expandHome(value: string | undefined): string | null {
+  if (!value) return null;
+  return value === "~" || value.startsWith("~/") ? path.join(homedir(), value.slice(1)) : value;
+}
+
+/** The directory the built-in `claude` entry reads when its config sets none. */
+function defaultClaudeDir(providerId: string): string | undefined {
+  if (providerId !== "claude") return undefined;
+  return process.env["CLAUDE_CONFIG_DIR"] ?? path.join(homedir(), ".claude");
 }

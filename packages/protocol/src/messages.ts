@@ -7034,6 +7034,16 @@ export const ProviderUsageDetailSchema = z.object({
   tone: ProviderUsageToneSchema.optional(),
 });
 
+/**
+ * A pool account whose login is not the one it should be, or is the same login as another entry.
+ * Only set while the daemon's sweep still finds it; a row without it is a healthy account.
+ */
+export const ProviderUsageAccountIdentitySchema = z.object({
+  kind: z.enum(["shared-login", "wrong-login"]),
+  summary: z.string(),
+  fixCommand: z.string(),
+});
+
 export const ProviderUsageSchema = z.object({
   providerId: z.string(),
   displayName: z.string(),
@@ -7046,6 +7056,7 @@ export const ProviderUsageSchema = z.object({
   balances: z.array(ProviderUsageBalanceSchema).optional(),
   details: z.array(ProviderUsageDetailSchema).optional(),
   error: z.string().nullable().optional(),
+  accountIdentity: ProviderUsageAccountIdentitySchema.optional(),
 });
 
 export const ProviderUsageListResponseMessageSchema = z.object({

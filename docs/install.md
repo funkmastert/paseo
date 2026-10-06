@@ -77,7 +77,7 @@ On Windows, which the plugin README has not been tested on:
 - **Sign in from PowerShell.** Step 3's command is POSIX shell. The PowerShell form, also untested:
 
   ```powershell
-  $env:CLAUDE_CONFIG_DIR = "$HOME\.claude-accounts\worker-1"; claude /login; Remove-Item Env:CLAUDE_CONFIG_DIR
+  $env:CLAUDE_CONFIG_DIR = "$HOME\.claude-accounts\worker-1"; claude auth login --email <worker-address>; Remove-Item Env:CLAUDE_CONFIG_DIR
   ```
 
 - **Check the links.** Step 3 links each account's `projects/` and `CLAUDE.md` to `~/.claude` with `ln -s`. Unknown: whether Git Bash's `ln -s` makes a link or a copy on your machine. `paseo doctor` reports an account whose `projects/` is not a link to `~/.claude/projects`.

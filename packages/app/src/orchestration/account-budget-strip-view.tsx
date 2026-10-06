@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useMemo, useState } from "react";
+import * as Clipboard from "expo-clipboard";
 import { ChevronRight } from "lucide-react-native";
 import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
@@ -7,6 +8,7 @@ import { useIsCompactFormFactor } from "@/constants/layout";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useCompactTimeAgo } from "@/hooks/use-compact-time-ago";
+import { useToast } from "@/contexts/toast-context";
 import { formatPct, formatResetLabel } from "@/provider-usage/format";
 import { ProviderUsageMeter, ProviderUsageWindowBar } from "@/provider-usage/window-bar";
 import type { Theme } from "@/styles/theme";
@@ -17,6 +19,7 @@ import {
   type AccountBalanceViewModel,
   type AccountBudgetRowViewModel,
   type AccountDetailViewModel,
+  type AccountIdentityViewModel,
   type AccountPoolRole,
   type AccountUsageCount,
   type WorstBudgetWindow,
@@ -296,6 +299,44 @@ function AccountBudgetBody({
   );
 }
 
+/**
+ * The daemon found this pool entry on the wrong login. The fix is a command to run on the host, so
+ * the row offers it as a copy rather than an action.
+ */
+function AccountIdentityNotice({
+  providerId,
+  identity,
+}: {
+  providerId: string;
+  identity: AccountIdentityViewModel;
+}) {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const handleCopy = useCallback(() => {
+    void (async () => {
+      try {
+        await Clipboard.setStringAsync(identity.fixCommand);
+        toast.copied(t("panels.orchestration.identityCopied"));
+      } catch {
+        toast.error(t("panels.orchestration.identityCopyError"));
+      }
+    })();
+  }, [identity.fixCommand, t, toast]);
+  return (
+    <View style={styles.identityNotice} testID={`orchestration-account-identity-${providerId}`}>
+      <Text style={styles.identityText}>{identity.summary}</Text>
+      <Pressable
+        onPress={handleCopy}
+        accessibilityRole="button"
+        accessibilityLabel={t("panels.orchestration.identityCopyFix")}
+        testID={`orchestration-account-identity-copy-${providerId}`}
+      >
+        <Text style={styles.identityCopy}>{identity.fixCommand}</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 function AccountBudgetRow({
   row,
   serverId,
@@ -354,6 +395,9 @@ function AccountBudgetRow({
         ) : null}
         {isJev ? <ThemedChevronRight size={14} uniProps={mutedIconColor} /> : null}
       </View>
+      {row.identity ? (
+        <AccountIdentityNotice providerId={row.providerId} identity={row.identity} />
+      ) : null}
       {row.usage ? <AccountPresence providerId={row.providerId} usage={row.usage} /> : null}
       {capMinutes != null && row.kind === "available" ? (
         <Text
@@ -498,5 +542,17 @@ const styles = StyleSheet.create((theme) => ({
   muted: {
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
+  },
+  identityNotice: {
+    gap: 2,
+  },
+  identityText: {
+    color: theme.colors.statusWarning,
+    fontSize: theme.fontSize.sm,
+  },
+  identityCopy: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    fontFamily: "monospace",
   },
 }));

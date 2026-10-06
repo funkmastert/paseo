@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { readClaudeAccountAuth } from "./account-auth.js";
+import { claudeSignInCommand, readClaudeAccountAuth } from "./account-auth.js";
 
 const dirs: string[] = [];
 
@@ -32,6 +32,7 @@ describe("readClaudeAccountAuth", () => {
     expect(readClaudeAccountAuth(dir)).toEqual({
       state: "signed-in",
       accountLabel: "worker@example.com",
+      accountUuid: "u",
     });
   });
 
@@ -49,6 +50,7 @@ describe("readClaudeAccountAuth", () => {
     expect(readClaudeAccountAuth(configDir({ oauthAccount: { accountUuid: "u" } }))).toEqual({
       state: "signed-in",
       accountLabel: null,
+      accountUuid: "u",
     });
   });
 
@@ -66,5 +68,25 @@ describe("readClaudeAccountAuth", () => {
     writeFileSync(join(dir, ".claude.json"), "{ not json");
 
     expect(readClaudeAccountAuth(dir)).toEqual({ state: "unknown" });
+  });
+});
+
+describe("claudeSignInCommand", () => {
+  test("pre-fills the expected email so the browser does not default to another account", () => {
+    expect(claudeSignInCommand("/home/u/.claude-personal", "worker@example.com")).toBe(
+      "CLAUDE_CONFIG_DIR=/home/u/.claude-personal claude auth login --email worker@example.com",
+    );
+  });
+
+  test("falls back to the bare command when no email is known", () => {
+    expect(claudeSignInCommand("/home/u/.claude-personal", null)).toBe(
+      "CLAUDE_CONFIG_DIR=/home/u/.claude-personal claude /login",
+    );
+  });
+
+  test("quotes an email that is not a plain shell word", () => {
+    expect(claudeSignInCommand("/c", "o'brien@example.com")).toBe(
+      "CLAUDE_CONFIG_DIR=/c claude auth login --email 'o'\\''brien@example.com'",
+    );
   });
 });

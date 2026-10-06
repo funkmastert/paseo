@@ -127,6 +127,7 @@ describe("buildAccountBudgetRows", () => {
       {
         kind: "unavailable",
         providerId: "claude",
+        identity: null,
         section: "claude",
         label: "Claude",
         plan: null,
@@ -134,6 +135,30 @@ describe("buildAccountBudgetRows", () => {
         usage: null,
       },
     ]);
+  });
+
+  it("carries the daemon's account-identity problem onto the row, with its fix command", () => {
+    const providers = [
+      usage({
+        providerId: "claude-personal",
+        accountIdentity: {
+          kind: "wrong-login",
+          summary: "claude-personal is signed into tyler@example.com, not worker@example.com",
+          fixCommand:
+            "CLAUDE_CONFIG_DIR=/home/u/.claude-personal claude auth login --email worker@example.com",
+        },
+      }),
+      usage({ providerId: "claude" }),
+    ];
+
+    const rows = buildAccountBudgetRows(providers, ["claude", "claude-personal"], []);
+
+    expect(rows.find((row) => row.providerId === "claude-personal")?.identity).toEqual({
+      summary: "claude-personal is signed into tyler@example.com, not worker@example.com",
+      fixCommand:
+        "CLAUDE_CONFIG_DIR=/home/u/.claude-personal claude auth login --email worker@example.com",
+    });
+    expect(rows.find((row) => row.providerId === "claude")?.identity).toBeNull();
   });
 
   it("keeps every requested account, as an unavailable row when the usage endpoint has no entry for it", () => {

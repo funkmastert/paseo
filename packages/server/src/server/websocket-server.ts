@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import type { AgentManager, AgentMetricsSnapshot } from "./agent/agent-manager.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
+import { PoolAccountIdentityTracker } from "./agent/pool-account-identity.js";
 import type { DownloadTokenStore } from "./file-download/token-store.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type pino from "pino";
@@ -613,6 +614,7 @@ export class VoiceAssistantWebSocketServer {
   private unsubscribeSpeechReadiness: (() => void) | null = null;
   private unsubscribeDaemonConfigChange: (() => void) | null = null;
   private readonly providerUsageService: ProviderUsageService;
+  private readonly accountIdentity = new PoolAccountIdentityTracker();
   private readonly usageHistoryStore: UsageHistoryStore;
   private readonly contextUsageService: AgentContextUsageService;
   private unsubscribeTerminalActivity: (() => void) | null = null;
@@ -794,6 +796,7 @@ export class VoiceAssistantWebSocketServer {
     this.providerUsageService = new ProviderUsageService({
       logger: this.logger,
       claudeDerivedProviders: deriveClaudeProviderEntries(this.daemonConfigStore.get().providers),
+      accountIdentity: this.accountIdentity,
       // Re-read from config.json each fetch: the key is named there, never stored.
       readOpenAiApiConfig: () => {
         try {
@@ -1009,6 +1012,11 @@ export class VoiceAssistantWebSocketServer {
    * instance that would double-hit the Claude usage API. */
   public getProviderUsageService(): ProviderUsageService {
     return this.providerUsageService;
+  }
+
+  /** The standing account-identity problems the failover sweep maintains (docs/account-failover.md). */
+  public getAccountIdentity(): PoolAccountIdentityTracker {
+    return this.accountIdentity;
   }
 
   /** The usage-history store this instance owns: the sampler in AgentTokenBurnMonitor writes it and

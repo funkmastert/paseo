@@ -176,6 +176,26 @@ describe("account login", () => {
     expect(twin?.why).toMatch(/one budget/);
   });
 
+  it("names the declared email in the sign-in fix, and flags a dir signed into another login", async () => {
+    const fx = makeFixture();
+    const config = poolConfig(fx) as {
+      agents: { providers: Record<string, { params?: unknown }> };
+    };
+    config.agents.providers["claude-personal"]!.params = {
+      accountPool: { role: "worker", priority: 1, email: "worker@example.com" },
+    };
+    writeConfig(fx, config);
+    makeAccountDir(path.join(fx.home, ".claude-leader"), { email: "leader@example.com" });
+    makeAccountDir(path.join(fx.home, ".claude-personal"), { email: "leader@example.com" });
+    makeAccountDir(path.join(fx.home, ".claude"), { email: "backup@example.com" });
+    const findings = await accountLoginCheck.run(makeContext(fx), Date.now() + 5000);
+    const personal = findings.find((f) => f.title.includes(".claude-personal ("));
+    expect(personal?.status).toBe("warn");
+    expect(personal?.fix).toBe(
+      `CLAUDE_CONFIG_DIR=${path.join(fx.home, ".claude-personal")} claude auth login --email worker@example.com`,
+    );
+  });
+
   it("keeps a provider's own keychainService override", async () => {
     const fx = makeFixture();
     const config = poolConfig(fx) as {

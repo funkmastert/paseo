@@ -1069,6 +1069,36 @@ describe("AccountFailoverMonitor (e2e)", () => {
     expect(strandedObservations(harness)).toHaveLength(count);
   });
 
+  test("pushes once when a pool entry shares another's login, and again only after it clears", async () => {
+    const shared: AgentAccountAuth = {
+      state: "signed-in",
+      accountLabel: "tyler@example.com",
+      accountUuid: "uuid-1",
+    };
+    harness.setAccount("claude", shared);
+    harness.setAccount("claude-personal", { ...shared });
+    harness.setAccount("claude-backup", {
+      state: "signed-in",
+      accountLabel: "worker@example.com",
+      accountUuid: "uuid-2",
+    });
+    const identityPushes = () =>
+      harness.pushes.filter((push) => push.data?.reason === "account_identity");
+
+    await harness.sweep();
+    expect(identityPushes()).toHaveLength(1);
+    expect(identityPushes()[0]?.body).toContain("claude-personal is signed into tyler@example.com");
+
+    await harness.sweep();
+    expect(identityPushes()).toHaveLength(1);
+
+    harness.setAccount("claude-personal", { ...shared, accountUuid: "uuid-3" });
+    await harness.sweep();
+    harness.setAccount("claude-personal", { ...shared });
+    await harness.sweep();
+    expect(identityPushes()).toHaveLength(2);
+  });
+
   test("treats two providers signed into one Claude account as one account", async () => {
     // Tyler's live shape: ~/.claude-personal and ~/.claude-leader on the same login. Their usage
     // windows are the same windows, so moving between them buys no budget at all.

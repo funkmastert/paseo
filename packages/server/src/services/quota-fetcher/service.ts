@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import type { ProviderUsage } from "../../server/messages.js";
+import type { PoolAccountIdentityTracker } from "../../server/agent/pool-account-identity.js";
 import type { ClaudeDerivedProviderEntry } from "./manifest.js";
 import { createProviderUsageFetchers } from "./manifest.js";
 import type {
@@ -21,6 +22,8 @@ export interface ProviderUsageServiceOptions {
   /** `agents.providerUsage.openaiApi`, read on every fetch. */
   readOpenAiApiConfig?: () => OpenAiApiUsageConfig | undefined;
   readJevStatus?: ProviderUsageFetcherFactoryOptions["readJevStatus"];
+  /** Standing account-identity problems, attached to each pool row at read time. */
+  accountIdentity?: PoolAccountIdentityTracker;
 }
 
 export interface ProviderUsageListResult {
@@ -47,9 +50,11 @@ export class ProviderUsageService {
   private readonly now: () => number;
   private cached: { fetchedAtMs: number; result: ProviderUsageListResult } | null = null;
   private inFlight: Promise<ProviderUsageListResult> | null = null;
+  private readonly accountIdentity: PoolAccountIdentityTracker | undefined;
 
   constructor(options: ProviderUsageServiceOptions) {
     this.logger = options.logger.child({ module: "provider-usage-service" });
+    this.accountIdentity = options.accountIdentity;
     this.fetchers =
       options.fetchers ??
       createProviderUsageFetchers(
@@ -66,6 +71,34 @@ export class ProviderUsageService {
   }
 
   async listUsage(options?: { forceRefresh?: boolean }): Promise<ProviderUsageListResult> {
+    return this.withAccountIdentity(await this.readUsage(options));
+  }
+
+  /**
+   * Identity is read per call, not cached with the rows: a login fixed in the last minute must not
+   * keep showing for five.
+   */
+  private withAccountIdentity(result: ProviderUsageListResult): ProviderUsageListResult {
+    if (!this.accountIdentity) return result;
+    const tracker = this.accountIdentity;
+    return {
+      ...result,
+      providers: result.providers.map((row) => {
+        const problem = tracker.problemFor(row.providerId);
+        if (!problem) return row;
+        return {
+          ...row,
+          accountIdentity: {
+            kind: problem.kind,
+            summary: problem.summary,
+            fixCommand: problem.fixCommand,
+          },
+        };
+      }),
+    };
+  }
+
+  private async readUsage(options?: { forceRefresh?: boolean }): Promise<ProviderUsageListResult> {
     const nowMs = this.now();
     if (
       !options?.forceRefresh &&

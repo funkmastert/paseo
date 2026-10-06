@@ -174,3 +174,55 @@ export function buildAccountFailoverReturnNotificationPayload(
     },
   };
 }
+
+/**
+ * `data.reason` for the account-identity push: a pool entry is signed into the wrong login, or
+ * shares one with another entry. Like the pool-exhausted reason, nothing to open, so no agent id.
+ */
+export type AccountIdentityNotificationReason = "account_identity";
+
+export interface AccountIdentityNotificationData {
+  [key: string]: unknown;
+  serverId: string;
+  reason: AccountIdentityNotificationReason;
+  providerId: string;
+  kind: "shared-login" | "wrong-login";
+}
+
+export interface AccountIdentityNotificationPayload {
+  title: string;
+  body: string;
+  data: AccountIdentityNotificationData;
+}
+
+interface BuildAccountIdentityNotificationPayloadInput {
+  serverId: string;
+  providerId: string;
+  kind: "shared-login" | "wrong-login";
+  /** One line from the identity check: what is wrong and on which login. */
+  summary: string;
+  /** The exact command to run, so the push is actionable without opening the daemon. */
+  fixCommand: string;
+}
+
+/**
+ * A pool account is not the login it is meant to be. Raised once per episode by the account
+ * failover sweep; the budget row keeps showing it until it clears.
+ */
+export function buildAccountIdentityNotificationPayload(
+  input: BuildAccountIdentityNotificationPayloadInput,
+): AccountIdentityNotificationPayload {
+  return {
+    title:
+      input.kind === "shared-login"
+        ? "Two Claude accounts are one login"
+        : "A Claude account is signed into the wrong login",
+    body: `${input.summary}. Run: ${input.fixCommand}`,
+    data: {
+      serverId: input.serverId,
+      reason: "account_identity",
+      providerId: input.providerId,
+      kind: input.kind,
+    },
+  };
+}

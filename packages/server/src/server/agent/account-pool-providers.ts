@@ -14,6 +14,11 @@ const AccountPoolSchema = z
   .object({
     role: z.enum(["leader", "worker"]).optional(),
     priority: z.number().optional(),
+    /**
+     * The login this entry is meant to be signed into. Read by the account-identity check
+     * (`pool-account-identity.ts`) and by sign-in commands; routing does not use it.
+     */
+    email: z.string().min(1).optional(),
   })
   .passthrough();
 
@@ -27,6 +32,8 @@ export interface AccountPoolProviderEntry {
   providerId: string;
   role: "leader" | "worker";
   priority: number;
+  /** `params.accountPool.email`, when the entry declares which login it should be. */
+  expectedEmail?: string | null;
   /** `enabled: false` hides a provider from the app/CLI (docs/custom-providers.md); it is
    * never a valid migration target even if otherwise healthy. */
   enabled: boolean;
@@ -70,6 +77,7 @@ export function resolveAccountPoolEntries(
       providerId,
       role: pool.role,
       priority: pool.priority,
+      ...(pool.email ? { expectedEmail: pool.email } : {}),
       enabled: result.data.enabled !== false,
     });
   }
@@ -147,8 +155,13 @@ export function pickFailoverTarget(
   return ranked[0]?.providerId ?? null;
 }
 
-function accountKeyOf(auth: AgentAccountAuth | null | undefined): string | null {
-  return auth?.state === "signed-in" ? auth.accountLabel : null;
+/**
+ * The login an account is, as far as the CLI says: its account id when it has one, else its email.
+ * Two config dirs with the same key are one budget.
+ */
+export function accountKeyOf(auth: AgentAccountAuth | null | undefined): string | null {
+  if (auth?.state !== "signed-in") return null;
+  return auth.accountUuid ?? auth.accountLabel;
 }
 
 /**
