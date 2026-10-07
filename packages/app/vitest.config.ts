@@ -154,6 +154,35 @@ export default defineConfig({
         find: /^expo-linking$/,
         replacement: path.resolve(__dirname, "test-stubs/expo-linking.ts"),
       },
+      // Ships untranspiled JSX in .js files and pulls in react-native-screens, which esbuild's
+      // browser-mode dependency scan can't parse — it kills collection for every browser test
+      // file, not just the ones that reach this import. Only `router` is used off this path today.
+      {
+        find: /^expo-router$/,
+        replacement: path.resolve(__dirname, "test-stubs/expo-router.ts"),
+      },
+      // Pulls in expo-modules-core, which needs `TurboModuleRegistry` off the real react-native —
+      // not provided by the react-native-web stub below, so it also kills browser collection.
+      {
+        find: /^expo-constants$/,
+        replacement: path.resolve(__dirname, "test-stubs/expo-constants.ts"),
+      },
+      // Same `TurboModuleRegistry` problem as expo-constants above, reached directly by
+      // src/performance/native-trace.ts.
+      {
+        find: /^expo-modules-core$/,
+        replacement: path.resolve(__dirname, "test-stubs/expo-modules-core.ts"),
+      },
+      // expo-file-system's legacy shim needs more off expo-modules-core than the stub above
+      // provides, reached by src/attachments/attachment-file-system.ts.
+      {
+        find: /^expo-file-system\/legacy$/,
+        replacement: path.resolve(__dirname, "test-stubs/expo-file-system-legacy.ts"),
+      },
+      {
+        find: /^expo-file-system$/,
+        replacement: path.resolve(__dirname, "test-stubs/expo-file-system.ts"),
+      },
       // Ships untranspiled JSX in a .js file, which esbuild's dependency scan refuses to parse.
       {
         find: /^expo-clipboard$/,
