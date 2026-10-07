@@ -29,6 +29,18 @@ export function statusText(t: TFunction, row: McpStatusRow): string {
 }
 
 /**
+ * A connected-group row's trailing status, or nothing when it is plain "Connected": nine of those
+ * in a column repeat what the green dots already say. Reporters keep it, because on a server the
+ * gateway calls healthy they are the only sign of trouble.
+ */
+export function compactStatusText(t: TFunction, row: McpStatusRow): string | null {
+  if (row.statusKey === "connected" && !reportedByText(t, row)) {
+    return null;
+  }
+  return statusText(t, row);
+}
+
+/**
  * The line under a row's name: what went wrong when something has, otherwise the status. Never
  * both — "Needs sign-in" over "Sign-in failed: …" says the same thing twice.
  */

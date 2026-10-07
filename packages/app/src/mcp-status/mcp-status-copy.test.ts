@@ -4,6 +4,7 @@ import { en } from "@/i18n/resources/en";
 import {
   actionLabelText,
   clientCredentialsSnippet,
+  compactStatusText,
   failureClipboardText,
   failureText,
   headlineText,
@@ -361,5 +362,37 @@ describe("actionLabelText", () => {
   it("calls the claude.ai hand-off a sign-in too, and keeps Broker & sign in", () => {
     expect(actionLabelText(t, row(undefined, { action: "openClaudeAi" }))).toBe("Sign in");
     expect(actionLabelText(t, row(undefined, { action: "adopt" }))).toBe("Broker & sign in");
+  });
+});
+
+describe("compactStatusText", () => {
+  function healthyRow(overrides: Partial<McpStatusRow> = {}): McpStatusRow {
+    return brokeredRow({
+      key: "server:zeeq",
+      name: "zeeq",
+      tone: "ok",
+      statusKey: "connected",
+      annotation: undefined,
+      ...overrides,
+    });
+  }
+
+  it("says nothing for a plain connected server, which the green dot already says", () => {
+    expect(compactStatusText(t, healthyRow())).toBeNull();
+  });
+
+  it("names any state the dot does not", () => {
+    expect(compactStatusText(t, healthyRow({ statusKey: "connecting", tone: "default" }))).toBe(
+      "Connecting",
+    );
+    expect(compactStatusText(t, healthyRow({ statusKey: "disabled", tone: "default" }))).toBe(
+      "Disabled",
+    );
+  });
+
+  it("keeps the reporters on a connected server, where they are the only sign of trouble", () => {
+    expect(compactStatusText(t, healthyRow({ annotation: annotation() }))).toBe(
+      "Connected · Amp analyst on claude-personal",
+    );
   });
 });

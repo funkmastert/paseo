@@ -14,6 +14,107 @@ import {
 } from "./mcp-status-strip-model";
 import { McpStatusStripView, type McpStatusStripViewProps } from "./mcp-status-strip-view";
 
+// The shared stubs draw no icons and drop `uniProps`, which would leave the chevrons and button
+// icons out of the captures. Here the strip's icons draw lucide's own path data (lucide-react's
+// components would bring a second React), coloured the way the theme mapping would colour them;
+// every other name falls back to the stub.
+vi.mock("lucide-react-native", async (importOriginal) => {
+  const { createElement, forwardRef } = await import("react");
+  type IconNode = Array<[string, Record<string, string>]>;
+  const paths: Record<string, IconNode> = {
+    ChevronDown: [["path", { d: "m6 9 6 6 6-6" }]],
+    ChevronUp: [["path", { d: "m18 15-6-6-6 6" }]],
+    Copy: [
+      ["rect", { width: "14", height: "14", x: "8", y: "8", rx: "2", ry: "2" }],
+      ["path", { d: "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" }],
+    ],
+    ExternalLink: [
+      ["path", { d: "M15 3h6v6" }],
+      ["path", { d: "M10 14 21 3" }],
+      ["path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }],
+    ],
+    EyeOff: [
+      [
+        "path",
+        {
+          d: "M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49",
+        },
+      ],
+      ["path", { d: "M14.084 14.158a3 3 0 0 1-4.242-4.242" }],
+      [
+        "path",
+        {
+          d: "M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143",
+        },
+      ],
+      ["path", { d: "m2 2 20 20" }],
+    ],
+    KeyRound: [
+      [
+        "path",
+        {
+          d: "M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z",
+        },
+      ],
+      ["circle", { cx: "16.5", cy: "7.5", r: ".5", fill: "currentColor" }],
+    ],
+    Server: [
+      ["rect", { width: "20", height: "8", x: "2", y: "2", rx: "2", ry: "2" }],
+      ["rect", { width: "20", height: "8", x: "2", y: "14", rx: "2", ry: "2" }],
+      ["line", { x1: "6", x2: "6.01", y1: "6", y2: "6" }],
+      ["line", { x1: "6", x2: "6.01", y1: "18", y2: "18" }],
+    ],
+  };
+  // forwardRef, like the real icons: <Button> reads a plain one-argument function as a render
+  // callback and would hand it a colour string.
+  function drawIcon(node: IconNode) {
+    const children = node.map(([tag, attrs], index) =>
+      createElement(tag, { ...attrs, key: index }),
+    );
+    return forwardRef<SVGSVGElement, { size?: number; color?: string }>(
+      ({ size = 24, color = "currentColor" }, ref) =>
+        createElement(
+          "svg",
+          {
+            ref,
+            width: size,
+            height: size,
+            viewBox: "0 0 24 24",
+            fill: "none",
+            stroke: color,
+            strokeWidth: 2,
+            strokeLinecap: "round",
+            strokeLinejoin: "round",
+          },
+          children,
+        ),
+    );
+  }
+  const icons = Object.fromEntries(
+    Object.entries(paths).map(([name, node]) => [name, drawIcon(node)]),
+  );
+  return { ...(await importOriginal<Record<string, unknown>>()), ...icons };
+});
+vi.mock("react-native-unistyles", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-native-unistyles")>();
+  // The stub's create() hands its factory the test theme; asking for it back is how to get it.
+  const createStyles = actual.StyleSheet.create as unknown as (
+    factory: (value: unknown) => unknown,
+  ) => unknown;
+  const theme = createStyles((value) => value);
+  interface Props {
+    uniProps?: (value: unknown) => Record<string, unknown>;
+  }
+  return {
+    ...actual,
+    withUnistyles:
+      <P extends object>(Component: React.ComponentType<P>) =>
+      ({ uniProps, ...props }: P & Props) => (
+        <Component {...(props as P)} {...(uniProps ? uniProps(theme) : {})} />
+      ),
+  };
+});
+
 // App sources compile against the classic JSX runtime, which expects React on the global.
 beforeEach(() => {
   vi.stubGlobal("React", React);
@@ -78,10 +179,10 @@ const SERVERS: McpStatusServerEntry[] = [
     "jira",
     "playwright",
     "postgres",
-    "sentry",
     "stripe",
     "zeeq",
   ].map(connected),
+  { ...connected("sentry"), status: "connecting" },
   needsAuth("figma"),
   needsAuth("linear"),
   needsAuth("notion"),
@@ -261,6 +362,53 @@ describe.each([
     );
   });
 
+  it("runs the second line under the button, out to the trailing rail", () => {
+    const { container } = mountStrip();
+    const trailingRail = rect(byTestId(container, "mcp-status-auth-linear")).right;
+    for (const server of ["linear", "claude.ai Robinhood"]) {
+      const secondLine = rect(byTestId(container, `mcp-status-second-line-${server}`));
+      const nameLine = rect(byTestId(container, `mcp-status-name-${server}`));
+      expect(Math.abs(secondLine.right - trailingRail)).toBeLessThanOrEqual(1);
+      // A short message is one line again: "Sign-in failed: Invalid refresh token".
+      expect(secondLine.height).toBeLessThanOrEqual(nameLine.height + 1);
+    }
+  });
+
+  it("keeps More muted and on the line right under the sentence it opens", async () => {
+    const { container } = mountStrip();
+    await settle();
+    const more = byTestId(container, "mcp-status-more-figma");
+    const secondLine = byTestId(container, "mcp-status-second-line-figma");
+    expect(getComputedStyle(more as Element).color).toBe(
+      getComputedStyle(secondLine as Element).color,
+    );
+    expect(rect(more).top - rect(secondLine).bottom).toBeLessThanOrEqual(1);
+  });
+
+  it("gives each problem row the sidebar's breathing room", () => {
+    const { container } = mountStrip();
+    const above = rect(byTestId(container, "mcp-status-second-line-linear")).bottom;
+    const below = rect(byTestId(container, "mcp-status-name-notion")).top;
+    // At least the 8px each row keeps above and below.
+    expect(below - above).toBeGreaterThanOrEqual(16);
+  });
+
+  it("sets each group's label on the name rail with its chevron beside it", () => {
+    const { container } = mountStrip({ model: model(["figma"]) });
+    const nameRail = rect(byTestId(container, "mcp-status-name-linear")).left;
+    for (const id of ["mcp-status-connected-toggle", "mcp-status-hidden-toggle"]) {
+      const toggle = byTestId(container, id);
+      const label = rect(buttonLabel(toggle));
+      const chevron = rect(toggle?.querySelector("svg") ?? null);
+      expect(Math.abs(label.left - nameRail)).toBeLessThanOrEqual(1);
+      expect(chevron.left).toBeGreaterThanOrEqual(label.right);
+      expect(chevron.left - label.right).toBeLessThanOrEqual(8);
+      expect(getComputedStyle(buttonLabel(toggle) as Element).color).toBe(
+        getComputedStyle(byTestId(container, "mcp-status-second-line-linear") as Element).color,
+      );
+    }
+  });
+
   it("ends every trailing control's ink on one rail", () => {
     const { container } = mountStrip();
     const outline = rect(byTestId(container, "mcp-status-auth-linear")).right;
@@ -272,7 +420,9 @@ describe.each([
     const { container } = mountStrip();
     expect(byTestId(container, "mcp-status-row-zeeq")).toBeNull();
     click(byTestId(container, "mcp-status-connected-toggle"));
-    expect(byTestId(container, "mcp-status-row-zeeq")?.textContent).toBe("zeeqConnected");
+    // The green dot already says connected; only a state it doesn't say gets words.
+    expect(byTestId(container, "mcp-status-row-zeeq")?.textContent).toBe("zeeq");
+    expect(byTestId(container, "mcp-status-row-sentry")?.textContent).toBe("sentryConnecting");
   });
 
   it("moves hidden rows under their own fold, where they can be unhidden", () => {

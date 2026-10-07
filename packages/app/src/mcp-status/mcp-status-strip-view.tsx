@@ -23,10 +23,10 @@ import {
 import type { Theme } from "@/styles/theme";
 import {
   actionLabelText,
+  compactStatusText,
   headlineText,
   remedyLines,
   secondLineText,
-  statusText,
 } from "./mcp-status-copy";
 import type {
   McpStatusActionFailure,
@@ -42,6 +42,8 @@ const ThemedEyeOff = withUnistyles(EyeOff);
 const foregroundMutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
 const CHEVRON_SIZE = 14;
+// The xs button's own icon size, so the chevron matches the label beside it.
+const DISCLOSURE_CHEVRON_SIZE = 12;
 const MENU_ICON_SIZE = 14;
 const DOT_SIZE = 6;
 const SECOND_LINE_CLAMP = 2;
@@ -62,9 +64,18 @@ function toneDotStyle(tone: ProviderUsageTone) {
   }
 }
 
-function StatusDot({ tone, testID }: { tone: ProviderUsageTone; testID?: string }) {
+function StatusDot({
+  tone,
+  testID,
+  tall = false,
+}: {
+  tone: ProviderUsageTone;
+  testID?: string;
+  /** On a problem row, whose first line is as tall as its button. */
+  tall?: boolean;
+}) {
   return (
-    <View style={styles.dotSlot}>
+    <View style={tall ? styles.issueDotSlot : styles.dotSlot}>
       <View testID={testID} style={[styles.dot, toneDotStyle(tone)]} />
     </View>
   );
@@ -92,7 +103,7 @@ function IssueRowTrailing({
         variant="ghost"
         size="xs"
         onPress={handleHide}
-        style={styles.trailingGhost}
+        style={styles.ghostOnRail}
         testID={`mcp-status-hide-${row.name}`}
       >
         {t("mcpStatus.hideAction")}
@@ -106,7 +117,6 @@ function IssueRowTrailing({
       leftIcon={row.action === "openClaudeAi" ? ExternalLink : KeyRound}
       onPress={handleAction}
       disabled={actionDisabled}
-      style={styles.trailingControl}
       testID={`mcp-status-auth-${row.name}`}
     >
       {actionLabelText(t, row)}
@@ -118,7 +128,7 @@ function IssueRowTrailing({
 function FailureDetails({ row, failure }: { row: McpStatusRow; failure: McpStatusActionFailure }) {
   const { t } = useTranslation();
   return (
-    <>
+    <View style={styles.failureDetails}>
       {remedyLines(t, row, failure).map((line) => (
         <View key={line.key} style={styles.remedyLine}>
           <Text style={styles.remedyLabel}>{line.label}</Text>
@@ -131,13 +141,14 @@ function FailureDetails({ row, failure }: { row: McpStatusRow; failure: McpStatu
           </Text>
         </View>
       ))}
-    </>
+    </View>
   );
 }
 
 /**
- * An unhealthy row. The dot centres on the name's line, not on the whole block; everything under
- * the name starts on the name's rail; the one trailing control ends on the strip's trailing rail.
+ * An unhealthy row. The one trailing control shares only the name's line, so everything under the
+ * name runs the full width from the name's rail to the strip's trailing rail. The dot centres on
+ * that first line, not on the whole block.
  *
  * The second line is the failure when there is one, otherwise the status, clamped to two lines.
  * Whether the clamp cut anything is measured rather than guessed — an invisible unclamped copy
@@ -193,42 +204,42 @@ function IssueRow({
   return (
     <ContextMenu>
       <ContextMenuTrigger style={styles.issueRow} testID={`mcp-status-row-${row.name}`}>
-        <StatusDot tone={row.tone} testID={`mcp-status-dot-${row.name}`} />
+        <StatusDot tone={row.tone} testID={`mcp-status-dot-${row.name}`} tall />
         <View style={styles.issueBody}>
           <View style={styles.issueHead}>
-            <View style={styles.issueText}>
-              <Text style={styles.name} numberOfLines={1} testID={`mcp-status-name-${row.name}`}>
-                {row.name}
-              </Text>
-              <Text
-                style={styles.secondLine}
-                numberOfLines={expanded ? undefined : SECOND_LINE_CLAMP}
-                selectable={expanded}
-                onLayout={handleClampedLayout}
-                testID={`mcp-status-second-line-${row.name}`}
-              >
-                {secondLine}
-              </Text>
-              {expanded ? null : (
-                <View
-                  style={styles.measureCopy}
-                  pointerEvents="none"
-                  accessible={false}
-                  aria-hidden
-                  accessibilityElementsHidden
-                  importantForAccessibility="no-hide-descendants"
-                  onLayout={handleFullLayout}
-                >
-                  <Text style={styles.secondLine}>{secondLine}</Text>
-                </View>
-              )}
-            </View>
+            <Text style={styles.name} numberOfLines={1} testID={`mcp-status-name-${row.name}`}>
+              {row.name}
+            </Text>
             <IssueRowTrailing
               row={row}
               actionDisabled={actionDisabled}
               onAction={onAction}
               onHide={onHide}
             />
+          </View>
+          <View style={styles.secondLineBlock}>
+            <Text
+              style={styles.secondLine}
+              numberOfLines={expanded ? undefined : SECOND_LINE_CLAMP}
+              selectable={expanded}
+              onLayout={handleClampedLayout}
+              testID={`mcp-status-second-line-${row.name}`}
+            >
+              {secondLine}
+            </Text>
+            {expanded ? null : (
+              <View
+                style={styles.measureCopy}
+                pointerEvents="none"
+                accessible={false}
+                aria-hidden
+                accessibilityElementsHidden
+                importantForAccessibility="no-hide-descendants"
+                onLayout={handleFullLayout}
+              >
+                <Text style={styles.secondLine}>{secondLine}</Text>
+              </View>
+            )}
           </View>
           {expanded && failure ? <FailureDetails row={row} failure={failure} /> : null}
           {canExpand || expanded ? (
@@ -251,7 +262,7 @@ function IssueRow({
                   leftIcon={Copy}
                   onPress={handleCopy}
                   accessibilityLabel={t("mcpStatus.copyError")}
-                  style={styles.compactGhost}
+                  style={styles.ghostOnRail}
                   testID={`mcp-status-copy-error-${row.name}`}
                 >
                   {t("mcpStatus.copyAction")}
@@ -274,18 +285,24 @@ function IssueRow({
   );
 }
 
-/** One line per connected, connecting or disabled server: dot, name, status trailing. */
+/**
+ * One line per connected, connecting or disabled server: dot and name, then the status only when
+ * it says more than the green dot already does.
+ */
 function CompactRow({ row }: { row: McpStatusRow }) {
   const { t } = useTranslation();
+  const status = compactStatusText(t, row);
   return (
     <View style={styles.compactRow} testID={`mcp-status-row-${row.name}`}>
       <StatusDot tone={row.tone} testID={`mcp-status-dot-${row.name}`} />
       <Text style={styles.compactName} numberOfLines={1}>
         {row.name}
       </Text>
-      <Text style={styles.compactStatus} numberOfLines={1}>
-        {statusText(t, row)}
-      </Text>
+      {status ? (
+        <Text style={styles.compactStatus} numberOfLines={1}>
+          {status}
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -303,7 +320,7 @@ function HiddenRow({ row, onUnhide }: { row: McpStatusRow; onUnhide: (name: stri
         variant="ghost"
         size="xs"
         onPress={handleUnhide}
-        style={styles.compactGhost}
+        style={styles.ghostOnRail}
         testID={`mcp-status-unhide-${row.name}`}
       >
         {t("mcpStatus.unhideAction")}
@@ -312,7 +329,10 @@ function HiddenRow({ row, onUnhide }: { row: McpStatusRow; onUnhide: (name: stri
   );
 }
 
-/** A muted "9 connected" row that opens its group. Chrome state, never persisted. */
+/**
+ * The quiet "9 connected" control that opens its group: a ghost button with its chevron beside
+ * the label, the label on the name rail. Chrome state, never persisted.
+ */
 function GroupDisclosure({
   label,
   open,
@@ -325,23 +345,28 @@ function GroupDisclosure({
   testID: string;
 }) {
   const accessibilityState = useMemo(() => ({ expanded: open }), [open]);
+  // Built here rather than at module scope, like IssueRow's menu icon.
+  const chevron = useMemo(
+    () =>
+      open ? (
+        <ThemedChevronUp size={DISCLOSURE_CHEVRON_SIZE} uniProps={foregroundMutedColorMapping} />
+      ) : (
+        <ThemedChevronDown size={DISCLOSURE_CHEVRON_SIZE} uniProps={foregroundMutedColorMapping} />
+      ),
+    [open],
+  );
   return (
-    <Pressable
+    <Button
+      variant="ghost"
+      size="xs"
       onPress={onToggle}
-      style={styles.groupToggle}
-      accessibilityRole="button"
+      trailing={chevron}
       accessibilityState={accessibilityState}
+      style={styles.groupToggle}
       testID={testID}
     >
-      <Text style={styles.groupToggleText} numberOfLines={1}>
-        {label}
-      </Text>
-      {open ? (
-        <ThemedChevronUp size={CHEVRON_SIZE} uniProps={foregroundMutedColorMapping} />
-      ) : (
-        <ThemedChevronDown size={CHEVRON_SIZE} uniProps={foregroundMutedColorMapping} />
-      )}
-    </Pressable>
+      {label}
+    </Button>
   );
 }
 
@@ -450,9 +475,9 @@ const styles = StyleSheet.create((theme) => {
   // that button's ink; the hit area grows outward instead (docs/design.md §8). The transparent
   // border stays inside, so the box never passes the strip's own edge.
   const ghostInkInset = createControlGeometry(theme).buttonXs.paddingHorizontal;
-  // Centres the xs control on the name's line rather than on the row's whole text block, the
-  // same line the dot centres on.
-  const trailingOffset = Math.round((nameLineHeight - buttonControlHeight.xs) / 2);
+  // A problem row's first line holds its button, so it is as tall as the button; the name and
+  // the dot both centre on it.
+  const issueHeadHeight = Math.max(nameLineHeight, buttonControlHeight.xs);
   // Where a row's name starts: the strip's padding, the dot, and the gap after it.
   const nameRail = theme.spacing[3] + DOT_SIZE + theme.spacing[2];
 
@@ -477,31 +502,32 @@ const styles = StyleSheet.create((theme) => {
     rowList: {
       paddingBottom: theme.spacing[1],
     },
+    // The sidebar list rhythm (docs/design.md §7): problem rows each carry their own 8px above
+    // and below. Compact rows stay tighter.
     issueRow: {
       flexDirection: "row",
       alignItems: "flex-start",
       gap: theme.spacing[2],
       paddingHorizontal: theme.spacing[3],
-      paddingVertical: theme.spacing[1.5],
+      paddingVertical: theme.spacing[2],
     },
     issueBody: {
       flex: 1,
       minWidth: 0,
-      gap: theme.spacing[1],
     },
     issueHead: {
       flexDirection: "row",
-      alignItems: "flex-start",
+      alignItems: "center",
       gap: theme.spacing[2],
+      minHeight: issueHeadHeight,
     },
-    issueText: {
-      flex: 1,
-      minWidth: 0,
-      gap: 1,
+    secondLineBlock: {
       // Clips the invisible measuring copy, which still lays out at full height.
       overflow: "hidden",
     },
     name: {
+      flex: 1,
+      minWidth: 0,
       fontSize: theme.fontSize.sm,
       lineHeight: nameLineHeight,
       color: theme.colors.foreground,
@@ -518,16 +544,14 @@ const styles = StyleSheet.create((theme) => {
       right: 0,
       opacity: 0,
     },
-    trailingControl: {
-      marginTop: trailingOffset,
-    },
-    trailingGhost: {
-      marginTop: trailingOffset,
+    ghostOnRail: {
       marginRight: -ghostInkInset,
     },
-    compactGhost: {
-      marginRight: -ghostInkInset,
+    failureDetails: {
+      gap: theme.spacing[1],
+      paddingTop: theme.spacing[1],
     },
+    // No gap above: More belongs to the sentence it opens, so it sits on the next line of it.
     disclosureLine: {
       flexDirection: "row",
       alignItems: "center",
@@ -537,7 +561,7 @@ const styles = StyleSheet.create((theme) => {
     disclosureText: {
       fontSize: theme.fontSize.sm,
       lineHeight: nameLineHeight,
-      color: theme.colors.foreground,
+      color: theme.colors.foregroundMuted,
     },
     remedyLine: {
       gap: 1,
@@ -570,21 +594,18 @@ const styles = StyleSheet.create((theme) => {
       fontSize: theme.fontSize.sm,
       color: theme.colors.foregroundMuted,
     },
+    // Pulled left by the ghost inset, so the label's ink lands on the name rail.
     groupToggle: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: theme.spacing[2],
-      minHeight: buttonControlHeight.xs,
-      paddingLeft: nameRail,
-      paddingRight: theme.spacing[3],
-    },
-    groupToggleText: {
-      flex: 1,
-      fontSize: theme.fontSize.sm,
-      color: theme.colors.foregroundMuted,
+      alignSelf: "flex-start",
+      marginLeft: nameRail - ghostInkInset,
+      gap: theme.spacing[1],
     },
     dotSlot: {
       height: nameLineHeight,
+      justifyContent: "center",
+    },
+    issueDotSlot: {
+      height: issueHeadHeight,
       justifyContent: "center",
     },
     dot: {
