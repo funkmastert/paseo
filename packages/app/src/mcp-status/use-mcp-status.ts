@@ -13,6 +13,7 @@ import { orderHostsLocalFirst, resolveActiveHostServerId } from "@/types/host-co
 import { useSessionStore } from "@/stores/session-store";
 import { useReplicaQuery } from "@/data/query";
 import { openExternalUrl } from "@/utils/open-external-url";
+import { useMcpHiddenServerNames, useMcpHiddenServersStore } from "./mcp-hidden-servers-store";
 import {
   buildMcpStatusStripModel,
   type McpStatusActionFailure,
@@ -116,6 +117,9 @@ export interface UseMcpStatusResult {
   openClaudeAiConnectors: () => Promise<void>;
   /** True while either the auth or the adopt mutation is in flight. */
   isStartingAuth: boolean;
+  /** Hides an unhealthy server on this host: out of the header's count and tone. */
+  hideServer: (name: string) => void;
+  unhideServer: (name: string) => void;
 }
 
 export function useMcpStatus(): UseMcpStatusResult {
@@ -152,6 +156,10 @@ export function useMcpStatus(): UseMcpStatusResult {
     });
   }, []);
 
+  const hiddenNames = useMcpHiddenServerNames(serverId);
+  const hide = useMcpHiddenServersStore((state) => state.hide);
+  const unhide = useMcpHiddenServersStore((state) => state.unhide);
+
   const model = useMemo(
     () =>
       buildMcpStatusStripModel({
@@ -159,8 +167,31 @@ export function useMcpStatus(): UseMcpStatusResult {
         sessionReports,
         canAdopt: supportsAdopt,
         failures,
+        hiddenNames,
       }),
-    [statusQuery.data, sessionReports, supportsAdopt, failures],
+    [statusQuery.data, sessionReports, supportsAdopt, failures, hiddenNames],
+  );
+
+  // A hidden server that connects again is released, so the next time it breaks the strip says
+  // so. Hiding is for a dead end, and one that connected was not.
+  const { recoveredHiddenNames } = model;
+  useEffect(() => {
+    if (serverId && recoveredHiddenNames.length > 0) {
+      unhide(serverId, recoveredHiddenNames);
+    }
+  }, [serverId, recoveredHiddenNames, unhide]);
+
+  const hideServer = useCallback(
+    (name: string) => {
+      if (serverId) hide(serverId, name);
+    },
+    [hide, serverId],
+  );
+  const unhideServer = useCallback(
+    (name: string) => {
+      if (serverId) unhide(serverId, [name]);
+    },
+    [unhide, serverId],
   );
 
   // Drop a row's recorded failure once the daemon's own view of that server moves on: a fresh
@@ -272,5 +303,7 @@ export function useMcpStatus(): UseMcpStatusResult {
     adoptServer,
     openClaudeAiConnectors,
     isStartingAuth: startAuthMutation.isPending || adoptMutation.isPending,
+    hideServer,
+    unhideServer,
   };
 }

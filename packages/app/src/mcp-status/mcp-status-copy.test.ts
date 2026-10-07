@@ -2,11 +2,15 @@ import { createInstance, type TFunction } from "i18next";
 import { beforeAll, describe, expect, it } from "vitest";
 import { en } from "@/i18n/resources/en";
 import {
+  actionLabelText,
   clientCredentialsSnippet,
   failureClipboardText,
   failureText,
+  headlineText,
   remedyLines,
   reportedByText,
+  secondLineText,
+  statusText,
 } from "./mcp-status-copy";
 import type {
   McpStatusActionFailure,
@@ -82,7 +86,8 @@ describe("reportedByText", () => {
       annotation: annotation({ reporterCount: 15, providerIds: ["claude-personal"] }),
     });
 
-    expect(reportedByText(t, many)).toBe("On claude-personal");
+    // Lower case: it only ever follows the status, after a separator.
+    expect(reportedByText(t, many)).toBe("on claude-personal");
   });
 
   it("names the agent and its account when only one reported", () => {
@@ -293,5 +298,68 @@ describe("failureClipboardText", () => {
     expect(copied).toContain("https://host.example/mcp/gateway/oauth/callback");
     expect(copied).toContain("/home/t/.paseo/mcp-gateway/tokens.json");
     expect(copied).toContain('"clientCredentials"');
+  });
+});
+
+describe("headlineText", () => {
+  it("names one server by what it needs", () => {
+    expect(headlineText(t, { kind: "needsSignIn", name: "linear" })).toBe("linear needs sign-in");
+    expect(headlineText(t, { kind: "needsAttention", name: "zeeq" })).toBe("zeeq needs attention");
+  });
+
+  it("counts several instead of listing names a sidebar row cannot fit", () => {
+    expect(headlineText(t, { kind: "manyNeedAttention", count: 5 })).toBe(
+      "5 MCP servers need attention",
+    );
+  });
+
+  it("counts the connected servers when nothing needs attention", () => {
+    expect(headlineText(t, { kind: "connected", count: 9 })).toBe("9 MCP servers connected");
+    expect(headlineText(t, { kind: "connected", count: 1 })).toBe("1 MCP server connected");
+  });
+});
+
+describe("statusText", () => {
+  it("says a server needs sign-in, not auth", () => {
+    expect(statusText(t, brokeredRow())).toBe("Needs sign-in");
+  });
+
+  it("calls a claude.ai connector what it is and names the account after it", () => {
+    const connector = row(undefined, {
+      key: "session:claude.ai Robinhood",
+      name: "claude.ai Robinhood",
+      statusKey: "claudeAiConnector",
+      annotation: annotation({ reporterCount: 2, providerIds: ["claude-2"] }),
+    });
+
+    expect(statusText(t, connector)).toBe("claude.ai connector · on claude-2");
+  });
+});
+
+describe("secondLineText", () => {
+  it("shows the failure in place of the status, never both", () => {
+    const failed = brokeredRow({
+      failure: failure({ reason: "authorization_failed", error: "Invalid refresh token" }),
+    });
+
+    expect(secondLineText(t, failed)).toBe("Sign-in failed: Invalid refresh token");
+  });
+
+  it("falls back to the status when nothing has failed yet", () => {
+    expect(secondLineText(t, brokeredRow())).toBe("Needs sign-in");
+  });
+});
+
+describe("actionLabelText", () => {
+  it("asks to sign in, or to sign in again after an error", () => {
+    expect(actionLabelText(t, brokeredRow({ action: "authenticate" }))).toBe("Sign in");
+    expect(actionLabelText(t, brokeredRow({ action: "authenticate", statusKey: "error" }))).toBe(
+      "Sign in again",
+    );
+  });
+
+  it("calls the claude.ai hand-off a sign-in too, and keeps Broker & sign in", () => {
+    expect(actionLabelText(t, row(undefined, { action: "openClaudeAi" }))).toBe("Sign in");
+    expect(actionLabelText(t, row(undefined, { action: "adopt" }))).toBe("Broker & sign in");
   });
 });
