@@ -199,6 +199,73 @@ describe("PhysicalDeviceLeaseManager grace period and reconciliation", () => {
   });
 });
 
+describe("PhysicalDeviceLeaseManager idle Wi-Fi devices", () => {
+  const IDLE_IPHONE: PhysicalDevice = { ...NETWORK_IPHONE, idle: true };
+
+  test("an idle Wi-Fi iPhone nobody holds or reserved is left out of the snapshot", async () => {
+    const { manager } = createManager({ devices: [IDLE_IPHONE] });
+    expect((await manager.getSnapshot()).devices).toEqual([]);
+  });
+
+  test("an idle Wi-Fi iPhone is still a checkout target, and listed once held", async () => {
+    const { manager } = createManager({ devices: [IDLE_IPHONE] });
+    const result = await manager.checkout({ agentId: "agent-1", platform: "ios" });
+    expect(result.status).toBe("granted");
+    expect((await manager.getSnapshot()).devices).toEqual([
+      expect.objectContaining({ id: IDLE_IPHONE.id, agentId: "agent-1", connected: true }),
+    ]);
+  });
+
+  test("an idle Wi-Fi iPhone drops out of the snapshot again once checked in", async () => {
+    const { manager } = createManager({ devices: [IDLE_IPHONE] });
+    await manager.checkout({ agentId: "agent-1", platform: "ios" });
+    await manager.checkin({ agentId: "agent-1" });
+    expect((await manager.getSnapshot()).devices).toEqual([]);
+  });
+
+  test("a checkout that names no device picks a phone in use before an idle one", async () => {
+    const WIRED_IPHONE: PhysicalDevice = {
+      id: "ffffffff-000FAKE00E0002",
+      platform: "ios",
+      name: "Fake Wired iPhone",
+      transport: "usb",
+    };
+    const { manager } = createManager({ devices: [IDLE_IPHONE, WIRED_IPHONE] });
+    const result = await manager.checkout({ agentId: "agent-1", platform: "ios" });
+    expect(result).toMatchObject({ status: "granted", device: { id: WIRED_IPHONE.id } });
+  });
+
+  test("an install to an idle Wi-Fi iPhone leases it to the installer, and another agent is refused", async () => {
+    const { manager } = createManager({ devices: [IDLE_IPHONE] });
+    const command = `xcrun devicectl device install app --device ${IDLE_IPHONE.id} App.app`;
+    expect(await manager.gateInstall({ agentId: "agent-1", command })).toEqual({
+      decision: "allow",
+    });
+    expect((await manager.getSnapshot()).devices).toEqual([
+      expect.objectContaining({ id: IDLE_IPHONE.id, agentId: "agent-1" }),
+    ]);
+    expect((await manager.gateInstall({ agentId: "agent-2", command })).decision).toBe("deny");
+  });
+
+  test("a held idle Wi-Fi iPhone that leaves the network keeps its holder through the grace period", async () => {
+    const { manager, state } = createManager({ devices: [IDLE_IPHONE] });
+    await manager.checkout({ agentId: "agent-1", platform: "ios" });
+
+    state.devices = [];
+    state.nowMs += 10 * MINUTE;
+    const entry = (await manager.getSnapshot()).devices[0];
+    expect(entry).toMatchObject({ id: IDLE_IPHONE.id, agentId: "agent-1", connected: false });
+    expect(entry?.graceRemainingSeconds).toBeGreaterThan(0);
+  });
+
+  test("an idle Wi-Fi iPhone reserved for Tyler stays listed", async () => {
+    const { manager } = createManager({ devices: [IDLE_IPHONE], reservedIds: [IDLE_IPHONE.id] });
+    expect((await manager.getSnapshot()).devices).toEqual([
+      expect.objectContaining({ id: IDLE_IPHONE.id, reserved: true }),
+    ]);
+  });
+});
+
 describe("PhysicalDeviceLeaseManager gateInstall", () => {
   test("installs to a free device lease it to the agent and allow", async () => {
     const { manager } = createManager({ devices: [USB_PIXEL] });

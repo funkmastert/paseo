@@ -13,10 +13,14 @@
  * are `wired` (USB), `localNetwork` (Wi-Fi) and `sameMachine` (simulators). A paired iPhone that
  * left the network has no transport and a `tunnelState` of `unavailable`. `tunnelState` is
  * otherwise about devicectl's own tunnel session — a reachable Wi-Fi iPhone reads
- * `disconnected` — so only `unavailable` means anything here.
+ * `disconnected` — so only `unavailable` rules a device out. `connected` means something is
+ * talking to it right now: a one-off `devicectl device info` call against a Wi-Fi iPhone opened
+ * the tunnel, and it read `disconnected` again within about 20 s. That is what tells a Wi-Fi
+ * iPhone in use from one that is only paired and on the same network.
  */
 
 import { z } from "zod";
+import type { PhysicalDevice } from "./physical-device-registry.js";
 
 export type DevicectlTransport = "wired" | "network";
 
@@ -31,6 +35,9 @@ export interface DevicectlPhysicalDevice {
   deviceType: string;
   serialNumber?: string;
   transport: DevicectlTransport;
+  /** Paired over Wi-Fi and reachable, but nothing has a tunnel open to it. devicectl lists such
+   * a phone for as long as it shares the Mac's network, so it is a target, not a phone in use. */
+  idle: boolean;
 }
 
 const DevicectlDeviceSchema = z.object({
@@ -81,6 +88,7 @@ function toPhysicalDevice(entry: DevicectlDeviceEntry): DevicectlPhysicalDevice 
   const transport = TRANSPORTS[connection?.transportType ?? ""];
   if (!transport || connection?.tunnelState === "unavailable") return undefined;
   const deviceName = entry.deviceProperties?.name;
+  const tunnelOpen = connection?.tunnelState === "connected";
   return {
     udid: hardware.udid,
     ...(entry.identifier ? { identifier: entry.identifier } : {}),
@@ -89,6 +97,7 @@ function toPhysicalDevice(entry: DevicectlDeviceEntry): DevicectlPhysicalDevice 
     deviceType: hardware.deviceType ?? "iPhone",
     ...(hardware.serialNumber ? { serialNumber: hardware.serialNumber } : {}),
     transport,
+    idle: transport === "network" && !tunnelOpen,
   };
 }
 
@@ -98,4 +107,21 @@ export function parseDevicectlDevicesJson(raw: unknown): DevicectlPhysicalDevice
   return (parsed.data.result?.devices ?? [])
     .map(toPhysicalDevice)
     .filter((device): device is DevicectlPhysicalDevice => device !== undefined);
+}
+
+/** The iPhones in a devicectl poll, as the physical-device gate sees them. Both of devicectl's
+ * other ids — the CoreDevice identifier and the name its owner gave the phone — are aliases. */
+export function toPhysicalIosDevices(
+  devices: readonly DevicectlPhysicalDevice[],
+): PhysicalDevice[] {
+  return devices.map((device) => ({
+    id: device.udid,
+    platform: "ios",
+    transport: device.transport === "network" ? "network" : "usb",
+    idle: device.idle,
+    name: device.name,
+    aliases: [device.identifier, device.deviceName].filter(
+      (alias): alias is string => alias !== undefined,
+    ),
+  }));
 }
