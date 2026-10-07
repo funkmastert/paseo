@@ -34,16 +34,23 @@ export function useAskJevPinnedAgents(serverId: string | null): AskJevPinnedAgen
   );
 
   // One best-effort unscoped refresh per distinct gap, so a pinned chat whose workspace was
-  // archived by housekeeping still loads — see findPinnedWorkspacesMissingAgents.
-  const attemptedKeyRef = useRef<string | null>(null);
+  // archived by housekeeping still loads — see findPinnedWorkspacesMissingAgents. The key tracks
+  // only the IN-FLIGHT request, not every attempt ever made: the ordinary scope:"active" demand
+  // refresh can later re-evict this same agent on a full-snapshot resync (a reconnect without a
+  // live directory-sync cursor), reproducing the same missing-workspace set, so a gap that was
+  // already "fixed" once must still be eligible to retry once the fetch that fixed it settles.
+  const pendingKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!serverId || missingWorkspaceIds.length === 0) return;
     const key = `${serverId}:${[...missingWorkspaceIds].sort().join(",")}`;
-    if (attemptedKeyRef.current === key) return;
-    attemptedKeyRef.current = key;
+    if (pendingKeyRef.current === key) return;
+    pendingKeyRef.current = key;
     void getHostRuntimeStore()
       .refreshAgentDirectory({ serverId, filter: {} })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        if (pendingKeyRef.current === key) pendingKeyRef.current = null;
+      });
   }, [serverId, missingWorkspaceIds]);
 
   const options = useMemo(
