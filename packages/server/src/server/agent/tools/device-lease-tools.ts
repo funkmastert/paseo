@@ -200,6 +200,7 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
         "Every iOS simulator and Android emulator running on this machine, who holds each one and for how long, " +
         "and how they count against the cap. Counted from the process list, so devices nobody checked out are included. " +
         "Also includes connected physical devices (USB/network) and who holds each — no slot cap for those. " +
+        'An iPhone that is only paired over Wi-Fi and not in use is left out; device_checkout with kind "physical" still finds it. ' +
         "Also says what the cap can and cannot do about your own device launches, which depends on which agent you are.",
       inputSchema: {},
     },

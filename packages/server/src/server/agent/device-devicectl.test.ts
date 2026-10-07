@@ -1,12 +1,13 @@
 import { describe, expect, test } from "vitest";
-import { parseDevicectlDevicesJson } from "./device-devicectl.js";
+import { parseDevicectlDevicesJson, toPhysicalIosDevices } from "./device-devicectl.js";
 
 /**
  * Shaped like a real `devicectl list devices --json-output` capture (Xcode 26, CoreDevice), with
  * fake identifiers throughout. CoreDevice's transport values are `wired`, `localNetwork` and
  * `sameMachine` (simulators); a paired device that can't be reached carries no transport and a
  * `tunnelState` of `unavailable`. A reachable Wi-Fi iPhone reads `tunnelState: "disconnected"`
- * — that field tracks devicectl's own tunnel session, not reachability.
+ * — that field tracks devicectl's own tunnel session, not reachability. It reads `connected`
+ * only while something (an install, Xcode) is talking to the phone.
  */
 function fixture() {
   return {
@@ -90,6 +91,7 @@ describe("parseDevicectlDevicesJson", () => {
         deviceType: "iPhone",
         serialNumber: "FAKESN0001",
         transport: "wired",
+        idle: false,
       },
       {
         udid: "00002345-000FAKE02E3D2DF",
@@ -98,6 +100,64 @@ describe("parseDevicectlDevicesJson", () => {
         deviceName: "Fake Wi-Fi iPhone",
         deviceType: "iPhone",
         transport: "network",
+        idle: true,
+      },
+    ]);
+  });
+
+  test("a Wi-Fi iPhone is idle until something opens a tunnel to it", () => {
+    const devices = parseDevicectlDevicesJson({
+      result: {
+        devices: [
+          {
+            hardwareProperties: { reality: "physical", udid: "in-use", deviceType: "iPhone" },
+            connectionProperties: { transportType: "localNetwork", tunnelState: "connected" },
+          },
+          {
+            hardwareProperties: { reality: "physical", udid: "paired-only", deviceType: "iPhone" },
+            connectionProperties: { transportType: "localNetwork", tunnelState: "disconnected" },
+          },
+          {
+            hardwareProperties: {
+              reality: "physical",
+              udid: "no-tunnel-field",
+              deviceType: "iPhone",
+            },
+            connectionProperties: { transportType: "localNetwork" },
+          },
+          {
+            // Plugged in: a cable is in use whatever the tunnel says.
+            hardwareProperties: { reality: "physical", udid: "wired", deviceType: "iPhone" },
+            connectionProperties: { transportType: "wired", tunnelState: "disconnected" },
+          },
+        ],
+      },
+    });
+    expect(devices.map((device) => [device.udid, device.idle])).toEqual([
+      ["in-use", false],
+      ["paired-only", true],
+      ["no-tunnel-field", true],
+      ["wired", false],
+    ]);
+  });
+
+  test("toPhysicalIosDevices carries idle, transport and both aliases through to the gate", () => {
+    expect(toPhysicalIosDevices(parseDevicectlDevicesJson(fixture()))).toEqual([
+      {
+        id: "00001234-000FAKE01E2C1CE",
+        platform: "ios",
+        transport: "usb",
+        idle: false,
+        name: "iPhone 16e",
+        aliases: ["11111111-2222-3333-4444-FAKE00000001", "Fake iPhone"],
+      },
+      {
+        id: "00002345-000FAKE02E3D2DF",
+        platform: "ios",
+        transport: "network",
+        idle: true,
+        name: "iPhone 17 Pro",
+        aliases: ["11111111-2222-3333-4444-FAKE00000002", "Fake Wi-Fi iPhone"],
       },
     ]);
   });

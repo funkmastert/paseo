@@ -18,6 +18,10 @@ export interface PhysicalDevice {
   /** Other names a command may use for this device: an iPhone's CoreDevice identifier and the
    * name its owner gave it. */
   aliases?: readonly string[];
+  /** A Wi-Fi iPhone that is reachable but not in use (device-devicectl.ts). Still a target for
+   * checkout and the install gate; the status list leaves it out unless someone holds or
+   * reserved it. */
+  idle?: boolean;
 }
 
 /** Model names come from adb with underscores (`Pixel_9_Pro_XL`); people and CLIs write them
@@ -131,7 +135,8 @@ export function reconcilePhysicalDeviceLeases(
  * The device a checkout should bind to: the one named, when it is connected, free and
  * unreserved; otherwise the longest-connected free, unreserved device of the platform (there is
  * no memory cost to weigh, so "longest connected" is just a stable, unsurprising tie-break —
- * the same device an agent asking twice in a row gets both times).
+ * the same device an agent asking twice in a row gets both times). A phone in use goes before
+ * an idle one: an idle Wi-Fi iPhone is most likely the one in Tyler's pocket.
  */
 export function selectFreePhysicalDevice(input: {
   platform: PhysicalDevicePlatform;
@@ -154,6 +159,6 @@ export function selectFreePhysicalDevice(input: {
         !held.has(device.id) &&
         !input.reservedDeviceIds.has(device.id),
     )
-    .sort((a, b) => a.id.localeCompare(b.id));
+    .sort((a, b) => Number(a.idle ?? false) - Number(b.idle ?? false) || a.id.localeCompare(b.id));
   return free[0];
 }

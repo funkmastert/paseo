@@ -477,7 +477,11 @@ export class PhysicalDeviceLeaseManager {
     const devices: PhysicalDeviceStatusEntry[] = [];
     for (const device of connected) {
       seen.add(device.id);
-      devices.push(this.toEntry(device, leaseByDeviceId.get(device.id), true, nowMs, reservedIds));
+      const lease = leaseByDeviceId.get(device.id);
+      // A phone that is only paired and on the same Wi-Fi is not a device anyone is using.
+      const claimed = lease !== undefined || reservedIds.has(device.id);
+      if (device.idle && !claimed) continue;
+      devices.push(this.toEntry(device, lease, true, nowMs, reservedIds));
     }
     for (const lease of this.leases) {
       if (seen.has(lease.deviceId)) continue;

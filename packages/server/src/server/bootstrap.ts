@@ -320,6 +320,7 @@ import {
 import { toPhysicalAndroidDevices } from "./agent/device-adb-track.js";
 import { PhysicalDeviceDetection } from "./agent/physical-device-detection.js";
 import { DevicectlPollingService } from "./agent/devicectl-polling-service.js";
+import { toPhysicalIosDevices } from "./agent/device-devicectl.js";
 import {
   createPromptQueue,
   formatSystemNotificationPrompt,
@@ -2094,15 +2095,7 @@ export async function createPaseoDaemon(
   });
   const devicectlPollingService = new DevicectlPollingService({
     onDevicesChanged: (devices) => {
-      iosPhysicalDevices = devices.map((device) => ({
-        id: device.udid,
-        platform: "ios",
-        transport: device.transport === "network" ? "network" : "usb",
-        name: device.name,
-        aliases: [device.identifier, device.deviceName].filter(
-          (alias): alias is string => alias !== undefined,
-        ),
-      }));
+      iosPhysicalDevices = toPhysicalIosDevices(devices);
     },
     logger: logger.child({ module: "devicectl-polling" }),
   });
