@@ -85,6 +85,19 @@ On Windows, which the plugin README has not been tested on:
 
 To run the daemon without the desktop app, on a server for example, follow step 1 of the same operator setup.
 
+## Set up the knowledge base
+
+The project knowledge base ([knowledge-base.md](knowledge-base.md)) ships switched off and needs [uv](https://docs.astral.sh/uv/) to install its one dependency, Basic Memory. `paseo kb setup` finds `uv` and installs the pinned release; it never installs `uv` itself.
+
+|                      | macOS                                                                                         | Windows                       |
+| -------------------- | --------------------------------------------------------------------------------------------- | ----------------------------- |
+| Install `uv`         | `brew install uv`, or the official script: `curl -LsSf https://astral.sh/uv/install.sh \| sh` | `winget install astral-sh.uv` |
+| Install Basic Memory | `paseo kb setup`                                                                              | Same                          |
+
+`paseo kb setup` runs `uv tool install basic-memory==<pin>` (the pinned version is in `packages/server/src/server/knowledge-base/basic-memory-sidecar.ts`) and prints the resolved binary path plus the `knowledgeBase` block to add to `config.json`. `uv` manages its own Python, so there is no system-Python difference to account for between macOS and Windows. Unknown: this command has not been run on Windows hardware for this fork yet.
+
+Add the printed block to `config.json`, set `"enabled": true`, then `paseo daemon reload`. `paseo kb seed "<project name>"` seeds a named project from existing material — see [knowledge-base.md](knowledge-base.md#turning-it-on).
+
 ## Verify it worked
 
 ```bash

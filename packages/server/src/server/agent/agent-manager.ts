@@ -110,7 +110,8 @@ import { findPerDirMcpServer, type PerDirMcpServerLookup } from "../mcp-gateway/
 import { McpGatewayActionError } from "../mcp-gateway/action-failure.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
-import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
+import { isPaseoToolEnabled, isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
+import { buildKnowledgeBaseSystemPrompt } from "./knowledge-base-prompt.js";
 import {
   ProviderSubagentStore,
   type ProviderSubagentDescriptor,
@@ -135,6 +136,7 @@ import type {
   HeldTurn,
 } from "./child-admission.js";
 import type { PromptQueue } from "./prompt-queue.js";
+import type { KnowledgeBaseService } from "../knowledge-base/service.js";
 import type { AgentResourceMonitorState } from "./resource-monitor-detector.js";
 import {
   isUnresponsiveCancelReason,
@@ -1324,6 +1326,10 @@ export class AgentManager {
   private physicalDeviceLeaseStatusSource: PhysicalDeviceLeaseStatusSource | null = null;
   private finishObligations: FinishObligationService | null = null;
   private childAdmission: ChildAdmissionController | null = null;
+  private knowledgeBase: Pick<
+    KnowledgeBaseService,
+    "resolveAtCreate" | "getSnapshot" | "isEnabled"
+  > | null = null;
   /** What each admitted stream started with, for a caller that has to retry the same turn. */
   private readonly admittedTurns = new WeakMap<AsyncGenerator<AgentStreamEvent>, AdmittedTurn>();
   /** Streams whose turn is the done janitor's question: quiet once the turn starts. */
@@ -1580,6 +1586,18 @@ export class AgentManager {
 
   getChildAdmission(): ChildAdmissionController | null {
     return this.childAdmission;
+  }
+
+  /**
+   * The knowledge base (docs/knowledge-base.md), set by bootstrap. A create resolves its project
+   * here once labels are final and before the first launch, so the summary snapshot is in the
+   * first system prompt (KTD-7, KTD-15). Every launch appends the guidance and that stored
+   * summary (`prepareSessionConfig`). Unset in unit tests that don't exercise it.
+   */
+  setKnowledgeBase(
+    service: Pick<KnowledgeBaseService, "resolveAtCreate" | "getSnapshot" | "isEnabled"> | null,
+  ): void {
+    this.knowledgeBase = service;
   }
 
   listAgentsForAdmission(): AdmissionAgentView[] {
@@ -2693,6 +2711,16 @@ export class AgentManager {
         options = { ...options, env: request.env, labels: request.labels };
       }
     }
+    if (!config.internal) {
+      options = {
+        ...options,
+        labels: await this.resolveKnowledgeBaseProject({
+          agentId: resolvedAgentId,
+          labels: options.labels,
+          workspaceId: options.workspaceId,
+        }),
+      };
+    }
     await this.deleteAgentState(resolvedAgentId);
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
       config,
@@ -2735,6 +2763,34 @@ export class AgentManager {
       });
     }
     return agent;
+  }
+
+  /**
+   * `labels` plus the knowledge-base project KTD-7 resolves for this create. Resolution never
+   * fails a create: on any error the agent is created without a project and the error is logged.
+   */
+  private async resolveKnowledgeBaseProject(input: {
+    agentId: string;
+    labels: Record<string, string> | undefined;
+    workspaceId: string | undefined;
+  }): Promise<Record<string, string> | undefined> {
+    if (!this.knowledgeBase) return input.labels;
+    try {
+      const projectLabels = await this.knowledgeBase.resolveAtCreate({
+        agentId: input.agentId,
+        labels: input.labels ?? {},
+        workspaceId: input.workspaceId ?? null,
+      });
+      return Object.keys(projectLabels).length > 0
+        ? { ...input.labels, ...projectLabels }
+        : input.labels;
+    } catch (error) {
+      this.logger.warn(
+        { err: error, agentId: input.agentId },
+        "Knowledge-base project resolution failed; creating the agent without a project",
+      );
+      return input.labels;
+    }
   }
 
   /**
@@ -2883,6 +2939,12 @@ export class AgentManager {
     if (!client.importSession) {
       throw new Error(`Provider '${input.provider}' does not support importing sessions`);
     }
+    // A failover successor arrives with its predecessor's labels and gets its own snapshot.
+    const labels = await this.resolveKnowledgeBaseProject({
+      agentId: resolvedAgentId,
+      labels: input.labels,
+      workspaceId: input.workspaceId,
+    });
 
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
       {
@@ -2918,7 +2980,7 @@ export class AgentManager {
 
       handedToRegistration = true;
       const agent = await this.registerSession(imported.session, importedConfig, resolvedAgentId, {
-        labels: input.labels,
+        labels,
         workspaceId: input.workspaceId,
         timelineRows,
         timelineNextSeq: timelineRows.length + 1,
@@ -7414,6 +7476,13 @@ export class AgentManager {
     const brokeredServerNames = brokersMcpServers
       ? scopeMcpGatewayServerNames(this.mcpGateway?.getServerNames() ?? [], labels)
       : [];
+    // The knowledge base's guidance and the agent's stored summary, for agents that get its tools.
+    const knowledgeBasePrompt =
+      !storedConfig.internal &&
+      this.paseoToolsEnabled &&
+      isPaseoToolEnabled(paseoToolPolicy, "kb_search")
+        ? buildKnowledgeBaseSystemPrompt(this.knowledgeBase, agentId)
+        : "";
     const launchConfig = this.applyDaemonAppendSystemPrompt(
       withRuntimeMcpGatewayServers({
         config: withRuntimePaseoMcpServer({
@@ -7431,6 +7500,7 @@ export class AgentManager {
         gatewayAuthToken: this.mcpGatewayAuthToken,
         sessionMode: this.mcpGateway?.sessionMode,
       }),
+      knowledgeBasePrompt,
     );
     // Claude clients only (the same test that admits brokered servers, minus the gateway being
     // on): the CLI's own switch for connectors it loads from the account.
@@ -7462,8 +7532,17 @@ export class AgentManager {
     return this.clients.get(provider)?.acceptsMcpGatewayServers === true;
   }
 
-  private applyDaemonAppendSystemPrompt(config: AgentSessionConfig): AgentSessionConfig {
-    const daemonAppendSystemPrompt = this.appendSystemPrompt.trim();
+  /**
+   * The daemon's own instructions, then `extra` (the knowledge base's). Both are stable across an
+   * agent's launches, so the provider's prompt cache survives resume and reload.
+   */
+  private applyDaemonAppendSystemPrompt(
+    config: AgentSessionConfig,
+    extra: string,
+  ): AgentSessionConfig {
+    const daemonAppendSystemPrompt = [this.appendSystemPrompt.trim(), extra]
+      .filter((part) => part.length > 0)
+      .join("\n\n");
     const next = { ...config };
     delete next.daemonAppendSystemPrompt;
 

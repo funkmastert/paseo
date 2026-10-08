@@ -74,6 +74,24 @@ import {
   UsageHistoryGetResponseSchema,
 } from "./usage-history/rpc-schemas.js";
 import {
+  KnowledgeBaseStatusRequestSchema,
+  KnowledgeBaseStatusResponseSchema,
+  KnowledgeBaseNotesListRequestSchema,
+  KnowledgeBaseNotesListResponseSchema,
+  KnowledgeBaseNoteGetRequestSchema,
+  KnowledgeBaseNoteGetResponseSchema,
+  KnowledgeBaseNoteWriteRequestSchema,
+  KnowledgeBaseNoteWriteResponseSchema,
+  KnowledgeBaseSearchRequestSchema,
+  KnowledgeBaseSearchResponseSchema,
+  KnowledgeBaseGraphGetRequestSchema,
+  KnowledgeBaseGraphGetResponseSchema,
+  KnowledgeBaseProjectRenameRequestSchema,
+  KnowledgeBaseProjectRenameResponseSchema,
+  KnowledgeBaseProjectMergeRequestSchema,
+  KnowledgeBaseProjectMergeResponseSchema,
+} from "./knowledge-base/rpc-schemas.js";
+import {
   TokenUsageGetBreakdownRequestSchema,
   TokenUsageGetBreakdownResponseSchema,
 } from "./token-usage/rpc-schemas.js";
@@ -4041,6 +4059,14 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   LoopInspectRequestSchema,
   LoopLogsRequestSchema,
   LoopStopRequestSchema,
+  KnowledgeBaseStatusRequestSchema,
+  KnowledgeBaseNotesListRequestSchema,
+  KnowledgeBaseNoteGetRequestSchema,
+  KnowledgeBaseNoteWriteRequestSchema,
+  KnowledgeBaseSearchRequestSchema,
+  KnowledgeBaseGraphGetRequestSchema,
+  KnowledgeBaseProjectRenameRequestSchema,
+  KnowledgeBaseProjectMergeRequestSchema,
 ]);
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
@@ -4400,6 +4426,10 @@ export const ServerInfoStatusPayloadSchema = z
         // section's release/reserve/shutdown actions (docs/device-leases.md); an older daemon
         // only supports the read-only device_status_update the deviceLeases flag above gates.
         deviceManagement: z.boolean().optional(),
+        // COMPAT(knowledgeBase): added in v0.8.x, remove gate after 2027-10-07. Advertised whenever
+        // the daemon has the code, independent of whether `knowledgeBase.enabled` is true
+        // (docs/knowledge-base.md, KTD-12).
+        knowledgeBase: z.boolean().optional(),
       })
       .optional(),
   })
@@ -7760,6 +7790,14 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   LoopStopResponseSchema,
   DaemonUpdateProgressMessageSchema,
   DaemonUpdateResponseSchema,
+  KnowledgeBaseStatusResponseSchema,
+  KnowledgeBaseNotesListResponseSchema,
+  KnowledgeBaseNoteGetResponseSchema,
+  KnowledgeBaseNoteWriteResponseSchema,
+  KnowledgeBaseSearchResponseSchema,
+  KnowledgeBaseGraphGetResponseSchema,
+  KnowledgeBaseProjectRenameResponseSchema,
+  KnowledgeBaseProjectMergeResponseSchema,
 ]);
 
 export type SessionOutboundMessage = z.infer<typeof SessionOutboundMessageSchema>;

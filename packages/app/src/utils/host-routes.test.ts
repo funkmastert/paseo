@@ -4,6 +4,8 @@ import {
   buildHostRootRoute,
   buildHostWorkspaceOpenRoute,
   buildHostWorkspaceRoute,
+  buildKnowledgeBaseRoute,
+  buildKnowledgeNoteRoute,
   buildNewWorkspaceRoute,
   buildOpenProjectRoute,
   resolveKnownHostRoute,
@@ -21,6 +23,7 @@ import {
   parseHostAgentRouteFromPathname,
   parseHostWorkspaceOpenIntentFromPathname,
   parseHostWorkspaceRouteFromPathname,
+  parseKnowledgeNoteRouteId,
   parseWorkspaceOpenIntent,
   stripHostWorkspaceRouteEchoSearch,
 } from "./host-routes";
@@ -298,5 +301,25 @@ describe("resolveKnownHostRoute", () => {
         hosts: [],
       }),
     ).toEqual({ kind: "redirect", href: "/welcome" });
+  });
+});
+
+describe("knowledge base routes", () => {
+  it("adds the host as a query parameter only when one is given", () => {
+    expect(buildKnowledgeBaseRoute()).toBe("/knowledge");
+    expect(buildKnowledgeBaseRoute("  ")).toBe("/knowledge");
+    expect(buildKnowledgeBaseRoute("srv 1")).toBe("/knowledge?host=srv%201");
+  });
+
+  it("puts a note path with slashes in one URL-safe segment and reads it back", () => {
+    const route = buildKnowledgeNoteRoute("projects/on-site recording.md", "srv-1");
+    const match = /^\/knowledge\/([A-Za-z0-9_-]+)\?host=srv-1$/.exec(route);
+    expect(match).not.toBeNull();
+    expect(parseKnowledgeNoteRouteId(match?.[1] ?? "")).toBe("projects/on-site recording.md");
+  });
+
+  it("rejects a note segment that is not base64url", () => {
+    expect(parseKnowledgeNoteRouteId("projects%2Fa.md")).toBeNull();
+    expect(parseKnowledgeNoteRouteId("")).toBeNull();
   });
 });

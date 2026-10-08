@@ -158,7 +158,7 @@ export function formatRefocusBlock(input: {
 }
 
 /** Slash commands (`/compact <instructions>`, `/goal …`) take the rest of the prompt as arguments. */
-function isSlashCommandPrompt(prompt: AgentPromptInput): boolean {
+export function isSlashCommandPrompt(prompt: AgentPromptInput): boolean {
   const text =
     typeof prompt === "string"
       ? prompt

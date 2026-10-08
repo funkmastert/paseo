@@ -20,6 +20,7 @@ import { setupFinishNotification, startCreatedAgentInitialPrompt } from "../agen
 import { resolveCreateAgentTitles } from "../create-agent-title.js";
 import { buildAgentPrompt } from "../prompt-attachments.js";
 import { normalizeClientMessageId, resolveClientMessageId } from "../../client-message-id.js";
+import { captureLinksFromPrompt } from "../../knowledge-base/link-capture.js";
 import { resolveRequiredProviderModel, type ResolvedProviderModel } from "../mcp-shared.js";
 import {
   appendTimelineItemIfAgentKnown,
@@ -192,6 +193,12 @@ export async function createAgentCommand(
   resolved.setupContinuation?.startAfterAgentCreate({
     agentId: snapshot.id,
   });
+
+  // Human-typed kickoff text only (KTD-8): an MCP create's initial prompt is agent-to-agent and
+  // was already captured in the parent's session.
+  if (input.kind === "session" && resolved.prompt !== undefined) {
+    captureLinksFromPrompt(snapshot.id, resolved.prompt, dependencies.logger);
+  }
 
   let liveSnapshot = snapshot;
   let initialPromptStarted = false;

@@ -1,0 +1,24 @@
+context platform=ios timeout=60000 retries=1
+env APP_ID=sh.paseo.debug
+
+open "${APP_ID}"
+wait "id=\"menu-button\"" 30000
+press "id=\"menu-button\""
+wait "id=\"sidebar-knowledge\"" 10000
+press "id=\"sidebar-knowledge\""
+wait "id=\"knowledge-screen\"" 15000
+wait "id=\"knowledge-search-input\"" 15000
+fill "id=\"knowledge-search-input\"" "Smoke note"
+wait "id=\"knowledge-note-row-0\"" 15000
+press "id=\"knowledge-note-row-0\""
+wait "id=\"knowledge-note-screen\"" 15000
+wait "text" "AD_WIKI_LINK" 15000
+press "id=\"knowledge-note-edit\""
+wait "id=\"knowledge-note-editor-input\"" 10000
+fill "id=\"knowledge-note-editor-input\"" "---\ntitle: Smoke note\ntype: project\npermalink: projects/smoke-note\n---\n\n## Summary\nAD_SAVE_OK, see [[Inbox|AD_WIKI_LINK]]\n"
+press "id=\"knowledge-note-save\""
+wait "id=\"knowledge-note-saved\"" 15000
+press "id=\"knowledge-note-cancel\""
+wait "id=\"knowledge-note-edit\"" 10000
+wait "text" "AD_SAVE_OK" 15000
+close

@@ -45,6 +45,9 @@ const MACHINE_JOBS_OFF = {
     },
   },
   worktrees: { diskSweeper: { enabled: false } },
+  // Off by default anyway (KTD-14); listed so an instance built with --machine-jobs off is
+  // explicit about it, matching the agents.* jobs above.
+  knowledgeBase: { enabled: false },
 };
 
 function stop(message) {
@@ -226,7 +229,7 @@ function newHome(homeArg, host, machineJobsOff) {
   console.log(`wrote     ${file}: daemon.listen ${host}, relay off`);
   if (machineJobsOff) {
     const agents = Object.keys(MACHINE_JOBS_OFF.agents).map((key) => `agents.${key}`);
-    console.log(`off       ${[...agents, "worktrees.diskSweeper"].join(", ")}`);
+    console.log(`off       ${[...agents, "worktrees.diskSweeper", "knowledgeBase"].join(", ")}`);
   }
   return 0;
 }

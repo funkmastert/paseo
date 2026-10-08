@@ -6,6 +6,7 @@ export const BUILTIN_SIDEBAR_NAV_IDS = [
   "search",
   "schedules",
   "ask-jev",
+  "knowledge",
   "token-usage",
 ] as const;
 export type BuiltinSidebarNavId = (typeof BUILTIN_SIDEBAR_NAV_IDS)[number];
@@ -38,6 +39,7 @@ const BUILTIN_LABEL_KEYS: Record<BuiltinSidebarNavId, string> = {
   search: "sidebar.sections.search",
   schedules: "sidebar.sections.schedules",
   "ask-jev": "sidebar.sections.askJev",
+  knowledge: "sidebar.sections.knowledge",
   "token-usage": "sidebar.sections.tokenUsage",
 };
 
@@ -56,6 +58,7 @@ const BUILTIN_SHORTCUT_ACTIONS: Record<BuiltinSidebarNavId, string | null> = {
   search: "toggle-command-center",
   schedules: null,
   "ask-jev": null,
+  knowledge: null,
   "token-usage": null,
 };
 

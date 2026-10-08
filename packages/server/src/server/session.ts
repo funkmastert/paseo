@@ -196,6 +196,11 @@ import {
 } from "./session/usage-history/usage-history-session.js";
 import type { UsageHistoryStore } from "./usage-history/usage-history-store.js";
 import {
+  createKnowledgeBaseSession,
+  type KnowledgeBaseBackend,
+  type KnowledgeBaseSession,
+} from "./session/knowledge-base/knowledge-base-session.js";
+import {
   createTokenUsageSession,
   type TokenUsageReader,
   type TokenUsageSession,
@@ -305,6 +310,7 @@ import {
 import { runGitCommand } from "../utils/run-git-command.js";
 import { CreateAgentLifecycleDispatch } from "./agent/create-agent-lifecycle-dispatch.js";
 import { resolveWorktreeSourceCwd } from "./workspace-source.js";
+import { captureLinksFromPrompt } from "./knowledge-base/link-capture.js";
 
 type ProviderSubagentManagerEvent = Extract<
   AgentManagerEvent,
@@ -586,6 +592,9 @@ export interface SessionOptions {
   tokenUsage?: TokenUsageReader;
   contextUsage?: AgentContextUsageService;
   jev?: JevService | null;
+  /** The `kb.*` RPCs' backend (docs/knowledge-base.md). Always passed; `isEnabled()` follows
+   *  config reloads, so `kb.status` works even while the feature is off. */
+  knowledgeBase?: KnowledgeBaseBackend | null;
   hubExecutionAgents?: HubExecutionAgents;
   hubRelationships?: HubRelationshipManagement;
   serviceProxy?: ServiceProxySubsystem;
@@ -847,6 +856,7 @@ export class Session {
   private readonly tokenUsageSession: TokenUsageSession | null;
   private readonly contextUsageSession: ContextUsageSession | null;
   private readonly jevSession: JevSession | null;
+  private readonly knowledgeBaseSession: KnowledgeBaseSession;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
   private readonly agentConfigSession: AgentConfigSession;
   private readonly projectConfigSession: ProjectConfigSession;
@@ -904,6 +914,7 @@ export class Session {
       tokenUsage,
       contextUsage,
       jev,
+      knowledgeBase,
       serviceProxy,
       scriptRuntimeStore,
       workspaceSetupSnapshots,
@@ -1061,6 +1072,11 @@ export class Session {
       host: { emit: (msg) => this.emit(msg) },
       store: usageHistory,
       logger: this.sessionLogger,
+    });
+    this.knowledgeBaseSession = createKnowledgeBaseSession({
+      host: { emit: (msg) => this.emit(msg) },
+      logger: this.sessionLogger,
+      backend: knowledgeBase,
     });
     this.tokenUsageSession = createTokenUsageSession({
       host: { emit: (msg) => this.emit(msg) },
@@ -2261,6 +2277,7 @@ export class Session {
       this.dispatchWorkspaceLifecycleMessage(msg) ??
       this.dispatchWorkspaceFileMessage(msg, source) ??
       this.dispatchProviderMessage(msg) ??
+      this.dispatchKnowledgeBaseMessage(msg) ??
       this.dispatchUsageMessage(msg) ??
       this.dispatchOrchestrationSkillsMessage(msg) ??
       this.dispatchPluginDirectoryMessage(msg) ??
@@ -2306,6 +2323,30 @@ export class Session {
       this.dispatchWorkspaceSetupMessage(msg) ??
       this.dispatchWorkspaceAndProjectMessage(msg)
     );
+  }
+
+  /** The `kb.*` RPCs (docs/knowledge-base.md, KTD-12). */
+  private dispatchKnowledgeBaseMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "kb.status.request":
+        return this.knowledgeBaseSession.handleStatus(msg);
+      case "kb.notes.list.request":
+        return this.knowledgeBaseSession.handleNotesList(msg);
+      case "kb.note.get.request":
+        return this.knowledgeBaseSession.handleNoteGet(msg);
+      case "kb.note.write.request":
+        return this.knowledgeBaseSession.handleNoteWrite(msg);
+      case "kb.search.request":
+        return this.knowledgeBaseSession.handleSearch(msg);
+      case "kb.graph.get.request":
+        return this.knowledgeBaseSession.handleGraphGet(msg);
+      case "kb.project.rename.request":
+        return this.knowledgeBaseSession.handleProjectRename(msg);
+      case "kb.project.merge.request":
+        return this.knowledgeBaseSession.handleProjectMerge(msg);
+      default:
+        return undefined;
+    }
   }
 
   /**
@@ -4078,6 +4119,7 @@ export class Session {
         logger: this.sessionLogger,
       });
       this.recordHumanPrompt(delivered.agentId, messageId ?? null);
+      captureLinksFromPrompt(delivered.agentId, prompt, this.sessionLogger);
       return { ok: true };
     } catch (error) {
       this.handleAgentRunError(agentId, error, "Failed to send agent message");
@@ -8316,6 +8358,7 @@ export class Session {
         await send();
       }
       this.recordHumanPrompt(agentId, msg.messageId ?? null);
+      captureLinksFromPrompt(agentId, prompt, this.sessionLogger);
 
       this.emit({
         type: "send_agent_message_response",

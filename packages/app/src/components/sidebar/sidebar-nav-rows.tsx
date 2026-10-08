@@ -1,5 +1,6 @@
 import { router, usePathname } from "expo-router";
 import {
+  BookOpen,
   CalendarClock,
   Coins,
   History,
@@ -27,6 +28,7 @@ import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspac
 import { useWorkspace } from "@/stores/session-store-hooks";
 import {
   buildAskJevRoute,
+  buildKnowledgeBaseRoute,
   buildNewWorkspaceRoute,
   buildSchedulesRoute,
   buildSessionsRoute,
@@ -200,6 +202,26 @@ function SidebarAskJevRow({ onBeforeNavigate }: SidebarNavRowProps) {
   );
 }
 
+function SidebarKnowledgeRow({ onBeforeNavigate }: SidebarNavRowProps) {
+  const { t } = useTranslation();
+  const pathname = usePathname();
+  const handlePress = useCallback(() => {
+    onBeforeNavigate?.();
+    router.push(buildKnowledgeBaseRoute());
+  }, [onBeforeNavigate]);
+
+  return (
+    <SidebarHeaderRow
+      icon={BookOpen}
+      label={t(builtinSidebarNavLabelKey("knowledge"))}
+      onPress={handlePress}
+      isActive={pathname.startsWith("/knowledge")}
+      testID="sidebar-knowledge"
+      variant="compact"
+    />
+  );
+}
+
 function SidebarTokenUsageRow({ onBeforeNavigate }: SidebarNavRowProps) {
   const { t } = useTranslation();
   const pathname = usePathname();
@@ -229,5 +251,6 @@ const BUILTIN_ROWS: Record<BuiltinSidebarNavId, ComponentType<SidebarNavRowProps
   search: SidebarSearchRow,
   schedules: SidebarSchedulesRow,
   "ask-jev": SidebarAskJevRow,
+  knowledge: SidebarKnowledgeRow,
   "token-usage": SidebarTokenUsageRow,
 };

@@ -16,12 +16,14 @@ import {
 } from "./agent-manager.js";
 import { AgentStorage } from "./agent-storage.js";
 import { MCP_SCOPE_LABEL } from "./runtime-mcp-config.js";
+import { KNOWLEDGE_BASE_GUIDANCE } from "./knowledge-base-prompt.js";
 import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import {
   getOpenAgentTabLabel,
   JEV_TOOLS_LABEL,
+  KB_PROJECT_LABEL,
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import {
@@ -63,6 +65,7 @@ import type {
 } from "./agent-sdk-types.js";
 import type { PaseoToolCatalog, PaseoToolRuntimeContext } from "./tools/types.js";
 import type { ProviderDefinition } from "./provider-registry.js";
+import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 
 const DESKTOP_OPEN_AGENT_TAB_LABEL = getOpenAgentTabLabel("desktop-client");
 const MOBILE_OPEN_AGENT_TAB_LABEL = getOpenAgentTabLabel("mobile-client");
@@ -13756,4 +13759,207 @@ test("onWorkspaceStateMayHaveChanged is not called for running shell tool calls"
   await manager.runAgent(snapshot.id, { text: "merge it" });
 
   expect(onWorkspaceStateMayHaveChanged).not.toHaveBeenCalled();
+});
+
+describe("knowledge-base project at create", () => {
+  interface ResolveCall {
+    agentId: string;
+    labels: Record<string, string>;
+    workspaceId: string | null;
+    sessionsCreatedBefore: number;
+  }
+
+  function createManager(
+    resolveAtCreate: (
+      input: Omit<ResolveCall, "sessionsCreatedBefore">,
+    ) => Promise<Record<string, string>>,
+  ) {
+    const client = new TestAgentClient();
+    // A pool-plugin-style hook that labels the create, so resolution must see its labels.
+    const pluginLifecycle = {
+      before: async (hook: string, request: { labels?: Record<string, string> }) =>
+        hook === "agent.create"
+          ? { ...request, labels: { ...request.labels, "paseo.task-class": "hard" } }
+          : request,
+      emit: () => undefined,
+    } as unknown as PluginLifecycle;
+    const manager = new AgentManager({ clients: { codex: client }, logger, pluginLifecycle });
+    const calls: ResolveCall[] = [];
+    manager.setKnowledgeBase({
+      resolveAtCreate: async (input) => {
+        calls.push({ ...input, sessionsCreatedBefore: client.createdConfigs.length });
+        return await resolveAtCreate(input);
+      },
+      getSnapshot: () => null,
+      isEnabled: () => true,
+    });
+    return { manager, calls };
+  }
+
+  test("resolves from the labels the agent.create hooks left, before the first launch", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-kb-"));
+    const { manager, calls } = createManager(async () => ({
+      [KB_PROJECT_LABEL]: "checkout-redesign",
+    }));
+
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: "ws-1",
+      labels: { [PARENT_AGENT_ID_LABEL]: "parent-1" },
+    });
+
+    expect(calls).toEqual([
+      {
+        agentId: agent.id,
+        labels: { [PARENT_AGENT_ID_LABEL]: "parent-1", "paseo.task-class": "hard" },
+        workspaceId: "ws-1",
+        sessionsCreatedBefore: 0,
+      },
+    ]);
+    expect(agent.labels).toEqual({
+      [PARENT_AGENT_ID_LABEL]: "parent-1",
+      "paseo.task-class": "hard",
+      [KB_PROJECT_LABEL]: "checkout-redesign",
+    });
+    await manager.closeAgent(agent.id);
+    rmSync(workdir, { recursive: true, force: true });
+  });
+
+  test("a resolution error leaves the agent without a project and the create succeeds", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-kb-"));
+    const { manager } = createManager(async () => {
+      throw new Error("notes directory is unreadable");
+    });
+
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+      labels: { [PARENT_AGENT_ID_LABEL]: "parent-1" },
+    });
+
+    expect(agent.labels).toEqual({
+      [PARENT_AGENT_ID_LABEL]: "parent-1",
+      "paseo.task-class": "hard",
+    });
+    await manager.closeAgent(agent.id);
+    rmSync(workdir, { recursive: true, force: true });
+  });
+});
+
+describe("knowledge-base guidance and summary in the launch config", () => {
+  const SUMMARY =
+    "Knowledge-base project for this session: Checkout redesign (checkout-redesign).\n" +
+    'Call kb_open("checkout-redesign") for the links, decisions, rules and status before relying on them.';
+
+  /** Like KnowledgeBaseService: a snapshot is taken once, at the first create on a project. */
+  function fakeKnowledgeBase(options: { enabled: boolean; project: string | null }) {
+    const snapshots = new Map<string, string>();
+    return {
+      resolveAtCreate: async (input: { agentId: string }): Promise<Record<string, string>> => {
+        if (!options.enabled || !options.project) return {};
+        if (!snapshots.has(input.agentId)) snapshots.set(input.agentId, SUMMARY);
+        return { [KB_PROJECT_LABEL]: options.project };
+      },
+      getSnapshot: (agentId: string) => {
+        const text = options.enabled ? snapshots.get(agentId) : undefined;
+        return text ? { project: "checkout-redesign", text, takenAt: "2026-10-08" } : null;
+      },
+      isEnabled: () => options.enabled,
+    };
+  }
+
+  function createManager(input: {
+    client: TestAgentClient;
+    storage: AgentStorage;
+    knowledgeBase: ReturnType<typeof fakeKnowledgeBase>;
+  }) {
+    const manager = new AgentManager({
+      clients: { codex: input.client },
+      registry: input.storage,
+      logger,
+      appendSystemPrompt: "Daemon instructions.",
+      idFactory: () => "00000000-0000-4000-8000-000000000611",
+    });
+    manager.setKnowledgeBase(input.knowledgeBase);
+    return manager;
+  }
+
+  test("an agent created on a project gets the identical text on create, reload and resume", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-kb-prompt-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    const knowledgeBase = fakeKnowledgeBase({ enabled: true, project: "checkout-redesign" });
+    const client = new TestAgentClient();
+    const manager = createManager({ client, storage, knowledgeBase });
+    const expected = `Daemon instructions.\n\n${KNOWLEDGE_BASE_GUIDANCE}\n\n${SUMMARY}`;
+
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    await manager.reloadAgentSession(agent.id);
+    await manager.closeAgent(agent.id);
+    // A daemon restart: a new manager resumes the agent from its stored handle.
+    const restartedClient = new TestAgentClient();
+    const restarted = createManager({ client: restartedClient, storage, knowledgeBase });
+    await restarted.resumeAgentFromPersistence(
+      { provider: "codex", sessionId: "session-611", metadata: { cwd: workdir } },
+      { cwd: workdir },
+      agent.id,
+    );
+
+    expect(client.createdConfigs[0]?.daemonAppendSystemPrompt).toBe(expected);
+    expect(client.resumeOverrides[0]?.daemonAppendSystemPrompt).toBe(expected);
+    expect(restartedClient.resumeOverrides[0]?.daemonAppendSystemPrompt).toBe(expected);
+    expect((await storage.get(agent.id))?.config).not.toHaveProperty("daemonAppendSystemPrompt");
+    await restarted.closeAgent(agent.id);
+    rmSync(workdir, { recursive: true, force: true });
+  });
+
+  test("an agent with no project gets only the guidance; with the feature off it gets nothing", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-kb-prompt-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    const untaggedClient = new TestAgentClient();
+    const untagged = createManager({
+      client: untaggedClient,
+      storage,
+      knowledgeBase: fakeKnowledgeBase({ enabled: true, project: null }),
+    });
+    const offClient = new TestAgentClient();
+    const off = createManager({
+      client: offClient,
+      storage: new AgentStorage(join(workdir, "agents-off"), logger),
+      knowledgeBase: fakeKnowledgeBase({ enabled: false, project: "checkout-redesign" }),
+    });
+
+    const first = await untagged.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    const second = await off.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+
+    expect(untaggedClient.createdConfigs[0]?.daemonAppendSystemPrompt).toBe(
+      `Daemon instructions.\n\n${KNOWLEDGE_BASE_GUIDANCE}`,
+    );
+    expect(offClient.createdConfigs[0]?.daemonAppendSystemPrompt).toBe("Daemon instructions.");
+    await untagged.closeAgent(first.id);
+    await off.closeAgent(second.id);
+    rmSync(workdir, { recursive: true, force: true });
+  });
+
+  test("an agent that does not get the Paseo tools gets no guidance", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-kb-prompt-"));
+    const client = new TestAgentClient();
+    const manager = createManager({
+      client,
+      storage: new AgentStorage(join(workdir, "agents"), logger),
+      knowledgeBase: fakeKnowledgeBase({ enabled: true, project: "checkout-redesign" }),
+    });
+    manager.setPaseoToolsEnabled(false);
+
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+
+    expect(client.createdConfigs[0]?.daemonAppendSystemPrompt).toBe("Daemon instructions.");
+    await manager.closeAgent(agent.id);
+    rmSync(workdir, { recursive: true, force: true });
+  });
 });

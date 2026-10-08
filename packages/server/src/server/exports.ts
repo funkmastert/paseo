@@ -115,3 +115,15 @@ export {
   runTokenAudit,
   type TokenAuditRow,
 } from "./session/doctor/index.js";
+
+// `paseo kb setup` (docs/knowledge-base.md, KTD-4): finds `uv`, installs the pinned Basic Memory
+// release, and resolves the installed binary. The daemon never installs software.
+export {
+  BASIC_MEMORY_VERSION,
+  defaultFallbackBinDirs as basicMemoryDefaultFallbackBinDirs,
+  resolveBasicMemoryExecutable,
+} from "./knowledge-base/basic-memory-sidecar.js";
+
+// `paseo kb seed` (docs/knowledge-base.md, KTD-13): the label a seed agent declares its own
+// spend ceiling with.
+export { SPEND_BUDGET_LABEL } from "./agent/spend-governor.js";

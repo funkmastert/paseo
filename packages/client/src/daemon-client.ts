@@ -498,6 +498,38 @@ type UsageHistoryGetPayload = Extract<
   SessionOutboundMessage,
   { type: "usage.history.get.response" }
 >["payload"];
+export type KnowledgeBaseStatusPayload = Extract<
+  SessionOutboundMessage,
+  { type: "kb.status.response" }
+>["payload"];
+export type KnowledgeBaseNotesListPayload = Extract<
+  SessionOutboundMessage,
+  { type: "kb.notes.list.response" }
+>["payload"];
+export type KnowledgeBaseNoteGetPayload = Extract<
+  SessionOutboundMessage,
+  { type: "kb.note.get.response" }
+>["payload"];
+export type KnowledgeBaseNoteWritePayload = Extract<
+  SessionOutboundMessage,
+  { type: "kb.note.write.response" }
+>["payload"];
+export type KnowledgeBaseSearchPayload = Extract<
+  SessionOutboundMessage,
+  { type: "kb.search.response" }
+>["payload"];
+export type KnowledgeBaseGraphGetPayload = Extract<
+  SessionOutboundMessage,
+  { type: "kb.graph.get.response" }
+>["payload"];
+export type KnowledgeBaseProjectRenamePayload = Extract<
+  SessionOutboundMessage,
+  { type: "kb.project.rename.response" }
+>["payload"];
+export type KnowledgeBaseProjectMergePayload = Extract<
+  SessionOutboundMessage,
+  { type: "kb.project.merge.response" }
+>["payload"];
 export type TokenUsageGetBreakdownPayload = Extract<
   SessionOutboundMessage,
   { type: "usage.tokens.get_breakdown.response" }
@@ -5300,6 +5332,100 @@ export class DaemonClient {
       message: {
         type: "usage.history.get.request",
         ...(options?.agentId ? { agentId: options.agentId } : {}),
+      },
+    });
+  }
+
+  /**
+   * The project knowledge base (docs/knowledge-base.md, KTD-12). Gate every call but `status` on
+   * `server_info.features.knowledgeBase`; an older daemon answers an unknown request type with
+   * nothing, so an ungated call would only time out.
+   */
+  async getKnowledgeBaseStatus(options?: {
+    requestId?: string;
+  }): Promise<KnowledgeBaseStatusPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "kb.status.request" },
+    });
+  }
+
+  async listKnowledgeBaseNotes(options?: {
+    requestId?: string;
+  }): Promise<KnowledgeBaseNotesListPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "kb.notes.list.request" },
+    });
+  }
+
+  async getKnowledgeBaseNote(
+    path: string,
+    options?: { requestId?: string },
+  ): Promise<KnowledgeBaseNoteGetPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "kb.note.get.request", path },
+    });
+  }
+
+  async writeKnowledgeBaseNote(
+    input: { path: string; content: string; expectedModifiedAt?: number | null },
+    options?: { requestId?: string },
+  ): Promise<KnowledgeBaseNoteWritePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: {
+        type: "kb.note.write.request",
+        path: input.path,
+        content: input.content,
+        ...(input.expectedModifiedAt !== undefined
+          ? { expectedModifiedAt: input.expectedModifiedAt }
+          : {}),
+      },
+    });
+  }
+
+  async searchKnowledgeBase(
+    query: string,
+    options?: { requestId?: string },
+  ): Promise<KnowledgeBaseSearchPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "kb.search.request", query },
+    });
+  }
+
+  async getKnowledgeBaseGraph(options?: {
+    requestId?: string;
+  }): Promise<KnowledgeBaseGraphGetPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "kb.graph.get.request" },
+    });
+  }
+
+  async renameKnowledgeBaseProject(
+    input: { path: string; title: string },
+    options?: { requestId?: string },
+  ): Promise<KnowledgeBaseProjectRenamePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "kb.project.rename.request", path: input.path, title: input.title },
+    });
+  }
+
+  async mergeKnowledgeBaseProjects(
+    input: { sourcePath: string; targetPath: string; dryRun: boolean },
+    options?: { requestId?: string },
+  ): Promise<KnowledgeBaseProjectMergePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: {
+        type: "kb.project.merge.request",
+        sourcePath: input.sourcePath,
+        targetPath: input.targetPath,
+        dryRun: input.dryRun,
       },
     });
   }

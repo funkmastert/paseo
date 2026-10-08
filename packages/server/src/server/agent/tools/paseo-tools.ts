@@ -91,6 +91,10 @@ import {
 } from "../../worktree/commands.js";
 import { registerBrowserTools } from "../../browser-tools/tools.js";
 import { registerDeviceLeaseTools } from "./device-lease-tools.js";
+import {
+  registerKnowledgeBaseTools,
+  type KnowledgeBaseToolsService,
+} from "./knowledge-base-tools.js";
 import { registerJevTools, type JevToolsDependencies } from "./jev-tools.js";
 import { isDefaultAgentCreateConfigUnattended } from "../create-agent-mode.js";
 import { resolveProviderExtends } from "../device-launch-enforcement.js";
@@ -164,6 +168,8 @@ export interface PaseoToolHostDependencies {
   deviceLeaseManager?: Pick<DeviceLeaseManager, "checkout" | "checkin" | "getSnapshot"> | null;
   /** The JEV agent tools (docs/jev.md, "Features 4–6"). Absent means no JEV tools are offered. */
   jevTools?: JevToolsDependencies | null;
+  /** The knowledge base (docs/knowledge-base.md). Its tools are offered only while it is on. */
+  knowledgeBase?: KnowledgeBaseToolsService | null;
   /** Physical devices (docs/device-leases.md, Physical devices). Absent means `device_checkout`
    * only offers simulators/emulators. */
   physicalDeviceLeaseManager?: Pick<
@@ -1364,6 +1370,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       );
     }
   }
+
+  registerKnowledgeBaseTools({
+    registerTool,
+    knowledgeBase: options.knowledgeBase,
+    callerAgentId,
+  });
 
   registerCoordinationTools({
     registerTool,

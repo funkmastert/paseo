@@ -102,6 +102,7 @@ test("new-home writes the listen and the jobs-off block, and refuses a home that
     assert.equal(config.agents.remediation.escalation.enabled, false);
     assert.equal(config.agents.tokenAudit.escalation.enabled, false);
     assert.equal(config.worktrees.diskSweeper.enabled, false);
+    assert.equal(config.knowledgeBase.enabled, false);
     if (IS_POSIX) {
       assert.equal(statSync(home).mode & 0o777, 0o700);
       assert.equal(statSync(path.join(home, "config.json")).mode & 0o777, 0o600);

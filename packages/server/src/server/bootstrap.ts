@@ -135,10 +135,15 @@ import type { LocalSpeechProviderConfig } from "./speech/providers/local/config.
 import type { RequestedSpeechProviders } from "./speech/speech-types.js";
 import { createSpeechService } from "./speech/speech-runtime.js";
 import { AgentManager } from "./agent/agent-manager.js";
-import { AgentStorage } from "./agent/agent-storage.js";
+import { AgentStorage, type StoredAgentRecord } from "./agent/agent-storage.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
 import { McpGateway, type McpGatewayConfig } from "./mcp-gateway/gateway.js";
+import { BasicMemoryClient } from "./knowledge-base/basic-memory-client.js";
+import { BasicMemorySidecar } from "./knowledge-base/basic-memory-sidecar.js";
+import { resolveKnowledgeBaseConfig } from "./knowledge-base/config.js";
+import { setLinkCaptureSink, type LinkCaptureSink } from "./knowledge-base/link-capture.js";
+import { KnowledgeBaseService, type KnowledgeBaseAgent } from "./knowledge-base/service.js";
 import { installMcpGatewayRoutes } from "./mcp-gateway/routes.js";
 import { normalizeMcpProtocolVersionHeader } from "./mcp-protocol-compat.js";
 import {
@@ -270,6 +275,10 @@ import {
 } from "./done-janitor-worktree.js";
 import { listProcessesInside } from "./worktree-process-scan.js";
 import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
+import {
+  KnowledgeBaseFirstPromptSummary,
+  composePromptDispatchInterceptors,
+} from "./agent/knowledge-base-prompt.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
 import type { RemediationConfig } from "./remediation/config.js";
 import {
@@ -2561,6 +2570,47 @@ export async function createPaseoDaemon(
   });
   await autoPinExpiry.start();
 
+  // Knowledge base (docs/knowledge-base.md): the Basic Memory sidecar serves search, and the
+  // service owns every note write, project assignment and filed link. Off unless the
+  // `knowledgeBase` section enables it; applied after listen and on every config reload, never
+  // awaited, so a slow Python start cannot delay the daemon.
+  const basicMemorySidecar = new BasicMemorySidecar({ logger, managedProcesses });
+  const knowledgeBaseWorkspaceRegistry = workspaceRegistry;
+  const knowledgeBase = new KnowledgeBaseService({
+    logger,
+    agents: {
+      async get(agentId) {
+        const live = agentManager.getAgent(agentId);
+        if (live) {
+          return {
+            id: live.id,
+            labels: live.labels,
+            title: live.config.title ?? null,
+            provider: live.provider,
+            workspaceId: live.workspaceId ?? null,
+          };
+        }
+        const record = await agentStorage.get(agentId);
+        return record ? toKnowledgeBaseAgent(record) : null;
+      },
+      async list() {
+        return (await agentStorage.list()).map(toKnowledgeBaseAgent);
+      },
+      async setLabels(agentId, labels) {
+        await agentManager.updateAgentMetadata(agentId, { labels });
+      },
+    },
+    workspaces: {
+      async get(workspaceId) {
+        const record = await knowledgeBaseWorkspaceRegistry.get(workspaceId);
+        return record ? { kind: record.kind, branch: record.branch } : null;
+      },
+    },
+    search: new BasicMemoryClient({ sidecar: basicMemorySidecar }),
+    sidecar: basicMemorySidecar,
+  });
+  agentManager.setKnowledgeBase(knowledgeBase);
+
   // Refocus (docs/refocus.md). Needs nothing but the manager and live config, so it is watching
   // before the first prompt can be dispatched.
   const agentRefocus = new AgentRefocus({
@@ -2568,8 +2618,23 @@ export async function createPaseoDaemon(
     readDaemonConfig: () => ({ refocus: daemonConfigStore.get().refocus }),
     logger: logger.child({ module: "refocus" }),
   });
-  agentManager.setPromptDispatchInterceptor((agentId, prompt) =>
-    agentRefocus.interceptPrompt(agentId, prompt),
+  // Copilot reads no system prompt, so its knowledge-base summary rides on its first prompt,
+  // after refocus has added to it (docs/knowledge-base.md).
+  const knowledgeBaseFirstPrompt = new KnowledgeBaseFirstPromptSummary({
+    knowledgeBase,
+    getAgent: (agentId) => agentManager.getAgent(agentId),
+    ignoresSystemPrompt: (provider) =>
+      provider === "copilot" ||
+      resolveProviderExtends(provider, daemonConfigStore.get().providers) === "copilot",
+  });
+  agentManager.setPromptDispatchInterceptor(
+    composePromptDispatchInterceptors(
+      [
+        (agentId, prompt) => agentRefocus.interceptPrompt(agentId, prompt),
+        (agentId, prompt) => knowledgeBaseFirstPrompt.interceptPrompt(agentId, prompt),
+      ],
+      logger.child({ module: "prompt-interceptors" }),
+    ),
   );
   agentRefocus.start();
   daemonConfigStore.onChange(() => agentRefocus.reportMode());
@@ -2937,6 +3002,7 @@ export async function createPaseoDaemon(
     browserToolsBroker,
     deviceLeaseManager,
     jevTools: jevToolsDependencies,
+    knowledgeBase,
     physicalDeviceLeaseManager,
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
@@ -2995,6 +3061,38 @@ export async function createPaseoDaemon(
   mcpGateway.setServerPersister((name, serverConfig) => {
     daemonConfigStore.patch({ mcpGateway: { servers: { [name]: serverConfig } } });
   });
+
+  const fileCapturedLink: LinkCaptureSink = async (agentId, link) => {
+    await knowledgeBase.fileLink({ agentId, url: link.url, category: link.kind });
+  };
+  const applyKnowledgeBaseConfig = () => {
+    const resolved = resolveKnowledgeBaseConfig(
+      readRawConfig(config.paseoHome).rawConfig?.["knowledgeBase"],
+      {
+        paseoHome: config.paseoHome,
+        onDisabledByConfig: (reason) => {
+          logger.warn({ reason }, "knowledgeBase config is invalid; the knowledge base is off");
+        },
+      },
+    );
+    void basicMemorySidecar.applyConfig(resolved).catch((error: unknown) => {
+      logger.warn({ err: error }, "Failed to apply the knowledgeBase config");
+    });
+    void knowledgeBase.applyConfig(resolved).then(
+      () => {
+        setLinkCaptureSink(knowledgeBase.isEnabled() ? fileCapturedLink : null);
+        // OpenCode's bridge lists tools from one catalog built up front; rebuild it so the
+        // knowledge-base tools come and go with the feature.
+        return setAgentProviderToolsEnabled(
+          mcpEnabled && daemonConfigStore.get().mcp.injectIntoAgents !== false,
+        );
+      },
+      (error: unknown) => {
+        setLinkCaptureSink(null);
+        logger.warn({ err: error }, "Failed to load the knowledge base");
+      },
+    );
+  };
 
   let mcpEnabled = config.mcpEnabled ?? true;
   // `jev.status` says the agent tools are served while agents can reach them: the agent MCP
@@ -3318,6 +3416,7 @@ export async function createPaseoDaemon(
                 : undefined,
               restartRecovery,
               jev,
+              knowledgeBase,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             const jevPushSender = wsServer.getPushNotificationSender();
@@ -3350,6 +3449,8 @@ export async function createPaseoDaemon(
             void mcpGateway.start().catch((error: unknown) => {
               logger.warn({ err: error }, "MCP gateway failed to start one or more servers");
             });
+            applyKnowledgeBaseConfig();
+            daemonConfigStore.onReload(applyKnowledgeBaseConfig);
             // Wired here (rather than at construction, above) for the same reason as the
             // token-burn monitor below: the push sender doesn't exist until wsServer does.
             mcpGateway.setNotifier({
@@ -3755,6 +3856,8 @@ export async function createPaseoDaemon(
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
       await serviceProxy.stopStandalone().catch(() => undefined);
       await agentProviderRuntime.shutdown().catch(() => undefined);
+      setLinkCaptureSink(null);
+      await basicMemorySidecar.stop().catch(() => undefined);
       if (mainStarted) {
         httpServer.closeAllConnections();
         await new Promise<void>((resolve) => httpServer.close(() => resolve()));
@@ -3836,6 +3939,11 @@ export async function createPaseoDaemon(
       logger.warn({ err: error }, "Failed to flush the JEV ledger");
     });
     await mcpGateway.stop().catch(() => undefined);
+    // Module-level, and test daemons can share a process.
+    setLinkCaptureSink(null);
+    await basicMemorySidecar.stop().catch((error: unknown) => {
+      logger.warn({ err: error }, "Failed to stop Basic Memory");
+    });
     await scheduleService.stop().catch(() => undefined);
     await relayRuntime?.stop().catch(() => undefined);
     if (wsServer) {
@@ -3884,6 +3992,16 @@ export async function createPaseoDaemon(
     getFinishObligations: () => finishObligations,
     getLeaderCompactionMonitor: () => leaderCompactionMonitor,
     getRestartRecovery: () => restartRecovery,
+  };
+}
+
+function toKnowledgeBaseAgent(record: StoredAgentRecord): KnowledgeBaseAgent {
+  return {
+    id: record.id,
+    labels: record.labels,
+    title: record.title ?? null,
+    provider: record.provider,
+    workspaceId: record.workspaceId ?? null,
   };
 }
 

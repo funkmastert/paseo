@@ -34,8 +34,10 @@ const SECRET_NAMES: readonly RegExp[] = [
 const SECRET_STEM =
   /(?:^|[._-])(?:(?:access|auth|api|bearer|refresh)[_-]?)?token$|(?:^|[._-])api[_-]?keys?$|(?:^|[._-])passw(?:or)?ds?$/;
 
-// A left boundary on each prefix, so `task-…` or `disk-…` is not read as an `sk-` key.
-const TOKENS: readonly { kind: string; pattern: RegExp }[] = [
+// A left boundary on each prefix, so `task-…` or `disk-…` is not read as an `sk-` key. Exported so
+// other scrubbers (knowledge-base/scrub.ts) reuse the same token shapes instead of redefining them;
+// none of these carry the `g` flag, so a caller doing replace-all clones each with `g` added.
+export const TOKENS: readonly { kind: string; pattern: RegExp }[] = [
   {
     kind: "Anthropic or OpenAI key",
     pattern: /(?<![A-Za-z0-9_-])sk-(?:ant|proj|svcacct|admin)-[A-Za-z0-9_-]{8,}/,

@@ -450,6 +450,30 @@ export function buildJevDashboardRoute(serverId?: string, agentId?: string) {
   return `/jev?${query}` as const;
 }
 
+function withHostQuery<TPath extends string>(path: TPath, serverId?: string) {
+  const normalizedServerId = trimNonEmpty(serverId);
+  if (!normalizedServerId) return path;
+  return `${path}?host=${encodeURIComponent(normalizedServerId)}` as const;
+}
+
+/** The knowledge base belongs to a host (docs/knowledge-base.md); `?host=` picks which one. */
+export function buildKnowledgeBaseRoute(serverId?: string) {
+  return withHostQuery("/knowledge", serverId);
+}
+
+/** Note paths hold slashes, so a note travels in a URL as base64url, like path-like workspace ids. */
+export function knowledgeNoteRouteId(notePath: string): string {
+  return toBase64UrlNoPad(notePath);
+}
+
+export function buildKnowledgeNoteRoute(notePath: string, serverId?: string) {
+  return withHostQuery(`/knowledge/${knowledgeNoteRouteId(notePath)}` as const, serverId);
+}
+
+export function parseKnowledgeNoteRouteId(noteId: string): string | null {
+  return tryDecodeBase64UrlNoPadUtf8(noteId);
+}
+
 export function buildPinnedGridRoute() {
   return "/pinned-grid" as const;
 }

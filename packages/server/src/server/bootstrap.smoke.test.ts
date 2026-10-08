@@ -381,6 +381,9 @@ describe("paseo daemon bootstrap", () => {
         daemonVitals: { enabled: true, dryRun: true },
         restartRecovery: { mode: "off" as const },
       },
+      // Off by default (KTD-14); present here only to confirm boot tolerates the section rather
+      // than rejecting config.json, the same as any other agents.* addition above.
+      knowledgeBase: { enabled: true },
     };
     await writeFile(configPath, `${JSON.stringify(bootPersisted, null, 2)}\n`, "utf-8");
     const config = loadConfig(paseoHome, { env: {} });

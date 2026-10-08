@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { router, type Href } from "expo-router";
 import { useTranslation } from "react-i18next";
 import {
+  BookOpen,
   CalendarClock,
   CircleDashed,
   Coins,
@@ -32,6 +33,7 @@ import { clearCommandCenterFocusRestoreElement } from "@/utils/command-center-fo
 import {
   buildAskJevRoute,
   buildJevDashboardRoute,
+  buildKnowledgeBaseRoute,
   buildOpenProjectRoute,
   buildSchedulesRoute,
   buildSessionsRoute,
@@ -74,6 +76,9 @@ const ThemedMessageCircleQuestion = withUnistyles(MessageCircleQuestion, (theme)
 const ThemedGauge = withUnistyles(Gauge, (theme) => ({
   color: theme.colors.foregroundMuted,
 }));
+const ThemedBookOpen = withUnistyles(BookOpen, (theme) => ({
+  color: theme.colors.foregroundMuted,
+}));
 const ThemedCoins = withUnistyles(Coins, (theme) => ({
   color: theme.colors.foregroundMuted,
 }));
@@ -104,6 +109,10 @@ function AskJevIcon({ size }: CommandCenterIconProps) {
 
 function JevDashboardIcon({ size }: CommandCenterIconProps) {
   return <ThemedGauge size={size} strokeWidth={2.2} />;
+}
+
+function KnowledgeIcon({ size }: CommandCenterIconProps) {
+  return <ThemedBookOpen size={size} strokeWidth={2.2} />;
 }
 
 function TokenUsageIcon({ size }: CommandCenterIconProps) {
@@ -147,6 +156,7 @@ export function CommandCenterRootActions() {
   const schedulesRoute = useMemo<Href>(() => buildSchedulesRoute(), []);
   const askJevRoute = useMemo<Href>(() => buildAskJevRoute(), []);
   const jevDashboardRoute = useMemo<Href>(() => buildJevDashboardRoute(), []);
+  const knowledgeRoute = useMemo<Href>(() => buildKnowledgeBaseRoute(), []);
   const tokenUsageRoute = useMemo<Href>(() => buildTokenUsageRoute(), []);
   const setShortcutsDialogOpen = useKeyboardShortcutsStore((state) => state.setShortcutsDialogOpen);
   // Narrow selector on purpose: a whole-store subscription would re-register every root action
@@ -314,11 +324,30 @@ export function CommandCenterRootActions() {
         },
       },
       {
+        id: "knowledge",
+        group: "actions",
+        groupRank: 0,
+        // Between the JEV dashboard (5.75) and Settings (6).
+        rank: 5.875,
+        keywords: ["knowledge", "notes", "projects", "kb", "memory", "wiki", "links"],
+        visibility: "always",
+        run: () => {
+          clearCommandCenterFocusRestoreElement();
+          router.push(knowledgeRoute);
+        },
+        presentation: {
+          kind: "action",
+          title: t("sidebar.sections.knowledge"),
+          sectionTitle: t("shell.commandCenter.actions"),
+          icon: KnowledgeIcon,
+        },
+      },
+      {
         id: "token-usage",
         group: "actions",
         groupRank: 0,
-        // Between JEV dashboard (5.75) and Settings (6).
-        rank: 5.85,
+        // Between Knowledge (5.875) and Settings (6).
+        rank: 5.9,
         keywords: ["tokens", "usage", "cost", "model", "role", "spend"],
         visibility: "always",
         run: () => {
@@ -423,6 +452,7 @@ export function CommandCenterRootActions() {
     homeRoute,
     jevDashboardRoute,
     keyboardActionDispatcher,
+    knowledgeRoute,
     openAddProject,
     openImportSession,
     overrides,

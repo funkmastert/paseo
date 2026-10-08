@@ -24,6 +24,7 @@ test.describe("Sidebar items in Appearance settings", () => {
         "search",
         "schedules",
         "ask-jev",
+        "knowledge",
       ]);
     });
 
@@ -39,6 +40,7 @@ test.describe("Sidebar items in Appearance settings", () => {
         "search",
         "schedules",
         "ask-jev",
+        "knowledge",
       ]);
       await expectSidebarNavSettingsRow(page, {
         key: "history",
@@ -60,6 +62,7 @@ test.describe("Sidebar items in Appearance settings", () => {
         "schedules",
         "search",
         "ask-jev",
+        "knowledge",
       ]);
       await moveSidebarNavItemUp(page, "schedules");
       await expectSidebarNavSettingsOrder(page, [
@@ -68,6 +71,7 @@ test.describe("Sidebar items in Appearance settings", () => {
         "history",
         "search",
         "ask-jev",
+        "knowledge",
       ]);
 
       await leaveSettings(page);
@@ -77,6 +81,7 @@ test.describe("Sidebar items in Appearance settings", () => {
         "history",
         "search",
         "ask-jev",
+        "knowledge",
       ]);
     });
 
@@ -89,6 +94,7 @@ test.describe("Sidebar items in Appearance settings", () => {
         { key: "history", visible: false },
         { key: "search", visible: true },
         { key: "ask-jev", visible: true },
+        { key: "knowledge", visible: true },
         { key: "token-usage", visible: true },
       ]);
 

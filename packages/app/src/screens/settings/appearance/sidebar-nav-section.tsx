@@ -5,6 +5,7 @@ import type { TFunction } from "i18next";
 import {
   ArrowDown,
   ArrowUp,
+  BookOpen,
   CalendarClock,
   Coins,
   History,
@@ -44,6 +45,7 @@ const BUILTIN_ICONS: Record<BuiltinSidebarNavId, LucideIcon> = {
   search: Search,
   schedules: CalendarClock,
   "ask-jev": MessageCircleQuestion,
+  knowledge: BookOpen,
   "token-usage": Coins,
 };
 

@@ -134,9 +134,17 @@ export function executableExists(
   return exists(executablePath) ? executablePath : null;
 }
 
+export type ExecutableProbe = (executablePath: string, timeoutMs: number) => Promise<boolean>;
+
+/**
+ * `probe` defaults to running `<candidate> --version` with the daemon's environment. Pass another
+ * when that run has side effects: Basic Memory writes a config and creates `~/basic-memory`
+ * from it unless its isolated environment is set (knowledge-base/basic-memory-sidecar.ts).
+ */
 export async function findExecutable(
   name: string,
   probeTimeoutMs = PROBE_TIMEOUT_MS,
+  probe: ExecutableProbe = probeExecutable,
 ): Promise<string | null> {
   const trimmed = name.trim();
   if (!trimmed) {
@@ -146,19 +154,19 @@ export async function findExecutable(
   if (process.platform === "win32") {
     return windowsExecutableResolution.find(trimmed, {
       enumeratePathCandidates: enumerateCandidates,
-      probeExecutable,
+      probeExecutable: probe,
       exists: existsSync,
       probeTimeoutMs,
     });
   }
 
   if (hasPathSeparator(trimmed)) {
-    return (await probeExecutable(trimmed, probeTimeoutMs)) ? trimmed : null;
+    return (await probe(trimmed, probeTimeoutMs)) ? trimmed : null;
   }
 
   const candidates = await enumerateCandidates(trimmed);
   for (const candidate of candidates) {
-    if (await probeExecutable(candidate, probeTimeoutMs)) {
+    if (await probe(candidate, probeTimeoutMs)) {
       return candidate;
     }
   }

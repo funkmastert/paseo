@@ -102,6 +102,7 @@ import { ProviderUsageService } from "../services/quota-fetcher/service.js";
 import { UsageHistoryStore } from "./usage-history/usage-history-store.js";
 import { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
 import type { JevService } from "./jev/contract.js";
+import type { KnowledgeBaseBackend } from "./session/knowledge-base/knowledge-base-session.js";
 import { getProcessMemoryDiagnostics, getProcessUptimeSeconds } from "./process-diagnostics.js";
 import {
   CLIENT_SHUTDOWN_RPC_REASON,
@@ -630,6 +631,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
   private readonly jev: JevService | null | undefined;
+  private readonly knowledgeBase: KnowledgeBaseBackend | null | undefined;
   private readonly autoPinExpiry: SessionOptions["autoPinExpiry"];
   private readonly tokenUsage: SessionOptions["tokenUsage"];
 
@@ -685,6 +687,7 @@ export class VoiceAssistantWebSocketServer {
     } = {},
     restartRecovery?: RestartRecoveryService,
     jev?: JevService | null,
+    knowledgeBase?: KnowledgeBaseBackend | null,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
     this.workspaceSetupRuntime = workspaceSetupRuntime;
@@ -704,6 +707,7 @@ export class VoiceAssistantWebSocketServer {
     this.pluginRuntime = pluginRuntime;
     this.orchestrationSkills = orchestrationSkills;
     this.jev = jev;
+    this.knowledgeBase = knowledgeBase;
     this.agentManager = agentManager;
     this.agentStorage = agentStorage;
     this.agentRequests = new AgentRequests(join(paseoHome, "agent-requests"));
@@ -1544,6 +1548,7 @@ export class VoiceAssistantWebSocketServer {
       tokenUsage: this.tokenUsage,
       contextUsage: this.contextUsageService,
       jev: this.jev,
+      knowledgeBase: this.knowledgeBase,
       hubExecutionAgents: options.hubExecutionAgents,
       hubRelationships: options.hubRelationships,
       serviceProxy: this.serviceProxy ?? undefined,
@@ -1918,6 +1923,9 @@ export class VoiceAssistantWebSocketServer {
         agentProfiles: true,
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: true,
+        // COMPAT(knowledgeBase): added in v0.8.x, remove gate after 2027-10-07. Advertised whenever
+        // the daemon has the code, independent of `knowledgeBase.enabled` (KTD-12).
+        knowledgeBase: true,
       },
     };
   }
