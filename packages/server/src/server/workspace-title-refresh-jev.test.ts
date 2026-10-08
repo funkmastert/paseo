@@ -5,6 +5,7 @@ import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 
 import { createTestJevService, type TestJevServiceOptions } from "./jev/fake.js";
+import type { JevOutcome } from "./jev/contract.js";
 import type { WorkspaceTitleTrackerAgentSummary } from "./agent/agent-manager.js";
 import { TITLE_REFRESH_DEFAULTS } from "./workspace-title-refresh-config.js";
 import {
@@ -294,11 +295,18 @@ describe("buildTitleRefreshState", () => {
 });
 
 describe("createTitleRefreshRecorder", () => {
-  async function record(action: "jev-fits" | "jev-stale") {
+  async function record(
+    action: "jev-fits" | "jev-stale" | "cadence",
+    opts: { gatedByJev?: boolean; outcome?: JevOutcome["kind"]; callId?: string | null } = {},
+  ) {
     const notes: unknown[] = [];
+    const savingsRecords: unknown[] = [];
     const dir = mkdtempSync(path.join(os.tmpdir(), "title-refresh-recorder-"));
     const recorder = createTitleRefreshRecorder({
-      jev: { decisions: { record: (note: unknown) => notes.push(note) } } as never,
+      jev: {
+        decisions: { record: (note: unknown) => notes.push(note) },
+        savings: { record: (input: unknown) => savingsRecords.push(input) },
+      } as never,
       filePath: path.join(dir, "title-refresh.jsonl"),
       logger: pino({ level: "silent" }),
     });
@@ -306,9 +314,9 @@ describe("createTitleRefreshRecorder", () => {
       {
         workspaceId: "wks_checkout",
         action,
-        gatedByJev: true,
-        outcome: "answered",
-        callId: "call-1",
+        gatedByJev: opts.gatedByJev ?? true,
+        outcome: opts.outcome ?? "answered",
+        callId: opts.callId ?? "call-1",
         reason: null,
         score: action === "jev-fits" ? 0 : 3,
         confidence: 0.9,
@@ -324,7 +332,7 @@ describe("createTitleRefreshRecorder", () => {
     const file = await vi.waitFor(() =>
       readFileSync(path.join(dir, "title-refresh.jsonl"), "utf8"),
     );
-    return { notes, file };
+    return { notes, savingsRecords, file };
   }
 
   it("records a fits answer as applied: JEV skipped a call code would have made", async () => {
@@ -343,5 +351,37 @@ describe("createTitleRefreshRecorder", () => {
   it("records a stale answer as not applied: the call happened as it would have anyway", async () => {
     const { notes } = await record("jev-stale");
     expect(notes).toEqual([expect.objectContaining({ applied: false, mode: "live" })]);
+  });
+
+  it("writes a titleRefresh savings involvement for an answered fits call", async () => {
+    const { savingsRecords } = await record("jev-fits");
+    expect(savingsRecords).toEqual([
+      expect.objectContaining({
+        feature: "titleRefresh",
+        callId: "call-1",
+        agentId: "agent-1",
+        decision: { did: "no-generate", wouldBe: "no-generate", changed: false },
+        pending: false,
+      }),
+    ]);
+  });
+
+  it("writes a titleRefresh savings involvement for an answered stale call", async () => {
+    const { savingsRecords } = await record("jev-stale");
+    expect(savingsRecords).toEqual([
+      expect.objectContaining({
+        feature: "titleRefresh",
+        decision: { did: "generate", wouldBe: "generate", changed: false },
+      }),
+    ]);
+  });
+
+  it("writes no savings involvement for a cadence look JEV never gated", async () => {
+    const { notes, savingsRecords } = await record("cadence", {
+      gatedByJev: false,
+      outcome: "failed",
+    });
+    expect(notes).toEqual([]);
+    expect(savingsRecords).toEqual([]);
   });
 });

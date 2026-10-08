@@ -250,7 +250,7 @@ const TITLE_REFRESH_FILE_MAX_BYTES = 1_000_000;
  * "generation calls avoided" gets counted later by the savings ledger.
  */
 export function createTitleRefreshRecorder(options: {
-  jev: Pick<JevService, "decisions"> | null;
+  jev: Pick<JevService, "decisions" | "savings"> | null;
   filePath: string;
   logger: Logger;
 }): (
@@ -284,6 +284,21 @@ export function createTitleRefreshRecorder(options: {
           applied: fits,
           mode: "live",
           wouldBe: "regenerate title",
+        });
+        options.jev.savings.record({
+          feature: "titleRefresh",
+          callSite: TITLE_REFRESH_CALL_SITE,
+          callId: event.callId,
+          agentId: context.agentId,
+          involvement: `Does "${context.currentTitle}" still describe what this session is doing?`,
+          decision: {
+            did: fits ? "no-generate" : "generate",
+            wouldBe: fits ? "no-generate" : "generate",
+            // titleRefresh has no shadow mode (docs/jev.md, "Config"): the answer is what ran.
+            changed: false,
+          },
+          facts: { action: event.action, score: event.score, confidence: event.confidence },
+          pending: false,
         });
       }
     } catch {
