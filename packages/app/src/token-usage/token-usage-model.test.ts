@@ -197,10 +197,18 @@ describe("resolveTokenUsageDisplayState", () => {
 
 describe("formatCompactTokens", () => {
   it.each([
+    [1_192_800_000, "1.2B"],
+    [547_900_000, "548M"],
     [245_000_000, "245M"],
+    [90_900_000, "91M"],
     [7_400_000, "7.4M"],
+    [3_000_000, "3M"],
     [16_000, "16K"],
     [900, "900"],
+    [999.6, "1K"],
+    [999_600, "1M"],
+    [999_950_000, "1B"],
+    [9_960_000, "10M"],
   ])("formats %d as %s", (value, expected) => {
     expect(formatCompactTokens(value)).toBe(expected);
   });
