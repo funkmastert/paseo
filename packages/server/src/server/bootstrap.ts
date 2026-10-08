@@ -286,6 +286,8 @@ import { RemediationLadder, remediationCreateAgentInput } from "./remediation/la
 import { buildDoctorContext, readRawConfig } from "./session/doctor/index.js";
 import { resolveTokenAuditConfig, tokenAuditSection } from "./token-audit/config.js";
 import { TokenAuditJob } from "./token-audit/token-audit-job.js";
+import { resolveTranscriptRoots } from "./token-usage/token-usage-roots.js";
+import { TokenUsageService, isTokenUsageEnabled } from "./token-usage/token-usage-service.js";
 import { resolveAccountPoolEntries } from "./agent/account-pool-providers.js";
 import {
   AgentStallSweep,
@@ -887,6 +889,35 @@ function withDeviceLeasesConfig(
   config: Pick<PaseoDaemonConfig, "deviceLeases">,
 ): Pick<MutableDaemonConfig, "deviceLeases"> {
   return config.deviceLeases !== undefined ? { deviceLeases: config.deviceLeases } : {};
+}
+
+/**
+ * Token usage by model and role from transcripts (docs/token-usage.md). Records each agent's
+ * provider sessions as the daemon sees them. Its first sweep waits for its timer, so listening
+ * is never held up by the backfill.
+ */
+function createTokenUsageService(input: {
+  paseoHome: string;
+  agentStorage: AgentStorage;
+  agentManager: AgentManager;
+  logger: Logger;
+}): TokenUsageService {
+  const readConfig = () => readRawConfig(input.paseoHome).rawConfig;
+  const service = new TokenUsageService({
+    rootDir: path.join(input.paseoHome, "token-usage"),
+    roots: resolveTranscriptRoots({
+      homeDir: homedir(),
+      env: process.env,
+      rawConfig: readConfig(),
+    }),
+    listAgentRecords: () => input.agentStorage.list(),
+    isEnabled: () => isTokenUsageEnabled(readConfig()),
+    logger: input.logger.child({ module: "token-usage" }),
+  });
+  input.agentManager.subscribe((event) => {
+    if (event.type === "agent_state") service.observeAgent(event.agent);
+  });
+  return service;
 }
 
 function withArtifactJanitorConfig(
@@ -1723,6 +1754,7 @@ export async function createPaseoDaemon(
   let doneJanitor: AgentDoneJanitor | null = null;
   let remediationLadder: RemediationLadder | null = null;
   let tokenAuditJob: TokenAuditJob | null = null;
+  let tokenUsageService: TokenUsageService | null = null;
   let agentStallSweep: AgentStallSweep | null = null;
   let awayReplyJob: AwayReplyJob | null = null;
   let workSnapshotSweep: AgentWorkSnapshotSweep | null = null;
@@ -3189,6 +3221,13 @@ export async function createPaseoDaemon(
               logger.info("Daemon password authentication enabled");
             }
 
+            const tokenUsage = createTokenUsageService({
+              paseoHome: config.paseoHome,
+              agentStorage,
+              agentManager,
+              logger,
+            });
+            tokenUsageService = tokenUsage;
             wsServer = new VoiceAssistantWebSocketServer(
               httpServer,
               logger,
@@ -3565,6 +3604,7 @@ export async function createPaseoDaemon(
               logger: logger.child({ module: "token-audit" }),
             });
             tokenAuditJob.start();
+            tokenUsage.start();
             // Fire-and-forget: reconciling in-flight agents reads agent state and must not delay
             // the daemon from accepting connections.
             void remediationLadder.start().catch((error: unknown) => {
@@ -3772,6 +3812,9 @@ export async function createPaseoDaemon(
     agentTokenBurnMonitor?.stop();
     // After the monitor stops: its last sweep's readings are still in memory, not on disk.
     await wsServer?.getUsageHistoryStore().close();
+    await tokenUsageService?.stop().catch((error: unknown) => {
+      logger.warn({ err: error }, "Failed to save token usage");
+    });
     stopMonitorsAndSweeps();
     // Before the savings callers: the observer's queued judgments still land their records.
     await readCheckObserver.observer.stop();
