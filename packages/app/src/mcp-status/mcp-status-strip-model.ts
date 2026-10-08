@@ -119,27 +119,48 @@ export interface McpStatusRow {
   sessionOnly: boolean;
 }
 
+/**
+ * What the strip's header says. One unhealthy row is named; several are counted, because a list
+ * of names does not fit a sidebar row and repeats the rows under it. Hidden rows are not counted.
+ */
+export type McpStatusHeadline =
+  | { kind: "needsSignIn"; name: string }
+  | { kind: "needsAttention"; name: string }
+  | { kind: "manyNeedAttention"; count: number }
+  | { kind: "connected"; count: number };
+
 export interface McpStatusCollapsedSummary {
   tone: ProviderUsageTone;
-  /** Critical servers currently unhealthy (needs-auth/error) — named per the collapsed-row
-   * spec in KTD10 ("aggregate dot + names of unhealthy critical servers"). */
-  unhealthyCriticalNames: string[];
-  /**
-   * Names for the collapsed "MCP issues: …" text: the unhealthy critical servers when there are
-   * any, else every unhealthy row (non-critical gateway servers, session-reported servers).
-   * Empty only when nothing is unhealthy, so the collapsed row never reads "connected" while a
-   * row underneath it isn't — which is exactly what happened when the gateway had no servers
-   * and only session reports existed.
-   */
-  issueNames: string[];
+  headline: McpStatusHeadline;
+  /** True while any row that is not hidden is unhealthy, so the header never reads "connected"
+   * above a row that isn't — which is what happened when only session reports existed. */
   hasIssues: boolean;
+}
+
+/** The expanded strip's sections, in the order they render. */
+export interface McpStatusRowGroups {
+  /** Unhealthy rows with a button that can still help, critical first. */
+  actionable: McpStatusRow[];
+  /** Unhealthy rows nothing in Paseo can fix: they explain, and offer Hide. */
+  stuck: McpStatusRow[];
+  /** Connected, connecting and disabled servers, behind one collapsed disclosure. */
+  connected: McpStatusRow[];
+  /** Rows the person hid, until their server connects. Out of the header's count and tone. */
+  hidden: McpStatusRow[];
 }
 
 export interface McpStatusStripModel {
   /** False when there is nothing to show at all — no servers and no session reports. */
   hasData: boolean;
   collapsed: McpStatusCollapsedSummary;
+  /** Every row, hidden or not — what the failure bookkeeping in useMcpStatus watches. */
   rows: McpStatusRow[];
+  groups: McpStatusRowGroups;
+  /**
+   * Hidden names whose server is connected again. Hiding is for a dead end; once one connects
+   * the name is released, so the next time it breaks the strip says so.
+   */
+  recoveredHiddenNames: string[];
 }
 
 const UNHEALTHY_STATUSES = new Set<McpServerStatus>(["needs-auth", "error"]);
@@ -192,18 +213,91 @@ function sortRows(rows: McpStatusRow[]): McpStatusRow[] {
   });
 }
 
+/** Unhealthy critical servers decide the tone first; hidden rows are already filtered out. */
 function deriveCollapsedTone(
   servers: McpStatusServerEntry[],
-  hasUnmatchedSessionIssues: boolean,
+  visibleUnhealthyRows: McpStatusRow[],
 ): ProviderUsageTone {
-  if (servers.some((s) => s.critical && s.status === "error")) return "danger";
-  if (servers.some((s) => s.critical && s.status === "needs-auth")) return "warning";
-  if (servers.some((s) => s.status === "error")) return "danger";
-  if (servers.some((s) => s.status === "needs-auth")) return "warning";
-  if (hasUnmatchedSessionIssues) return "warning";
+  const rows = visibleUnhealthyRows;
+  if (rows.some((row) => row.critical && row.statusKey === "error")) return "danger";
+  if (rows.some((row) => row.critical && row.statusKey === "needsAuth")) return "warning";
+  if (rows.some((row) => row.statusKey === "error")) return "danger";
+  // needs-auth gateway rows and every session-only row.
+  if (rows.length > 0) return "warning";
   if (servers.length === 0) return "default";
   if (servers.some((s) => s.status === "connecting")) return "default";
   return "ok";
+}
+
+function deriveHeadline(
+  visibleUnhealthyRows: McpStatusRow[],
+  rows: McpStatusRow[],
+): McpStatusHeadline {
+  const [only] = visibleUnhealthyRows;
+  if (visibleUnhealthyRows.length > 1) {
+    return { kind: "manyNeedAttention", count: visibleUnhealthyRows.length };
+  }
+  if (only) {
+    const needsSignIn = only.statusKey === "needsAuth" || only.statusKey === "claudeAiConnector";
+    return { kind: needsSignIn ? "needsSignIn" : "needsAttention", name: only.name };
+  }
+  return { kind: "connected", count: rows.filter((row) => row.statusKey === "connected").length };
+}
+
+function byName(a: McpStatusRow, b: McpStatusRow): number {
+  return a.name.localeCompare(b.name);
+}
+
+function groupRows(rows: McpStatusRow[], hidden: ReadonlySet<string>): McpStatusRowGroups {
+  const groups: McpStatusRowGroups = { actionable: [], stuck: [], connected: [], hidden: [] };
+  // `rows` is already sorted critical-first, which the two unhealthy groups keep.
+  for (const row of rows) {
+    // A hidden server stays hidden until it really connects, or it would flash into the
+    // connected group on the connecting tick of every reconnect.
+    if (hidden.has(row.name) && row.statusKey !== "connected") {
+      groups.hidden.push(row);
+    } else if (!isUnhealthyRow(row)) {
+      groups.connected.push(row);
+    } else if (row.action) {
+      groups.actionable.push(row);
+    } else {
+      groups.stuck.push(row);
+    }
+  }
+  groups.connected.sort(byName);
+  groups.hidden.sort(byName);
+  return groups;
+}
+
+/**
+ * Hidden names whose server is connected again. The gateway decides for a server it brokers. A
+ * name it does not broker has no row once its sessions read connected, so it is released when they
+ * all do.
+ */
+function deriveRecoveredHiddenNames(input: {
+  hidden: ReadonlySet<string>;
+  rows: McpStatusRow[];
+  serverNames: ReadonlySet<string>;
+  sessionReports: McpStatusSessionReport[];
+  unhealthyReportsByServer: ReadonlyMap<string, McpStatusSessionReport[]>;
+}): string[] {
+  const recovered = new Set(
+    input.rows
+      .filter((row) => row.statusKey === "connected" && input.hidden.has(row.name))
+      .map((row) => row.name),
+  );
+  for (const report of input.sessionReports) {
+    const name = report.serverName;
+    if (
+      report.status === "connected" &&
+      input.hidden.has(name) &&
+      !input.serverNames.has(name) &&
+      !input.unhealthyReportsByServer.has(name)
+    ) {
+      recovered.add(name);
+    }
+  }
+  return [...recovered];
 }
 
 function groupUnhealthyReportsByServer(
@@ -285,6 +379,8 @@ export function buildMcpStatusStripModel(input: {
   canAdopt?: boolean;
   /** The last failed action per server name, keyed as the strip records them. */
   failures?: Record<string, McpStatusActionFailure>;
+  /** Server names the person hid on this host. Only an unhealthy row can be hidden. */
+  hiddenNames?: readonly string[];
 }): McpStatusStripModel {
   const serverNames = new Set(input.servers.map((server) => server.name));
   const unhealthyReportsByServer = groupUnhealthyReportsByServer(input.sessionReports);
@@ -336,22 +432,25 @@ export function buildMcpStatusStripModel(input: {
   }
 
   const rows = sortRows([...serverRows, ...sessionOnlyRows]);
-  const unhealthyCriticalNames = input.servers
-    .filter((server) => server.critical && isUnhealthy(server.status))
-    .map((server) => server.name);
-  const issueNames =
-    unhealthyCriticalNames.length > 0
-      ? unhealthyCriticalNames
-      : rows.filter(isUnhealthyRow).map((row) => row.name);
+  const hidden = new Set(input.hiddenNames ?? []);
+  const groups = groupRows(rows, hidden);
+  const visibleUnhealthyRows = [...groups.actionable, ...groups.stuck];
 
   return {
     hasData: rows.length > 0,
     collapsed: {
-      tone: deriveCollapsedTone(input.servers, sessionOnlyRows.length > 0),
-      unhealthyCriticalNames,
-      issueNames,
-      hasIssues: rows.some(isUnhealthyRow),
+      tone: deriveCollapsedTone(input.servers, visibleUnhealthyRows),
+      headline: deriveHeadline(visibleUnhealthyRows, rows),
+      hasIssues: visibleUnhealthyRows.length > 0,
     },
     rows,
+    groups,
+    recoveredHiddenNames: deriveRecoveredHiddenNames({
+      hidden,
+      rows,
+      serverNames,
+      sessionReports: input.sessionReports,
+      unhealthyReportsByServer,
+    }),
   };
 }
