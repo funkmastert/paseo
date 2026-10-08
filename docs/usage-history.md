@@ -2,7 +2,7 @@
 
 The daemon knew how full a usage window was and nothing about how fast it was filling. A weekly window reached 100% with no warning and every agent on the account died. Usage history records the readings the daemon already sees, so it can say "at this rate `claude-personal` caps in three hours" while there is still time to act on it.
 
-It records and projects. It never pushes, steers or acts. [Account pressure](token-burn.md#account-pressure) is the threshold alert and [budget pacing](budget-pacing.md) is the advice to leaders; both can read a projection, neither is changed by this.
+It records and projects. It never pushes, steers or acts. [Account pressure](token-burn.md#account-pressure) is the threshold alert and [budget pacing](budget-pacing.md) is the advice to leaders; both can read a projection, neither is changed by this. Tokens by model and role, read from transcripts, are [token usage](token-usage.md).
 
 ## What is sampled
 

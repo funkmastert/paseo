@@ -53,6 +53,8 @@ interface TestPaseoDaemonOptions {
   refocus?: PaseoDaemonConfig["refocus"];
   catastropheGate?: PaseoDaemonConfig["catastropheGate"];
   jevOverrides?: PaseoDaemonConfig["jevOverrides"];
+  /** Defaults to no transcript trees: a test daemon must never read the developer's own. */
+  tokenUsageOverrides?: PaseoDaemonConfig["tokenUsageOverrides"];
   daemonVitals?: PaseoDaemonConfig["daemonVitals"];
   restartRecovery?: PaseoDaemonConfig["restartRecovery"];
   pluginsEnabled?: PaseoDaemonConfig["pluginsEnabled"];
@@ -213,6 +215,7 @@ async function prepareTestDaemonConfig(
     refocus: options.refocus,
     catastropheGate: options.catastropheGate,
     jevOverrides: options.jevOverrides,
+    tokenUsageOverrides: options.tokenUsageOverrides ?? { roots: [] },
     daemonVitals: options.daemonVitals,
     restartRecovery: options.restartRecovery,
     pluginsEnabled: options.pluginsEnabled,
