@@ -11,6 +11,7 @@ const SHELL_ROW_TEST_IDS = {
   search: "sidebar-search",
   schedules: "sidebar-schedules",
   "ask-jev": "sidebar-ask-jev",
+  knowledge: "sidebar-knowledge",
   "token-usage": "sidebar-token-usage",
 } as const;
 
@@ -38,6 +39,7 @@ function itemLabel(key: SidebarNavKey): string {
     search: "Search",
     schedules: "Schedules",
     "ask-jev": "Ask JEV",
+    knowledge: "Knowledge",
     "token-usage": "Tokens",
   }[key];
 }

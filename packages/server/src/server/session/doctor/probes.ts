@@ -2,6 +2,11 @@ import { execFile } from "node:child_process";
 import { existsSync, statfsSync } from "node:fs";
 import path from "node:path";
 import { claudeConfigDirKeychainService } from "../../../services/quota-fetcher/providers/claude.js";
+import {
+  isWindowsCommandScript,
+  quoteWindowsArgument,
+  quoteWindowsCommand,
+} from "../../../utils/windows-command.js";
 import type { DoctorProbes } from "./context.js";
 import { measureDirBytes } from "./measure-dir.js";
 
@@ -29,15 +34,21 @@ export function createRealProbes(): DoctorProbes {
     },
     measureDirBytes,
     exec(file, args, options) {
+      // Node's execFile refuses .cmd/.bat scripts without a shell on Windows (spawn EINVAL);
+      // route those through cmd.exe like utils/spawn.ts does, with matching quoting.
+      const shell = isWindowsCommandScript(file);
+      const resolvedFile = shell ? quoteWindowsCommand(file) : file;
+      const resolvedArgs = shell ? args.map(quoteWindowsArgument) : [...args];
       return new Promise((resolve) => {
         execFile(
-          file,
-          [...args],
+          resolvedFile,
+          resolvedArgs,
           {
             timeout: options.timeoutMs,
             cwd: options.cwd,
             env: options.env,
             maxBuffer: 32 * 1024 * 1024,
+            shell,
           },
           (error, stdout, stderr) => {
             const code = error ? (error as NodeJS.ErrnoException & { code?: unknown }).code : 0;

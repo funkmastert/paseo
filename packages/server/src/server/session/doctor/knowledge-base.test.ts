@@ -129,9 +129,14 @@ describe("knowledgeBaseCheck", () => {
 
     try {
       const notesFinding = findings.find((f) => f.title.includes("Notes directory"));
-      expect(notesFinding?.status).toBe("fail");
+      // chmod 0o500 does not deny directory writes on Windows (no POSIX permission bits), so
+      // there is no reliable way to fabricate an unwritable directory here; this assertion is
+      // POSIX-only. The rest of the test still runs on Windows as a smoke check.
+      if (process.platform !== "win32") {
+        expect(notesFinding?.status).toBe("fail");
+      }
     } finally {
-      chmodSync(notesDir, 0o755);
+      if (process.platform !== "win32") chmodSync(notesDir, 0o755);
     }
   });
 });
