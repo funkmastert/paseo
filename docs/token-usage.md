@@ -52,22 +52,10 @@ A session no agent claims is left unread for 10 minutes after its transcript sta
 
 `$PASEO_HOME/token-usage/`:
 
-- `state.json`: hourly buckets (`[hour, provider, model, role, input, cacheWrite, cacheRead, output, responses]`) and the per-file scan state (offset, size, mtime, recent ids, Codex model, Claude first id and newest timestamp). One file on purpose: a crash between two separate writes would count a stretch twice or lose it.
+- `state.json`: hourly buckets and the per-file scan state. One file on purpose: a crash between two separate writes would count a stretch twice or lose it.
 - `sessions.json`: session id, agent id, parent agent id, last seen.
 
-Zod-validated, `v: 1`, atomic writes at most every five minutes and on shutdown. A file that will not parse is replaced and the scan rebuilds it from the transcripts.
-
-| Bound               | Value (`DEFAULT_TOKEN_USAGE_LIMITS`)           |
-| ------------------- | ---------------------------------------------- |
-| Age                 | 31 days for buckets, file entries and sessions |
-| Buckets             | 100,000; the oldest hour goes first            |
-| Models per provider | 128; past that a new model books as `unknown`  |
-| File entries        | 100,000                                        |
-| Recent ids per file | 16, dropped once a file is idle for a day      |
-| Sessions            | 50,000                                         |
-| One transcript line | 32 MiB; a longer line is passed over unread    |
-
-On this machine the state file is about 4.5 MB for 15.8K transcripts and 2.7K buckets. Loading it takes about 50 ms once; a query takes about 1 ms.
+Zod-validated, `v: 1`, atomic writes at most every five minutes and on shutdown. A file that will not parse is replaced and the scan rebuilds it from the transcripts. Every axis — buckets, file entries, sessions, models per provider, recent ids per file, one line's length — is bounded; see `DEFAULT_TOKEN_USAGE_LIMITS` in `token-usage-store.ts` for the current values. The scanner's discovery window matches the store's retention (`TokenUsageService` derives one from the other), so a file's scan state is never dropped before the buckets it backs are pruned.
 
 ## The RPC
 
@@ -75,4 +63,4 @@ On this machine the state file is about 4.5 MB for 15.8K transcripts and 2.7K bu
 
 ## Checking it against the transcripts
 
-The scanner's totals were checked against an independent sum over the same transcripts, deduped globally by `message.id` (largest count per category): Claude matched exactly over 30 days in every category (a run while agents are writing can trail by a few hundredths of a percent: lines written after the scan read the file), Codex matched exactly per model, and one sampled session with 230 subagent and workflow files matched exactly. To repeat it, run the service's `runSweep()` against a temporary `PASEO_HOME` until `complete`, never against `~/.paseo`.
+Check the scanner's totals against an independent sum over the same transcripts, deduped globally by `message.id` (largest count per category). Run the service's `runSweep()` against a temporary `PASEO_HOME` until `complete`, never against `~/.paseo`.

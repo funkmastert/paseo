@@ -2177,6 +2177,10 @@ export const ptBR: TranslationResources = {
     jevOlder: "{{count}} anteriores",
     jevAllActivity: "Toda a atividade do JEV",
   },
+  tokenUsage: {
+    byModelTitle: "Tokens por modelo",
+    byRoleTitle: "Tokens por função",
+  },
   review: {
     comment: {
       add: "Adicionar comentário de revisão",

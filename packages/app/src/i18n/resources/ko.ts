@@ -2155,6 +2155,10 @@ export const ko: TranslationResources = {
     jevOlder: "이전 {{count}}건",
     jevAllActivity: "모든 JEV 활동",
   },
+  tokenUsage: {
+    byModelTitle: "모델별 토큰",
+    byRoleTitle: "역할별 토큰",
+  },
   review: {
     comment: {
       add: "리뷰 댓글 추가",

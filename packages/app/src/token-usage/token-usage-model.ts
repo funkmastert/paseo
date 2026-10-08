@@ -1,5 +1,4 @@
 import type {
-  TokenUsageCoverage,
   TokenUsageGetBreakdownResponse,
   TokenUsageRow,
 } from "@getpaseo/protocol/token-usage/rpc-schemas";
@@ -113,25 +112,38 @@ export function buildTokenUsageModelBars(
   const unattributed = withTotals.filter((entry) => entry.model === TOKEN_USAGE_UNKNOWN_MODEL);
   const ordered = [...attributed, ...unattributed];
 
-  const maxTotal = Math.max(1, ...ordered.map((entry) => entry.total));
+  const totals = ordered.map((entry) => entry.total);
+  const maxTotal = Math.max(1, ...totals);
 
-  return ordered.map((entry) => ({
+  return ordered.map((entry) => buildModelBar(entry, maxTotal));
+}
+
+function buildModelBar(
+  entry: {
+    provider: string;
+    model: string;
+    roleTotals: Map<TokenUsageDisplayRole, number>;
+    total: number;
+  },
+  maxTotal: number,
+): TokenUsageModelBar {
+  const isUnattributed = entry.model === TOKEN_USAGE_UNKNOWN_MODEL;
+  const label = isUnattributed ? "Unattributed" : `${entry.provider} / ${entry.model}`;
+  const segments = TOKEN_USAGE_ROLE_ORDER.map((role) => {
+    const roleTotal = entry.roleTotals.get(role) ?? 0;
+    return { role, total: roleTotal, fraction: roleTotal / maxTotal };
+  });
+  return {
     id: `${entry.provider}/${entry.model}`,
     provider: entry.provider,
     model: entry.model,
-    label:
-      entry.model === TOKEN_USAGE_UNKNOWN_MODEL
-        ? "Unattributed"
-        : `${entry.provider} / ${entry.model}`,
-    isUnattributed: entry.model === TOKEN_USAGE_UNKNOWN_MODEL,
+    label,
+    isUnattributed,
     total: entry.total,
     formattedTotal: formatCompactTokens(entry.total),
     share: entry.total / maxTotal,
-    segments: TOKEN_USAGE_ROLE_ORDER.map((role) => {
-      const roleTotal = entry.roleTotals.get(role) ?? 0;
-      return { role, total: roleTotal, fraction: roleTotal / maxTotal };
-    }),
-  }));
+    segments,
+  };
 }
 
 export interface TokenUsageRoleTotal {
@@ -165,25 +177,33 @@ export function hasIncompleteAttribution(
 }
 
 export type TokenUsageDisplayState =
+  | { kind: "error"; message: string }
+  | { kind: "disabled" }
   | { kind: "backfilling"; filesDone: number; filesTotal: number }
   | { kind: "empty" }
   | { kind: "data" };
 
+export type TokenUsageDisplayStateInput = Pick<TokenUsageBreakdown, "rows" | "coverage" | "error">;
+
 /**
- * R11: progress while the backfill runs, an empty state once it's done and there's still nothing.
- * `backfill.state` is an open string too; a state this app doesn't recognize yet behaves like
- * "done" — no progress banner, since it isn't known to still be running.
+ * R11/R14: a failed read (the payload's own `error`) and the feature turned off in config
+ * (`coverage.enabled: false`) are distinct from "no data yet" — both would otherwise fall through
+ * to the same empty state, hiding why. `backfill.state` is an open string too; a state this app
+ * doesn't recognize yet behaves like "done" — no progress banner, since it isn't known to still be
+ * running.
  */
 export function resolveTokenUsageDisplayState(
-  rows: readonly TokenUsageRow[],
-  coverage: TokenUsageCoverage,
+  breakdown: TokenUsageDisplayStateInput,
 ): TokenUsageDisplayState {
-  if (rows.length > 0) return { kind: "data" };
-  if (coverage.backfill.state === "running" || coverage.backfill.state === "pending") {
+  if (breakdown.error) return { kind: "error", message: breakdown.error };
+  if (!breakdown.coverage.enabled) return { kind: "disabled" };
+  if (breakdown.rows.length > 0) return { kind: "data" };
+  const backfillState = breakdown.coverage.backfill.state;
+  if (backfillState === "running" || backfillState === "pending") {
     return {
       kind: "backfilling",
-      filesDone: coverage.backfill.filesDone,
-      filesTotal: coverage.backfill.filesTotal,
+      filesDone: breakdown.coverage.backfill.filesDone,
+      filesTotal: breakdown.coverage.backfill.filesTotal,
     };
   }
   return { kind: "empty" };

@@ -2,6 +2,7 @@ import { useMemo, type ReactElement } from "react";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Alert } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
 import {
@@ -21,8 +22,7 @@ import { TokensByRoleCard } from "./tokens-by-role-card";
  * The screen's presentational pieces: no `expo-router`, no navigation hooks. A capture (or this
  * screen's browser test) can mount these directly with fixture data — `expo-router`'s `router`
  * singleton pulls in the whole navigation stack, which breaks the browser capture's esbuild loader
- * on its JSX (the same trap `jev-dashboard-view.tsx` avoids). `token-usage-screen.tsx` wires
- * fixture data today and will wire `use-token-usage.ts` in U5, without touching this file.
+ * on its JSX (the same trap `jev-dashboard-view.tsx` avoids).
  */
 
 const ThemedLoadingSpinner = withUnistyles(LoadingSpinner, (theme) => ({
@@ -91,23 +91,33 @@ export function TokenUsageAvailabilityBanner({
 export interface TokenUsageContentProps {
   breakdown: TokenUsageBreakdown | undefined;
   isLoading: boolean;
+  queryError: Error | null;
+  onRetry: () => void;
   unit: TokenUsageUnit;
   onUnitChange: (unit: TokenUsageUnit) => void;
   range: TokenUsageRange;
   onRangeChange: (range: TokenUsageRange) => void;
 }
 
+function RetryButton({ onRetry, testID }: { onRetry: () => void; testID: string }) {
+  return (
+    <Button variant="outline" size="sm" onPress={onRetry} testID={testID}>
+      Retry
+    </Button>
+  );
+}
+
 export function TokenUsageContent({
   breakdown,
   isLoading,
+  queryError,
+  onRetry,
   unit,
   onUnitChange,
   range,
   onRangeChange,
 }: TokenUsageContentProps): ReactElement {
-  const displayState = breakdown
-    ? resolveTokenUsageDisplayState(breakdown.rows, breakdown.coverage)
-    : null;
+  const displayState = breakdown ? resolveTokenUsageDisplayState(breakdown) : null;
   const bars = useMemo(
     () => (breakdown ? buildTokenUsageModelBars(breakdown.rows, unit) : []),
     [breakdown, unit],
@@ -141,6 +151,34 @@ export function TokenUsageContent({
           <ThemedLoadingSpinner size={14} />
           <Text style={styles.loadingLabel}>Loading...</Text>
         </View>
+      ) : null}
+      {!breakdown && !isLoading && queryError ? (
+        <Alert
+          variant="error"
+          title="Couldn't load token usage"
+          description={queryError.message}
+          testID="token-usage-query-error"
+        >
+          <RetryButton onRetry={onRetry} testID="token-usage-query-error-retry" />
+        </Alert>
+      ) : null}
+      {displayState?.kind === "error" ? (
+        <Alert
+          variant="error"
+          title="Couldn't load token usage"
+          description={displayState.message}
+          testID="token-usage-error"
+        >
+          <RetryButton onRetry={onRetry} testID="token-usage-error-retry" />
+        </Alert>
+      ) : null}
+      {displayState?.kind === "disabled" ? (
+        <Alert
+          variant="info"
+          title="Token usage is turned off"
+          description="Recording is off on this host (agents.tokenUsage.enabled)."
+          testID="token-usage-disabled"
+        />
       ) : null}
       {displayState?.kind === "backfilling" ? (
         <Alert

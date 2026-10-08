@@ -9,6 +9,11 @@ import type {
   UsageBooking,
 } from "./token-usage-store.js";
 import {
+  CLAUDE_ASSISTANT_NEEDLE,
+  CLAUDE_USAGE_NEEDLE,
+  CODEX_THREAD_SETTINGS_NEEDLE,
+  CODEX_TOKEN_USAGE_NEEDLE,
+  CODEX_TURN_CONTEXT_NEEDLE,
   createCodexParseState,
   parseClaudeTranscriptLine,
   parseCodexTranscriptLine,
@@ -105,11 +110,12 @@ const SKIPPED_DIRS = new Set(["tool-results", "memory"]);
 const MAX_WALK_DEPTH = 6;
 const STAT_CONCURRENCY = 4;
 
-const CLAUDE_PREFILTER = Buffer.from('"usage"');
+// Built from the parsers' own needles (transcript-parsers.ts) so the two can't drift apart (#18).
+const CLAUDE_PREFILTERS = [Buffer.from(CLAUDE_USAGE_NEEDLE), Buffer.from(CLAUDE_ASSISTANT_NEEDLE)];
 const CODEX_PREFILTERS = [
-  Buffer.from('"token_usage_record"'),
-  Buffer.from('"turn_context"'),
-  Buffer.from('"thread_settings_applied"'),
+  Buffer.from(CODEX_TOKEN_USAGE_NEEDLE),
+  Buffer.from(CODEX_TURN_CONTEXT_NEEDLE),
+  Buffer.from(CODEX_THREAD_SETTINGS_NEEDLE),
 ];
 
 export class TokenUsageScanner {
@@ -125,6 +131,12 @@ export class TokenUsageScanner {
   private readonly unlistableRoots = new Set<string>();
   /** Response ids of each fork's parents, held while the fork's copied prefix is being read. */
   private readonly forkParentIds = new Map<string, Set<string>>();
+  /**
+   * Set by `requestStop()` so a fork-parent read in progress — the one unbudgeted loop, since
+   * stopping it halfway would leave a copy half-skipped — still exits promptly on shutdown
+   * (#12), instead of running past the daemon's shutdown budget.
+   */
+  private stopRequested = false;
 
   constructor(options: TokenUsageScannerOptions) {
     this.store = options.store;
@@ -135,6 +147,12 @@ export class TokenUsageScanner {
     this.yieldEveryLines = options.yieldEveryLines ?? DEFAULT_YIELD_EVERY_LINES;
     this.windowMs = (options.windowDays ?? DEFAULT_WINDOW_DAYS) * DAY_MS;
     this.graceMs = options.graceMs;
+  }
+
+  /** Cooperative stop: the in-progress sweep (including an unbudgeted fork-parent read) exits at
+   * its next yield rather than running to completion. */
+  requestStop(): void {
+    this.stopRequested = true;
   }
 
   async sweep(input: {
@@ -350,13 +368,14 @@ export class TokenUsageScanner {
     return { outcome: "done", consumed };
   }
 
-  /** Yields to the event loop; true when the sweep's budget is spent. */
+  /** Yields to the event loop; true when the sweep's budget is spent, or a stop was requested
+   * (checked even when `ctx.deadline` is unbudgeted — see `requestStop()`). */
   private async yieldAndCheck(ctx: SweepContext): Promise<boolean> {
     const before = performance.now();
     ctx.longestBlockMs = Math.max(ctx.longestBlockMs, before - ctx.lastYield);
     await new Promise<void>((resolve) => setImmediate(resolve));
     ctx.lastYield = performance.now();
-    return ctx.lastYield >= ctx.deadline;
+    return this.stopRequested || ctx.lastYield >= ctx.deadline;
   }
 
   private async processLine(input: {
@@ -382,7 +401,7 @@ export class TokenUsageScanner {
         ctx,
       });
     }
-    if (!line.includes(CLAUDE_PREFILTER)) return "ok";
+    if (!CLAUDE_PREFILTERS.every((needle) => line.includes(needle))) return "ok";
     const record = parseClaudeTranscriptLine(line.toString("utf8"));
     if (!record) return "ok";
     // Claude sometimes writes earlier responses again further down the same file, with their
@@ -391,7 +410,9 @@ export class TokenUsageScanner {
       return "ok";
     }
     entry.newestMs = Math.max(entry.newestMs ?? record.timestampMs, record.timestampMs);
-    if (await this.isForkCopy(record.messageId, file, entry, ctx)) return "ok";
+    const forkCopy = await this.isForkCopy(record.messageId, file, entry, ctx);
+    if (forkCopy === "defer") return "defer";
+    if (forkCopy) return "ok";
     if (record.timestampMs < ctx.horizonMs) return "ok";
     return this.book({
       id: record.messageId,
@@ -416,7 +437,7 @@ export class TokenUsageScanner {
     file: DiscoveredFile,
     entry: FileScanState,
     ctx: SweepContext,
-  ): Promise<boolean> {
+  ): Promise<boolean | "defer"> {
     if (!messageId) return false;
     if (!entry.firstId) {
       entry.firstId = messageId;
@@ -427,7 +448,13 @@ export class TokenUsageScanner {
     if (!entry.forkOf) return false;
     let parentIds = this.forkParentIds.get(file.path);
     if (!parentIds) {
-      parentIds = await this.readResponseIds(entry.forkOf, ctx);
+      const result = await this.readResponseIds(entry.forkOf, ctx);
+      // A stop interrupted the read: the id set is partial. Neither cache it nor decide from it
+      // — a wrong "not a copy" call here would double-book a response the parent already counted.
+      // Defer the line so this sweep leaves the file's offset where it was; the next sweep (or a
+      // fresh scanner after restart) reads the parents again from the start.
+      if (result === "stopped") return "defer";
+      parentIds = result;
       this.forkParentIds.set(file.path, parentIds);
     }
     if (parentIds.has(messageId)) return true;
@@ -437,7 +464,10 @@ export class TokenUsageScanner {
     return false;
   }
 
-  private async readResponseIds(paths: readonly string[], ctx: SweepContext): Promise<Set<string>> {
+  private async readResponseIds(
+    paths: readonly string[],
+    ctx: SweepContext,
+  ): Promise<Set<string> | "stopped"> {
     const ids = new Set<string>();
     for (const parentPath of paths) {
       let size: number;
@@ -455,13 +485,14 @@ export class TokenUsageScanner {
         sessionHint: null,
       };
       // Not budgeted: a fork is rare, and stopping halfway would leave its copy half-skipped.
+      // Still cooperative, though — `yieldAndCheck` honors `requestStop()` regardless (#12).
       const unbudgeted = { ...ctx, deadline: Number.POSITIVE_INFINITY };
-      await this.readLines(
+      const result = await this.readLines(
         parent,
         { provider: "claude", offset: 0, size: 0, mtimeMs: 0 },
         unbudgeted,
         async (line) => {
-          if (!line.includes(CLAUDE_PREFILTER)) return "ok";
+          if (!CLAUDE_PREFILTERS.every((needle) => line.includes(needle))) return "ok";
           const id = parseClaudeTranscriptLine(line.toString("utf8"))?.messageId;
           if (id) ids.add(id);
           return "ok";
@@ -469,6 +500,7 @@ export class TokenUsageScanner {
       );
       ctx.lastYield = unbudgeted.lastYield;
       ctx.longestBlockMs = Math.max(ctx.longestBlockMs, unbudgeted.longestBlockMs);
+      if (result.outcome === "budget") return "stopped";
     }
     return ids;
   }

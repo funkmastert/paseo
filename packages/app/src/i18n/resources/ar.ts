@@ -2144,6 +2144,10 @@ export const ar: TranslationResources = {
     jevOlder: "{{count}} أقدم",
     jevAllActivity: "كل نشاط JEV",
   },
+  tokenUsage: {
+    byModelTitle: "الرموز حسب النموذج",
+    byRoleTitle: "الرموز حسب الدور",
+  },
   review: {
     comment: {
       add: "إضافة تعليق المراجعة",

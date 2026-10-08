@@ -2164,6 +2164,10 @@ export const ja: TranslationResources = {
     jevOlder: "ほか {{count}} 件",
     jevAllActivity: "すべての JEV アクティビティ",
   },
+  tokenUsage: {
+    byModelTitle: "モデル別トークン",
+    byRoleTitle: "ロール別トークン",
+  },
   review: {
     comment: {
       add: "レビューコメントを追加",

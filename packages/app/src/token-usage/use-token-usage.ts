@@ -9,8 +9,18 @@ import type { TokenUsageBreakdown } from "./token-usage-model";
 // what the last sweep already wrote.
 export const TOKEN_USAGE_STALE_TIME_MS = 60 * 1000;
 
+// Matches the daemon's backfill sweep cadence (docs/token-usage.md: "Sweeps run every 15 s while
+// the backfill has files left"), so the progress banner advances instead of freezing at its first
+// snapshot.
+const BACKFILL_POLL_INTERVAL_MS = 15 * 1000;
+
 export function tokenUsageQueryKey(serverId: string | null | undefined, range: TokenUsageRange) {
   return ["tokenUsage", serverId ?? "", range] as const;
+}
+
+export function backfillRefetchInterval(data: TokenUsageBreakdown | undefined): number | false {
+  const state = data?.coverage.backfill.state;
+  return state === "pending" || state === "running" ? BACKFILL_POLL_INTERVAL_MS : false;
 }
 
 /**
@@ -21,7 +31,13 @@ export function useTokenUsage(
   serverId: string | null | undefined,
   range: TokenUsageRange,
   options: { enabled?: boolean } = {},
-): { data: TokenUsageBreakdown | undefined; isLoading: boolean; isSupported: boolean } {
+): {
+  data: TokenUsageBreakdown | undefined;
+  isLoading: boolean;
+  isSupported: boolean;
+  error: Error | null;
+  refetch: () => void;
+} {
   const client = useHostRuntimeClient(serverId ?? "");
   const isConnected = useHostRuntimeIsConnected(serverId ?? "");
   const isSupported = useHostFeature(serverId, "tokenUsage");
@@ -42,7 +58,18 @@ export function useTokenUsage(
     staleTimeMs: TOKEN_USAGE_STALE_TIME_MS,
     queryFn,
     enabled,
+    refetchInterval: (q) => backfillRefetchInterval(q.state.data),
   });
 
-  return { data: query.data, isLoading: query.isLoading, isSupported };
+  const refetch = useCallback(() => {
+    void query.refetch();
+  }, [query]);
+
+  return {
+    data: query.data,
+    isLoading: query.isLoading,
+    isSupported,
+    error: query.error,
+    refetch,
+  };
 }

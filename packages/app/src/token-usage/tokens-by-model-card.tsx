@@ -1,31 +1,20 @@
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
+import { useTranslation } from "react-i18next";
+import { SettingsSection } from "@/components/settings/headings/settings-section";
 import { settingsStyles } from "@/styles/settings";
-import {
-  TOKEN_USAGE_ROLE_ORDER,
-  type TokenUsageModelBar,
-  type TokenUsageDisplayRole,
-} from "./token-usage-model";
-import { TOKEN_USAGE_ROLE_LABELS } from "./token-usage-role-colors";
+import { TOKEN_USAGE_ROLE_ORDER, type TokenUsageModelBar } from "./token-usage-model";
+import { TOKEN_USAGE_ROLE_LABELS, roleFillStyles } from "./token-usage-role-colors";
 
 // A sliver stays visible for a non-zero segment, without pretending it's bigger than it is.
 const MIN_SEGMENT_FRACTION = 0.006;
-
-const ROLE_FILL_STYLE_NAMES: Record<
-  TokenUsageDisplayRole,
-  "roleLeader" | "roleWorker" | "roleOutside"
-> = {
-  leader: "roleLeader",
-  worker: "roleWorker",
-  outside: "roleOutside",
-};
 
 function Legend() {
   return (
     <View style={styles.legend} testID="tokens-by-model-legend">
       {TOKEN_USAGE_ROLE_ORDER.map((role) => (
         <View key={role} style={styles.legendItem}>
-          <View style={[styles.legendDot, styles[ROLE_FILL_STYLE_NAMES[role]]]} />
+          <View style={[styles.legendDot, roleFillStyles[role]]} />
           <Text style={styles.legendLabel}>{TOKEN_USAGE_ROLE_LABELS[role]}</Text>
         </View>
       ))}
@@ -44,7 +33,7 @@ function ModelBarTrack({ bar }: { bar: TokenUsageModelBar }) {
               key={segment.role}
               style={[
                 styles.segment,
-                styles[ROLE_FILL_STYLE_NAMES[segment.role]],
+                roleFillStyles[segment.role],
                 { flexGrow: Math.max(segment.fraction, MIN_SEGMENT_FRACTION), flexBasis: 0 },
               ]}
             />
@@ -83,15 +72,16 @@ function ModelRow({ bar, bordered }: { bar: TokenUsageModelBar; bordered: boolea
  * only renders it.
  */
 export function TokensByModelCard({ bars }: { bars: TokenUsageModelBar[] }) {
+  const { t } = useTranslation();
   return (
-    <View testID="tokens-by-model-card">
+    <SettingsSection title={t("tokenUsage.byModelTitle")} testID="tokens-by-model-card">
       <Legend />
       <View style={settingsStyles.card}>
         {bars.map((bar, index) => (
           <ModelRow key={bar.id} bar={bar} bordered={index > 0} />
         ))}
       </View>
-    </View>
+    </SettingsSection>
   );
 }
 
@@ -150,15 +140,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   segment: {
     height: "100%",
-  },
-  roleLeader: {
-    backgroundColor: theme.colors.palette.blue[500],
-  },
-  roleWorker: {
-    backgroundColor: theme.colors.palette.purple[500],
-  },
-  roleOutside: {
-    backgroundColor: theme.colors.palette.green[500],
   },
   value: {
     minWidth: 56,

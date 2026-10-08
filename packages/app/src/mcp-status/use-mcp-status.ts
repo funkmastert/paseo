@@ -7,9 +7,8 @@ import type {
   McpGatewayAuthStartPayload,
   McpGatewayServerAdoptPayload,
 } from "@getpaseo/client/internal/daemon-client";
-import { useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
-import { useHostRuntimeClient, useHostRuntimeIsConnected, useHosts } from "@/runtime/host-runtime";
-import { orderHostsLocalFirst, resolveActiveHostServerId } from "@/types/host-connection";
+import { useActiveHostServerId } from "@/hooks/use-active-host-server-id";
+import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import { useReplicaQuery } from "@/data/query";
 import { openExternalUrl } from "@/utils/open-external-url";
@@ -36,27 +35,10 @@ export function mcpStatusQueryKey(serverId: string | null): QueryKey {
 
 /**
  * Resolves the "active host" the strip scopes to (KTD10: host-scoped in v1, aggregation
- * deferred). Mirrors settings-screen.tsx's host resolution with no picker selection of its
- * own: the connected local daemon, else the first connected host.
+ * deferred). Re-exported from the shared `useActiveHostServerId` so existing callers of this name
+ * don't need to change.
  */
-export function useMcpStatusActiveServerId(): string | null {
-  const hosts = useHosts();
-  const localServerId = useLocalDaemonServerId();
-  const orderedHosts = useMemo(
-    () => orderHostsLocalFirst(hosts, localServerId),
-    [hosts, localServerId],
-  );
-  return useMemo(
-    () =>
-      resolveActiveHostServerId({
-        selectedServerId: null,
-        localServerId,
-        hosts,
-        orderedHosts,
-      }),
-    [localServerId, hosts, orderedHosts],
-  );
-}
+export const useMcpStatusActiveServerId = useActiveHostServerId;
 
 function agentLabelFallback(title: string | null, fallback: string): string {
   const trimmed = title?.trim() ?? "";

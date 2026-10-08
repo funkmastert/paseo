@@ -2117,6 +2117,10 @@ export const zhCN: TranslationResources = {
     jevOlder: "更早的 {{count}} 条",
     jevAllActivity: "所有 JEV 活动",
   },
+  tokenUsage: {
+    byModelTitle: "按模型统计 Token",
+    byRoleTitle: "按角色统计 Token",
+  },
   review: {
     comment: {
       add: "添加 review 评论",

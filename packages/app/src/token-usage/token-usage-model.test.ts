@@ -141,22 +141,22 @@ describe("normalizeTokenUsageRole", () => {
 
 describe("resolveTokenUsageDisplayState", () => {
   it("shows the progress state while backfill runs with no rows yet", () => {
-    const state = resolveTokenUsageDisplayState([], {
-      ...EMPTY_COVERAGE,
-      backfill: { state: "running", filesDone: 3, filesTotal: 10 },
+    const state = resolveTokenUsageDisplayState({
+      rows: [],
+      coverage: { ...EMPTY_COVERAGE, backfill: { state: "running", filesDone: 3, filesTotal: 10 } },
     });
     expect(state).toEqual({ kind: "backfilling", filesDone: 3, filesTotal: 10 });
   });
 
   it("shows the empty state once backfill is done with no rows", () => {
-    const state = resolveTokenUsageDisplayState([], EMPTY_COVERAGE);
+    const state = resolveTokenUsageDisplayState({ rows: [], coverage: EMPTY_COVERAGE });
     expect(state).toEqual({ kind: "empty" });
   });
 
   it("shows data once rows exist, regardless of backfill state", () => {
-    const state = resolveTokenUsageDisplayState([row({ weighted: 1 })], {
-      ...EMPTY_COVERAGE,
-      backfill: { state: "running", filesDone: 1, filesTotal: 10 },
+    const state = resolveTokenUsageDisplayState({
+      rows: [row({ weighted: 1 })],
+      coverage: { ...EMPTY_COVERAGE, backfill: { state: "running", filesDone: 1, filesTotal: 10 } },
     });
     expect(state).toEqual({ kind: "data" });
   });
@@ -164,11 +164,34 @@ describe("resolveTokenUsageDisplayState", () => {
   it('treats a backfill state it doesn\'t recognize yet as "done" — no progress banner', () => {
     // `backfill.state` is an open string too (docs/protocol-compatibility.md): a daemon may add a
     // state this app predates.
-    const state = resolveTokenUsageDisplayState([], {
-      ...EMPTY_COVERAGE,
-      backfill: { state: "paused", filesDone: 3, filesTotal: 10 },
+    const state = resolveTokenUsageDisplayState({
+      rows: [],
+      coverage: { ...EMPTY_COVERAGE, backfill: { state: "paused", filesDone: 3, filesTotal: 10 } },
     });
     expect(state).toEqual({ kind: "empty" });
+  });
+
+  it("shows the error state when the payload carries one, even with rows present", () => {
+    // The daemon's error path still carries rows: [] today, but the error check must not depend
+    // on that — a future response could carry stale rows alongside a read failure.
+    const state = resolveTokenUsageDisplayState({
+      rows: [row({ weighted: 1 })],
+      coverage: EMPTY_COVERAGE,
+      error: "Failed to read token usage: ENOENT",
+    });
+    expect(state).toEqual({ kind: "error", message: "Failed to read token usage: ENOENT" });
+  });
+
+  it("shows the disabled state when coverage.enabled is false, ahead of the empty fallback", () => {
+    const state = resolveTokenUsageDisplayState({
+      rows: [],
+      coverage: {
+        enabled: false,
+        recordingSinceMs: null,
+        backfill: { state: "off", filesDone: 0, filesTotal: 0 },
+      },
+    });
+    expect(state).toEqual({ kind: "disabled" });
   });
 });
 

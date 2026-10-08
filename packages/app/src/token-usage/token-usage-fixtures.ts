@@ -1,9 +1,9 @@
 import type { TokenUsageBreakdown, TokenUsageRange, TokenUsageRow } from "./token-usage-model";
 
 /**
- * Realistic fixture data standing in for the real `usage.tokens.get_breakdown` RPC until U3's
- * protocol unit and U5's `use-token-usage.ts` land. Several Claude and Codex models, three roles,
- * one "unknown" model row, scaled per range so switching ranges visibly changes the screen.
+ * Fixture data for the browser test and screenshots, shaped exactly like the
+ * `usage.tokens.get_breakdown` payload. Several Claude and Codex models, three roles, one
+ * "unknown" model row, scaled per range so switching ranges visibly changes the screen.
  */
 function buildRows(scale: number): TokenUsageRow[] {
   return [
@@ -123,6 +123,41 @@ export function buildTokenUsageBackfillingFixture(range: TokenUsageRange): Token
       enabled: true,
       recordingSinceMs: now - rangeDurationMs("30d"),
       backfill: { state: "running", filesDone: 4_200, filesTotal: 15_500 },
+    },
+  };
+}
+
+/** A failed read: rows empty, the payload's own `error` set (token-usage-session.ts's catch path). */
+export function buildTokenUsageErrorFixture(range: TokenUsageRange): TokenUsageBreakdown {
+  const now = Date.now();
+  return {
+    requestId: `fixture-error-${range}`,
+    generatedAt: new Date(now).toISOString(),
+    range,
+    rangeStartMs: now - rangeDurationMs(range),
+    rows: [],
+    coverage: {
+      enabled: true,
+      recordingSinceMs: null,
+      backfill: { state: "pending", filesDone: 0, filesTotal: 0 },
+    },
+    error: "Failed to read token usage: ENOENT: no such file or directory",
+  };
+}
+
+/** The feature turned off in config (`agents.tokenUsage.enabled: false`). */
+export function buildTokenUsageDisabledFixture(range: TokenUsageRange): TokenUsageBreakdown {
+  const now = Date.now();
+  return {
+    requestId: `fixture-disabled-${range}`,
+    generatedAt: new Date(now).toISOString(),
+    range,
+    rangeStartMs: now - rangeDurationMs(range),
+    rows: [],
+    coverage: {
+      enabled: false,
+      recordingSinceMs: null,
+      backfill: { state: "off", filesDone: 0, filesTotal: 0 },
     },
   };
 }

@@ -16,6 +16,7 @@ import {
   type TranscriptRoot,
 } from "./token-usage-scanner.js";
 import { TokenUsageStore, type SessionIndexEntry } from "./token-usage-store.js";
+import { withTimeout } from "../../utils/promise-timeout.js";
 
 /**
  * Token usage by model and role (docs/token-usage.md). Owns the store and the scanner, runs the
@@ -57,6 +58,7 @@ export interface TokenUsageServiceOptions {
 }
 
 const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
 const RANGE_MS: Record<TokenUsageRange, number> = {
   "24h": 24 * HOUR_MS,
   "7d": 7 * 24 * HOUR_MS,
@@ -65,6 +67,10 @@ const RANGE_MS: Record<TokenUsageRange, number> = {
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 const DEFAULT_BACKFILL_INTERVAL_MS = 15_000;
 const DEFAULT_FIRST_SWEEP_DELAY_MS = 10_000;
+/** How long `stop()` waits for an in-flight sweep after requesting it stop, inside the daemon's
+ * shared 10s shutdown budget (#12). Past this, the shutdown flush is skipped rather than risking
+ * a mid-file snapshot. */
+const STOP_WAIT_BUDGET_MS = 3_000;
 
 export class TokenUsageService {
   private readonly store: TokenUsageStore;
@@ -87,8 +93,14 @@ export class TokenUsageService {
     this.now = options.now ?? Date.now;
     this.store =
       options.store ?? new TokenUsageStore({ rootDir: options.rootDir, logger: options.logger });
+    // The scan window must cover at least the store's retention: a file whose scan-state entry
+    // drops out of the window before its buckets are pruned can be re-read from byte 0 and
+    // double-booked (#19). Deriving from the store, rather than each defaulting independently,
+    // keeps the two from drifting apart again. An explicit override still wins.
+    const windowDays = options.scanner?.windowDays ?? Math.ceil(this.store.retentionMs / DAY_MS);
     this.scanner = new TokenUsageScanner({
       ...options.scanner,
+      windowDays,
       store: this.store,
       roots: options.roots,
       logger: options.logger,
@@ -111,7 +123,21 @@ export class TokenUsageService {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    await this.running?.catch(() => undefined);
+    this.scanner.requestStop();
+    // Settles to `true` once the sweep finishes, success or failure — only `withTimeout`'s own
+    // race branch should signal "didn't stop in time", not the sweep's own error.
+    const settled = (this.running?.then(
+      () => true,
+      () => true,
+    ) ?? Promise.resolve(true)) as Promise<true>;
+    try {
+      await withTimeout(settled, STOP_WAIT_BUDGET_MS, "token usage sweep did not stop in time");
+    } catch {
+      // The last flushed state.json is self-consistent (a bucket's offset only commits after its
+      // read fully returns); skip this flush rather than risk one off a sweep that never stopped.
+      this.logger.warn({}, "Token usage sweep did not stop in time; skipping the shutdown flush");
+      return;
+    }
     await this.store.close();
   }
 

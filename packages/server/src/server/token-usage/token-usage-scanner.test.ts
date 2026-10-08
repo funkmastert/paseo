@@ -291,6 +291,42 @@ describe("TokenUsageScanner", () => {
     expect(totals(store)).toMatchObject({ responses: 2, output: 110 });
   });
 
+  it("defers a fork line instead of guessing when a requested stop interrupts its parent-id read", async () => {
+    // #12: `readResponseIds`'s parent read is unbudgeted on purpose (a fork is rare, and stopping
+    // halfway would leave its copy half-skipped), but it must still honor a cooperative stop. A
+    // partial id set must never decide "not a copy" — that would double-book a response the
+    // parent already counted.
+    const shared = [claudeAssistantLine({ messageId: "p1", output: 10 })];
+    await writeLines(path.join(projectDir, "parent.jsonl"), shared);
+    const { store, scanner } = harness({ yieldEveryLines: 1 });
+    await scanner.sweep({ roles: roles() });
+
+    await writeLines(path.join(projectDir, "fork.jsonl"), [
+      ...shared,
+      claudeAssistantLine({ messageId: "f1", output: 100 }),
+    ]);
+    scanner.requestStop();
+    await scanner.sweep({ roles: roles() });
+
+    // Nothing from the fork is counted yet — the parent-id read was interrupted before it could
+    // tell whether "p1" is a copy, so the line is deferred rather than booked either way.
+    expect(totals(store)).toMatchObject({ responses: 1, output: 10 });
+
+    // A fresh scanner (the shape of a restart) reads the parent again from the start and resolves
+    // it correctly: the fork's own new response books, its copied "p1" still doesn't double-count.
+    const retry = new TokenUsageScanner({
+      store,
+      roots: [
+        { provider: "claude", dir: claudeRoot },
+        { provider: "codex", dir: codexRoot },
+      ],
+      logger: { warn: () => undefined },
+      now: () => NOW,
+    });
+    await retry.sweep({ roles: roles() });
+    expect(totals(store)).toMatchObject({ responses: 2, output: 110 });
+  });
+
   it("reads a Codex rollout with its model and root session", async () => {
     const file = path.join(codexRoot, "2026", "10", "01", "rollout-fake.jsonl");
     await writeLines(file, [

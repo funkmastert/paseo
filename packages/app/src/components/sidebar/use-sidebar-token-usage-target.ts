@@ -1,8 +1,6 @@
-import { useMemo } from "react";
-import { useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
+import { useActiveHostServerId } from "@/hooks/use-active-host-server-id";
 import { useHostFeature } from "@/runtime/host-features";
-import { useHostRuntimeIsConnected, useHosts } from "@/runtime/host-runtime";
-import { orderHostsLocalFirst, resolveActiveHostServerId } from "@/types/host-connection";
+import { useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 
 export interface SidebarTokenUsageTarget {
   serverId: string;
@@ -14,22 +12,7 @@ export interface SidebarTokenUsageTarget {
  * host, a disconnected host, or an older daemon — mirroring `useSidebarJevDashboardTarget`.
  */
 export function useSidebarTokenUsageTarget(): SidebarTokenUsageTarget | null {
-  const hosts = useHosts();
-  const localServerId = useLocalDaemonServerId();
-  const orderedHosts = useMemo(
-    () => orderHostsLocalFirst(hosts, localServerId),
-    [hosts, localServerId],
-  );
-  const activeServerId = useMemo(
-    () =>
-      resolveActiveHostServerId({
-        selectedServerId: null,
-        localServerId,
-        hosts,
-        orderedHosts,
-      }),
-    [localServerId, hosts, orderedHosts],
-  );
+  const activeServerId = useActiveHostServerId();
   const connected = useHostRuntimeIsConnected(activeServerId ?? "");
   const supported = useHostFeature(activeServerId, "tokenUsage");
 

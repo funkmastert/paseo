@@ -191,6 +191,8 @@ describe("TokenUsageStore", () => {
     store.add(booking({ atMs: NOW - HOUR, model: "m-b" }));
     store.add(booking({ atMs: NOW, model: "m-c" }));
     store.setFile("/fake/1.jsonl", { provider: "claude", offset: 0, size: 0, mtimeMs: NOW - HOUR });
+    // At the cap, a second new file is refused rather than evicting the first (#7): an evicted
+    // file would look unseen to the scanner and get re-read from byte 0, double-counting it.
     store.setFile("/fake/2.jsonl", { provider: "claude", offset: 0, size: 0, mtimeMs: NOW });
     store.recordSession({
       sessionId: "s1",
@@ -207,8 +209,43 @@ describe("TokenUsageStore", () => {
         .map((row) => row.model)
         .sort(),
     ).toEqual(["m-b", "unknown"]);
-    expect(store.listFiles().map(([filePath]) => filePath)).toEqual(["/fake/2.jsonl"]);
+    expect(store.listFiles().map(([filePath]) => filePath)).toEqual(["/fake/1.jsonl"]);
     expect(store.listSessions().map((entry) => entry.sessionId)).toEqual(["s2"]);
+  });
+
+  it("refuses a new file at the files cap, leaving the existing entry untouched, and warns once", async () => {
+    const warn = vi.fn();
+    const store = new TokenUsageStore({ rootDir, logger: { warn }, limits: { maxFiles: 1 } });
+    await store.load();
+    const original = { provider: "claude" as const, offset: 500, size: 500, mtimeMs: NOW - HOUR };
+    store.setFile("/fake/1.jsonl", original);
+
+    store.setFile("/fake/2.jsonl", { provider: "claude", offset: 0, size: 0, mtimeMs: NOW });
+    store.setFile("/fake/3.jsonl", { provider: "claude", offset: 0, size: 0, mtimeMs: NOW });
+
+    expect(store.getFile("/fake/1.jsonl")).toEqual(original);
+    expect(store.getFile("/fake/2.jsonl")).toBeUndefined();
+    expect(store.getFile("/fake/3.jsonl")).toBeUndefined();
+    expect(store.listFiles().map(([filePath]) => filePath)).toEqual(["/fake/1.jsonl"]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("maybeFlush skips inside the debounce interval, and writes once it has passed", async () => {
+    const store = new TokenUsageStore({
+      rootDir,
+      logger: { warn: vi.fn() },
+      flushIntervalMs: HOUR,
+    });
+    await store.load();
+    await store.flush(NOW); // establishes lastFlushMs with nothing dirty yet
+    store.add(booking({ atMs: NOW }));
+
+    await store.maybeFlush(NOW + HOUR - 1);
+    await expect(fs.readFile(path.join(rootDir, "state.json"), "utf8")).rejects.toThrow(/ENOENT/);
+
+    await store.maybeFlush(NOW + HOUR);
+    const state = JSON.parse(await fs.readFile(path.join(rootDir, "state.json"), "utf8"));
+    expect(state.buckets).toHaveLength(1);
   });
 
   it("writes nothing on close when it never loaded", async () => {

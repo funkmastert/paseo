@@ -1,12 +1,11 @@
-import { useMemo, useState, type ReactElement } from "react";
+import { useState, type ReactElement } from "react";
 import { useIsFocused } from "@react-navigation/native";
 import { ScrollView, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { MenuHeader } from "@/components/headers/menu-header";
-import { useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
+import { useActiveHostServerId } from "@/hooks/use-active-host-server-id";
 import { useHostFeature } from "@/runtime/host-features";
-import { useHostRuntimeIsConnected, useHosts } from "@/runtime/host-runtime";
-import { orderHostsLocalFirst, resolveActiveHostServerId } from "@/types/host-connection";
+import { useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import type { TokenUsageRange, TokenUsageUnit } from "./token-usage-model";
 import { useTokenUsage } from "./use-token-usage";
 import {
@@ -25,31 +24,11 @@ export function TokenUsageScreen(): ReactElement {
   return <TokenUsageScreenContent />;
 }
 
-/** The active host this screen scopes to — no picker, same resolution as the sidebar target. */
-function useTokenUsageActiveServerId(): string | null {
-  const hosts = useHosts();
-  const localServerId = useLocalDaemonServerId();
-  const orderedHosts = useMemo(
-    () => orderHostsLocalFirst(hosts, localServerId),
-    [hosts, localServerId],
-  );
-  return useMemo(
-    () =>
-      resolveActiveHostServerId({
-        selectedServerId: null,
-        localServerId,
-        hosts,
-        orderedHosts,
-      }),
-    [localServerId, hosts, orderedHosts],
-  );
-}
-
 function TokenUsageScreenContent(): ReactElement {
   const [unit, setUnit] = useState<TokenUsageUnit>("weighted");
   const [range, setRange] = useState<TokenUsageRange>("7d");
 
-  const serverId = useTokenUsageActiveServerId();
+  const serverId = useActiveHostServerId();
   const connected = useHostRuntimeIsConnected(serverId ?? "");
   const supported = useHostFeature(serverId, "tokenUsage");
   const availability = resolveTokenUsageAvailability({
@@ -58,7 +37,12 @@ function TokenUsageScreenContent(): ReactElement {
     supported,
   });
 
-  const { data: breakdown, isLoading } = useTokenUsage(serverId, range, {
+  const {
+    data: breakdown,
+    isLoading,
+    error,
+    refetch,
+  } = useTokenUsage(serverId, range, {
     enabled: availability.kind === "ready",
   });
 
@@ -76,6 +60,8 @@ function TokenUsageScreenContent(): ReactElement {
             <TokenUsageContent
               breakdown={breakdown}
               isLoading={isLoading}
+              queryError={error}
+              onRetry={refetch}
               unit={unit}
               onUnitChange={setUnit}
               range={range}

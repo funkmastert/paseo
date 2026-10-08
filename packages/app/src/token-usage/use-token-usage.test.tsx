@@ -2,23 +2,48 @@
 
 import React, { type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useTokenUsage } from "./use-token-usage";
+import { backfillRefetchInterval, useTokenUsage } from "./use-token-usage";
+import type { TokenUsageBreakdown } from "./token-usage-model";
 
-const getTokenUsageBreakdownMock = vi.hoisted(() =>
-  vi.fn(async ({ range }: { range: string }) => ({
+function breakdown(backfillState: string): TokenUsageBreakdown {
+  return {
     requestId: "req-1",
     generatedAt: "2026-10-07T00:00:00.000Z",
-    range,
+    range: "7d",
     rangeStartMs: 0,
     rows: [],
     coverage: {
       enabled: true,
       recordingSinceMs: null,
-      backfill: { state: "done", filesDone: 1, filesTotal: 1 },
+      backfill: { state: backfillState, filesDone: 1, filesTotal: 10 },
     },
-  })),
+  };
+}
+
+// `vi.hoisted` moves this call above the module's imports, but type-only references are erased
+// before that matters — the explicit return type is what lets every `mockResolvedValueOnce` below
+// accept a full `TokenUsageBreakdown`, not just the shape of this default implementation.
+const getTokenUsageBreakdownMock = vi.hoisted(() =>
+  vi.fn(
+    async ({
+      range,
+    }: {
+      range: string;
+    }): Promise<import("./token-usage-model").TokenUsageBreakdown> => ({
+      requestId: "req-1",
+      generatedAt: "2026-10-07T00:00:00.000Z",
+      range: range as "24h" | "7d" | "30d",
+      rangeStartMs: 0,
+      rows: [],
+      coverage: {
+        enabled: true,
+        recordingSinceMs: null,
+        backfill: { state: "done", filesDone: 1, filesTotal: 1 },
+      },
+    }),
+  ),
 );
 const supportsTokenUsage = vi.hoisted(() => ({ value: true }));
 
@@ -84,5 +109,38 @@ describe("useTokenUsage", () => {
     rerender({ range: "7d" });
     await waitFor(() => expect(result.current.data?.range).toBe("7d"));
     expect(getTokenUsageBreakdownMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("polls on the backfill cadence while running, and stops once done", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    getTokenUsageBreakdownMock.mockResolvedValueOnce(breakdown("running"));
+    getTokenUsageBreakdownMock.mockResolvedValueOnce(breakdown("done"));
+
+    const { result } = renderHook(() => useTokenUsage("test-server", "7d"), { wrapper });
+    await waitFor(() => expect(result.current.data?.coverage.backfill.state).toBe("running"));
+    expect(getTokenUsageBreakdownMock).toHaveBeenCalledTimes(1);
+
+    await act(() => vi.advanceTimersByTimeAsync(15_000));
+    await waitFor(() => expect(result.current.data?.coverage.backfill.state).toBe("done"));
+    expect(getTokenUsageBreakdownMock).toHaveBeenCalledTimes(2);
+
+    await act(() => vi.advanceTimersByTimeAsync(15_000));
+    expect(getTokenUsageBreakdownMock).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+  });
+});
+
+describe("backfillRefetchInterval", () => {
+  it("polls while pending or running", () => {
+    expect(backfillRefetchInterval(breakdown("pending"))).toBe(15_000);
+    expect(backfillRefetchInterval(breakdown("running"))).toBe(15_000);
+  });
+
+  it("does not poll once done, off, an unrecognized state, or with no data yet", () => {
+    expect(backfillRefetchInterval(breakdown("done"))).toBe(false);
+    expect(backfillRefetchInterval(breakdown("off"))).toBe(false);
+    expect(backfillRefetchInterval(breakdown("paused"))).toBe(false);
+    expect(backfillRefetchInterval(undefined)).toBe(false);
   });
 });

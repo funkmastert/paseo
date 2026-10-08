@@ -2153,6 +2153,10 @@ export const en = {
     jevOlder: "{{count}} older",
     jevAllActivity: "All JEV activity",
   },
+  tokenUsage: {
+    byModelTitle: "Tokens by model",
+    byRoleTitle: "Tokens by role",
+  },
   review: {
     comment: {
       add: "Add review comment",

@@ -39,9 +39,20 @@ export interface CodexParseState {
 const SYNTHETIC_MODEL = "<synthetic>";
 const MAX_MODEL_LENGTH = 128;
 
+/**
+ * Which lines can carry usage or a model, shared with the scanner's byte prefilter (which runs
+ * before these parsers, on the raw line buffer) so the two can't drift apart (#18): the scanner
+ * builds its `Buffer` needles from these same strings instead of its own copies.
+ */
+export const CLAUDE_USAGE_NEEDLE = '"usage"';
+export const CLAUDE_ASSISTANT_NEEDLE = '"assistant"';
+export const CODEX_TOKEN_USAGE_NEEDLE = '"token_usage_record"';
+export const CODEX_TURN_CONTEXT_NEEDLE = '"turn_context"';
+export const CODEX_THREAD_SETTINGS_NEEDLE = '"thread_settings_applied"';
+
 export function parseClaudeTranscriptLine(line: string): ClaudeUsageRecord | null {
   // Cheap prefilter: most lines (tool results, attachments, user turns) cannot carry usage.
-  if (!line.includes('"usage"') || !line.includes('"assistant"')) return null;
+  if (!line.includes(CLAUDE_USAGE_NEEDLE) || !line.includes(CLAUDE_ASSISTANT_NEEDLE)) return null;
   const parsed = parseObject(line);
   if (!parsed || parsed["type"] !== "assistant") return null;
   const message = asRecord(parsed["message"]);
@@ -79,11 +90,11 @@ export function parseCodexTranscriptLine(
   line: string,
   state: CodexParseState,
 ): CodexUsageRecord | null {
-  if (line.includes('"turn_context"') || line.includes('"thread_settings_applied"')) {
+  if (line.includes(CODEX_TURN_CONTEXT_NEEDLE) || line.includes(CODEX_THREAD_SETTINGS_NEEDLE)) {
     readCodexModel(line, state);
     return null;
   }
-  if (!line.includes('"token_usage_record"')) return null;
+  if (!line.includes(CODEX_TOKEN_USAGE_NEEDLE)) return null;
   const parsed = parseObject(line);
   if (!parsed || parsed["type"] !== "token_usage_record") return null;
   const payload = asRecord(parsed["payload"]);

@@ -2177,6 +2177,10 @@ export const ru: TranslationResources = {
     jevOlder: "Ещё {{count}}",
     jevAllActivity: "Вся активность JEV",
   },
+  tokenUsage: {
+    byModelTitle: "Токены по модели",
+    byRoleTitle: "Токены по роли",
+  },
   review: {
     comment: {
       add: "Добавить комментарий к ревью",

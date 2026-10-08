@@ -161,6 +161,7 @@ export class TokenUsageStore {
   private stateDirty = false;
   private sessionsDirty = false;
   private lastFlushMs = 0;
+  private filesCapWarned = false;
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(options: TokenUsageStoreOptions) {
@@ -265,7 +266,19 @@ export class TokenUsageStore {
 
   setFile(filePath: string, state: FileScanState): void {
     if (!this.files.has(filePath) && this.files.size >= this.limits.maxFiles) {
-      this.dropOldestFile();
+      // Refuse the new file rather than evicting an existing entry (the parallel policy to
+      // `admitModel`'s unknown-model fallback): `prune()` already clears entries past retention,
+      // so every tracked file here is still in-window and possibly still being appended to. An
+      // evicted file looks unseen to `scanFile`, which re-reads it from byte 0 and double-books
+      // every response it already counted, with no ledger to undo that.
+      if (!this.filesCapWarned) {
+        this.logger.warn(
+          { maxFiles: this.limits.maxFiles },
+          "Token usage file cap reached; new transcripts are not tracked until older ones age out",
+        );
+        this.filesCapWarned = true;
+      }
+      return;
     }
     this.files.set(filePath, state);
     this.stateDirty = true;
@@ -375,18 +388,6 @@ export class TokenUsageStore {
     for (const [key, bucket] of this.buckets) {
       if (bucket[0] === oldest) this.buckets.delete(key);
     }
-  }
-
-  private dropOldestFile(): void {
-    let oldestPath: string | null = null;
-    let oldestMs = Number.POSITIVE_INFINITY;
-    for (const [filePath, file] of this.files) {
-      if (file.mtimeMs < oldestMs) {
-        oldestMs = file.mtimeMs;
-        oldestPath = filePath;
-      }
-    }
-    if (oldestPath !== null) this.files.delete(oldestPath);
   }
 
   private dropOldestSession(): void {

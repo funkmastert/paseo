@@ -189,16 +189,70 @@ describe("TokenUsageService", () => {
   it("sweeps on its own timer once started, and flushes on stop", async () => {
     await writeTranscript(FAKE_CLAUDE_SESSION, [claudeAssistantLine({ messageId: "m1" })]);
     const store = new TokenUsageStore({ rootDir, logger: { warn: vi.fn() }, flushIntervalMs: DAY });
+    await store.load();
+    // Starts the debounce clock before the service exists, so the sweep's own `maybeFlush` is
+    // inside the interval and skips — isolating stop()'s flush as the only write under test (#20).
+    await store.flush(NOW);
     const service = createService({ store, firstSweepDelayMs: 0 });
 
     service.start();
     await vi.waitFor(async () => {
       expect((await service.getBreakdown("24h")).coverage.backfill.state).toBe("done");
     });
+    // Nothing has been flushed yet: the explicit pre-start flush left nothing dirty, and the
+    // sweep's own `maybeFlush` is still inside the debounce interval.
+    await expect(fs.readFile(path.join(rootDir, "state.json"), "utf8")).rejects.toThrow(/ENOENT/);
+
     await service.stop();
 
-    const state = JSON.parse(await fs.readFile(path.join(rootDir, "state.json"), "utf8"));
-    expect(state.buckets).toHaveLength(1);
+    const stateAfterStop = JSON.parse(await fs.readFile(path.join(rootDir, "state.json"), "utf8"));
+    expect(stateAfterStop.buckets).toHaveLength(1);
+  });
+
+  it("discovers a file just past the old 30-day cutoff, inside the store's 31-day retention", async () => {
+    // #19: the scanner's window must derive from (or at least equal) the store's retention, so a
+    // file whose scan-state entry would otherwise be dropped before its buckets are pruned never
+    // looks "unseen" and gets re-read from byte 0.
+    const filePath = path.join(projectDir, `${FAKE_CLAUDE_SESSION}.jsonl`);
+    await fs.writeFile(filePath, `${claudeAssistantLine({ messageId: "m1" })}\n`);
+    const oldMtime = new Date(NOW - 30 * DAY - 12 * HOUR);
+    await fs.utimes(filePath, oldMtime, oldMtime);
+    const service = createService();
+
+    for (let sweep = 0; sweep < 10; sweep += 1) await service.runSweep();
+    const done = await service.getBreakdown("24h");
+    await service.stop();
+
+    expect(done.coverage.backfill).toEqual({ state: "done", filesDone: 1, filesTotal: 1 });
+  });
+
+  it("stop() does not wait past its budget for a sweep that never finishes, and skips the flush", async () => {
+    // #12: daemon shutdown has one shared budget; a stuck sweep must not consume all of it.
+    vi.useFakeTimers();
+    try {
+      const store = new TokenUsageStore({ rootDir, logger: { warn: vi.fn() } });
+      const closeSpy = vi.spyOn(store, "close");
+      const service = new TokenUsageService({
+        rootDir,
+        roots: [{ provider: "claude", dir: path.join(tmp, "projects") }],
+        listAgentRecords: () => new Promise(() => undefined), // a hang the sweep can't finish
+        isEnabled: () => true,
+        logger: { warn: vi.fn(), info: vi.fn() },
+        now: () => NOW,
+        firstSweepDelayMs: 0,
+        store,
+      });
+
+      service.start();
+      await vi.advanceTimersByTimeAsync(0);
+      const stopped = service.stop();
+      await vi.advanceTimersByTimeAsync(3_000);
+      await stopped;
+
+      expect(closeSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
