@@ -135,12 +135,15 @@ import type { LocalSpeechProviderConfig } from "./speech/providers/local/config.
 import type { RequestedSpeechProviders } from "./speech/speech-types.js";
 import { createSpeechService } from "./speech/speech-runtime.js";
 import { AgentManager } from "./agent/agent-manager.js";
-import { AgentStorage } from "./agent/agent-storage.js";
+import { AgentStorage, type StoredAgentRecord } from "./agent/agent-storage.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
 import { McpGateway, type McpGatewayConfig } from "./mcp-gateway/gateway.js";
+import { BasicMemoryClient } from "./knowledge-base/basic-memory-client.js";
 import { BasicMemorySidecar } from "./knowledge-base/basic-memory-sidecar.js";
 import { resolveKnowledgeBaseConfig } from "./knowledge-base/config.js";
+import { setLinkCaptureSink, type LinkCaptureSink } from "./knowledge-base/link-capture.js";
+import { KnowledgeBaseService, type KnowledgeBaseAgent } from "./knowledge-base/service.js";
 import { installMcpGatewayRoutes } from "./mcp-gateway/routes.js";
 import { normalizeMcpProtocolVersionHeader } from "./mcp-protocol-compat.js";
 import {
@@ -2954,10 +2957,49 @@ export async function createPaseoDaemon(
     daemonConfigStore.patch({ mcpGateway: { servers: { [name]: serverConfig } } });
   });
 
-  // Knowledge base search (docs/knowledge-base.md): the Basic Memory sidecar. Off unless the
-  // `knowledgeBase` section enables it; started after listen and on every config reload, never
+  // Knowledge base (docs/knowledge-base.md): the Basic Memory sidecar serves search, and the
+  // service owns every note write, project assignment and filed link. Off unless the
+  // `knowledgeBase` section enables it; applied after listen and on every config reload, never
   // awaited, so a slow Python start cannot delay the daemon.
   const basicMemorySidecar = new BasicMemorySidecar({ logger, managedProcesses });
+  const knowledgeBaseWorkspaceRegistry = workspaceRegistry;
+  const knowledgeBase = new KnowledgeBaseService({
+    logger,
+    agents: {
+      async get(agentId) {
+        const live = agentManager.getAgent(agentId);
+        if (live) {
+          return {
+            id: live.id,
+            labels: live.labels,
+            title: live.config.title ?? null,
+            provider: live.provider,
+            workspaceId: live.workspaceId ?? null,
+          };
+        }
+        const record = await agentStorage.get(agentId);
+        return record ? toKnowledgeBaseAgent(record) : null;
+      },
+      async list() {
+        return (await agentStorage.list()).map(toKnowledgeBaseAgent);
+      },
+      async setLabels(agentId, labels) {
+        await agentManager.updateAgentMetadata(agentId, { labels });
+      },
+    },
+    workspaces: {
+      async get(workspaceId) {
+        const record = await knowledgeBaseWorkspaceRegistry.get(workspaceId);
+        return record ? { kind: record.kind, branch: record.branch } : null;
+      },
+    },
+    search: new BasicMemoryClient({ sidecar: basicMemorySidecar }),
+    sidecar: basicMemorySidecar,
+  });
+  agentManager.setKnowledgeBase(knowledgeBase);
+  const fileCapturedLink: LinkCaptureSink = async (agentId, link) => {
+    await knowledgeBase.fileLink({ agentId, url: link.url, category: link.kind });
+  };
   const applyKnowledgeBaseConfig = () => {
     const resolved = resolveKnowledgeBaseConfig(
       readRawConfig(config.paseoHome).rawConfig?.["knowledgeBase"],
@@ -2971,6 +3013,13 @@ export async function createPaseoDaemon(
     void basicMemorySidecar.applyConfig(resolved).catch((error: unknown) => {
       logger.warn({ err: error }, "Failed to apply the knowledgeBase config");
     });
+    void knowledgeBase.applyConfig(resolved).then(
+      () => setLinkCaptureSink(knowledgeBase.isEnabled() ? fileCapturedLink : null),
+      (error: unknown) => {
+        setLinkCaptureSink(null);
+        logger.warn({ err: error }, "Failed to load the knowledge base");
+      },
+    );
   };
 
   let mcpEnabled = config.mcpEnabled ?? true;
@@ -3724,6 +3773,7 @@ export async function createPaseoDaemon(
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
       await serviceProxy.stopStandalone().catch(() => undefined);
       await agentProviderRuntime.shutdown().catch(() => undefined);
+      setLinkCaptureSink(null);
       await basicMemorySidecar.stop().catch(() => undefined);
       if (mainStarted) {
         httpServer.closeAllConnections();
@@ -3803,6 +3853,8 @@ export async function createPaseoDaemon(
       logger.warn({ err: error }, "Failed to flush the JEV ledger");
     });
     await mcpGateway.stop().catch(() => undefined);
+    // Module-level, and test daemons can share a process.
+    setLinkCaptureSink(null);
     await basicMemorySidecar.stop().catch((error: unknown) => {
       logger.warn({ err: error }, "Failed to stop Basic Memory");
     });
@@ -3854,6 +3906,16 @@ export async function createPaseoDaemon(
     getFinishObligations: () => finishObligations,
     getLeaderCompactionMonitor: () => leaderCompactionMonitor,
     getRestartRecovery: () => restartRecovery,
+  };
+}
+
+function toKnowledgeBaseAgent(record: StoredAgentRecord): KnowledgeBaseAgent {
+  return {
+    id: record.id,
+    labels: record.labels,
+    title: record.title ?? null,
+    provider: record.provider,
+    workspaceId: record.workspaceId ?? null,
   };
 }
 

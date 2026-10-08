@@ -22,6 +22,7 @@ import { projectTimelineRows } from "./timeline-projection.js";
 import {
   getOpenAgentTabLabel,
   JEV_TOOLS_LABEL,
+  KB_PROJECT_LABEL,
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import {
@@ -63,6 +64,7 @@ import type {
 } from "./agent-sdk-types.js";
 import type { PaseoToolCatalog, PaseoToolRuntimeContext } from "./tools/types.js";
 import type { ProviderDefinition } from "./provider-registry.js";
+import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 
 const DESKTOP_OPEN_AGENT_TAB_LABEL = getOpenAgentTabLabel("desktop-client");
 const MOBILE_OPEN_AGENT_TAB_LABEL = getOpenAgentTabLabel("mobile-client");
@@ -13756,4 +13758,85 @@ test("onWorkspaceStateMayHaveChanged is not called for running shell tool calls"
   await manager.runAgent(snapshot.id, { text: "merge it" });
 
   expect(onWorkspaceStateMayHaveChanged).not.toHaveBeenCalled();
+});
+
+describe("knowledge-base project at create", () => {
+  interface ResolveCall {
+    agentId: string;
+    labels: Record<string, string>;
+    workspaceId: string | null;
+    sessionsCreatedBefore: number;
+  }
+
+  function createManager(
+    resolveAtCreate: (
+      input: Omit<ResolveCall, "sessionsCreatedBefore">,
+    ) => Promise<Record<string, string>>,
+  ) {
+    const client = new TestAgentClient();
+    // A pool-plugin-style hook that labels the create, so resolution must see its labels.
+    const pluginLifecycle = {
+      before: async (hook: string, request: { labels?: Record<string, string> }) =>
+        hook === "agent.create"
+          ? { ...request, labels: { ...request.labels, "paseo.task-class": "hard" } }
+          : request,
+      emit: () => undefined,
+    } as unknown as PluginLifecycle;
+    const manager = new AgentManager({ clients: { codex: client }, logger, pluginLifecycle });
+    const calls: ResolveCall[] = [];
+    manager.setKnowledgeBase({
+      resolveAtCreate: async (input) => {
+        calls.push({ ...input, sessionsCreatedBefore: client.createdConfigs.length });
+        return await resolveAtCreate(input);
+      },
+    });
+    return { manager, calls };
+  }
+
+  test("resolves from the labels the agent.create hooks left, before the first launch", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-kb-"));
+    const { manager, calls } = createManager(async () => ({
+      [KB_PROJECT_LABEL]: "checkout-redesign",
+    }));
+
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: "ws-1",
+      labels: { [PARENT_AGENT_ID_LABEL]: "parent-1" },
+    });
+
+    expect(calls).toEqual([
+      {
+        agentId: agent.id,
+        labels: { [PARENT_AGENT_ID_LABEL]: "parent-1", "paseo.task-class": "hard" },
+        workspaceId: "ws-1",
+        sessionsCreatedBefore: 0,
+      },
+    ]);
+    expect(agent.labels).toEqual({
+      [PARENT_AGENT_ID_LABEL]: "parent-1",
+      "paseo.task-class": "hard",
+      [KB_PROJECT_LABEL]: "checkout-redesign",
+    });
+    await manager.closeAgent(agent.id);
+    rmSync(workdir, { recursive: true, force: true });
+  });
+
+  test("a resolution error leaves the agent without a project and the create succeeds", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-kb-"));
+    const { manager } = createManager(async () => {
+      throw new Error("notes directory is unreadable");
+    });
+
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+      labels: { [PARENT_AGENT_ID_LABEL]: "parent-1" },
+    });
+
+    expect(agent.labels).toEqual({
+      [PARENT_AGENT_ID_LABEL]: "parent-1",
+      "paseo.task-class": "hard",
+    });
+    await manager.closeAgent(agent.id);
+    rmSync(workdir, { recursive: true, force: true });
+  });
 });
