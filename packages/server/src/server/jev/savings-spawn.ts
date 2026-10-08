@@ -1,8 +1,4 @@
-import {
-  JEV_CALL_LABEL,
-  JEV_SPAWN_LABEL,
-  TASK_CLASS_SOURCE_LABEL,
-} from "@getpaseo/protocol/agent-labels";
+import { JEV_CALL_LABEL, JEV_SPAWN_LABEL } from "@getpaseo/protocol/agent-labels";
 
 import type { JevSavingsSink } from "./contract.js";
 import { JevSavingsLedger, savingsIdForCall } from "./savings.js";
@@ -26,6 +22,14 @@ export interface JevSpawnLabel {
   wouldModel: string | null;
   move: "down" | "up" | "none";
   applied: boolean;
+  /**
+   * `decision.jev.declaredAudit` (docs/jev.md, "Auditing a declared label"): true only for the
+   * declared-label audit's own call. A declared child's class source is `declared` whether this
+   * call was the audit or an ordinary role-only ask on the same child, so that field alone cannot
+   * tell them apart — this one can. Absent from a label written before this field existed; such a
+   * label is never audit data.
+   */
+  audit: boolean;
 }
 
 function decodePart(part: string): string | null {
@@ -44,7 +48,7 @@ function classAndModel(value: string | undefined): [string | null, string | null
   }
 }
 
-/** `v1;base=standard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0`. */
+/** `v1;base=standard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0;audit=0`. */
 export function parseJevSpawnLabel(value: string | null | undefined): JevSpawnLabel | null {
   if (typeof value !== "string") return null;
   const [version, ...pairs] = value.split(";");
@@ -66,6 +70,7 @@ export function parseJevSpawnLabel(value: string | null | undefined): JevSpawnLa
     wouldModel: would[1],
     move,
     applied: fields.get("applied") === "1",
+    audit: fields.get("audit") === "1",
   };
 }
 
@@ -146,10 +151,10 @@ export function createSpawnHintSavingsRecorder(options: {
                 applied: spawn.applied,
                 // The declared-label audit (docs/jev.md, "Auditing a declared label"): kept out of
                 // the go-live rule's evidence counters, which read "this child's class was never
-                // declared" (savings-formulas.ts).
-                ...(agent.labels[TASK_CLASS_SOURCE_LABEL] === "declared"
-                  ? { declaredAudit: true }
-                  : {}),
+                // declared" (savings-formulas.ts). Read off the label's own `audit` field, not the
+                // class source: a role-only ask on a declared child also has a declared class
+                // source, but is not the audit.
+                ...(spawn.audit ? { declaredAudit: true } : {}),
               },
               pending: true,
             }) || null;

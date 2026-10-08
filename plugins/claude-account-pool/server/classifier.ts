@@ -449,6 +449,14 @@ export interface JevHintDecision {
   /** Whether JEV changed this create's class or role. */
   applied: boolean;
   /**
+   * Carried from `SpawnHint.declaredAudit`: true only for the declared-label audit's own call,
+   * never for an ordinary ask on the same child (a role-only ask on a declared class is `false`
+   * even though `taskClass.source` is `declared` too). The role router writes this into
+   * `paseo.jev-spawn` so the savings track can tell the two apart without re-deriving it from the
+   * class source, which cannot (docs/jev.md, "Auditing a declared label").
+   */
+  declaredAudit: boolean;
+  /**
    * The create as it would be if every answer past its floor applied,
    * whatever shadow mode and the apply switches say. Present for every answer,
    * so a shadow day counts how many creates JEV would move down and up.
@@ -1516,6 +1524,7 @@ function decideJevRecord(
       ...("callId" in jevHint && jevHint.callId !== undefined ? { callId: jevHint.callId } : {}),
       ...("reason" in jevHint ? { reason: jevHint.reason } : {}),
       applied: false,
+      declaredAudit: false,
     };
   }
   const textInput = { labels: input.labels, title: input.title, initialPrompt: input.initialPrompt };
@@ -1532,6 +1541,7 @@ function decideJevRecord(
     callId: hint.callId,
     answers: hint.answers,
     applied: resolved.source === "jev" || resolved.role.source === "classified-jev",
+    declaredAudit: hint.declaredAudit,
     wouldBe: {
       taskClass: resolved.wouldBeClass ?? null,
       ...(hint.answers.role !== undefined ? { role: wouldBeRole.id } : {}),

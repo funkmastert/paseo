@@ -282,6 +282,7 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
       proposal: { roleId, ...(taskClass ? { taskClass } : {}) },
       applyHard: true,
       applyRole: true,
+      declaredAudit: false,
     };
   }
 
@@ -379,7 +380,13 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
 
     const { jev, ...rest } = withFailure;
     expect(rest).toEqual(without);
-    expect(jev).toEqual({ status: "failed", reason: "timeout", callId: "call-2", applied: false });
+    expect(jev).toEqual({
+      status: "failed",
+      reason: "timeout",
+      callId: "call-2",
+      applied: false,
+      declaredAudit: false,
+    });
   });
 
   it("is replayable: the same hint gives the same decision", () => {
@@ -401,6 +408,7 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
       proposal: { taskClass: "mechanical" },
       applyHard: true,
       applyRole: true,
+      declaredAudit: true,
     };
 
     const decision = classifyAgent({ ...declaredHard, jevHint: hint }, world({ policy: LIVE_POLICY }));
@@ -413,6 +421,7 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
     // would have nothing to measure.
     expect(decision.jev?.base?.taskClass).toBe("hard");
     expect(decision.jev?.wouldBe).toMatchObject({ taskClass: "mechanical", move: "down" });
+    expect(decision.jev?.declaredAudit).toBe(true);
   });
 
   it("the declared-label audit's wouldBe never falls back to a hard-seed keyword when JEV's own answer disagrees", () => {
@@ -432,6 +441,7 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
       proposal: {},
       applyHard: true,
       applyRole: true,
+      declaredAudit: true,
     };
 
     const decision = classifyAgent({ ...declaredHard, jevHint: hint }, world({ policy: LIVE_POLICY }));
@@ -455,6 +465,7 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
       proposal: {},
       applyHard: true,
       applyRole: true,
+      declaredAudit: true,
     };
 
     const decision = classifyAgent({ ...declaredHard, jevHint: hint }, world({ policy: LIVE_POLICY }));
@@ -475,6 +486,7 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
       proposal: {},
       applyHard: true,
       applyRole: true,
+      declaredAudit: true,
     };
 
     const decision = classifyAgent({ ...declaredHard, jevHint: hint }, world({ policy: LIVE_POLICY }));
@@ -496,11 +508,15 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
       proposal: { roleId: "reviewer" },
       applyHard: true,
       applyRole: true,
+      declaredAudit: false,
     };
 
     const decision = classifyAgent({ ...declaredHard, jevHint: hint }, world({ policy: LIVE_POLICY }));
 
     expect(decision.jev?.wouldBe).toMatchObject({ taskClass: "hard", move: "none" });
+    // A role-only ask is not the declared-label audit, even though this child's class is
+    // declared too: the savings track must be able to tell the two apart (finding, 2026-10-08).
+    expect(decision.jev?.declaredAudit).toBe(false);
   });
 });
 

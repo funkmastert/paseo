@@ -524,7 +524,12 @@ describe("failing open", () => {
       const hint = await hintFor(child(), { callId: callId as string, answers: mechanical });
 
       expect(hint).toEqual({ status: "failed", reason: "contract" });
-      expect(decideWith(child(), hint).jev).toEqual({ status: "failed", reason: "contract", applied: false });
+      expect(decideWith(child(), hint).jev).toEqual({
+        status: "failed",
+        reason: "contract",
+        applied: false,
+        declaredAudit: false,
+      });
     }
     const failed = await hintFor(child(), { outcome: "failed", reason: "timeout", callId: 7 as unknown as string });
     expect(failed).toEqual({ status: "failed", reason: "timeout" });
@@ -575,7 +580,13 @@ describe("failing open", () => {
     const without = decideWith(child(), undefined);
     expect(withHint.taskClass).toEqual(without.taskClass);
     expect(withHint.model).toEqual(without.model);
-    expect(withHint.jev).toEqual({ status: "unavailable", reason: "excluded", callId: "c-x", applied: false });
+    expect(withHint.jev).toEqual({
+      status: "unavailable",
+      reason: "excluded",
+      callId: "c-x",
+      applied: false,
+      declaredAudit: false,
+    });
   });
 
   it("fails a malformed answer rather than reading it", async () => {
@@ -603,6 +614,7 @@ describe("precedence", () => {
       proposal: { taskClass: "mechanical" },
       applyHard: true,
       applyRole: true,
+      declaredAudit: false,
     };
 
     const decision = decideWith(child({ labels: { "paseo.task-class": "standard" } }), hint);
@@ -619,6 +631,7 @@ describe("precedence", () => {
       proposal: { taskClass: "mechanical" },
       applyHard: false,
       applyRole: false,
+      declaredAudit: false,
     };
 
     const decision = decideWith(child({ initialPrompt: "Fix the race condition in the queue." }), hint);

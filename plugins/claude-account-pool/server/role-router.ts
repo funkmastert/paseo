@@ -676,9 +676,14 @@ function applyJevLabels(
 }
 
 /**
- * `v1;base=standard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0`.
+ * `v1;base=standard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0;audit=0`.
  * A missing class or model is `-`; each part is URI-encoded so a `;`, `/` or `=` in a model id
  * cannot shift the fields. Null when the decision carries no would-be.
+ *
+ * `audit` is `decision.jev.declaredAudit`: true only for the declared-label audit's own call,
+ * never for an ordinary ask on the same child (a role-only ask on a declared class still has
+ * `base.taskClass` declared, but is not the audit). `savings-spawn.ts` reads this field rather
+ * than re-deriving it from the class source, which cannot tell the two apart.
  */
 export function formatJevSpawnLabel(jev: NonNullable<AgentDecision["jev"]>): string | null {
   if (!jev.wouldBe || !jev.base) {
@@ -692,6 +697,7 @@ export function formatJevSpawnLabel(jev: NonNullable<AgentDecision["jev"]>): str
     `would=${part(jev.wouldBe.taskClass, jev.wouldBe.model)}`,
     `move=${jev.wouldBe.move}`,
     `applied=${jev.applied ? 1 : 0}`,
+    `audit=${jev.declaredAudit ? 1 : 0}`,
   ].join(";");
 }
 

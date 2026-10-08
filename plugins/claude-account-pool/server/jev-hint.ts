@@ -107,6 +107,14 @@ export type SpawnHint =
       applyHard: boolean;
       /** `spawnHint.applyRole` as the last `jev.status` poll read it. */
       applyRole: boolean;
+      /**
+       * Carries `SpawnHintPlan.declaredAudit` through to the classifier and the labels it writes.
+       * A declared child's class source is `declared` whether this call was the declared-label
+       * audit or an ordinary role-only ask on the same child (`applyRole` winning over the audit,
+       * see `planSpawnHint`) — the label alone cannot tell those apart, so the savings track reads
+       * this flag instead of re-deriving it from the class source.
+       */
+      declaredAudit: boolean;
     };
 
 /** The daemon's spawn-hint switches, from the last `jev.status` poll (server/jev-availability.ts). */
@@ -519,6 +527,7 @@ export async function fetchSpawnHint(options: FetchSpawnHintOptions): Promise<Sp
         proposal: proposeFromAnswers(answers, world.policy),
         applyHard: availability.applyHard,
         applyRole: availability.applyRole,
+        declaredAudit: plan.declaredAudit,
       };
     }
     return {

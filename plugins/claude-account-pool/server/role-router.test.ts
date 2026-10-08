@@ -2352,6 +2352,7 @@ describe("JEV's labels", () => {
     proposal: { taskClass: "mechanical" },
     applyHard: false,
     applyRole: false,
+    declaredAudit: false,
   });
 
   const unlabelled = () =>
@@ -2368,7 +2369,7 @@ describe("JEV's labels", () => {
     expect(result?.config.model).toBe("claude-haiku-4-5");
     expect(result?.labels).toMatchObject({ [TASK_CLASS_SOURCE_LABEL]: "jev", [JEV_CALL_LABEL]: "jev-call-7" });
     expect(result?.labels?.[JEV_SPAWN_LABEL]).toBe(
-      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=1",
+      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=1;audit=0",
     );
   });
 
@@ -2379,7 +2380,7 @@ describe("JEV's labels", () => {
     expect(result?.labels).toMatchObject({ [TASK_CLASS_SOURCE_LABEL]: "default", [JEV_CALL_LABEL]: "jev-call-7" });
     // The durable record: the model it runs without JEV, and the model the answer would run.
     expect(result?.labels?.[JEV_SPAWN_LABEL]).toBe(
-      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0",
+      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0;audit=0",
     );
   });
 
@@ -2397,6 +2398,7 @@ describe("JEV's labels", () => {
       proposal: { taskClass: "mechanical" },
       applyHard: false,
       applyRole: false,
+      declaredAudit: true,
     };
 
     const result = createRoleRouter(jevOptions())({ ...declaredHard, jevHint: auditHint }, fakeContext);
@@ -2409,8 +2411,33 @@ describe("JEV's labels", () => {
     expect(result?.labels?.[TASK_CLASS_SOURCE_LABEL]).toBe("declared");
     expect(result?.labels?.[JEV_CALL_LABEL]).toBe("jev-call-audit");
     expect(result?.labels?.[JEV_SPAWN_LABEL]).toBe(
-      "v1;base=hard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0",
+      "v1;base=hard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0;audit=1",
     );
+  });
+
+  it("marks a role-only ask on a declared child as not the audit, even though its class source is declared too", () => {
+    const declaredHard = request({
+      callerAgentId: "c1",
+      labels: { [AGENT_ROLE_LABEL]: "worker", [TASK_CLASS_LABEL]: "hard" },
+      initialPrompt: "Implement the retry helper.",
+      config: { provider: "claude", cwd: "/tmp/work" },
+    });
+    // A role-only ask (no taskClass/reasoning answers): planSpawnHint marks this declaredAudit:
+    // false even though the child's own task class is declared, because the live role ask —
+    // not the audit — is what reached JEV for this create.
+    const roleOnlyHint: SpawnHint = {
+      status: "shadow",
+      callId: "jev-call-role-only",
+      answers: { role: { choice: "reviewer", confidence: 0.9 } },
+      proposal: { roleId: "reviewer" },
+      applyHard: false,
+      applyRole: true,
+      declaredAudit: false,
+    };
+
+    const result = createRoleRouter(jevOptions())({ ...declaredHard, jevHint: roleOnlyHint }, fakeContext);
+
+    expect(result?.labels?.[JEV_SPAWN_LABEL]).toMatch(/;audit=0$/);
   });
 
   it("a hint that is not an answer writes nothing", () => {
