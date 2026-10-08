@@ -633,3 +633,80 @@ describe("buildMcpStatusStripModel groups", () => {
     expect(model.recoveredHiddenNames).toEqual([]);
   });
 });
+
+describe("buildMcpStatusStripModel hidden rows over time", () => {
+  function names(rows: McpStatusRow[]): string[] {
+    return rows.map((row) => row.name);
+  }
+
+  it("keeps a hidden server hidden through every tick of a reconnect until it really connects", () => {
+    const at = (status: McpStatusServerEntry["status"]) =>
+      buildMcpStatusStripModel({
+        servers: [server({ name: "notion" }), server({ name: "zeeq", status })],
+        sessionReports: [],
+        hiddenNames: ["zeeq"],
+      });
+
+    for (const status of ["error", "connecting", "needs-auth", "disabled"] as const) {
+      const model = at(status);
+      expect(names(model.groups.hidden), status).toEqual(["zeeq"]);
+      expect(names(model.groups.connected), status).toEqual(["notion"]);
+      expect(model.recoveredHiddenNames, status).toEqual([]);
+    }
+
+    const connected = at("connected");
+    expect(names(connected.groups.connected)).toEqual(["notion", "zeeq"]);
+    expect(connected.groups.hidden).toEqual([]);
+    expect(connected.recoveredHiddenNames).toEqual(["zeeq"]);
+  });
+
+  it("releases a hidden session-only name once its sessions report it connected", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [server({ name: "notion" })],
+      sessionReports: [
+        report({ serverName: "claude.ai Robinhood", agentId: "a1", status: "connected" }),
+        report({ serverName: "claude.ai Robinhood", agentId: "a2", status: "connected" }),
+      ],
+      hiddenNames: ["claude.ai Robinhood"],
+    });
+
+    // The row is gone — connected reports never make one — so the release is all that is left.
+    expect(names(model.rows)).toEqual(["notion"]);
+    expect(model.recoveredHiddenNames).toEqual(["claude.ai Robinhood"]);
+  });
+
+  it("keeps a session-only name hidden while any session still reports it unhealthy", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [],
+      sessionReports: [
+        report({ serverName: "claude.ai Robinhood", agentId: "a1", status: "connected" }),
+        report({ serverName: "claude.ai Robinhood", agentId: "a2", status: "needs-auth" }),
+      ],
+      hiddenNames: ["claude.ai Robinhood"],
+    });
+
+    expect(names(model.groups.hidden)).toEqual(["claude.ai Robinhood"]);
+    expect(model.recoveredHiddenNames).toEqual([]);
+  });
+
+  it("lets the gateway's own status decide for a server it brokers, not a session's report", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [server({ name: "figma", status: "needs-auth" })],
+      sessionReports: [report({ serverName: "figma", status: "connected" })],
+      hiddenNames: ["figma"],
+    });
+
+    expect(names(model.groups.hidden)).toEqual(["figma"]);
+    expect(model.recoveredHiddenNames).toEqual([]);
+  });
+
+  it("does not release a hidden name nothing reports at all", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [server({ name: "notion" })],
+      sessionReports: [],
+      hiddenNames: ["claude.ai Robinhood"],
+    });
+
+    expect(model.recoveredHiddenNames).toEqual([]);
+  });
+});

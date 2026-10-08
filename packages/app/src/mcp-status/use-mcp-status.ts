@@ -115,12 +115,15 @@ export interface UseMcpStatusResult {
   adoptServer: (name: string, agentId: string) => Promise<McpGatewayServerAdoptPayload>;
   /** Opens claude.ai's connector settings — the only place claude.ai connectors get authorized. */
   openClaudeAiConnectors: () => Promise<void>;
-  /** True while either the auth or the adopt mutation is in flight. */
-  isStartingAuth: boolean;
+  /** Servers with a sign-in or broker request in flight. Per row, so one slow sign-in leaves
+   * every other row's button usable. */
+  pendingNames: ReadonlySet<string>;
   /** Hides an unhealthy server on this host: out of the header's count and tone. */
   hideServer: (name: string) => void;
   unhideServer: (name: string) => void;
 }
+
+const NO_PENDING: ReadonlySet<string> = new Set();
 
 export function useMcpStatus(): UseMcpStatusResult {
   const { t } = useTranslation();
@@ -223,6 +226,20 @@ export function useMcpStatus(): UseMcpStatusResult {
     });
   }, [model.rows]);
 
+  const [pendingNames, setPendingNames] = useState<ReadonlySet<string>>(NO_PENDING);
+  const whilePending = useCallback(async <T>(name: string, run: () => Promise<T>): Promise<T> => {
+    setPendingNames((prev) => new Set(prev).add(name));
+    try {
+      return await run();
+    } finally {
+      setPendingNames((prev) => {
+        const next = new Set(prev);
+        next.delete(name);
+        return next.size === 0 ? NO_PENDING : next;
+      });
+    }
+  }, []);
+
   const startAuthMutation = useMutation({
     mutationFn: async (name: string) => {
       if (!client) {
@@ -239,7 +256,7 @@ export function useMcpStatus(): UseMcpStatusResult {
   const startAuth = useCallback(
     async (name: string) => {
       clearFailure(name);
-      const result = await startAuthMutation.mutateAsync(name);
+      const result = await whilePending(name, () => startAuthMutation.mutateAsync(name));
       if (result.error && !result.authorizationUrl) {
         setFailures((prev) => ({
           ...prev,
@@ -254,7 +271,7 @@ export function useMcpStatus(): UseMcpStatusResult {
       }
       return result;
     },
-    [clearFailure, startAuthMutation],
+    [clearFailure, startAuthMutation, whilePending],
   );
 
   const adoptMutation = useMutation({
@@ -273,7 +290,7 @@ export function useMcpStatus(): UseMcpStatusResult {
   const adoptServer = useCallback(
     async (name: string, agentId: string) => {
       clearFailure(name);
-      const result = await adoptMutation.mutateAsync({ name, agentId });
+      const result = await whilePending(name, () => adoptMutation.mutateAsync({ name, agentId }));
       if (result.error && !result.authorizationUrl) {
         setFailures((prev) => ({
           ...prev,
@@ -288,7 +305,7 @@ export function useMcpStatus(): UseMcpStatusResult {
       }
       return result;
     },
-    [adoptMutation, clearFailure],
+    [adoptMutation, clearFailure, whilePending],
   );
 
   const openClaudeAiConnectors = useCallback(async () => {
@@ -302,7 +319,7 @@ export function useMcpStatus(): UseMcpStatusResult {
     startAuth,
     adoptServer,
     openClaudeAiConnectors,
-    isStartingAuth: startAuthMutation.isPending || adoptMutation.isPending,
+    pendingNames,
     hideServer,
     unhideServer,
   };

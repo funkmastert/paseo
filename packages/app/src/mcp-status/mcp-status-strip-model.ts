@@ -145,7 +145,7 @@ export interface McpStatusRowGroups {
   stuck: McpStatusRow[];
   /** Connected, connecting and disabled servers, behind one collapsed disclosure. */
   connected: McpStatusRow[];
-  /** Unhealthy rows the person hid. Out of the header's count and tone. */
+  /** Rows the person hid, until their server connects. Out of the header's count and tone. */
   hidden: McpStatusRow[];
 }
 
@@ -252,10 +252,12 @@ function groupRows(rows: McpStatusRow[], hidden: ReadonlySet<string>): McpStatus
   const groups: McpStatusRowGroups = { actionable: [], stuck: [], connected: [], hidden: [] };
   // `rows` is already sorted critical-first, which the two unhealthy groups keep.
   for (const row of rows) {
-    if (!isUnhealthyRow(row)) {
-      groups.connected.push(row);
-    } else if (hidden.has(row.name)) {
+    // A hidden server stays hidden until it really connects, or it would flash into the
+    // connected group on the connecting tick of every reconnect.
+    if (hidden.has(row.name) && row.statusKey !== "connected") {
       groups.hidden.push(row);
+    } else if (!isUnhealthyRow(row)) {
+      groups.connected.push(row);
     } else if (row.action) {
       groups.actionable.push(row);
     } else {
@@ -265,6 +267,37 @@ function groupRows(rows: McpStatusRow[], hidden: ReadonlySet<string>): McpStatus
   groups.connected.sort(byName);
   groups.hidden.sort(byName);
   return groups;
+}
+
+/**
+ * Hidden names whose server is connected again. The gateway decides for a server it brokers. A
+ * name it does not broker has no row once its sessions read connected, so it is released when they
+ * all do.
+ */
+function deriveRecoveredHiddenNames(input: {
+  hidden: ReadonlySet<string>;
+  rows: McpStatusRow[];
+  serverNames: ReadonlySet<string>;
+  sessionReports: McpStatusSessionReport[];
+  unhealthyReportsByServer: ReadonlyMap<string, McpStatusSessionReport[]>;
+}): string[] {
+  const recovered = new Set(
+    input.rows
+      .filter((row) => row.statusKey === "connected" && input.hidden.has(row.name))
+      .map((row) => row.name),
+  );
+  for (const report of input.sessionReports) {
+    const name = report.serverName;
+    if (
+      report.status === "connected" &&
+      input.hidden.has(name) &&
+      !input.serverNames.has(name) &&
+      !input.unhealthyReportsByServer.has(name)
+    ) {
+      recovered.add(name);
+    }
+  }
+  return [...recovered];
 }
 
 function groupUnhealthyReportsByServer(
@@ -412,8 +445,12 @@ export function buildMcpStatusStripModel(input: {
     },
     rows,
     groups,
-    recoveredHiddenNames: rows
-      .filter((row) => row.statusKey === "connected" && hidden.has(row.name))
-      .map((row) => row.name),
+    recoveredHiddenNames: deriveRecoveredHiddenNames({
+      hidden,
+      rows,
+      serverNames,
+      sessionReports: input.sessionReports,
+      unhealthyReportsByServer,
+    }),
   };
 }

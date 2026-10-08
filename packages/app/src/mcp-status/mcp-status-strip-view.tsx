@@ -84,12 +84,13 @@ function StatusDot({
 /** A row's single trailing control: the action, or Hide when there is none. */
 function IssueRowTrailing({
   row,
-  actionDisabled,
+  actionPending,
   onAction,
   onHide,
 }: {
   row: McpStatusRow;
-  actionDisabled: boolean;
+  /** This row's own sign-in or broker request is in flight. */
+  actionPending: boolean;
   onAction: (row: McpStatusRow) => void;
   onHide: (name: string) => void;
 }) {
@@ -116,7 +117,7 @@ function IssueRowTrailing({
       size="xs"
       leftIcon={row.action === "openClaudeAi" ? ExternalLink : KeyRound}
       onPress={handleAction}
-      disabled={actionDisabled}
+      loading={actionPending}
       testID={`mcp-status-auth-${row.name}`}
     >
       {actionLabelText(t, row)}
@@ -158,13 +159,13 @@ function FailureDetails({ row, failure }: { row: McpStatusRow; failure: McpStatu
  */
 function IssueRow({
   row,
-  actionDisabled,
+  actionPending,
   onAction,
   onHide,
   onCopyFailure,
 }: {
   row: McpStatusRow;
-  actionDisabled: boolean;
+  actionPending: boolean;
   onAction: (row: McpStatusRow) => void;
   onHide: (name: string) => void;
   onCopyFailure: (row: McpStatusRow, failure: McpStatusActionFailure) => void;
@@ -212,7 +213,7 @@ function IssueRow({
             </Text>
             <IssueRowTrailing
               row={row}
-              actionDisabled={actionDisabled}
+              actionPending={actionPending}
               onAction={onAction}
               onHide={onHide}
             />
@@ -244,17 +245,18 @@ function IssueRow({
           {expanded && failure ? <FailureDetails row={row} failure={failure} /> : null}
           {canExpand || expanded ? (
             <View style={styles.disclosureLine}>
-              <Text
-                style={styles.disclosureText}
+              <Button
+                variant="ghost"
+                size="xs"
                 onPress={handleToggle}
-                accessibilityRole="button"
                 accessibilityLabel={t(
                   expanded ? "mcpStatus.showLessError" : "mcpStatus.showFullError",
                 )}
+                style={styles.ghostOnNameRail}
                 testID={`mcp-status-more-${row.name}`}
               >
                 {t(expanded ? "mcpStatus.less" : "mcpStatus.more")}
-              </Text>
+              </Button>
               {expanded && failure ? (
                 <Button
                   variant="ghost"
@@ -374,8 +376,8 @@ export interface McpStatusStripViewProps {
   model: McpStatusStripModel;
   expanded: boolean;
   onToggleExpanded: () => void;
-  /** True while a sign-in or broker request is in flight; every action button waits on it. */
-  actionDisabled: boolean;
+  /** Servers whose sign-in or broker request is in flight; only those rows' buttons wait. */
+  pendingNames: ReadonlySet<string>;
   onAction: (row: McpStatusRow) => void;
   onHide: (name: string) => void;
   onUnhide: (name: string) => void;
@@ -391,7 +393,7 @@ export function McpStatusStripView({
   model,
   expanded,
   onToggleExpanded,
-  actionDisabled,
+  pendingNames,
   onAction,
   onHide,
   onUnhide,
@@ -434,7 +436,7 @@ export function McpStatusStripView({
             <IssueRow
               key={row.key}
               row={row}
-              actionDisabled={actionDisabled}
+              actionPending={pendingNames.has(row.name)}
               onAction={onAction}
               onHide={onHide}
               onCopyFailure={onCopyFailure}
@@ -480,6 +482,9 @@ const styles = StyleSheet.create((theme) => {
   const issueHeadHeight = Math.max(nameLineHeight, buttonControlHeight.xs);
   // Where a row's name starts: the strip's padding, the dot, and the gap after it.
   const nameRail = theme.spacing[3] + DOT_SIZE + theme.spacing[2];
+  // How far an xs button's box reaches above a line of text centred in it. Pulling More/Less up
+  // by that much puts its label on the line right under the sentence, as plain text would sit.
+  const lineOverhang = Math.round((nameLineHeight - buttonControlHeight.xs) / 2);
 
   return {
     container: {
@@ -547,21 +552,22 @@ const styles = StyleSheet.create((theme) => {
     ghostOnRail: {
       marginRight: -ghostInkInset,
     },
+    // The leading-edge twin of ghostOnRail: the label's ink on the name rail.
+    ghostOnNameRail: {
+      marginLeft: -ghostInkInset,
+    },
     failureDetails: {
       gap: theme.spacing[1],
       paddingTop: theme.spacing[1],
     },
     // No gap above: More belongs to the sentence it opens, so it sits on the next line of it.
+    // Only the top is pulled in; below, the box keeps inside the row, where a touch still lands
+    // on Android.
     disclosureLine: {
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "space-between",
-      minHeight: nameLineHeight,
-    },
-    disclosureText: {
-      fontSize: theme.fontSize.sm,
-      lineHeight: nameLineHeight,
-      color: theme.colors.foregroundMuted,
+      marginTop: lineOverhang,
     },
     remedyLine: {
       gap: 1,

@@ -23,7 +23,7 @@ export function McpStatusStrip() {
     startAuth,
     adoptServer,
     openClaudeAiConnectors,
-    isStartingAuth,
+    pendingNames,
     hideServer,
     unhideServer,
   } = useMcpStatus();
@@ -76,7 +76,7 @@ export function McpStatusStrip() {
       model={model}
       expanded={expanded}
       onToggleExpanded={handleToggle}
-      actionDisabled={isStartingAuth}
+      pendingNames={pendingNames}
       onAction={handleAction}
       onHide={hideServer}
       onUnhide={unhideServer}

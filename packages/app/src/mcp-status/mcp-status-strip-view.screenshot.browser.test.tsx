@@ -261,7 +261,7 @@ describe.each([
       model: model(),
       expanded: true,
       onToggleExpanded: vi.fn(),
-      actionDisabled: false,
+      pendingNames: new Set(),
       onAction: vi.fn(),
       onHide: vi.fn(),
       onUnhide: vi.fn(),
@@ -357,9 +357,10 @@ describe.each([
       const secondLine = rect(byTestId(container, `mcp-status-second-line-${server}`));
       expect(secondLine.left).toBe(nameRect.left);
     }
-    expect(rect(byTestId(container, "mcp-status-more-figma")).left).toBe(
-      rect(byTestId(container, "mcp-status-second-line-figma")).left,
-    );
+    // More is a ghost button; its label's ink is what sits on the rail.
+    const moreLabel = rect(buttonLabel(byTestId(container, "mcp-status-more-figma")));
+    const figmaSecondLine = rect(byTestId(container, "mcp-status-second-line-figma"));
+    expect(Math.abs(moreLabel.left - figmaSecondLine.left)).toBeLessThanOrEqual(1);
   });
 
   it("runs the second line under the button, out to the trailing rail", () => {
@@ -378,11 +379,44 @@ describe.each([
     const { container } = mountStrip();
     await settle();
     const more = byTestId(container, "mcp-status-more-figma");
+    const label = buttonLabel(more);
     const secondLine = byTestId(container, "mcp-status-second-line-figma");
-    expect(getComputedStyle(more as Element).color).toBe(
+    expect(more?.getAttribute("role")).toBe("button");
+    expect(getComputedStyle(label as Element).color).toBe(
       getComputedStyle(secondLine as Element).color,
     );
-    expect(rect(more).top - rect(secondLine).bottom).toBeLessThanOrEqual(1);
+    // The label lands on the next line of the sentence, as plain text would.
+    expect(Math.abs(rect(label).top - rect(secondLine).bottom)).toBeLessThanOrEqual(2);
+  });
+
+  it("waits only on the row whose sign-in is in flight", () => {
+    const { container } = mountStrip({ pendingNames: new Set(["linear"]) });
+    const disabled = (id: string) => byTestId(container, id)?.getAttribute("aria-disabled");
+    expect(disabled("mcp-status-auth-linear")).toBe("true");
+    expect(disabled("mcp-status-auth-notion")).toBeNull();
+    expect(disabled("mcp-status-auth-claude.ai Robinhood")).toBeNull();
+  });
+
+  it("hides any problem row from its context menu", async () => {
+    const onHide = vi.fn();
+    const { container } = mountStrip({ onHide });
+    const row = rect(byTestId(container, "mcp-status-row-linear"));
+    act(() => {
+      byTestId(container, "mcp-status-row-linear")?.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          clientX: row.left + 20,
+          clientY: row.top + 10,
+        }),
+      );
+    });
+    // The menu renders outside the strip, in the app's overlay layer.
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="mcp-status-menu-hide-linear"]')).not.toBeNull(),
+    );
+    click(document.querySelector('[data-testid="mcp-status-menu-hide-linear"]'));
+    await vi.waitFor(() => expect(onHide).toHaveBeenCalledExactlyOnceWith("linear"));
   });
 
   it("gives each problem row the sidebar's breathing room", () => {
