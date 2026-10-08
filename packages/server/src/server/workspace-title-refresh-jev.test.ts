@@ -296,7 +296,7 @@ describe("buildTitleRefreshState", () => {
 
 describe("createTitleRefreshRecorder", () => {
   async function record(
-    action: "jev-fits" | "jev-stale" | "cadence",
+    action: "jev-fits" | "jev-stale" | "cadence" | "cadence-not-ready",
     opts: { gatedByJev?: boolean; outcome?: JevOutcome["kind"]; callId?: string | null } = {},
   ) {
     const notes: unknown[] = [];
@@ -353,14 +353,14 @@ describe("createTitleRefreshRecorder", () => {
     expect(notes).toEqual([expect.objectContaining({ applied: false, mode: "live" })]);
   });
 
-  it("writes a titleRefresh savings involvement for an answered fits call", async () => {
+  it("writes a titleRefresh savings involvement for an answered fits call, changed: true since it skipped a generation", async () => {
     const { savingsRecords } = await record("jev-fits");
     expect(savingsRecords).toEqual([
       expect.objectContaining({
         feature: "titleRefresh",
         callId: "call-1",
         agentId: "agent-1",
-        decision: { did: "no-generate", wouldBe: "no-generate", changed: false },
+        decision: { did: "no-generate", wouldBe: "no-generate", changed: true },
         pending: false,
       }),
     ]);
@@ -372,6 +372,36 @@ describe("createTitleRefreshRecorder", () => {
       expect.objectContaining({
         feature: "titleRefresh",
         decision: { did: "generate", wouldBe: "generate", changed: false },
+      }),
+    ]);
+  });
+
+  it("writes a titleRefresh savings involvement for an answered low-confidence look the cadence decided to generate", async () => {
+    const { savingsRecords } = await record("cadence", {
+      gatedByJev: false,
+      outcome: "answered",
+      callId: "call-low-conf",
+    });
+    expect(savingsRecords).toEqual([
+      expect.objectContaining({
+        feature: "titleRefresh",
+        callId: "call-low-conf",
+        decision: { did: "generate", wouldBe: "generate", changed: false },
+      }),
+    ]);
+  });
+
+  it("writes a titleRefresh savings involvement for an answered low-confidence look the cadence decided to skip", async () => {
+    const { savingsRecords } = await record("cadence-not-ready", {
+      gatedByJev: false,
+      outcome: "answered",
+      callId: "call-low-conf-2",
+    });
+    expect(savingsRecords).toEqual([
+      expect.objectContaining({
+        feature: "titleRefresh",
+        callId: "call-low-conf-2",
+        decision: { did: "no-generate", wouldBe: "no-generate", changed: false },
       }),
     ]);
   });

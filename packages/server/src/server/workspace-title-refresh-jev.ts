@@ -285,6 +285,13 @@ export function createTitleRefreshRecorder(options: {
           mode: "live",
           wouldBe: "regenerate title",
         });
+      }
+      // Every answered call is an involvement (R1), not only the ones confident enough to gate:
+      // a low-confidence answer still cost JEV a call, and the cadence decided the look instead.
+      if (options.jev && event.outcome === "answered" && context.agentId && event.callId) {
+        const generate = event.gatedByJev
+          ? event.action === "jev-stale"
+          : event.action === "cadence";
         options.jev.savings.record({
           feature: "titleRefresh",
           callSite: TITLE_REFRESH_CALL_SITE,
@@ -292,10 +299,11 @@ export function createTitleRefreshRecorder(options: {
           agentId: context.agentId,
           involvement: `Does "${context.currentTitle}" still describe what this session is doing?`,
           decision: {
-            did: fits ? "no-generate" : "generate",
-            wouldBe: fits ? "no-generate" : "generate",
-            // titleRefresh has no shadow mode (docs/jev.md, "Config"): the answer is what ran.
-            changed: false,
+            did: generate ? "generate" : "no-generate",
+            wouldBe: generate ? "generate" : "no-generate",
+            // titleRefresh has no shadow mode (docs/jev.md, "Config"): a "fits" answer changed
+            // what code did (it skipped a generation); every other outcome ran as it would have.
+            changed: event.gatedByJev && event.action === "jev-fits",
           },
           facts: { action: event.action, score: event.score, confidence: event.confidence },
           pending: false,
