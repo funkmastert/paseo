@@ -1172,6 +1172,7 @@ export const en = {
       schedules: "Schedules",
       askJev: "Ask JEV",
       jevDashboard: "JEV dashboard",
+      tokenUsage: "Tokens",
     },
     worktreeSetup: {
       title: "Set up worktree scripts",
@@ -2151,6 +2152,10 @@ export const en = {
     jevDryRun: "Dry run",
     jevOlder: "{{count}} older",
     jevAllActivity: "All JEV activity",
+  },
+  tokenUsage: {
+    byModelTitle: "Tokens by model",
+    byRoleTitle: "Tokens by role",
   },
   review: {
     comment: {

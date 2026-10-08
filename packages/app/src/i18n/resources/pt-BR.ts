@@ -1188,6 +1188,7 @@ export const ptBR: TranslationResources = {
       schedules: "Agendamentos",
       askJev: "Perguntar ao JEV",
       jevDashboard: "Painel do JEV",
+      tokenUsage: "Tokens",
     },
     worktreeSetup: {
       title: "Configurar scripts de worktree",
@@ -2175,6 +2176,10 @@ export const ptBR: TranslationResources = {
     jevDryRun: "Simulação",
     jevOlder: "{{count}} anteriores",
     jevAllActivity: "Toda a atividade do JEV",
+  },
+  tokenUsage: {
+    byModelTitle: "Tokens por modelo",
+    byRoleTitle: "Tokens por função",
   },
   review: {
     comment: {

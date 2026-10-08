@@ -1170,6 +1170,7 @@ export const ko: TranslationResources = {
       schedules: "일정",
       askJev: "JEV에게 묻기",
       jevDashboard: "JEV 대시보드",
+      tokenUsage: "토큰",
     },
     worktreeSetup: {
       title: "워크트리 스크립트 설정",
@@ -2153,6 +2154,10 @@ export const ko: TranslationResources = {
     jevDryRun: "드라이 런",
     jevOlder: "이전 {{count}}건",
     jevAllActivity: "모든 JEV 활동",
+  },
+  tokenUsage: {
+    byModelTitle: "모델별 토큰",
+    byRoleTitle: "역할별 토큰",
   },
   review: {
     comment: {

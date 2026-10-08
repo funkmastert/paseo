@@ -1179,6 +1179,7 @@ export const ru: TranslationResources = {
       schedules: "Расписания",
       askJev: "Спросить JEV",
       jevDashboard: "Панель JEV",
+      tokenUsage: "Токены",
     },
     worktreeSetup: {
       title: "Настроить скрипты worktree",
@@ -2175,6 +2176,10 @@ export const ru: TranslationResources = {
     jevDryRun: "Пробный запуск",
     jevOlder: "Ещё {{count}}",
     jevAllActivity: "Вся активность JEV",
+  },
+  tokenUsage: {
+    byModelTitle: "Токены по модели",
+    byRoleTitle: "Токены по роли",
   },
   review: {
     comment: {
