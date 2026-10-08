@@ -282,6 +282,7 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
       proposal: { roleId, ...(taskClass ? { taskClass } : {}) },
       applyHard: true,
       applyRole: true,
+      declaredAudit: false,
     };
   }
 
@@ -379,13 +380,143 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
 
     const { jev, ...rest } = withFailure;
     expect(rest).toEqual(without);
-    expect(jev).toEqual({ status: "failed", reason: "timeout", callId: "call-2", applied: false });
+    expect(jev).toEqual({
+      status: "failed",
+      reason: "timeout",
+      callId: "call-2",
+      applied: false,
+      declaredAudit: false,
+    });
   });
 
   it("is replayable: the same hint gives the same decision", () => {
     const input = { ...implementation, jevHint: jevHint("advisor", "mechanical") };
 
     expect(classifyAgent(input, world({ policy: LIVE_POLICY }))).toEqual(classifyAgent(input, world({ policy: LIVE_POLICY })));
+  });
+
+  it("the declared-label audit: a declared label always wins, but wouldBe reads JEV's own answer, not the applied decision", () => {
+    const declaredHard = child({
+      title: "retry loop",
+      initialPrompt: "Implement the retry loop in the fetch helper.",
+      labels: { "paseo.task-class": "hard" },
+    });
+    const hint: ClassifierInput["jevHint"] = {
+      status: "shadow",
+      callId: "call-audit",
+      answers: { taskClass: { choice: "mechanical", confidence: 0.95 }, reasoning: { score: 0.2, confidence: 0.9 } },
+      proposal: { taskClass: "mechanical" },
+      applyHard: true,
+      applyRole: true,
+      declaredAudit: true,
+    };
+
+    const decision = classifyAgent({ ...declaredHard, jevHint: hint }, world({ policy: LIVE_POLICY }));
+
+    // The declared label still decides the real class — `resolveTaskClass` never even looks past it.
+    expect(decision.taskClass).toMatchObject({ taskClass: "hard", source: "declared" });
+    expect(decision.jev?.applied).toBe(false);
+    // `base` is what actually runs (the declared class); `wouldBe` is JEV's own answer, ignoring
+    // the label — if it read "hard" too (the declared-label short circuit, unstripped), the audit
+    // would have nothing to measure.
+    expect(decision.jev?.base?.taskClass).toBe("hard");
+    expect(decision.jev?.wouldBe).toMatchObject({ taskClass: "mechanical", move: "down" });
+    expect(decision.jev?.declaredAudit).toBe(true);
+  });
+
+  it("the declared-label audit's wouldBe never falls back to a hard-seed keyword when JEV's own answer disagrees", () => {
+    // The prompt itself matches HARD_SEED_RE; a non-audited unlabelled create would never even
+    // reach JEV with this prompt, and a declared one is asked anyway. Stripping the label and
+    // re-running the keyword classifier (the old, buggy path) would read "hard" off the prompt
+    // whatever JEV answered; `wouldBe` must read JEV's own choice instead.
+    const declaredHard = child({
+      title: "db migration",
+      initialPrompt: "Plan the database migration for the orders table.",
+      labels: { "paseo.task-class": "hard" },
+    });
+    const hint: ClassifierInput["jevHint"] = {
+      status: "shadow",
+      callId: "call-audit-2",
+      answers: { taskClass: { choice: "standard", confidence: 0.9 }, reasoning: { score: 1.0, confidence: 0.8 } },
+      proposal: {},
+      applyHard: true,
+      applyRole: true,
+      declaredAudit: true,
+    };
+
+    const decision = classifyAgent({ ...declaredHard, jevHint: hint }, world({ policy: LIVE_POLICY }));
+
+    expect(decision.taskClass).toMatchObject({ taskClass: "hard", source: "declared" });
+    expect(decision.jev?.wouldBe).toMatchObject({ taskClass: "standard", move: "down" });
+  });
+
+  it("the declared-label audit's wouldBe agrees with the declared class when JEV's raw answer matches it, whatever the confidence", () => {
+    const declaredHard = child({
+      title: "retry loop",
+      initialPrompt: "Implement the retry loop in the fetch helper.",
+      labels: { "paseo.task-class": "hard" },
+    });
+    const hint: ClassifierInput["jevHint"] = {
+      status: "shadow",
+      callId: "call-audit-3",
+      // 0.80 is below HARD_CONFIDENCE_FLOOR (0.85): the old floor-gated path would have fallen
+      // through to the keyword default here too, but the audit reads the raw choice regardless.
+      answers: { taskClass: { choice: "hard", confidence: 0.8 }, reasoning: { score: 1.4, confidence: 0.8 } },
+      proposal: {},
+      applyHard: true,
+      applyRole: true,
+      declaredAudit: true,
+    };
+
+    const decision = classifyAgent({ ...declaredHard, jevHint: hint }, world({ policy: LIVE_POLICY }));
+
+    expect(decision.jev?.wouldBe).toMatchObject({ taskClass: "hard", move: "none" });
+  });
+
+  it("the declared-label audit falls back to the declared class when JEV answers other", () => {
+    const declaredHard = child({
+      title: "retry loop",
+      initialPrompt: "Implement the retry loop in the fetch helper.",
+      labels: { "paseo.task-class": "hard" },
+    });
+    const hint: ClassifierInput["jevHint"] = {
+      status: "shadow",
+      callId: "call-audit-4",
+      answers: { taskClass: { choice: "other", confidence: 0.9 }, reasoning: { score: 0.5, confidence: 0.8 } },
+      proposal: {},
+      applyHard: true,
+      applyRole: true,
+      declaredAudit: true,
+    };
+
+    const decision = classifyAgent({ ...declaredHard, jevHint: hint }, world({ policy: LIVE_POLICY }));
+
+    expect(decision.jev?.wouldBe).toMatchObject({ taskClass: "hard", move: "none" });
+  });
+
+  it("a role-only ask on a declared child reads wouldBe as the declared class: no task_class question was asked", () => {
+    const declaredHard = child({
+      title: "retry loop",
+      initialPrompt: "Implement the retry loop in the fetch helper.",
+      labels: { "paseo.task-class": "hard" },
+    });
+    // No `taskClass`/`reasoning` answers at all: the plan asked only the role question.
+    const hint: ClassifierInput["jevHint"] = {
+      status: "answered",
+      callId: "call-audit-5",
+      answers: { role: { choice: "reviewer", confidence: 0.9 } },
+      proposal: { roleId: "reviewer" },
+      applyHard: true,
+      applyRole: true,
+      declaredAudit: false,
+    };
+
+    const decision = classifyAgent({ ...declaredHard, jevHint: hint }, world({ policy: LIVE_POLICY }));
+
+    expect(decision.jev?.wouldBe).toMatchObject({ taskClass: "hard", move: "none" });
+    // A role-only ask is not the declared-label audit, even though this child's class is
+    // declared too: the savings track must be able to tell the two apart (finding, 2026-10-08).
+    expect(decision.jev?.declaredAudit).toBe(false);
   });
 });
 
@@ -424,6 +555,16 @@ describe("classifyAgent — the JEV agent tools' arm", () => {
     );
     expect(denied.tools.deniedTools).toContain("Read");
     expect(denied.jevTools?.arm).toBeNull();
+  });
+
+  it("gives no arm to a non-Claude create: the tools and the discovery hint are Claude-only", () => {
+    const decision = classifyAgent(
+      child({ title: "x", requestedProvider: "codex" }),
+      world({ jevToolsAvailable: tools({ draw: 0.1 }) }),
+    );
+
+    expect(decision.jevTools?.arm).toBeNull();
+    expect(decision.jevTools?.reason).toContain("codex");
   });
 });
 

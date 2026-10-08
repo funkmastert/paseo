@@ -449,6 +449,14 @@ export interface JevHintDecision {
   /** Whether JEV changed this create's class or role. */
   applied: boolean;
   /**
+   * Carried from `SpawnHint.declaredAudit`: true only for the declared-label audit's own call,
+   * never for an ordinary ask on the same child (a role-only ask on a declared class is `false`
+   * even though `taskClass.source` is `declared` too). The role router writes this into
+   * `paseo.jev-spawn` so the savings track can tell the two apart without re-deriving it from the
+   * class source, which cannot (docs/jev.md, "Auditing a declared label").
+   */
+  declaredAudit: boolean;
+  /**
    * The create as it would be if every answer past its floor applied,
    * whatever shadow mode and the apply switches say. Present for every answer,
    * so a shadow day counts how many creates JEV would move down and up.
@@ -1271,6 +1279,25 @@ function decideOutputStyle(
   };
 }
 
+/**
+ * The declared-label audit's `wouldBe` (docs/jev.md, "Auditing a declared label"): JEV's own
+ * `task_class` answer, read directly. A declared label always wins `resolveTaskClass`'s own
+ * precedence before it ever looks at a hint, so re-running it with the label stripped falls back
+ * to the keyword seeds or the default for most answers — `standard`, `other`, a hard answer below
+ * its apply floor, or a role-only ask that carries no `task_class` question at all — none of which
+ * is JEV's answer. A missing or unrecognized choice means nothing to measure: `wouldBe` stays the
+ * declared class itself.
+ */
+function declaredAuditWouldBe(
+  hint: Extract<SpawnHint, { status: "answered" | "shadow" }>,
+  declaredClass: TaskClassId | undefined,
+): TaskClassId | undefined {
+  const answered = hint.answers.taskClass?.choice;
+  return answered !== undefined && (TASK_CLASS_IDS as readonly string[]).includes(answered)
+    ? (answered as TaskClassId)
+    : declaredClass;
+}
+
 /** Cheaper to dearer, for `wouldBe.move`. No class is the standard pool. */
 function classRank(taskClass: TaskClassId | undefined): number {
   return taskClass === undefined ? TASK_CLASS_IDS.indexOf("standard") : TASK_CLASS_IDS.indexOf(taskClass);
@@ -1306,13 +1333,25 @@ function hintNote(
 
 /**
  * The JEV agent tools' arm. Eligible when the feature could send now, the
- * decided tool profile keeps `Read`, and the D7 check passed; the draw then
- * picks the arm, so both arms are agents the classifier treated alike.
+ * create runs on a Claude-family provider, the decided tool profile keeps
+ * `Read`, and the D7 check passed; the draw then picks the arm, so both arms
+ * are agents the classifier treated alike.
  */
-function decideJevTools(world: ClassifierWorld, tools: ToolDecision): JevToolsDecision | undefined {
+function decideJevTools(
+  world: ClassifierWorld,
+  tools: ToolDecision,
+  providerFamily: string,
+): JevToolsDecision | undefined {
   const jevTools = world.jevToolsAvailable;
   if (!jevTools) {
     return undefined;
+  }
+  // The tools reach the agent over its own MCP session, and the discovery hint rides on
+  // `providerOptions.appendSystemPrompt`, a Claude-only key other providers' strict option
+  // schemas reject outright. Both are Claude Code behaviour, so a non-Claude create is never
+  // drawn into either D8 arm.
+  if (providerFamily !== POOL_FAMILY) {
+    return { arm: null, reason: `No JEV tools: this is a ${echoed(providerFamily)} create, and the tools are Claude-only.` };
   }
   if (!jevTools.active) {
     return { arm: null, reason: "No JEV tools: agents.jev.agentTools cannot send a call on this host right now." };
@@ -1414,10 +1453,14 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     textInput,
     hint ? { proposed: proposedClass, applyMechanical: live, applyHard: live && hint.applyHard } : undefined,
   );
-  // What JEV would make it with every switch on, for `wouldBe`.
-  const wouldBeClass = hint
-    ? resolveTaskClass(textInput, { proposed: proposedClass, applyMechanical: true, applyHard: true }).taskClass
-    : classResolution.taskClass;
+  // What JEV would make it with every switch on, for `wouldBe`. For a declared child (the
+  // declared-label audit, docs/jev.md "Auditing a declared label") that is JEV's own answer, read
+  // directly rather than re-run through the keyword classifier.
+  const wouldBeClass = !hint
+    ? classResolution.taskClass
+    : classResolution.source === "declared"
+      ? declaredAuditWouldBe(hint, classResolution.taskClass)
+      : resolveTaskClass(textInput, { proposed: proposedClass, applyMechanical: true, applyHard: true }).taskClass;
   const classPartial = {
     taskClass: classResolution.taskClass,
     source: classResolution.source,
@@ -1440,7 +1483,7 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     world.mcpGateway,
     toolRole.role,
   );
-  const jevTools = decideJevTools(world, tools);
+  const jevTools = decideJevTools(world, tools, familyOfProvider(world.pool, model.provider ?? input.requestedProvider ?? POOL_FAMILY));
 
   const decision: AgentDecision = { role: roleDecision, taskClass, model, tools, account, thinking, outputStyle, mcp };
   if (input.jevHint) {
@@ -1481,6 +1524,7 @@ function decideJevRecord(
       ...("callId" in jevHint && jevHint.callId !== undefined ? { callId: jevHint.callId } : {}),
       ...("reason" in jevHint ? { reason: jevHint.reason } : {}),
       applied: false,
+      declaredAudit: false,
     };
   }
   const textInput = { labels: input.labels, title: input.title, initialPrompt: input.initialPrompt };
@@ -1497,6 +1541,7 @@ function decideJevRecord(
     callId: hint.callId,
     answers: hint.answers,
     applied: resolved.source === "jev" || resolved.role.source === "classified-jev",
+    declaredAudit: hint.declaredAudit,
     wouldBe: {
       taskClass: resolved.wouldBeClass ?? null,
       ...(hint.answers.role !== undefined ? { role: wouldBeRole.id } : {}),

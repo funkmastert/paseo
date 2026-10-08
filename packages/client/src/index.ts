@@ -480,6 +480,7 @@ export interface PaseoJevActions {
       questions: JevQuestions;
       scope?: { cwd: string; parentAgentId?: string };
       deadlineMs?: number;
+      shadow?: true;
     },
     options?: { timeout?: number },
   ): Promise<JevDecidePayload>;

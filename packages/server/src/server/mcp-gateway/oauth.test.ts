@@ -1,7 +1,23 @@
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import express from "express";
+import {
+  auth as runOAuthOrchestration,
+  type OAuthClientProvider,
+} from "@modelcontextprotocol/sdk/client/auth.js";
+import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { DemoInMemoryAuthProvider } from "@modelcontextprotocol/sdk/examples/server/demoInMemoryOAuthProvider.js";
+import {
+  InvalidClientError,
+  InvalidGrantError,
+} from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import type {
+  OAuthClientInformationFull,
+  OAuthTokens,
+} from "@modelcontextprotocol/sdk/shared/auth.js";
 
 import { McpGatewayTokenStore } from "./token-store.js";
 import {
@@ -262,6 +278,230 @@ describe("createGatewayOAuthClientProvider", () => {
     const url = new URL("https://github.com/login/oauth/authorize?client_id=x");
     provider.redirectToAuthorization(url);
     expect(onRedirect).toHaveBeenCalledWith(url);
+  });
+});
+
+type RefreshBehavior = "succeed" | "invalid_grant" | "invalid_client";
+
+/**
+ * The SDK's demo provider with a controllable `exchangeRefreshToken` — the one call this suite
+ * needs to force into each of the SDK's three recoverable-error shapes (dead refresh token,
+ * dead client, a refresh that just works) to prove `invalidateCredentials` reacts correctly to
+ * each.
+ */
+class ConfigurableRefreshAuthProvider extends DemoInMemoryAuthProvider {
+  refreshBehavior: RefreshBehavior = "succeed";
+
+  async exchangeRefreshToken(
+    _client: OAuthClientInformationFull,
+    refreshToken: string,
+    scopes?: string[],
+  ): Promise<OAuthTokens> {
+    if (this.refreshBehavior === "invalid_grant") {
+      throw new InvalidGrantError("refresh token is no longer valid");
+    }
+    if (this.refreshBehavior === "invalid_client") {
+      throw new InvalidClientError("client is no longer recognized");
+    }
+    return {
+      access_token: randomUUID(),
+      token_type: "bearer",
+      expires_in: 3600,
+      refresh_token: refreshToken,
+      scope: (scopes ?? []).join(" "),
+    };
+  }
+}
+
+interface FakeOAuthServer {
+  url: string;
+  provider: ConfigurableRefreshAuthProvider;
+  close: () => Promise<void>;
+}
+
+/**
+ * A real discovery + DCR + authorize + token-exchange authorization server (KTD2/KTD3's
+ * fixture pattern), minus the MCP resource server — this suite never calls a tool, only
+ * `auth()`. Listens on port 0 and reads back the bound port, rather than probing a free port
+ * and reusing it: a probe-then-reuse has a TOCTOU gap another process on the machine could
+ * grab the port through. `mcpAuthRouter` needs the port to sign `issuerUrl` with, so it is
+ * mounted after the real listen, once the bound port is known — adding middleware to an
+ * already-listening `express()` app is fine; only requests arriving after this point matter.
+ */
+async function startFakeOAuthServer(): Promise<FakeOAuthServer> {
+  const provider = new ConfigurableRefreshAuthProvider();
+  const app = express();
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
+
+  const httpServer = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+    const server = app.listen(0, "127.0.0.1", () => resolve(server));
+  });
+  const address = httpServer.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to bind the fake OAuth server to a port");
+  }
+  const baseUrl = new URL(`http://127.0.0.1:${address.port}`);
+  const resourceUrl = new URL("/mcp", baseUrl);
+
+  app.use(
+    mcpAuthRouter({
+      provider,
+      issuerUrl: baseUrl,
+      resourceServerUrl: resourceUrl,
+      scopesSupported: ["mcp:tools"],
+    }),
+  );
+
+  return {
+    url: resourceUrl.toString(),
+    provider,
+    close: () => new Promise<void>((resolve) => httpServer.close(() => resolve())),
+  };
+}
+
+/**
+ * Drives a real first sign-in to completion (discovery, DCR, authorize, code exchange) so the
+ * token store ends up in the state a previously-connected server would be in. The demo
+ * provider's code exchange never issues a refresh token, so one is spliced in afterward — this
+ * suite is specifically about what happens when that refresh token later turns out to be dead.
+ */
+async function signInOnce(params: {
+  fixtureUrl: string;
+  provider: OAuthClientProvider;
+  serverName: string;
+  tokenStore: McpGatewayTokenStore;
+}): Promise<void> {
+  const { fixtureUrl, provider, serverName, tokenStore } = params;
+  let capturedUrl: URL | undefined;
+  const bootstrapProvider: OAuthClientProvider = {
+    ...provider,
+    redirectToAuthorization: (url: URL) => {
+      capturedUrl = url;
+    },
+  };
+  const started = await runOAuthOrchestration(bootstrapProvider, { serverUrl: fixtureUrl });
+  if (started !== "REDIRECT" || !capturedUrl) {
+    throw new Error("Expected initial sign-in to redirect");
+  }
+
+  const authorizeResponse = await fetch(capturedUrl.toString(), { redirect: "manual" });
+  const redirectLocation = authorizeResponse.headers.get("location");
+  if (!redirectLocation) {
+    throw new Error("Fixture authorize endpoint did not redirect");
+  }
+  const code = new URL(redirectLocation).searchParams.get("code");
+  if (!code) {
+    throw new Error("Fixture callback carried no authorization code");
+  }
+
+  const exchanged = await runOAuthOrchestration(provider, {
+    serverUrl: fixtureUrl,
+    authorizationCode: code,
+  });
+  if (exchanged !== "AUTHORIZED") {
+    throw new Error("Expected code exchange to authorize");
+  }
+
+  const tokens = tokenStore.getOAuthTokens(serverName);
+  if (!tokens) {
+    throw new Error("Expected tokens to be stored after a successful exchange");
+  }
+  tokenStore.saveOAuthTokens(serverName, { ...tokens, refresh_token: "initial-refresh-token" });
+}
+
+describe("invalidateCredentials (recovering from a dead refresh token or client)", () => {
+  async function buildSignedInProvider(fixtureUrl: string) {
+    const tokenStore = new McpGatewayTokenStore(
+      mkdtempSync(path.join(tmpdir(), "paseo-mcp-gateway-invalidate-")),
+    );
+    const stateStore = new McpGatewayOAuthStateStore();
+    let capturedUrl: URL | undefined;
+    const provider = createGatewayOAuthClientProvider({
+      serverName: "fixture",
+      tokenStore,
+      stateStore,
+      redirectUrl: "https://daemon.example.test/mcp/gateway/oauth/callback",
+      onRedirect: (url) => {
+        capturedUrl = url;
+      },
+    });
+    await signInOnce({ fixtureUrl, provider, serverName: "fixture", tokenStore });
+    return {
+      tokenStore,
+      provider,
+      getCapturedUrl: () => capturedUrl,
+      resetCapturedUrl: () => {
+        capturedUrl = undefined;
+      },
+    };
+  }
+
+  test("a dead refresh token (invalid_grant) clears stored tokens and ends in a fresh authorization URL", async () => {
+    const fixture = await startFakeOAuthServer();
+    try {
+      const { tokenStore, provider, getCapturedUrl, resetCapturedUrl } =
+        await buildSignedInProvider(fixture.url);
+      expect(tokenStore.getOAuthTokens("fixture")).toBeDefined();
+
+      fixture.provider.refreshBehavior = "invalid_grant";
+      resetCapturedUrl();
+
+      const result = await runOAuthOrchestration(provider, { serverUrl: fixture.url });
+
+      expect(result).toBe("REDIRECT");
+      expect(getCapturedUrl()).toBeInstanceOf(URL);
+      expect(tokenStore.getOAuthTokens("fixture")).toBeUndefined();
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  test("a dead client (invalid_client) clears tokens and client info, then re-registers for the fresh authorization", async () => {
+    const fixture = await startFakeOAuthServer();
+    try {
+      const { tokenStore, provider, getCapturedUrl, resetCapturedUrl } =
+        await buildSignedInProvider(fixture.url);
+      const originalClientId = tokenStore.getClientInformation("fixture")?.client_id;
+      expect(originalClientId).toBeDefined();
+
+      fixture.provider.refreshBehavior = "invalid_client";
+      resetCapturedUrl();
+
+      const result = await runOAuthOrchestration(provider, { serverUrl: fixture.url });
+
+      expect(result).toBe("REDIRECT");
+      expect(getCapturedUrl()).toBeInstanceOf(URL);
+      expect(tokenStore.getOAuthTokens("fixture")).toBeUndefined();
+      // Invalidating "all" drops the stale registration too, so the retry's discovery finds no
+      // client and dynamically registers a new one rather than reusing the dead one.
+      expect(tokenStore.getClientInformation("fixture")?.client_id).toBeDefined();
+      expect(tokenStore.getClientInformation("fixture")?.client_id).not.toBe(originalClientId);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  test("a good refresh token still refreshes silently, with no redirect and no cleared tokens", async () => {
+    const fixture = await startFakeOAuthServer();
+    try {
+      const { tokenStore, provider, getCapturedUrl, resetCapturedUrl } =
+        await buildSignedInProvider(fixture.url);
+      const tokensBefore = tokenStore.getOAuthTokens("fixture");
+
+      fixture.provider.refreshBehavior = "succeed";
+      resetCapturedUrl();
+
+      const result = await runOAuthOrchestration(provider, { serverUrl: fixture.url });
+
+      expect(result).toBe("AUTHORIZED");
+      expect(getCapturedUrl()).toBeUndefined();
+      const tokensAfter = tokenStore.getOAuthTokens("fixture");
+      expect(tokensAfter).toBeDefined();
+      expect(tokensAfter?.access_token).not.toBe(tokensBefore?.access_token);
+    } finally {
+      await fixture.close();
+    }
   });
 });
 

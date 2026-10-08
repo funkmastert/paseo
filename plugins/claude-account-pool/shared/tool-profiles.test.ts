@@ -263,6 +263,12 @@ describe("applyToolProfile", () => {
   it("writes no appendSystemPrompt key at all when nothing was denied and no notice was given", () => {
     expect(applyToolProfile(undefined, { kind: "unrestricted" })).toBeUndefined();
   });
+
+  it("writes only appendSystemPrompt for a notice-only call: no empty settings.permissions for a provider with nothing to deny", () => {
+    const result = applyToolProfile(undefined, { kind: "unrestricted" }, [], "you have extra tools");
+
+    expect(result).toEqual({ appendSystemPrompt: "you have extra tools" });
+  });
 });
 
 describe("ToolProfileSchema", () => {

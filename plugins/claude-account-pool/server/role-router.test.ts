@@ -2352,6 +2352,7 @@ describe("JEV's labels", () => {
     proposal: { taskClass: "mechanical" },
     applyHard: false,
     applyRole: false,
+    declaredAudit: false,
   });
 
   const unlabelled = () =>
@@ -2368,7 +2369,7 @@ describe("JEV's labels", () => {
     expect(result?.config.model).toBe("claude-haiku-4-5");
     expect(result?.labels).toMatchObject({ [TASK_CLASS_SOURCE_LABEL]: "jev", [JEV_CALL_LABEL]: "jev-call-7" });
     expect(result?.labels?.[JEV_SPAWN_LABEL]).toBe(
-      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=1",
+      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=1;audit=0",
     );
   });
 
@@ -2379,8 +2380,64 @@ describe("JEV's labels", () => {
     expect(result?.labels).toMatchObject({ [TASK_CLASS_SOURCE_LABEL]: "default", [JEV_CALL_LABEL]: "jev-call-7" });
     // The durable record: the model it runs without JEV, and the model the answer would run.
     expect(result?.labels?.[JEV_SPAWN_LABEL]).toBe(
-      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0",
+      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0;audit=0",
     );
+  });
+
+  it("the declared-label audit: a declared hard child keeps its label and model, but the labels record JEV's class with applied 0", () => {
+    const declaredHard = request({
+      callerAgentId: "c1",
+      labels: { [AGENT_ROLE_LABEL]: "worker", [TASK_CLASS_LABEL]: "hard" },
+      initialPrompt: "Implement the retry helper.",
+      config: { provider: "claude", cwd: "/tmp/work" },
+    });
+    const auditHint: SpawnHint = {
+      status: "shadow",
+      callId: "jev-call-audit",
+      answers: { taskClass: { choice: "mechanical", confidence: 0.95 }, reasoning: { score: 0.2, confidence: 0.9 } },
+      proposal: { taskClass: "mechanical" },
+      applyHard: false,
+      applyRole: false,
+      declaredAudit: true,
+    };
+
+    const result = createRoleRouter(jevOptions())({ ...declaredHard, jevHint: auditHint }, fakeContext);
+
+    // The declared label still wins: the class, model and thinking are unchanged from a plain
+    // declared create.
+    const withoutHint = createRoleRouter(jevOptions())(declaredHard, fakeContext);
+    expect(result?.config.model).toBe(withoutHint?.config.model);
+    expect(result?.labels?.[AGENT_ROLE_LABEL]).toBe("worker");
+    expect(result?.labels?.[TASK_CLASS_SOURCE_LABEL]).toBe("declared");
+    expect(result?.labels?.[JEV_CALL_LABEL]).toBe("jev-call-audit");
+    expect(result?.labels?.[JEV_SPAWN_LABEL]).toBe(
+      "v1;base=hard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0;audit=1",
+    );
+  });
+
+  it("marks a role-only ask on a declared child as not the audit, even though its class source is declared too", () => {
+    const declaredHard = request({
+      callerAgentId: "c1",
+      labels: { [AGENT_ROLE_LABEL]: "worker", [TASK_CLASS_LABEL]: "hard" },
+      initialPrompt: "Implement the retry helper.",
+      config: { provider: "claude", cwd: "/tmp/work" },
+    });
+    // A role-only ask (no taskClass/reasoning answers): planSpawnHint marks this declaredAudit:
+    // false even though the child's own task class is declared, because the live role ask —
+    // not the audit — is what reached JEV for this create.
+    const roleOnlyHint: SpawnHint = {
+      status: "shadow",
+      callId: "jev-call-role-only",
+      answers: { role: { choice: "reviewer", confidence: 0.9 } },
+      proposal: { roleId: "reviewer" },
+      applyHard: false,
+      applyRole: true,
+      declaredAudit: false,
+    };
+
+    const result = createRoleRouter(jevOptions())({ ...declaredHard, jevHint: roleOnlyHint }, fakeContext);
+
+    expect(result?.labels?.[JEV_SPAWN_LABEL]).toMatch(/;audit=0$/);
   });
 
   it("a hint that is not an answer writes nothing", () => {
@@ -2472,6 +2529,64 @@ describe("JEV's labels", () => {
       );
 
       expect(result).toBeUndefined();
+    });
+
+    function hintOf(result: ReturnType<RoleCreateRouter>): string | undefined {
+      return (result?.config.providerOptions as { appendSystemPrompt?: string } | undefined)?.appendSystemPrompt;
+    }
+
+    it("adds the agent-tools discovery hint for the on arm only", () => {
+      const router = createRoleRouter(jevOptions());
+
+      expect(hintOf(router({ ...unlabelled(), jevTools: tools(0.1) }, fakeContext))).toContain("ask_jev");
+      expect(hintOf(router({ ...unlabelled(), jevTools: tools(0.9) }, fakeContext))).toBeUndefined();
+    });
+
+    it("gives a non-Claude create neither an arm nor the hint, and the request passes through untouched", () => {
+      const base = unlabelled();
+      const codexCreate = {
+        ...base,
+        request: { ...base.request, config: { ...base.request.config, provider: "codex", model: "gpt-5" } },
+        jevTools: tools(0.1),
+      };
+
+      const result = createRoleRouter(jevOptions())(codexCreate, fakeContext);
+
+      expect(result?.labels?.[JEV_TOOLS_LABEL]).toBeUndefined();
+      expect(hintOf(result)).toBeUndefined();
+      expect(result?.config.providerOptions).toBeUndefined();
+    });
+
+    it("adds no hint when the arm was never evaluated (the daemon serves no JEV tools)", () => {
+      const result = createRoleRouter(jevOptions())(unlabelled(), fakeContext);
+
+      expect(hintOf(result)).toBeUndefined();
+    });
+
+    it("adds no hint for an ineligible create (Read denied, excluded scope, or JEV tools inactive)", () => {
+      const router = createRoleRouter(jevOptions());
+
+      expect(
+        hintOf(router({ ...unlabelled(), jevTools: { active: true, scope: "excluded", assignShare: 1, draw: 0 } }, fakeContext)),
+      ).toBeUndefined();
+      expect(
+        hintOf(router({ ...unlabelled(), jevTools: { active: false, scope: "ok", assignShare: 1, draw: 0 } }, fakeContext)),
+      ).toBeUndefined();
+    });
+
+    it("combines with a restriction notice instead of replacing it", () => {
+      const policy: RoleModelPolicy = {
+        ...DEFAULT_POLICY,
+        roles: DEFAULT_POLICY.roles.map((role) =>
+          role.id === "worker" ? { ...role, toolProfile: { kind: "read-only" as const } } : role,
+        ),
+      };
+      const router = createRoleRouter(baseOptions({ policyCache: fakePolicyCache(policy) }));
+
+      const notice = hintOf(router({ ...unlabelled(), jevTools: tools(0.1) }, fakeContext));
+
+      expect(notice).toContain("[tool profile: read-only]");
+      expect(notice).toContain("ask_jev");
     });
   });
 });

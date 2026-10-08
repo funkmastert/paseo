@@ -216,7 +216,14 @@ describe("the agent_model_policy tool — MCP servers", () => {
 
 describe("the agent_model_policy tool — JEV's spawn hint", () => {
   const call = { id: 1, method: "tools/call", params: { name: "agent_model_policy", arguments: { prompt: "Implement the retry helper." } } };
-  const live = { active: true, reason: null, shadow: false, applyHard: false, applyRole: false };
+  const live = {
+    active: true,
+    reason: null,
+    shadow: false,
+    applyHard: false,
+    applyRole: false,
+    auditDeclared: false,
+  };
 
   it("says the class is decided at create once the hint is live, and never asks JEV", () => {
     const reply = handleMcpMessage(call, world, () => live) as { result: { content: { text: string }[] } };
