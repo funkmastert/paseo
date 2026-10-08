@@ -160,7 +160,7 @@ export class TokenUsageService {
 
   async getBreakdown(range: TokenUsageRange): Promise<TokenUsageBreakdown> {
     const nowMs = this.now();
-    const rangeStartMs = Math.floor((nowMs - RANGE_MS[range]) / HOUR_MS) * HOUR_MS;
+    const rangeStartMs = tokenUsageRangeStartMs(range, nowMs);
     const base = { generatedAt: new Date(nowMs).toISOString(), range, rangeStartMs };
     this.enabled = this.isEnabled();
     if (!this.enabled) {
@@ -227,6 +227,11 @@ export class TokenUsageService {
     }
     this.schedule(backfilling ? this.backfillIntervalMs : this.sweepIntervalMs);
   }
+}
+
+/** A range starts on the hour, since buckets are hours: "24h" covers 24 to 25 hours. */
+export function tokenUsageRangeStartMs(range: TokenUsageRange, nowMs: number): number {
+  return Math.floor((nowMs - RANGE_MS[range]) / HOUR_MS) * HOUR_MS;
 }
 
 /** `agents.tokenUsage.enabled` out of a parsed `config.json`. On unless explicitly false. */

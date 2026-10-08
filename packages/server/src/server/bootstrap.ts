@@ -287,6 +287,7 @@ import { buildDoctorContext, readRawConfig } from "./session/doctor/index.js";
 import { resolveTokenAuditConfig, tokenAuditSection } from "./token-audit/config.js";
 import { TokenAuditJob } from "./token-audit/token-audit-job.js";
 import { resolveTranscriptRoots } from "./token-usage/token-usage-roots.js";
+import type { TranscriptRoot } from "./token-usage/token-usage-scanner.js";
 import { TokenUsageService, isTokenUsageEnabled } from "./token-usage/token-usage-service.js";
 import { resolveAccountPoolEntries } from "./agent/account-pool-providers.js";
 import {
@@ -749,6 +750,14 @@ export interface PaseoDaemonConfig {
   leaderCompactionOverrides?: {
     sweepIntervalMs?: number;
   };
+  /**
+   * Test seam for TokenUsageService; production leaves this unset. A test daemon names its own
+   * transcript trees so it never reads the developer's real ones.
+   */
+  tokenUsageOverrides?: {
+    roots?: TranscriptRoot[];
+    firstSweepDelayMs?: number;
+  };
   diskSweeper?: {
     enabled?: boolean;
     sweepIntervalMs?: number;
@@ -898,6 +907,7 @@ function withDeviceLeasesConfig(
  */
 function createTokenUsageService(input: {
   paseoHome: string;
+  overrides: PaseoDaemonConfig["tokenUsageOverrides"];
   agentStorage: AgentStorage;
   agentManager: AgentManager;
   logger: Logger;
@@ -905,11 +915,10 @@ function createTokenUsageService(input: {
   const readConfig = () => readRawConfig(input.paseoHome).rawConfig;
   const service = new TokenUsageService({
     rootDir: path.join(input.paseoHome, "token-usage"),
-    roots: resolveTranscriptRoots({
-      homeDir: homedir(),
-      env: process.env,
-      rawConfig: readConfig(),
-    }),
+    roots:
+      input.overrides?.roots ??
+      resolveTranscriptRoots({ homeDir: homedir(), env: process.env, rawConfig: readConfig() }),
+    firstSweepDelayMs: input.overrides?.firstSweepDelayMs,
     listAgentRecords: () => input.agentStorage.list(),
     isEnabled: () => isTokenUsageEnabled(readConfig()),
     logger: input.logger.child({ module: "token-usage" }),
@@ -3223,6 +3232,7 @@ export async function createPaseoDaemon(
 
             const tokenUsage = createTokenUsageService({
               paseoHome: config.paseoHome,
+              overrides: config.tokenUsageOverrides,
               agentStorage,
               agentManager,
               logger,
@@ -3245,6 +3255,7 @@ export async function createPaseoDaemon(
                 relayConfig: dependencies.serverFeatureOverrides?.relayConfig,
                 startPaused: true,
                 autoPinExpiry,
+                tokenUsage,
               },
               workspaceAutoName,
               config.auth,
