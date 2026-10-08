@@ -2473,5 +2473,48 @@ describe("JEV's labels", () => {
 
       expect(result).toBeUndefined();
     });
+
+    function hintOf(result: ReturnType<RoleCreateRouter>): string | undefined {
+      return (result?.config.providerOptions as { appendSystemPrompt?: string } | undefined)?.appendSystemPrompt;
+    }
+
+    it("adds the agent-tools discovery hint for the on arm only", () => {
+      const router = createRoleRouter(jevOptions());
+
+      expect(hintOf(router({ ...unlabelled(), jevTools: tools(0.1) }, fakeContext))).toContain("ask_jev");
+      expect(hintOf(router({ ...unlabelled(), jevTools: tools(0.9) }, fakeContext))).toBeUndefined();
+    });
+
+    it("adds no hint when the arm was never evaluated (the daemon serves no JEV tools)", () => {
+      const result = createRoleRouter(jevOptions())(unlabelled(), fakeContext);
+
+      expect(hintOf(result)).toBeUndefined();
+    });
+
+    it("adds no hint for an ineligible create (Read denied, excluded scope, or JEV tools inactive)", () => {
+      const router = createRoleRouter(jevOptions());
+
+      expect(
+        hintOf(router({ ...unlabelled(), jevTools: { active: true, scope: "excluded", assignShare: 1, draw: 0 } }, fakeContext)),
+      ).toBeUndefined();
+      expect(
+        hintOf(router({ ...unlabelled(), jevTools: { active: false, scope: "ok", assignShare: 1, draw: 0 } }, fakeContext)),
+      ).toBeUndefined();
+    });
+
+    it("combines with a restriction notice instead of replacing it", () => {
+      const policy: RoleModelPolicy = {
+        ...DEFAULT_POLICY,
+        roles: DEFAULT_POLICY.roles.map((role) =>
+          role.id === "worker" ? { ...role, toolProfile: { kind: "read-only" as const } } : role,
+        ),
+      };
+      const router = createRoleRouter(baseOptions({ policyCache: fakePolicyCache(policy) }));
+
+      const notice = hintOf(router({ ...unlabelled(), jevTools: tools(0.1) }, fakeContext));
+
+      expect(notice).toContain("[tool profile: read-only]");
+      expect(notice).toContain("ask_jev");
+    });
   });
 });
