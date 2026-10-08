@@ -1995,4 +1995,22 @@ describe("DaemonConfigStore reload", () => {
 
     expect(agentModelPolicyOf(store.get())).toEqual({ policyId: "disk-value" });
   });
+
+  test("onReload runs after a reload that changes only a section the store does not carry", () => {
+    const { paseoHome, store, persisted } = createReloadableStore();
+    const reloads: unknown[] = [];
+    const changes: unknown[] = [];
+    store.onChange(() => changes.push("change"));
+    const unsubscribe = store.onReload(() =>
+      reloads.push(loadPersistedConfig(paseoHome).knowledgeBase),
+    );
+
+    writeConfig(paseoHome, { ...persisted, knowledgeBase: { enabled: true } });
+    store.reload();
+    unsubscribe();
+    store.reload();
+
+    expect(reloads).toEqual([{ enabled: true }]);
+    expect(changes).toEqual([]);
+  });
 });

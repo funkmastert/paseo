@@ -139,6 +139,8 @@ import { AgentStorage } from "./agent/agent-storage.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
 import { McpGateway, type McpGatewayConfig } from "./mcp-gateway/gateway.js";
+import { BasicMemorySidecar } from "./knowledge-base/basic-memory-sidecar.js";
+import { resolveKnowledgeBaseConfig } from "./knowledge-base/config.js";
 import { installMcpGatewayRoutes } from "./mcp-gateway/routes.js";
 import { normalizeMcpProtocolVersionHeader } from "./mcp-protocol-compat.js";
 import {
@@ -2952,6 +2954,25 @@ export async function createPaseoDaemon(
     daemonConfigStore.patch({ mcpGateway: { servers: { [name]: serverConfig } } });
   });
 
+  // Knowledge base search (docs/knowledge-base.md): the Basic Memory sidecar. Off unless the
+  // `knowledgeBase` section enables it; started after listen and on every config reload, never
+  // awaited, so a slow Python start cannot delay the daemon.
+  const basicMemorySidecar = new BasicMemorySidecar({ logger, managedProcesses });
+  const applyKnowledgeBaseConfig = () => {
+    const resolved = resolveKnowledgeBaseConfig(
+      readRawConfig(config.paseoHome).rawConfig?.["knowledgeBase"],
+      {
+        paseoHome: config.paseoHome,
+        onDisabledByConfig: (reason) => {
+          logger.warn({ reason }, "knowledgeBase config is invalid; the knowledge base is off");
+        },
+      },
+    );
+    void basicMemorySidecar.applyConfig(resolved).catch((error: unknown) => {
+      logger.warn({ err: error }, "Failed to apply the knowledgeBase config");
+    });
+  };
+
   let mcpEnabled = config.mcpEnabled ?? true;
   // `jev.status` says the agent tools are served while agents can reach them: the agent MCP
   // endpoint is on and Paseo's tools are injected into agents. The plugin labels no create until.
@@ -3297,6 +3318,8 @@ export async function createPaseoDaemon(
             void mcpGateway.start().catch((error: unknown) => {
               logger.warn({ err: error }, "MCP gateway failed to start one or more servers");
             });
+            applyKnowledgeBaseConfig();
+            daemonConfigStore.onReload(applyKnowledgeBaseConfig);
             // Wired here (rather than at construction, above) for the same reason as the
             // token-burn monitor below: the push sender doesn't exist until wsServer does.
             mcpGateway.setNotifier({
@@ -3701,6 +3724,7 @@ export async function createPaseoDaemon(
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
       await serviceProxy.stopStandalone().catch(() => undefined);
       await agentProviderRuntime.shutdown().catch(() => undefined);
+      await basicMemorySidecar.stop().catch(() => undefined);
       if (mainStarted) {
         httpServer.closeAllConnections();
         await new Promise<void>((resolve) => httpServer.close(() => resolve()));
@@ -3779,6 +3803,9 @@ export async function createPaseoDaemon(
       logger.warn({ err: error }, "Failed to flush the JEV ledger");
     });
     await mcpGateway.stop().catch(() => undefined);
+    await basicMemorySidecar.stop().catch((error: unknown) => {
+      logger.warn({ err: error }, "Failed to stop Basic Memory");
+    });
     await scheduleService.stop().catch(() => undefined);
     await relayRuntime?.stop().catch(() => undefined);
     if (wsServer) {

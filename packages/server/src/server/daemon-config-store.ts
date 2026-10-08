@@ -529,6 +529,7 @@ export class DaemonConfigStore {
   private readonly logger: LoggerLike | undefined;
   private readonly changeListeners = new Set<ConfigListener>();
   private readonly applyListeners = new Set<ConfigApplyListener>();
+  private readonly reloadListeners = new Set<() => void>();
   private readonly fieldChangeHandlers = new Map<string, Set<FieldChangeHandler>>();
   private readonly relayEnabledMutable: boolean;
   private readonly reloadSource: DaemonConfigReloadSource | undefined;
@@ -694,6 +695,13 @@ export class DaemonConfigStore {
     );
     this.applyReplacement(desired, { removedProviders });
     this.lastKnownPersisted = persisted;
+    for (const listener of this.reloadListeners) {
+      try {
+        listener();
+      } catch (error) {
+        this.logger?.info({ error }, "Daemon config reload notification failed");
+      }
+    }
 
     return {
       appliedPaths: [...appliedPaths].sort(),
@@ -789,6 +797,17 @@ export class DaemonConfigStore {
     this.changeListeners.add(listener);
     return () => {
       this.changeListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Runs after every `reload()`, changed or not. A section that is not part of the mutable config
+   * (`knowledgeBase`) reads config.json itself, and `onChange` never fires for it.
+   */
+  public onReload(listener: () => void): () => void {
+    this.reloadListeners.add(listener);
+    return () => {
+      this.reloadListeners.delete(listener);
     };
   }
 
