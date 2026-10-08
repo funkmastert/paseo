@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { PRIVATE_FILE_MODE } from "../private-files.js";
 import { McpGatewayTokenStore } from "./token-store.js";
@@ -108,6 +108,82 @@ describe("McpGatewayTokenStore", () => {
 
     expect(store.getClientInformation("zeeq")).toBeUndefined();
     expect(store.getOAuthTokens("zeeq")).toEqual({ access_token: "token-1", token_type: "Bearer" });
+  });
+
+  test("clearOAuthTokens drops the dead tokens and keeps everything else", () => {
+    const store = new McpGatewayTokenStore(createTempHome());
+    store.saveClientInformation("zeeq", {
+      client_id: "client-1",
+      redirect_uris: ["https://daemon.example.test/mcp/gateway/oauth/callback"],
+    });
+    store.saveOAuthTokens("zeeq", {
+      access_token: "at-1",
+      token_type: "Bearer",
+      refresh_token: "rt-1",
+    });
+
+    store.clearOAuthTokens("zeeq");
+
+    expect(store.getOAuthTokens("zeeq")).toBeUndefined();
+    expect(store.getClientInformation("zeeq")).toEqual({
+      client_id: "client-1",
+      redirect_uris: ["https://daemon.example.test/mcp/gateway/oauth/callback"],
+    });
+  });
+
+  test("clearOAuthTokens on a server with no tokens is a no-op", () => {
+    const store = new McpGatewayTokenStore(createTempHome());
+    expect(() => store.clearOAuthTokens("zeeq")).not.toThrow();
+    expect(store.getOAuthTokens("zeeq")).toBeUndefined();
+  });
+
+  test("clearCodeVerifier drops the verifier and keeps the tokens", () => {
+    const store = new McpGatewayTokenStore(createTempHome());
+    store.saveCodeVerifier("zeeq", "verifier-1");
+    store.saveOAuthTokens("zeeq", { access_token: "at-1", token_type: "Bearer" });
+
+    store.clearCodeVerifier("zeeq");
+
+    expect(store.getCodeVerifier("zeeq")).toBeUndefined();
+    expect(store.getOAuthTokens("zeeq")).toEqual({ access_token: "at-1", token_type: "Bearer" });
+  });
+
+  test("clearAllOAuthCredentials drops tokens, verifier, and client info together, in a single write", () => {
+    const store = new McpGatewayTokenStore(createTempHome());
+    store.saveClientInformation("zeeq", {
+      client_id: "client-1",
+      redirect_uris: ["https://daemon.example.test/mcp/gateway/oauth/callback"],
+    });
+    store.saveOAuthTokens("zeeq", {
+      access_token: "at-1",
+      token_type: "Bearer",
+      refresh_token: "rt-1",
+    });
+    store.saveCodeVerifier("zeeq", "verifier-1");
+
+    // `setRecord` is the store's one read-modify-write primitive (every `save`/`clear` method
+    // funnels through it to touch the file) — counting its calls on this instance counts
+    // writes to the token file, while the real implementation still runs underneath.
+    const setRecordSpy = vi.spyOn(
+      store as unknown as { setRecord: (serverName: string, record: unknown) => void },
+      "setRecord",
+    );
+    try {
+      store.clearAllOAuthCredentials("zeeq");
+      expect(setRecordSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      setRecordSpy.mockRestore();
+    }
+
+    expect(store.getOAuthTokens("zeeq")).toBeUndefined();
+    expect(store.getCodeVerifier("zeeq")).toBeUndefined();
+    expect(store.getClientInformation("zeeq")).toBeUndefined();
+  });
+
+  test("clearAllOAuthCredentials on a server with nothing stored is a no-op", () => {
+    const store = new McpGatewayTokenStore(createTempHome());
+    expect(() => store.clearAllOAuthCredentials("zeeq")).not.toThrow();
+    expect(store.getOAuthTokens("zeeq")).toBeUndefined();
   });
 
   test("round-trips static auth header values, never touching config", () => {
