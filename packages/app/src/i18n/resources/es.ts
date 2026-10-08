@@ -1197,6 +1197,7 @@ export const es: TranslationResources = {
       schedules: "Horarios",
       askJev: "Preguntar a JEV",
       jevDashboard: "Panel de JEV",
+      tokenUsage: "Tokens",
     },
     worktreeSetup: {
       title: "Configurar secuencias de comandos del árbol de trabajo",

@@ -1163,6 +1163,7 @@ export const ar: TranslationResources = {
       schedules: "الجداول",
       askJev: "اسأل JEV",
       jevDashboard: "لوحة تحكم JEV",
+      tokenUsage: "الرموز",
     },
     worktreeSetup: {
       title: "إعداد البرامج النصية لشجرة العمل",

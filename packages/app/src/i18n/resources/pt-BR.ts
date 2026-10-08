@@ -1188,6 +1188,7 @@ export const ptBR: TranslationResources = {
       schedules: "Agendamentos",
       askJev: "Perguntar ao JEV",
       jevDashboard: "Painel do JEV",
+      tokenUsage: "Tokens",
     },
     worktreeSetup: {
       title: "Configurar scripts de worktree",
