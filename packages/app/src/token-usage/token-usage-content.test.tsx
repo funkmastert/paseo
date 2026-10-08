@@ -18,6 +18,26 @@ afterEach(() => {
 });
 
 describe("TokenUsageContent", () => {
+  it("separates the unit and range controls with a visible divider between them", () => {
+    const container = mount(<ContentHarness width={DESKTOP_WIDTH} />, DESKTOP_WIDTH);
+    const unitControl = container.querySelector('[data-testid="token-usage-unit"]');
+    const divider = container.querySelector('[data-testid="token-usage-controls-divider"]');
+    const rangeControl = container.querySelector('[data-testid="token-usage-range"]');
+    expect(unitControl).not.toBeNull();
+    expect(divider).not.toBeNull();
+    expect(rangeControl).not.toBeNull();
+    // The divider sits in source order between the two groups, which is what keeps them from
+    // reading as one row of five buttons.
+    const row = divider?.parentElement;
+    const children = row ? Array.from(row.children) : [];
+    expect(children.indexOf(unitControl as Element)).toBeLessThan(
+      children.indexOf(divider as Element),
+    );
+    expect(children.indexOf(divider as Element)).toBeLessThan(
+      children.indexOf(rangeControl as Element),
+    );
+  });
+
   it("shows the model and role cards with fixture data", () => {
     const container = mount(<ContentHarness width={DESKTOP_WIDTH} />, DESKTOP_WIDTH);
     expect(container.querySelector('[data-testid="tokens-by-model-card"]')).not.toBeNull();

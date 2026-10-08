@@ -138,6 +138,7 @@ export function TokenUsageContent({
           options={UNIT_OPTIONS}
           testID="token-usage-unit"
         />
+        <View style={styles.controlsDivider} testID="token-usage-controls-divider" />
         <SegmentedControl
           size="sm"
           value={range}
@@ -215,7 +216,15 @@ const styles = StyleSheet.create((theme) => ({
   controlsRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: theme.spacing[3],
+    alignItems: "center",
+    gap: theme.spacing[4],
+  },
+  // A visible boundary between the unit and range groups (docs/design.md §5: borders separate) —
+  // without it, five segments in a row with only a gap between groups reads as one control.
+  controlsDivider: {
+    width: 1,
+    alignSelf: "stretch",
+    backgroundColor: theme.colors.border,
   },
   loadingRow: {
     flexDirection: "row",

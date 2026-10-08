@@ -42,12 +42,31 @@ export function totalForUnit(row: TokenUsageRow, unit: TokenUsageUnit): number {
   return unit === "weighted" ? row.weighted : rawTotal(row);
 }
 
-/** 245_000_000 -> "245M", 7_400_000 -> "7.4M", 16_000 -> "16K", 900 -> "900". */
+interface CompactTokenUnit {
+  threshold: number;
+  divisor: number;
+  suffix: string;
+}
+
+const COMPACT_TOKEN_UNITS: readonly CompactTokenUnit[] = [
+  { threshold: 1_000_000_000, divisor: 1_000_000_000, suffix: "B" },
+  { threshold: 1_000_000, divisor: 1_000_000, suffix: "M" },
+  { threshold: 1_000, divisor: 1_000, suffix: "K" },
+];
+
+/**
+ * One decimal below 10 in the chosen unit, none at 10 and above — a value never shows more than
+ * three significant digits. 1_192_800_000 -> "1.2B", 547_900_000 -> "548M", 7_400_000 -> "7.4M",
+ * 3_000_000 -> "3M", 16_000 -> "16K", 900 -> "900".
+ */
 export function formatCompactTokens(value: number): string {
   const abs = Math.abs(value);
-  if (abs >= 1_000_000) return `${trimTrailingZero((value / 1_000_000).toFixed(1))}M`;
-  if (abs >= 1_000) return `${trimTrailingZero((value / 1_000).toFixed(1))}K`;
-  return `${Math.round(value)}`;
+  const unit = COMPACT_TOKEN_UNITS.find((candidate) => abs >= candidate.threshold);
+  if (!unit) return `${Math.round(value)}`;
+  const scaled = value / unit.divisor;
+  const formatted =
+    Math.abs(scaled) < 10 ? trimTrailingZero(scaled.toFixed(1)) : `${Math.round(scaled)}`;
+  return `${formatted}${unit.suffix}`;
 }
 
 function trimTrailingZero(formatted: string): string {
