@@ -1163,6 +1163,7 @@ export const ar: TranslationResources = {
       schedules: "الجداول",
       askJev: "اسأل JEV",
       jevDashboard: "لوحة تحكم JEV",
+      tokenUsage: "الرموز",
     },
     worktreeSetup: {
       title: "إعداد البرامج النصية لشجرة العمل",
@@ -2152,6 +2153,10 @@ export const ar: TranslationResources = {
     jevDryRun: "تشغيل تجريبي",
     jevOlder: "{{count}} أقدم",
     jevAllActivity: "كل نشاط JEV",
+  },
+  tokenUsage: {
+    byModelTitle: "الرموز حسب النموذج",
+    byRoleTitle: "الرموز حسب الدور",
   },
   review: {
     comment: {

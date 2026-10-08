@@ -266,6 +266,49 @@ describe("PhysicalDeviceLeaseManager idle Wi-Fi devices", () => {
   });
 });
 
+describe("PhysicalDeviceLeaseManager detectionChanged", () => {
+  test("a device appearing notifies once; the same list reported again does not notify", () => {
+    const { manager, state } = createManager({ devices: [] });
+    const listener = vi.fn();
+    manager.subscribe(listener);
+
+    state.devices = [USB_PIXEL];
+    manager.detectionChanged();
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    manager.detectionChanged();
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  test("an idle flip on a Wi-Fi iPhone notifies", () => {
+    const { manager, state } = createManager({ devices: [{ ...NETWORK_IPHONE, idle: true }] });
+    const listener = vi.fn();
+    manager.subscribe(listener);
+
+    state.devices = [{ ...NETWORK_IPHONE, idle: false }];
+    manager.detectionChanged();
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    manager.detectionChanged();
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  test("a held device disappearing notifies once and starts the grace clock", async () => {
+    const { manager, state } = createManager({ devices: [USB_PIXEL] });
+    await manager.checkout({ agentId: "agent-1", platform: "android" });
+
+    const listener = vi.fn();
+    manager.subscribe(listener);
+    state.devices = [];
+    manager.detectionChanged();
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    const entry = (await manager.getSnapshot()).devices.find((d) => d.id === USB_PIXEL.id);
+    expect(entry).toMatchObject({ agentId: "agent-1", connected: false });
+    expect(entry?.graceRemainingSeconds).toBeGreaterThan(0);
+  });
+});
+
 describe("PhysicalDeviceLeaseManager gateInstall", () => {
   test("installs to a free device lease it to the agent and allow", async () => {
     const { manager } = createManager({ devices: [USB_PIXEL] });

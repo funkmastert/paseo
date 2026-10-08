@@ -1155,6 +1155,7 @@ export const zhCN: TranslationResources = {
       schedules: "计划",
       askJev: "询问 JEV",
       jevDashboard: "JEV 仪表盘",
+      tokenUsage: "Token",
     },
     worktreeSetup: {
       title: "设置 worktree scripts",
@@ -2125,6 +2126,10 @@ export const zhCN: TranslationResources = {
     jevDryRun: "试运行",
     jevOlder: "更早的 {{count}} 条",
     jevAllActivity: "所有 JEV 活动",
+  },
+  tokenUsage: {
+    byModelTitle: "按模型统计 Token",
+    byRoleTitle: "按角色统计 Token",
   },
   review: {
     comment: {

@@ -1197,6 +1197,7 @@ export const es: TranslationResources = {
       schedules: "Horarios",
       askJev: "Preguntar a JEV",
       jevDashboard: "Panel de JEV",
+      tokenUsage: "Tokens",
     },
     worktreeSetup: {
       title: "Configurar secuencias de comandos del árbol de trabajo",
@@ -2201,6 +2202,10 @@ export const es: TranslationResources = {
     jevDryRun: "Simulación",
     jevOlder: "{{count}} anteriores",
     jevAllActivity: "Toda la actividad de JEV",
+  },
+  tokenUsage: {
+    byModelTitle: "Tokens por modelo",
+    byRoleTitle: "Tokens por rol",
   },
   review: {
     comment: {

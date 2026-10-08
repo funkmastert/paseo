@@ -637,6 +637,10 @@
         "autoPinSessions": {
           "type": "boolean"
         },
+        "autoPinRecentUseMinutes": {
+          "type": "number",
+          "minimum": 0
+        },
         "metadataGeneration": {
           "type": "object",
           "properties": {
@@ -1750,6 +1754,15 @@
           },
           "additionalProperties": false
         },
+        "tokenUsage": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
         "providerUsage": {
           "type": "object",
           "properties": {
@@ -2039,6 +2052,80 @@
                     },
                     "maxUsdPerDay": {
                       "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "readCheck": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "shadow": {
+                      "type": "boolean"
+                    },
+                    "timeoutMs": {
+                      "type": "number"
+                    },
+                    "minTokens": {
+                      "type": "number"
+                    },
+                    "liveMinTokens": {
+                      "type": "number"
+                    },
+                    "liveTimeoutMs": {
+                      "type": "number"
+                    },
+                    "liveShare": {
+                      "type": "number"
+                    },
+                    "maxDeniesPerAgentPerHour": {
+                      "type": "number"
+                    },
+                    "maxConcurrent": {
+                      "type": "number"
+                    },
+                    "maxUsdPerDay": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "titleRefresh": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "shadow": {
+                      "type": "boolean"
+                    },
+                    "timeoutMs": {
+                      "type": "number"
+                    },
+                    "staleScoreThreshold": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 3
+                    },
+                    "cadenceMinUserTurns": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "cadenceMinMinutes": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "ceilingUserTurns": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "ceilingHours": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
                     }
                   },
                   "additionalProperties": false

@@ -1175,6 +1175,7 @@ export const ja: TranslationResources = {
       schedules: "スケジュール",
       askJev: "JEV に質問",
       jevDashboard: "JEV ダッシュボード",
+      tokenUsage: "トークン",
     },
     worktreeSetup: {
       title: "ワークツリースクリプトを設定",
@@ -2172,6 +2173,10 @@ export const ja: TranslationResources = {
     jevDryRun: "ドライラン",
     jevOlder: "ほか {{count}} 件",
     jevAllActivity: "すべての JEV アクティビティ",
+  },
+  tokenUsage: {
+    byModelTitle: "モデル別トークン",
+    byRoleTitle: "ロール別トークン",
   },
   review: {
     comment: {

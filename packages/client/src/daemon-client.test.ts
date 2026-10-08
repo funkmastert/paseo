@@ -6540,3 +6540,49 @@ test("wire snapshot callers own expansion and receive hash references unchanged"
   );
   expect(await request).toEqual(body);
 });
+
+test("gets a token usage breakdown for a range", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: { tokenUsage: true } });
+  await connectPromise;
+
+  const response = client.getTokenUsageBreakdown({ range: "24h" });
+  const request = parseSentFrame(mock.sent[0]);
+  expect(request).toMatchObject({ type: "usage.tokens.get_breakdown.request", range: "24h" });
+  const payload = {
+    requestId: request.requestId,
+    generatedAt: "2026-10-07T12:00:00.000Z",
+    range: "24h",
+    rangeStartMs: 1_759_752_000_000,
+    rows: [
+      {
+        provider: "claude",
+        model: "claude-opus-5-5",
+        role: "worker",
+        input: 10,
+        cacheWrite: 200,
+        cacheRead: 3_000,
+        output: 40,
+        weighted: 900,
+        responses: 2,
+      },
+    ],
+    coverage: {
+      enabled: true,
+      recordingSinceMs: 1_759_752_000_000,
+      backfill: { state: "done", filesDone: 4, filesTotal: 4 },
+    },
+  };
+  mock.triggerMessage(wrapSessionMessage({ type: "usage.tokens.get_breakdown.response", payload }));
+
+  await expect(response).resolves.toEqual(payload);
+});

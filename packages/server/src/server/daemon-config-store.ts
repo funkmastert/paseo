@@ -231,6 +231,9 @@ const RELOADABLE_PATHS = [
   // check, so a change never needs a restart. It has no PERSISTED_TO_MUTABLE_PATH entry on
   // purpose; that only stops reload() from listing it as applied.
   "agents.tokenAudit",
+  // Same shape as agents.tokenAudit: the token usage service re-reads config.json on every tick
+  // (docs/token-usage.md), so a change never needs a restart.
+  "agents.tokenUsage",
   // Same shape as agents.tokenAudit: JevService reads it through its own 5-second cache
   // (jev/config.ts), so a change never needs a restart. No PERSISTED_TO_MUTABLE_PATH entry: it
   // is not part of the mutable config broadcast to clients (docs/jev.md, "Config").

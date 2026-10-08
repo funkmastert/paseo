@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import {
   CalendarClock,
   CircleDashed,
+  Coins,
   Folder,
   FolderPlus,
   Gauge,
@@ -35,6 +36,7 @@ import {
   buildSchedulesRoute,
   buildSessionsRoute,
   buildSettingsRoute,
+  buildTokenUsageRoute,
 } from "@/utils/host-routes";
 import { getShortcutOs } from "@/utils/shortcut-platform";
 import type { CommandCenterContribution, CommandCenterIconProps } from "./contributions";
@@ -72,6 +74,9 @@ const ThemedMessageCircleQuestion = withUnistyles(MessageCircleQuestion, (theme)
 const ThemedGauge = withUnistyles(Gauge, (theme) => ({
   color: theme.colors.foregroundMuted,
 }));
+const ThemedCoins = withUnistyles(Coins, (theme) => ({
+  color: theme.colors.foregroundMuted,
+}));
 
 function PlusIcon({ size }: CommandCenterIconProps) {
   return <ThemedPlus size={size} strokeWidth={2.4} />;
@@ -99,6 +104,10 @@ function AskJevIcon({ size }: CommandCenterIconProps) {
 
 function JevDashboardIcon({ size }: CommandCenterIconProps) {
   return <ThemedGauge size={size} strokeWidth={2.2} />;
+}
+
+function TokenUsageIcon({ size }: CommandCenterIconProps) {
+  return <ThemedCoins size={size} strokeWidth={2.2} />;
 }
 
 function KeyboardIcon({ size }: CommandCenterIconProps) {
@@ -138,6 +147,7 @@ export function CommandCenterRootActions() {
   const schedulesRoute = useMemo<Href>(() => buildSchedulesRoute(), []);
   const askJevRoute = useMemo<Href>(() => buildAskJevRoute(), []);
   const jevDashboardRoute = useMemo<Href>(() => buildJevDashboardRoute(), []);
+  const tokenUsageRoute = useMemo<Href>(() => buildTokenUsageRoute(), []);
   const setShortcutsDialogOpen = useKeyboardShortcutsStore((state) => state.setShortcutsDialogOpen);
   // Narrow selector on purpose: a whole-store subscription would re-register every root action
   // each time host filters are reconciled.
@@ -304,6 +314,25 @@ export function CommandCenterRootActions() {
         },
       },
       {
+        id: "token-usage",
+        group: "actions",
+        groupRank: 0,
+        // Between JEV dashboard (5.75) and Settings (6).
+        rank: 5.85,
+        keywords: ["tokens", "usage", "cost", "model", "role", "spend"],
+        visibility: "always",
+        run: () => {
+          clearCommandCenterFocusRestoreElement();
+          router.push(tokenUsageRoute);
+        },
+        presentation: {
+          kind: "action",
+          title: t("sidebar.sections.tokenUsage"),
+          sectionTitle: t("shell.commandCenter.actions"),
+          icon: TokenUsageIcon,
+        },
+      },
+      {
         id: "settings",
         group: "actions",
         groupRank: 0,
@@ -406,6 +435,7 @@ export function CommandCenterRootActions() {
     shortcutsAvailable,
     t,
     toggleAgentList,
+    tokenUsageRoute,
   ]);
 
   useCommandCenterActions({ sourceId: "root", enabled: true, actions });
