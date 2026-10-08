@@ -15,3 +15,4 @@ export const copyAsync = notAvailable;
 export const readAsStringAsync = notAvailable;
 export const deleteAsync = notAvailable;
 export const readDirectoryAsync = notAvailable;
+export const createDownloadResumable = notAvailable;

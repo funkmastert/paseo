@@ -1,5 +1,6 @@
 const Constants = {
   expoConfig: null,
+  easConfig: null,
   manifest: null,
 };
 

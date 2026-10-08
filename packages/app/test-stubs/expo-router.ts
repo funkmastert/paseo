@@ -23,12 +23,8 @@ export function useLocalSearchParams(): Record<string, string> {
   return {};
 }
 
-export function useLocalSearchParam(): string | undefined {
-  return undefined;
-}
-
-export function useGlobalSearchParam(): string | undefined {
-  return undefined;
+export function useGlobalSearchParams(): Record<string, string> {
+  return {};
 }
 
 export function useRootNavigationState(): undefined {
