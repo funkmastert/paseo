@@ -363,6 +363,28 @@ describe("TokenUsageScanner", () => {
     expect(totals(store).responses).toBe(1);
   });
 
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "keeps what it read from a folder it briefly cannot list, rather than reading it twice",
+    async () => {
+      const otherProject = path.join(claudeRoot, "-other-project");
+      await writeLines(path.join(otherProject, "other.jsonl"), [
+        claudeAssistantLine({ messageId: "o1", sessionId: "other" }),
+      ]);
+      const { store, scanner } = harness();
+      await scanner.sweep({ roles: roles({ other: "leader" }) });
+
+      await fs.chmod(otherProject, 0o000);
+      try {
+        await scanner.sweep({ roles: roles({ other: "leader" }) });
+      } finally {
+        await fs.chmod(otherProject, 0o755);
+      }
+      await scanner.sweep({ roles: roles({ other: "leader" }) });
+
+      expect(totals(store).responses).toBe(1);
+    },
+  );
+
   it("finds nothing and fails nothing when the trees do not exist", async () => {
     await fs.rm(path.join(tmp, "claude"), { recursive: true });
     await fs.rm(path.join(tmp, "codex"), { recursive: true });

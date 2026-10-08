@@ -122,6 +122,8 @@ export class TokenUsageScanner {
   private readonly yieldEveryLines: number;
   private readonly windowMs: number;
   private readonly graceMs: number | undefined;
+  /** Roots whose last listing failed, so the failure is logged once rather than every sweep. */
+  private readonly unlistableRoots = new Set<string>();
   /** Response ids of each fork's parents, held while the fork's copied prefix is being read. */
   private readonly forkParentIds = new Map<string, Set<string>>();
 
@@ -208,9 +210,14 @@ export class TokenUsageScanner {
       try {
         await this.walk({ provider: root.provider, root: realRoot }, realRoot, 0, nowMs, found);
         walkedRoots.push(realRoot);
+        this.unlistableRoots.delete(realRoot);
       } catch (error) {
-        // An unreadable tree keeps its entries: dropping them would read it all again later.
-        this.logger.warn({ err: error, root: realRoot }, "Failed to list transcripts");
+        // A tree not listed in full keeps its entries: a file missing from a partial listing is
+        // not gone, and dropping its entry would read it all again and count it twice.
+        if (!this.unlistableRoots.has(realRoot)) {
+          this.logger.warn({ err: error, root: realRoot }, "Failed to list transcripts");
+        }
+        this.unlistableRoots.add(realRoot);
       }
     }
     for (const [filePath] of this.store.listFiles()) {
@@ -231,8 +238,9 @@ export class TokenUsageScanner {
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch (error) {
-      if (depth === 0) throw error;
-      return;
+      // Removed since its parent was listed: what it held is gone. Anything else fails the walk.
+      if (depth > 0 && isMissing(error)) return;
+      throw error;
     }
     const files: string[] = [];
     for (const entry of entries) {
@@ -250,8 +258,9 @@ export class TokenUsageScanner {
           let stat: Awaited<ReturnType<typeof fs.stat>>;
           try {
             stat = await fs.stat(filePath);
-          } catch {
-            return;
+          } catch (error) {
+            if (isMissing(error)) return;
+            throw error;
           }
           if (nowMs - stat.mtimeMs > this.windowMs) return;
           const birthMs = stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.mtimeMs;
@@ -594,6 +603,11 @@ function claudeSessionFromPath(root: string, filePath: string): string | null {
   if (parts.length === 2) return path.basename(parts[1] ?? "", ".jsonl") || null;
   if (parts.length > 2 && parts[2] === "subagents") return parts[1] ?? null;
   return null;
+}
+
+function isMissing(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
 }
 
 function isInside(root: string, filePath: string): boolean {
