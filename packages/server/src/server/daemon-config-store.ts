@@ -235,6 +235,10 @@ const RELOADABLE_PATHS = [
   // (jev/config.ts), so a change never needs a restart. No PERSISTED_TO_MUTABLE_PATH entry: it
   // is not part of the mutable config broadcast to clients (docs/jev.md, "Config").
   "agents.jev",
+  // Off by default (KTD-14, docs/knowledge-base.md): enabling it starts the Basic Memory sidecar
+  // without a restart. No PERSISTED_TO_MUTABLE_PATH entry: the service reads config.json directly,
+  // not the mutable config broadcast to clients.
+  "knowledgeBase",
   "worktrees.diskSweeper",
   // Deliberately NOT listed: the running McpGateway is constructed once in bootstrap.ts
   // and never observes config changes (its class doc calls live reconfiguration "wired

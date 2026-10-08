@@ -1911,6 +1911,9 @@ export class VoiceAssistantWebSocketServer {
         agentProfiles: true,
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: true,
+        // COMPAT(knowledgeBase): added in v0.8.x, remove gate after 2027-10-07. Advertised whenever
+        // the daemon has the code, independent of `knowledgeBase.enabled` (KTD-12).
+        knowledgeBase: true,
       },
     };
   }

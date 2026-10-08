@@ -850,6 +850,25 @@ export const AgentJevSchema = z
   })
   .strict();
 
+// `knowledgeBase`: the project knowledge base (docs/knowledge-base.md). Off by default. Shapes
+// and types only: `knowledge-base/config.ts` resolves the value and clamps or ignores anything out
+// of range. A section that fails this schema turns the feature off rather than guessing, and never
+// rejects the rest of config.json — `PersistedConfigSchema` accepts any `knowledgeBase` value and
+// keeps it as written, the `agents.jev` pattern.
+export const KnowledgeBaseConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    notesDir: z.string().optional(),
+    basicMemory: z
+      .object({
+        command: z.string().optional(),
+        semanticSearch: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
@@ -1029,6 +1048,8 @@ export const PersistedConfigSchema = z
       })
       .strict()
       .optional(),
+    // Any value loads; `KnowledgeBaseConfigSchema` is what the feature itself checks (see above).
+    knowledgeBase: z.union([KnowledgeBaseConfigSchema, z.unknown()]).optional(),
     features: z
       .object({
         dictation: FeatureDictationSchema.optional(),
