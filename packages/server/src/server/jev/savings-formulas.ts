@@ -222,7 +222,7 @@ export function priceSavings(input: JevSavingsPriceInput): JevSavingsPrice {
     case "readCheck":
       return priceReadCheck(input);
     case "compactionTiming":
-      return noTokensPrice("none", "none: dormant, and it spends for quality");
+      return noTokensPrice("none", "none: it chooses when to compact, and spends for quality");
     case "askJev":
       return noTokensPrice("none", "none: a person's own question, counted as an involvement");
     case "titleRefresh":
@@ -830,7 +830,11 @@ export function evaluateEvidence(
       };
     }
     case "compactionTiming":
-      return { rule: "none: dormant, claims no savings", observed: "-", met: null };
+      return {
+        rule: "none: chooses when to compact, claims no savings",
+        observed: "-",
+        met: null,
+      };
     case "askJev":
       return {
         rule: "none: a person's own questions, claims no savings",

@@ -3,6 +3,10 @@ import type { AgentPromptInput } from "./agent/agent-sdk-types.js";
 import type { IdleTurnOutcome, LeaderCompactionAgentSummary } from "./agent/agent-manager.js";
 import { AgentLeaderCompactionMonitor } from "./agent-leader-compaction-monitor.js";
 import type { LeaderCompactionSettings } from "./agent/leader-compaction-planner.js";
+import type {
+  LeaderCompactionTimingPort,
+  LeaderCompactionTimingVerdict,
+} from "./agent/leader-compaction-timing.js";
 
 interface SentTurn {
   agentId: string;
@@ -49,7 +53,46 @@ function leader(overrides: Partial<LeaderCompactionAgentSummary> = {}) {
   } satisfies LeaderCompactionAgentSummary;
 }
 
-function createMonitor(fake: FakeAgents, settings: LeaderCompactionSettings) {
+/** Stands in for the compaction-timing advisor: a scripted verdict, and what the monitor told it. */
+class FakeTiming implements LeaderCompactionTimingPort {
+  verdict: LeaderCompactionTimingVerdict | null = null;
+  cutPoint: string | null = null;
+  earlyStarts: string[] = [];
+  cutPointRequests: string[] = [];
+
+  verdictFor(): LeaderCompactionTimingVerdict | null {
+    return this.verdict;
+  }
+
+  /** Like the advisor, an early start uses the verdict up. */
+  noteEarlyStart(agentId: string): void {
+    this.earlyStarts.push(agentId);
+    this.verdict = null;
+  }
+
+  requestCutPoint(agentId: string): void {
+    this.cutPointRequests.push(agentId);
+  }
+
+  cutPointFor(): string | null {
+    return this.cutPoint;
+  }
+}
+
+const EARLY_REASON = "your last turn finished a unit of work";
+
+function startEarly(live: boolean): LeaderCompactionTimingVerdict {
+  return { live, timing: { kind: "startEarly", lineTokens: 200_000, reason: EARLY_REASON } };
+}
+
+function defer(live: boolean): LeaderCompactionTimingVerdict {
+  return {
+    live,
+    timing: { kind: "defer", ceilingTokens: 500_000, reason: "you are mid-way through an edit" },
+  };
+}
+
+function createMonitor(fake: FakeAgents, settings: LeaderCompactionSettings, timing?: FakeTiming) {
   const pushes: Array<{ title: string; body: string; level?: string }> = [];
   const logs: Array<{ msg: string; obj: object }> = [];
   const logger = {
@@ -68,6 +111,7 @@ function createMonitor(fake: FakeAgents, settings: LeaderCompactionSettings) {
     readDaemonConfig: () => ({ leaderCompaction: settings }),
     logger,
     now: () => 0,
+    timing,
   });
   return { monitor, pushes, logs };
 }
@@ -177,5 +221,111 @@ describe("AgentLeaderCompactionMonitor", () => {
     // Automation has run out of tries and only a person can compact it now.
     expect(pushes[0]?.level).toBe("alert");
     expect(monitor.getState("leader-1")).toEqual({ phase: "settled", reason: "gaveUp" });
+  });
+});
+
+describe("AgentLeaderCompactionMonitor with compaction timing", () => {
+  test("dry run: a shadow startEarly makes the would-start fire under the line, once", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 260_000 })];
+    const timing = new FakeTiming();
+    timing.verdict = startEarly(false);
+    const { monitor, logs } = createMonitor(fake, { enabled: true, dryRun: true }, timing);
+
+    // The report settles the agent, the next sweep re-arms it under the line, and the one after
+    // must not report again.
+    await sweep(monitor);
+    await sweep(monitor);
+    await sweep(monitor);
+
+    expect(fake.sent).toEqual([]);
+    const reports = logs.filter((log) => log.msg.startsWith("Leader compaction would start"));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.obj).toMatchObject({
+      agentId: "leader-1",
+      usedTokens: 260_000,
+      trigger: "early",
+      reason: EARLY_REASON,
+      prepareMessage: expect.stringContaining(`under the 400K line, but ${EARLY_REASON}`),
+    });
+    expect(timing.earlyStarts).toEqual(["leader-1"]);
+  });
+
+  test("dry run: a defer holds the would-start and says so once, then the line starts it", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    const timing = new FakeTiming();
+    timing.verdict = defer(false);
+    const { monitor, logs } = createMonitor(fake, { enabled: true, dryRun: true }, timing);
+
+    await sweep(monitor);
+    await sweep(monitor);
+    const holds = logs.filter((log) => log.msg.startsWith("Leader compaction would hold"));
+    expect(holds).toHaveLength(1);
+    expect(holds[0]?.obj).toMatchObject({ agentId: "leader-1", usedTokens: 450_000 });
+    expect(logs.some((log) => log.msg.startsWith("Leader compaction would start"))).toBe(false);
+
+    timing.verdict = null;
+    await sweep(monitor);
+    const reports = logs.filter((log) => log.msg.startsWith("Leader compaction would start"));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.obj).toMatchObject({ trigger: "line" });
+  });
+
+  test("a live leg ignores shadow verdicts", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 260_000 })];
+    const timing = new FakeTiming();
+    timing.verdict = startEarly(false);
+    const { monitor } = createMonitor(fake, { enabled: true }, timing);
+
+    await sweep(monitor);
+    expect(fake.sent).toEqual([]);
+
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    timing.verdict = defer(false);
+    await sweep(monitor);
+    expect(fake.sent).toHaveLength(1);
+  });
+
+  test("a live startEarly runs the episode against the early line, with the cut point", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 260_000 })];
+    fake.onTurn = (turn) => {
+      if (turn.prompt.startsWith("/compact")) {
+        fake.agents = [leader({ contextWindowUsedTokens: 29_000 })];
+      }
+    };
+    const timing = new FakeTiming();
+    timing.verdict = startEarly(true);
+    const { monitor } = createMonitor(fake, { enabled: true }, timing);
+
+    await sweep(monitor);
+    expect(monitor.isEpisodeOpen("leader-1")).toBe(true);
+    expect(timing.earlyStarts).toEqual(["leader-1"]);
+    expect(timing.cutPointRequests).toEqual(["leader-1"]);
+    timing.cutPoint = 'The live work starts at "Fix the login bug".';
+    await sweep(monitor);
+    await sweep(monitor);
+
+    const [prepare, compact, restore] = fake.sent.map((turn) => turn.prompt);
+    expect(prepare).toContain(`260K tokens. That is under the 400K line, but ${EARLY_REASON}`);
+    expect(compact).toMatch(/^\/compact .* The live work starts at "Fix the login bug"\.$/);
+    expect(restore).toContain("step 3 of 3");
+    expect(monitor.getState("leader-1")).toEqual({ phase: "settled", reason: "done" });
+    expect(monitor.isEpisodeOpen("leader-1")).toBe(false);
+  });
+
+  test("a live defer holds an idle leader at the line", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    const timing = new FakeTiming();
+    timing.verdict = defer(true);
+    const { monitor, logs } = createMonitor(fake, { enabled: true }, timing);
+
+    await sweep(monitor);
+
+    expect(fake.sent).toEqual([]);
+    expect(logs.some((log) => log.msg.startsWith("Leader compaction held"))).toBe(true);
   });
 });

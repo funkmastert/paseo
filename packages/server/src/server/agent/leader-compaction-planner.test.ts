@@ -6,6 +6,7 @@ import {
   type LeaderCompactionAgentInput,
   type LeaderCompactionEpisode,
   type LeaderCompactionState,
+  type LeaderCompactionTiming,
 } from "./leader-compaction-planner.js";
 
 const config = resolveLeaderCompactionConfig({
@@ -30,6 +31,8 @@ function leader(overrides: Partial<LeaderCompactionAgentInput> = {}): LeaderComp
 
 const episode: LeaderCompactionEpisode = {
   triggeredAtTokens: 500_000,
+  lineTokens: 400_000,
+  trigger: { kind: "line" },
   attempts: 0,
   note: null,
   compactedFromTokens: null,
@@ -85,7 +88,12 @@ describe("planLeaderCompactionStep", () => {
       config: dry,
       nowMs: 0,
     });
-    expect(first.action).toEqual({ kind: "reportDryRun", usedTokens: 500_000, startsNow: false });
+    expect(first.action).toEqual({
+      kind: "reportDryRun",
+      usedTokens: 500_000,
+      startsNow: false,
+      trigger: { kind: "line" },
+    });
     const second = planLeaderCompactionStep({
       state: first.state,
       agent: leader(),
@@ -153,6 +161,121 @@ describe("planLeaderCompactionStep", () => {
   });
 });
 
+describe("planLeaderCompactionStep with a compaction-timing verdict", () => {
+  const startEarly: LeaderCompactionTiming = {
+    kind: "startEarly",
+    lineTokens: 200_000,
+    reason: "your last turn finished a unit of work",
+  };
+  const defer: LeaderCompactionTiming = {
+    kind: "defer",
+    ceilingTokens: 500_000,
+    reason: "you are mid-way through a multi-step edit",
+  };
+
+  function planWith(
+    timing: LeaderCompactionTiming | null | undefined,
+    agent: LeaderCompactionAgentInput,
+    planConfig = config,
+  ) {
+    return planLeaderCompactionStep({
+      state: undefined,
+      agent,
+      config: planConfig,
+      nowMs: 0,
+      timing,
+    });
+  }
+
+  test("startEarly never starts under its own line", () => {
+    expect(planWith(startEarly, leader({ contextWindowUsedTokens: 150_000 })).action).toEqual({
+      kind: "none",
+    });
+  });
+
+  test("startEarly starts an episode under the line, against the early line", () => {
+    const result = planWith(startEarly, leader({ contextWindowUsedTokens: 260_000 }));
+    expect(result.action).toMatchObject({
+      kind: "startTurn",
+      step: "prepare",
+      episode: {
+        triggeredAtTokens: 260_000,
+        lineTokens: 200_000,
+        trigger: { kind: "early", reason: "your last turn finished a unit of work" },
+      },
+    });
+  });
+
+  test("defer holds an idle leader at the line, and not at the ceiling", () => {
+    const held = planWith(defer, leader({ contextWindowUsedTokens: 450_000 }));
+    expect(held).toEqual({
+      state: { phase: "armed" },
+      action: {
+        kind: "defer",
+        usedTokens: 450_000,
+        reason: "you are mid-way through a multi-step edit",
+      },
+    });
+    const atCeiling = planWith(defer, leader({ contextWindowUsedTokens: 500_000 }));
+    expect(atCeiling.action).toMatchObject({ kind: "startTurn", step: "prepare" });
+  });
+
+  test("no timing gives today's plan", () => {
+    for (const used of [260_000, 450_000]) {
+      const agent = leader({ contextWindowUsedTokens: used });
+      expect(planWith(undefined, agent)).toEqual(planWith(null, agent));
+      expect(planWith(null, agent)).toEqual(plan(undefined, agent));
+    }
+    expect(planWith(null, leader({ contextWindowUsedTokens: 260_000 })).action).toEqual({
+      kind: "none",
+    });
+  });
+
+  test("a verdict is ignored once the agent has started another turn", () => {
+    const running = { lifecycle: "running" as const, busy: true };
+    expect(
+      planWith(startEarly, leader({ ...running, contextWindowUsedTokens: 260_000 })).action,
+    ).toEqual({ kind: "none" });
+    expect(
+      planWith(defer, leader({ ...running, contextWindowUsedTokens: 450_000 })).state,
+    ).toMatchObject({ phase: "waiting", step: "prepare" });
+  });
+
+  test("the dry-run would-start reflects startEarly and defer", () => {
+    const dry = resolveLeaderCompactionConfig({ enabled: true, dryRun: true });
+    const early = planWith(startEarly, leader({ contextWindowUsedTokens: 260_000 }), dry);
+    expect(early).toEqual({
+      state: { phase: "settled", reason: "dryRun" },
+      action: {
+        kind: "reportDryRun",
+        usedTokens: 260_000,
+        startsNow: true,
+        trigger: { kind: "early", reason: "your last turn finished a unit of work" },
+      },
+    });
+    const held = planWith(defer, leader({ contextWindowUsedTokens: 450_000 }), dry);
+    expect(held.state).toEqual({ phase: "armed" });
+    expect(held.action).toMatchObject({ kind: "defer", usedTokens: 450_000 });
+  });
+
+  test("an early episode waits under the line without being dropped as shrunk", () => {
+    const early: LeaderCompactionEpisode = {
+      ...episode,
+      triggeredAtTokens: 260_000,
+      lineTokens: 200_000,
+      trigger: { kind: "early", reason: "a clean break" },
+    };
+    const waiting: LeaderCompactionState = { phase: "waiting", step: "prepare", episode: early };
+    expect(plan(waiting, leader({ contextWindowUsedTokens: 270_000 })).action).toMatchObject({
+      kind: "startTurn",
+      step: "prepare",
+    });
+    expect(plan(waiting, leader({ contextWindowUsedTokens: 40_000 })).state).toEqual({
+      phase: "armed",
+    });
+  });
+});
+
 describe("applyLeaderCompactionTurnOutcome", () => {
   function apply(
     step: "prepare" | "compact" | "restore",
@@ -207,6 +330,27 @@ describe("applyLeaderCompactionTurnOutcome", () => {
     const last = apply("compact", { status: "canceled" }, { ...episode, attempts: 1 });
     expect(last.gaveUp).toBe(true);
     expect(last.state).toEqual({ phase: "settled", reason: "gaveUp" });
+  });
+
+  test("an early episode's compaction counts against its own line", () => {
+    const early: LeaderCompactionEpisode = {
+      ...episode,
+      triggeredAtTokens: 260_000,
+      lineTokens: 200_000,
+      trigger: { kind: "early", reason: "a clean break" },
+    };
+    const didNot = apply(
+      "compact",
+      { status: "completed", finalText: "", usedTokensAfter: 250_000 },
+      early,
+    );
+    expect(didNot.failure).toEqual({ kind: "notCompacted", usedTokens: 250_000 });
+    const shrank = apply(
+      "compact",
+      { status: "completed", finalText: "", usedTokensAfter: 28_000 },
+      early,
+    );
+    expect(shrank.state).toMatchObject({ phase: "waiting", step: "restore" });
   });
 
   test("restore ends the episode", () => {

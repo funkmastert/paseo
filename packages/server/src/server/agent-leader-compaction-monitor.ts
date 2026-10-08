@@ -5,7 +5,9 @@ import type {
 } from "./agent/agent-manager.js";
 import { formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
 import {
+  LEADER_COMPACTION_MESSAGE_HEADER,
   applyLeaderCompactionTurnOutcome,
+  type LeaderCompactionAction,
   planLeaderCompactionStep,
   resolveLeaderCompactionConfig,
   type LeaderCompactionConfig,
@@ -14,8 +16,11 @@ import {
   type LeaderCompactionState,
   type LeaderCompactionStep,
   type LeaderCompactionStepFailure,
+  type LeaderCompactionTiming,
+  type LeaderCompactionTrigger,
   type LeaderCompactionTurnResult,
 } from "./agent/leader-compaction-planner.js";
+import type { LeaderCompactionTimingPort } from "./agent/leader-compaction-timing.js";
 import type { PushNotificationSender } from "./push/index.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
 
@@ -40,6 +45,11 @@ export interface AgentLeaderCompactionMonitorOptions {
   logger: LeaderCompactionMonitorLogger;
   sweepIntervalMs?: number;
   now?: () => number;
+  /**
+   * Feature 9's advisor (docs/jev.md, "Feature 9: compaction timing"). Absent: every episode starts
+   * at `prepareAtTokens`, and `/compact` goes out with today's text.
+   */
+  timing?: LeaderCompactionTimingPort;
 }
 
 function formatTokens(tokens: number): string {
@@ -53,11 +63,21 @@ function formatTokens(tokens: number): string {
  * reasoning compaction will not carry forward. The note is its reply rather than a file: a reply
  * needs no permission and no path, and the daemon reads it straight off the turn.
  */
-export function formatPrepareMessage(usedTokens: number, config: LeaderCompactionConfig): string {
+export function formatPrepareMessage(
+  usedTokens: number,
+  config: LeaderCompactionConfig,
+  trigger: LeaderCompactionTrigger = { kind: "line" },
+): string {
+  const size = `Your conversation is ${formatTokens(usedTokens)} tokens`;
+  const line = formatTokens(config.prepareAtTokens);
+  const why =
+    trigger.kind === "early"
+      ? `${size}. That is under the ${line} line, but ${trigger.reason}, so this is a clean ` +
+        "point to compact it."
+      : `${size}, over the ${line} line.`;
   return formatSystemNotificationPrompt(
     [
-      `Bozeo leader compaction — step 1 of 3. Your conversation is ${formatTokens(usedTokens)} ` +
-        `tokens, over the ${formatTokens(config.prepareAtTokens)} line. Every request you make ` +
+      `${LEADER_COMPACTION_MESSAGE_HEADER} 1 of 3. ${why} Every request you make ` +
         "re-reads the whole of it, so at this size each step costs many times what it would " +
         "in a fresh context. The daemon will compact your conversation (Claude Code's " +
         "/compact) as soon as this turn ends. You keep the same agent id, your subagents keep " +
@@ -80,14 +100,15 @@ export function formatPrepareMessage(usedTokens: number, config: LeaderCompactio
 
 /**
  * Step 2. `/compact` takes free-text instructions for its summarizer, which reads the visible
- * conversation only — the note it is told to keep is what carries the reasoning across.
+ * conversation only — the note it is told to keep is what carries the reasoning across. A cut
+ * point, when JEV gave one in time, says where the live work starts.
  */
-export function formatCompactCommand(): string {
-  return (
+export function formatCompactCommand(cutPoint?: string | null): string {
+  const base =
     "/compact Keep the most recent assistant message verbatim: it is a restore note written for " +
     "this compaction. Also keep every instruction and constraint the user gave, the ids of " +
-    "subagents still in flight, file paths, branches, commits and PR numbers, and the next step."
-  );
+    "subagents still in flight, file paths, branches, commits and PR numbers, and the next step.";
+  return cutPoint ? `${base} ${cutPoint}` : base;
 }
 
 /**
@@ -119,7 +140,7 @@ export function formatRestoreMessage(episode: LeaderCompactionEpisode): string {
       "the state of your work (git, your subagents) before acting on it.";
   return formatSystemNotificationPrompt(
     [
-      "Bozeo leader compaction — step 3 of 3, done. Your conversation was compacted to cut " +
+      `${LEADER_COMPACTION_MESSAGE_HEADER} 3 of 3, done. Your conversation was compacted to cut ` +
         `the cost of every request you make: ${describeCompaction(episode)}. Earlier ` +
         "turns are now a summary, and your reasoning from before it is gone, so where the " +
         "summary and the note disagree, trust the note. Nothing else changed: same agent id, " +
@@ -136,15 +157,26 @@ function formatStepPrompt(
   step: LeaderCompactionStep,
   episode: LeaderCompactionEpisode,
   config: LeaderCompactionConfig,
+  cutPoint: string | null,
 ): string {
   switch (step) {
     case "prepare":
-      return formatPrepareMessage(episode.triggeredAtTokens, config);
+      return formatPrepareMessage(episode.triggeredAtTokens, config, episode.trigger);
     case "compact":
-      return formatCompactCommand();
+      return formatCompactCommand(cutPoint);
     case "restore":
       return formatRestoreMessage(episode);
   }
+}
+
+function describeDryRunStart(trigger: LeaderCompactionTrigger, startsNow: boolean): string {
+  const steps = "prepare, then /compact, then restore";
+  if (trigger.kind === "early") {
+    return `Leader compaction would start now, early, at a clean break JEV saw: ${steps}`;
+  }
+  return startsNow
+    ? `Leader compaction would start now: ${steps}`
+    : `Leader compaction would start at the agent's next idle moment: ${steps}`;
 }
 
 function describeFailure(failure: LeaderCompactionStepFailure): string {
@@ -181,6 +213,8 @@ export class AgentLeaderCompactionMonitor {
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweepInFlight = false;
   private readonly states = new Map<string, LeaderCompactionState>();
+  /** The `defer` verdict last reported per agent, so a verdict standing over many sweeps logs once. */
+  private readonly reportedDeferrals = new Map<string, LeaderCompactionTiming>();
   /** Turns this monitor started and has not seen end. Tests await them through `settle()`. */
   private readonly turns = new Set<Promise<void>>();
 
@@ -248,6 +282,12 @@ export class AgentLeaderCompactionMonitor {
     return this.states.get(agentId);
   }
 
+  /** An episode has started and not ended: its own turns are not the leader's work. */
+  isEpisodeOpen(agentId: string): boolean {
+    const phase = this.states.get(agentId)?.phase;
+    return phase === "waiting" || phase === "inFlight" || phase === "backoff";
+  }
+
   private sweep(): void {
     this.reportMode();
     const settings = this.options.readDaemonConfig().leaderCompaction;
@@ -268,21 +308,63 @@ export class AgentLeaderCompactionMonitor {
         this.states.delete(agentId);
       }
     }
+    for (const agentId of this.reportedDeferrals.keys()) {
+      if (!liveIds.has(agentId)) this.reportedDeferrals.delete(agentId);
+    }
 
     for (const agent of agents) {
+      const timing = this.timingFor(agent.id, config);
       const plan = planLeaderCompactionStep({
         state: this.states.get(agent.id),
         agent,
         config,
         nowMs,
+        timing,
       });
       this.setState(agent.id, plan.state);
-      if (plan.action.kind === "reportDryRun") {
-        this.reportDryRun(agent, plan.action.usedTokens, plan.action.startsNow, config);
-      } else if (plan.action.kind === "startTurn") {
-        this.startStep(agent, plan.action.step, plan.action.episode, config);
-      }
+      this.act(agent, plan.action, timing, config);
     }
+  }
+
+  private act(
+    agent: LeaderCompactionAgentSummary,
+    action: LeaderCompactionAction,
+    timing: LeaderCompactionTiming | null,
+    config: LeaderCompactionConfig,
+  ): void {
+    switch (action.kind) {
+      case "none":
+        return;
+      case "reportDryRun":
+        if (action.trigger.kind === "early") this.options.timing?.noteEarlyStart(agent.id);
+        this.reportDryRun(agent, action.usedTokens, action.startsNow, action.trigger, config);
+        return;
+      case "defer":
+        // The same verdict stands over every sweep until the next turn; say so once.
+        if (timing && this.reportedDeferrals.get(agent.id) !== timing) {
+          this.reportedDeferrals.set(agent.id, timing);
+          this.reportDefer(agent, action.usedTokens, action.reason, config);
+        }
+        return;
+      case "startTurn":
+        if (action.step === "prepare" && action.episode.trigger.kind === "early") {
+          this.options.timing?.noteEarlyStart(agent.id);
+        }
+        this.startStep(agent, action.step, action.episode, config);
+    }
+  }
+
+  /**
+   * The advisor's verdict, when it may shape this sweep. A shadow answer acts on nothing, so it
+   * shapes only a dry run's would-start.
+   */
+  private timingFor(
+    agentId: string,
+    config: LeaderCompactionConfig,
+  ): LeaderCompactionTiming | null {
+    const verdict = this.options.timing?.verdictFor(agentId) ?? null;
+    if (!verdict || !(verdict.live || config.dryRun)) return null;
+    return verdict.timing;
   }
 
   private setState(agentId: string, state: LeaderCompactionState): void {
@@ -297,6 +379,7 @@ export class AgentLeaderCompactionMonitor {
     agent: LeaderCompactionAgentSummary,
     usedTokens: number,
     startsNow: boolean,
+    trigger: LeaderCompactionTrigger,
     config: LeaderCompactionConfig,
   ): void {
     this.options.logger.info(
@@ -309,12 +392,33 @@ export class AgentLeaderCompactionMonitor {
         prepareAtTokens: config.prepareAtTokens,
         lifecycle: agent.lifecycle,
         startsNow,
-        prepareMessage: formatPrepareMessage(usedTokens, config),
+        trigger: trigger.kind,
+        ...(trigger.kind === "early" ? { reason: trigger.reason } : {}),
+        prepareMessage: formatPrepareMessage(usedTokens, config, trigger),
         compactCommand: formatCompactCommand(),
       },
-      startsNow
-        ? "Leader compaction would start now: prepare, then /compact, then restore"
-        : "Leader compaction would start at the agent's next idle moment: prepare, then /compact, then restore",
+      describeDryRunStart(trigger, startsNow),
+    );
+  }
+
+  private reportDefer(
+    agent: LeaderCompactionAgentSummary,
+    usedTokens: number,
+    reason: string,
+    config: LeaderCompactionConfig,
+  ): void {
+    this.options.logger.info(
+      {
+        dryRun: config.dryRun,
+        agentId: agent.id,
+        title: agent.title,
+        usedTokens,
+        prepareAtTokens: config.prepareAtTokens,
+        reason,
+      },
+      config.dryRun
+        ? "Leader compaction would hold: JEV judged the leader mid-way through a multi-step edit"
+        : "Leader compaction held: JEV judged the leader mid-way through a multi-step edit",
     );
   }
 
@@ -324,7 +428,9 @@ export class AgentLeaderCompactionMonitor {
     episode: LeaderCompactionEpisode,
     config: LeaderCompactionConfig,
   ): void {
-    const prompt = formatStepPrompt(step, episode, config);
+    const cutPoint =
+      step === "compact" ? (this.options.timing?.cutPointFor(agent.id) ?? null) : null;
+    const prompt = formatStepPrompt(step, episode, config, cutPoint);
     let started: Promise<IdleTurnOutcome> | null;
     try {
       started = this.options.agentManager.startTurnIfIdle(agent.id, prompt);
@@ -344,6 +450,8 @@ export class AgentLeaderCompactionMonitor {
         step,
         usedTokens: agent.contextWindowUsedTokens,
         attempt: episode.attempts + 1,
+        trigger: episode.trigger.kind,
+        ...(cutPoint ? { cutPoint } : {}),
       },
       "Leader compaction started a step",
     );
@@ -395,6 +503,15 @@ export class AgentLeaderCompactionMonitor {
       nowMs: this.now(),
     });
     this.setState(agent.id, applied.state);
+    if (
+      !applied.failure &&
+      step === "prepare" &&
+      applied.state.phase === "waiting" &&
+      applied.state.step === "compact"
+    ) {
+      // Asked now, used if the answer is back by the sweep that sends /compact.
+      this.options.timing?.requestCutPoint(agent.id);
+    }
     if (!applied.failure) {
       this.options.logger.info(
         {
