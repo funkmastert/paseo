@@ -5,6 +5,7 @@ import {
   BookOpen,
   CalendarClock,
   CircleDashed,
+  Coins,
   Folder,
   FolderPlus,
   Gauge,
@@ -37,6 +38,7 @@ import {
   buildSchedulesRoute,
   buildSessionsRoute,
   buildSettingsRoute,
+  buildTokenUsageRoute,
 } from "@/utils/host-routes";
 import { getShortcutOs } from "@/utils/shortcut-platform";
 import type { CommandCenterContribution, CommandCenterIconProps } from "./contributions";
@@ -77,6 +79,9 @@ const ThemedGauge = withUnistyles(Gauge, (theme) => ({
 const ThemedBookOpen = withUnistyles(BookOpen, (theme) => ({
   color: theme.colors.foregroundMuted,
 }));
+const ThemedCoins = withUnistyles(Coins, (theme) => ({
+  color: theme.colors.foregroundMuted,
+}));
 
 function PlusIcon({ size }: CommandCenterIconProps) {
   return <ThemedPlus size={size} strokeWidth={2.4} />;
@@ -108,6 +113,10 @@ function JevDashboardIcon({ size }: CommandCenterIconProps) {
 
 function KnowledgeIcon({ size }: CommandCenterIconProps) {
   return <ThemedBookOpen size={size} strokeWidth={2.2} />;
+}
+
+function TokenUsageIcon({ size }: CommandCenterIconProps) {
+  return <ThemedCoins size={size} strokeWidth={2.2} />;
 }
 
 function KeyboardIcon({ size }: CommandCenterIconProps) {
@@ -148,6 +157,7 @@ export function CommandCenterRootActions() {
   const askJevRoute = useMemo<Href>(() => buildAskJevRoute(), []);
   const jevDashboardRoute = useMemo<Href>(() => buildJevDashboardRoute(), []);
   const knowledgeRoute = useMemo<Href>(() => buildKnowledgeBaseRoute(), []);
+  const tokenUsageRoute = useMemo<Href>(() => buildTokenUsageRoute(), []);
   const setShortcutsDialogOpen = useKeyboardShortcutsStore((state) => state.setShortcutsDialogOpen);
   // Narrow selector on purpose: a whole-store subscription would re-register every root action
   // each time host filters are reconciled.
@@ -333,6 +343,25 @@ export function CommandCenterRootActions() {
         },
       },
       {
+        id: "token-usage",
+        group: "actions",
+        groupRank: 0,
+        // Between Knowledge (5.875) and Settings (6).
+        rank: 5.9,
+        keywords: ["tokens", "usage", "cost", "model", "role", "spend"],
+        visibility: "always",
+        run: () => {
+          clearCommandCenterFocusRestoreElement();
+          router.push(tokenUsageRoute);
+        },
+        presentation: {
+          kind: "action",
+          title: t("sidebar.sections.tokenUsage"),
+          sectionTitle: t("shell.commandCenter.actions"),
+          icon: TokenUsageIcon,
+        },
+      },
+      {
         id: "settings",
         group: "actions",
         groupRank: 0,
@@ -436,6 +465,7 @@ export function CommandCenterRootActions() {
     shortcutsAvailable,
     t,
     toggleAgentList,
+    tokenUsageRoute,
   ]);
 
   useCommandCenterActions({ sourceId: "root", enabled: true, actions });

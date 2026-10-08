@@ -886,6 +886,7 @@ function AppWithSidebar({ children }: { children: ReactNode }) {
       pathname === "/jev" ||
       pathname === "/knowledge" ||
       pathname.startsWith("/knowledge/") ||
+      pathname === "/tokens" ||
       pathname === "/pinned-grid" ||
       routeHasKnownHost);
 
@@ -923,6 +924,7 @@ function RootStack() {
         <Stack.Screen name="jev" />
         <Stack.Screen name="knowledge/index" />
         <Stack.Screen name="knowledge/[noteId]" />
+        <Stack.Screen name="tokens" />
         <Stack.Screen name="pinned-grid" />
         <Stack.Screen name="pair-scan" />
       </Stack.Protected>

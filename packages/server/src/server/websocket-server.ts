@@ -177,6 +177,8 @@ interface WebSocketServerConfig {
   relayConfig?: boolean;
   startPaused?: boolean;
   autoPinExpiry?: SessionOptions["autoPinExpiry"];
+  /** Token usage by model and role; the `tokenUsage` feature is advertised only with it. */
+  tokenUsage?: SessionOptions["tokenUsage"];
 }
 
 type WebSocketRuntimeMetrics = SessionRuntimeMetrics & CheckoutDiffMetrics;
@@ -631,6 +633,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly jev: JevService | null | undefined;
   private readonly knowledgeBase: KnowledgeBaseBackend | null | undefined;
   private readonly autoPinExpiry: SessionOptions["autoPinExpiry"];
+  private readonly tokenUsage: SessionOptions["tokenUsage"];
 
   constructor(
     server: HTTPServer,
@@ -690,6 +693,7 @@ export class VoiceAssistantWebSocketServer {
     this.workspaceSetupRuntime = workspaceSetupRuntime;
     this.advertiseDaemonStatusRpc = wsConfig.daemonStatusRpc !== false;
     this.autoPinExpiry = wsConfig.autoPinExpiry;
+    this.tokenUsage = wsConfig.tokenUsage;
     this.advertiseRelayConfig = wsConfig.relayConfig !== false;
     this.connectionLifecycle = wsConfig.startPaused === true ? "starting" : "accepting";
     this.serverId = serverId;
@@ -1541,6 +1545,7 @@ export class VoiceAssistantWebSocketServer {
       providerSnapshotManager: this.providerSnapshotManager,
       providerUsageService: this.providerUsageService,
       usageHistory: this.usageHistoryStore,
+      tokenUsage: this.tokenUsage,
       contextUsage: this.contextUsageService,
       jev: this.jev,
       knowledgeBase: this.knowledgeBase,
@@ -1764,6 +1769,8 @@ export class VoiceAssistantWebSocketServer {
         deviceLeases: true,
         // COMPAT(usageHistory): added in v0.8.2, remove gate after 2027-09-23.
         usageHistory: true,
+        // COMPAT(tokenUsage): added in v0.8.x, remove gate after 2027-10-07.
+        ...(this.tokenUsage ? { tokenUsage: true } : {}),
         // COMPAT(agentContextUsage): added in v0.8.2, remove gate after 2027-09-24.
         agentContextUsage: true,
         // COMPAT(jev): added in v0.8.x, remove gate after 2027-03-28.

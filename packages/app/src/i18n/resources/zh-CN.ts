@@ -1156,6 +1156,7 @@ export const zhCN: TranslationResources = {
       askJev: "询问 JEV",
       jevDashboard: "JEV 仪表盘",
       knowledge: "知识库",
+      tokenUsage: "Token",
     },
     worktreeSetup: {
       title: "设置 worktree scripts",
@@ -2031,23 +2032,33 @@ export const zhCN: TranslationResources = {
     },
   },
   mcpStatus: {
-    collapsedSummary: {
-      healthy: "MCP 服务器已连接",
-      issues: "MCP 问题：{{names}}",
+    headline: {
+      needsSignIn: "{{name}} 需要登录",
+      needsAttention: "{{name}} 需要处理",
+      manyNeedAttention_one: "{{count}} 个 MCP 服务器需要处理",
+      manyNeedAttention_other: "{{count}} 个 MCP 服务器需要处理",
+      connected_one: "{{count}} 个 MCP 服务器已连接",
+      connected_other: "{{count}} 个 MCP 服务器已连接",
     },
     status: {
       connected: "已连接",
       connecting: "连接中",
-      needsAuth: "需要授权",
+      needsAuth: "需要登录",
       error: "错误",
       disabled: "已禁用",
       sessionReported: "会话问题",
-      claudeAiConnector: "需在每个 Claude 账户中登录",
+      claudeAiConnector: "claude.ai 连接器",
     },
-    authAction: "授权",
-    reauthAction: "重新授权",
+    authAction: "登录",
+    reauthAction: "重新登录",
     adoptAction: "代理并登录",
-    openClaudeAiAction: "打开 claude.ai",
+    hideAction: "隐藏",
+    unhideAction: "取消隐藏",
+    copyAction: "复制",
+    more: "更多",
+    less: "收起",
+    connectedGroup: "已连接 {{count}} 个",
+    hiddenGroup: "已隐藏 {{count}} 个",
     authError: "身份验证失败：{{error}}",
     failure: {
       gatewayDisabled: "此主机上的 MCP 网关已关闭。",
@@ -2214,6 +2225,10 @@ export const zhCN: TranslationResources = {
       back: "返回",
       cancel: "取消",
     },
+  },
+  tokenUsage: {
+    byModelTitle: "按模型统计 Token",
+    byRoleTitle: "按角色统计 Token",
   },
   review: {
     comment: {

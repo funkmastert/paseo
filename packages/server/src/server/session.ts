@@ -201,6 +201,11 @@ import {
   type KnowledgeBaseSession,
 } from "./session/knowledge-base/knowledge-base-session.js";
 import {
+  createTokenUsageSession,
+  type TokenUsageReader,
+  type TokenUsageSession,
+} from "./session/token-usage/token-usage-session.js";
+import {
   createContextUsageSession,
   type ContextUsageSession,
 } from "./session/context-usage/context-usage-session.js";
@@ -584,6 +589,7 @@ export interface SessionOptions {
   providerSnapshotManager: ProviderSnapshotManager;
   providerUsageService: ProviderUsageService;
   usageHistory?: UsageHistoryStore;
+  tokenUsage?: TokenUsageReader;
   contextUsage?: AgentContextUsageService;
   jev?: JevService | null;
   /** The `kb.*` RPCs' backend (docs/knowledge-base.md). Always passed; `isEnabled()` follows
@@ -847,6 +853,7 @@ export class Session {
   private readonly restartRecoverySession: RestartRecoverySession;
   private readonly providerCatalogSession: ProviderCatalogSession;
   private readonly usageHistorySession: UsageHistorySession | null;
+  private readonly tokenUsageSession: TokenUsageSession | null;
   private readonly contextUsageSession: ContextUsageSession | null;
   private readonly jevSession: JevSession | null;
   private readonly knowledgeBaseSession: KnowledgeBaseSession;
@@ -904,6 +911,7 @@ export class Session {
       providerSnapshotManager,
       providerUsageService,
       usageHistory,
+      tokenUsage,
       contextUsage,
       jev,
       knowledgeBase,
@@ -1069,6 +1077,11 @@ export class Session {
       host: { emit: (msg) => this.emit(msg) },
       logger: this.sessionLogger,
       backend: knowledgeBase,
+    });
+    this.tokenUsageSession = createTokenUsageSession({
+      host: { emit: (msg) => this.emit(msg) },
+      reader: tokenUsage,
+      logger: this.sessionLogger,
     });
     this.contextUsageSession = createContextUsageSession({
       host: { emit: (msg) => this.emit(msg) },
@@ -2336,10 +2349,14 @@ export class Session {
     }
   }
 
-  /** Usage reads: the accounts' usage history, an agent's context breakdown, and JEV. */
+  /**
+   * Usage reads: the accounts' usage history, token usage by model and role, an agent's context
+   * breakdown, and JEV.
+   */
   private dispatchUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     return (
       this.dispatchUsageHistoryMessage(msg) ??
+      this.dispatchTokenUsageMessage(msg) ??
       this.dispatchContextUsageMessage(msg) ??
       this.dispatchJevMessage(msg)
     );
@@ -2355,6 +2372,13 @@ export class Session {
   private dispatchUsageHistoryMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     if (msg.type !== "usage.history.get.request" || !this.usageHistorySession) return undefined;
     return this.usageHistorySession.handleGetRequest(msg);
+  }
+
+  private dispatchTokenUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type !== "usage.tokens.get_breakdown.request" || !this.tokenUsageSession) {
+      return undefined;
+    }
+    return this.tokenUsageSession.handleGetBreakdownRequest(msg);
   }
 
   private dispatchJevMessage(msg: SessionInboundMessage): Promise<void> | undefined {

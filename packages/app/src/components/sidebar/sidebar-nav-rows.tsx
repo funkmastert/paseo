@@ -2,6 +2,7 @@ import { router, usePathname } from "expo-router";
 import {
   BookOpen,
   CalendarClock,
+  Coins,
   History,
   MessageCircleQuestion,
   Plus,
@@ -11,6 +12,7 @@ import { memo, useCallback, useMemo, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import { View, type StyleProp, type ViewStyle } from "react-native";
 import { SidebarHeaderRow } from "@/components/sidebar/sidebar-header-row";
+import { useSidebarTokenUsageTarget } from "@/components/sidebar/use-sidebar-token-usage-target";
 import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import { PluginSidebarItemRow } from "@/plugins/sidebar-items";
 import { canCreateWorktreeForProjectKind } from "@/projects/host-projects";
@@ -30,6 +32,7 @@ import {
   buildNewWorkspaceRoute,
   buildSchedulesRoute,
   buildSessionsRoute,
+  buildTokenUsageRoute,
 } from "@/utils/host-routes";
 
 interface SidebarNavRowProps {
@@ -219,6 +222,29 @@ function SidebarKnowledgeRow({ onBeforeNavigate }: SidebarNavRowProps) {
   );
 }
 
+function SidebarTokenUsageRow({ onBeforeNavigate }: SidebarNavRowProps) {
+  const { t } = useTranslation();
+  const pathname = usePathname();
+  const target = useSidebarTokenUsageTarget();
+  const handlePress = useCallback(() => {
+    onBeforeNavigate?.();
+    router.push(buildTokenUsageRoute());
+  }, [onBeforeNavigate]);
+
+  if (!target) return null;
+
+  return (
+    <SidebarHeaderRow
+      icon={Coins}
+      label={t(builtinSidebarNavLabelKey("token-usage"))}
+      onPress={handlePress}
+      isActive={pathname.includes("/tokens")}
+      testID="sidebar-token-usage"
+      variant="compact"
+    />
+  );
+}
+
 const BUILTIN_ROWS: Record<BuiltinSidebarNavId, ComponentType<SidebarNavRowProps>> = {
   "new-workspace": SidebarNewWorkspaceRow,
   history: SidebarHistoryRow,
@@ -226,4 +252,5 @@ const BUILTIN_ROWS: Record<BuiltinSidebarNavId, ComponentType<SidebarNavRowProps
   schedules: SidebarSchedulesRow,
   "ask-jev": SidebarAskJevRow,
   knowledge: SidebarKnowledgeRow,
+  "token-usage": SidebarTokenUsageRow,
 };

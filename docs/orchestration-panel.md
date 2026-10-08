@@ -227,14 +227,15 @@ The unistyles stub has no runtime, so the real form-factor hook never reports co
 tests mock `useIsCompactFormFactor` instead of resizing the viewport; a wider viewport changes
 nothing.
 
-The rows and `orchestration-header-controls.tsx` are captured rather than the whole panel:
-importing the panel pulls `navigateToAgent` and therefore expo-router, which does not bundle for
-the browser project, and the budget strip's poll needs a live host. The strip is captured through
-`account-budget-strip-view.tsx`, which takes rows instead of hooks. Keep those three modules free of
-runtime imports that reach the app graph, or the capture stops working. A new lucide icon also needs adding
-to `packages/app/test-stubs/lucide-react-native.ts`. Do not build JSX at module scope in either: the
-classic runtime reads `React` off the global, which the test stubs only once a test is running, after
-the import.
+The rows and `orchestration-header-controls.tsx` are captured rather than the whole panel. The
+panel bundles for the browser project now, but it reads its pane context, the session store and a
+live host — directory demand and the budget strip's polls — so a fixture cannot drive it. The strip
+is captured through `account-budget-strip-view.tsx`, which takes rows instead of hooks. Keep those
+three modules taking their data as props, or the capture needs a host again. When an import reaches
+a package the browser project cannot bundle, stub the package ([Test setup](testing.md#test-setup)).
+A new lucide icon also needs adding to `packages/app/test-stubs/lucide-react-native.ts`. Do not
+build JSX at module scope in either: the classic runtime reads `React` off the global, which the
+test stubs only once a test is running, after the import.
 
 A fixture cannot show real budget readings or real activity text. To see those, point a dev web build at
 the live daemon through a bridge that forwards only read-type frames, and keep the captures out of

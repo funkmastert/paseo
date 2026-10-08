@@ -15,8 +15,8 @@ import {
 } from "@/components/ui/select-field";
 import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
 import { Switch } from "@/components/ui/switch";
+import { SidebarModelProvider } from "@/components/sidebar/sidebar-model";
 import { useIsCompactFormFactor } from "@/constants/layout";
-import { useAggregatedAgents } from "@/hooks/use-aggregated-agents";
 import { useHostRuntimeClient, useHosts } from "@/runtime/host-runtime";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import {
@@ -40,6 +40,7 @@ import {
 import { AskJevResultCard } from "@/ask-jev/ask-jev-result-view";
 import { useAskJevHostStatus } from "@/ask-jev/use-ask-jev-host-status";
 import { useApplyAskJevAvailability, useAskJevFormModel } from "@/ask-jev/use-ask-jev-form-model";
+import { useAskJevPinnedAgents } from "@/ask-jev/use-ask-jev-pinned-agents";
 
 const ANSWER_TYPE_OPTIONS: SegmentedControlOption<AskJevAnswerType>[] = [
   { value: "noul", label: "Yes / No", testID: "ask-jev-type-noul" },
@@ -62,7 +63,13 @@ export function AskJevScreen(): ReactElement {
     return <View style={styles.container} />;
   }
 
-  return <AskJevScreenContent />;
+  // Outside the sidebar's own provider, so it builds the same Pinned projection from the same
+  // stores — the agent picker below offers exactly what the Pinned section lists.
+  return (
+    <SidebarModelProvider active>
+      <AskJevScreenContent />
+    </SidebarModelProvider>
+  );
 }
 
 function AskJevScreenContent(): ReactElement {
@@ -281,20 +288,20 @@ function HostField({ model, state, size }: FormPartProps) {
 }
 
 function AgentField({ model, state, size }: FormPartProps) {
-  const { agents } = useAggregatedAgents();
+  const { options: pinnedOptions, hasPinnedWorkspaces } = useAskJevPinnedAgents(
+    state.selectedServerId,
+  );
   const options = useMemo<SelectFieldOption<string>[]>(
     () => [
       { id: "none", value: NO_AGENT, label: "None" },
-      ...agents
-        .filter((agent) => agent.serverId === state.selectedServerId && !agent.archivedAt)
-        .map((agent) => ({
-          id: agent.id,
-          value: agent.id,
-          label: agent.title?.trim() || "Untitled agent",
-          testID: `ask-jev-agent-${agent.id}`,
-        })),
+      ...pinnedOptions.map((agent) => ({
+        id: agent.id,
+        value: agent.id,
+        label: agent.label,
+        testID: `ask-jev-agent-${agent.id}`,
+      })),
     ],
-    [agents, state.selectedServerId],
+    [pinnedOptions],
   );
   const handleChange = useCallback(
     (value: string, display: SelectFieldDisplay) => {
@@ -310,10 +317,14 @@ function AgentField({ model, state, size }: FormPartProps) {
       options={options}
       onChange={handleChange}
       placeholder="None"
-      emptyText="No agents on this host"
+      emptyText={
+        hasPinnedWorkspaces
+          ? "No agents in your pinned chats"
+          : "Nothing pinned — pin a chat from the sidebar to attach it"
+      }
       searchable
       searchPlaceholder="Search agents..."
-      title="Attach an agent's recent activity"
+      title="Attach a pinned chat's recent activity"
       size={size}
       triggerTestID="ask-jev-agent-trigger"
     />

@@ -170,6 +170,7 @@ import {
 import { TerminalStreamRouter, type TerminalStreamEvent } from "./terminal-stream-router.js";
 import type { RestartRecoveryPlan } from "@getpaseo/protocol/restart-recovery/rpc-schemas";
 import type { JevQuestion, JevQuestions } from "@getpaseo/protocol/jev/rpc-schemas";
+import type { TokenUsageRange } from "@getpaseo/protocol/token-usage/rpc-schemas";
 import type {
   BrowserAutomationExecuteRequest,
   BrowserAutomationExecuteResponse,
@@ -528,6 +529,10 @@ export type KnowledgeBaseProjectRenamePayload = Extract<
 export type KnowledgeBaseProjectMergePayload = Extract<
   SessionOutboundMessage,
   { type: "kb.project.merge.response" }
+>["payload"];
+export type TokenUsageGetBreakdownPayload = Extract<
+  SessionOutboundMessage,
+  { type: "usage.tokens.get_breakdown.response" }
 >["payload"];
 export type AgentContextUsageReadPayload = Extract<
   SessionOutboundMessage,
@@ -5422,6 +5427,22 @@ export class DaemonClient {
         targetPath: input.targetPath,
         dryRun: input.dryRun,
       },
+    });
+  }
+
+  /**
+   * Token usage by provider, model and role over a range, from the transcripts on disk. See
+   * docs/token-usage.md.
+   */
+  async getTokenUsageBreakdown(options: {
+    range: TokenUsageRange;
+    requestId?: string;
+  }): Promise<TokenUsageGetBreakdownPayload> {
+    // COMPAT(tokenUsage): callers gate on `server_info.features.tokenUsage`; an older daemon
+    // answers an unknown request type with nothing, so an ungated call would only time out.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: { type: "usage.tokens.get_breakdown.request", range: options.range },
     });
   }
 

@@ -68,7 +68,7 @@ describe("buildMcpStatusStripModel", () => {
     ]);
   });
 
-  it("summarizes the collapsed row by naming unhealthy critical servers only", () => {
+  it("counts every unhealthy server in the header, critical or not", () => {
     const model = buildMcpStatusStripModel({
       servers: [
         server({ name: "zeeq", status: "needs-auth", critical: true }),
@@ -78,9 +78,23 @@ describe("buildMcpStatusStripModel", () => {
       sessionReports: [],
     });
 
-    expect(model.collapsed.unhealthyCriticalNames).toEqual(["zeeq"]);
+    expect(model.collapsed.headline).toEqual({ kind: "manyNeedAttention", count: 2 });
     expect(model.collapsed.tone).toBe("warning");
     expect(model.collapsed.hasIssues).toBe(true);
+  });
+
+  it("lets an unhealthy critical server decide the tone before a non-critical error", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [
+        server({ name: "zeeq", status: "needs-auth", critical: true }),
+        server({ name: "github", status: "error", critical: false }),
+      ],
+      sessionReports: [],
+    });
+
+    expect(model.collapsed.tone).toBe("warning");
+    // Critical first among the rows too.
+    expect(model.groups.actionable.map((row) => row.name)).toEqual(["zeeq", "github"]);
   });
 
   it("escalates the collapsed tone to danger when a critical server errors", () => {
@@ -187,7 +201,7 @@ describe("buildMcpStatusStripModel", () => {
     expect(model.rows).toHaveLength(1);
   });
 
-  it("names session-reported servers in the collapsed summary when the gateway has none", () => {
+  it("counts session-reported servers in the header when the gateway has none", () => {
     const model = buildMcpStatusStripModel({
       servers: [],
       sessionReports: [
@@ -198,44 +212,53 @@ describe("buildMcpStatusStripModel", () => {
 
     // Previously the collapsed row read "MCP servers connected" here — no critical gateway
     // server was unhealthy because there were no gateway servers at all.
-    expect(model.collapsed.unhealthyCriticalNames).toEqual([]);
-    expect(model.collapsed.issueNames).toEqual(["biblio", "claude.ai Robinhood"]);
+    expect(model.collapsed.headline).toEqual({ kind: "manyNeedAttention", count: 2 });
     expect(model.collapsed.tone).toBe("warning");
     expect(model.collapsed.hasIssues).toBe(true);
   });
 
-  it("prefers unhealthy critical names over other issues in the collapsed summary", () => {
-    const model = buildMcpStatusStripModel({
-      servers: [
-        server({ name: "zeeq", status: "needs-auth", critical: true }),
-        server({ name: "github", status: "needs-auth", critical: false }),
-      ],
-      sessionReports: [report({ serverName: "biblio" })],
+  it("names the one unhealthy server, as a sign-in when signing in is what it needs", () => {
+    const needsAuth = buildMcpStatusStripModel({
+      servers: [server({ name: "linear", status: "needs-auth" }), server({ name: "notion" })],
+      sessionReports: [],
     });
+    expect(needsAuth.collapsed.headline).toEqual({ kind: "needsSignIn", name: "linear" });
 
-    expect(model.collapsed.issueNames).toEqual(["zeeq"]);
+    const connector = buildMcpStatusStripModel({
+      servers: [server({ name: "notion" })],
+      sessionReports: [report({ serverName: "claude.ai Robinhood", status: "needs-auth" })],
+    });
+    expect(connector.collapsed.headline).toEqual({
+      kind: "needsSignIn",
+      name: "claude.ai Robinhood",
+    });
   });
 
-  it("names non-critical unhealthy servers when no critical server is unhealthy", () => {
+  it("names the one unhealthy server as needing attention when sign-in is not the problem", () => {
+    const errored = buildMcpStatusStripModel({
+      servers: [server({ name: "zeeq", status: "error", critical: true })],
+      sessionReports: [],
+    });
+    expect(errored.collapsed.headline).toEqual({ kind: "needsAttention", name: "zeeq" });
+
+    const sessionIssue = buildMcpStatusStripModel({
+      servers: [],
+      sessionReports: [report({ serverName: "sentry" })],
+    });
+    expect(sessionIssue.collapsed.headline).toEqual({ kind: "needsAttention", name: "sentry" });
+  });
+
+  it("counts the connected servers when nothing is unhealthy", () => {
     const model = buildMcpStatusStripModel({
       servers: [
-        server({ name: "zeeq", status: "connected", critical: true }),
-        server({ name: "github", status: "needs-auth", critical: false }),
+        server({ name: "notion", status: "connected" }),
+        server({ name: "zeeq", status: "connected" }),
+        server({ name: "linear", status: "connecting" }),
       ],
       sessionReports: [],
     });
 
-    expect(model.collapsed.issueNames).toEqual(["github"]);
-    expect(model.collapsed.hasIssues).toBe(true);
-  });
-
-  it("reports no issue names when every server is healthy", () => {
-    const model = buildMcpStatusStripModel({
-      servers: [server({ name: "notion", status: "connected" })],
-      sessionReports: [],
-    });
-
-    expect(model.collapsed.issueNames).toEqual([]);
+    expect(model.collapsed.headline).toEqual({ kind: "connected", count: 2 });
     expect(model.collapsed.hasIssues).toBe(false);
   });
 
@@ -522,5 +545,168 @@ describe("showsReporterProvenance", () => {
     // A brokered server the gateway calls healthy, and a server it has never heard of.
     expect(showsReporterProvenance(rowNamed("zeeq"))).toBe(true);
     expect(showsReporterProvenance(rowNamed("amplitude"))).toBe(true);
+  });
+});
+
+describe("buildMcpStatusStripModel groups", () => {
+  // The servers from Tyler's screenshot: four broken ones the gateway brokers, a claude.ai
+  // connector only a session reported, and the connected rest.
+  function screenshotModel(hiddenNames?: readonly string[]) {
+    return buildMcpStatusStripModel({
+      servers: [
+        server({ name: "agent-gateway" }),
+        server({ name: "amplitude" }),
+        server({ name: "figma", status: "needs-auth" }),
+        server({ name: "linear", status: "needs-auth" }),
+        server({ name: "notion", status: "needs-auth" }),
+        server({ name: "slack", status: "needs-auth" }),
+        server({ name: "sentry", status: "connecting" }),
+        server({ name: "zeeq", status: "disabled" }),
+      ],
+      sessionReports: [report({ serverName: "claude.ai Robinhood", status: "needs-auth" })],
+      failures: {
+        figma: failure({ reason: "client_registration_refused" }),
+        slack: failure({ reason: "client_not_registered", remedyPath: "/fake/tokens.json" }),
+      },
+      ...(hiddenNames ? { hiddenNames } : {}),
+    });
+  }
+
+  function names(rows: McpStatusRow[]): string[] {
+    return rows.map((row) => row.name);
+  }
+
+  it("puts unhealthy rows with an action first, then the ones nothing here can fix", () => {
+    const model = screenshotModel();
+
+    expect(names(model.groups.actionable)).toEqual(["claude.ai Robinhood", "linear", "notion"]);
+    expect(names(model.groups.stuck)).toEqual(["figma", "slack"]);
+  });
+
+  it("gathers connected, connecting and disabled servers into one group", () => {
+    const model = screenshotModel();
+
+    expect(names(model.groups.connected)).toEqual(["agent-gateway", "amplitude", "sentry", "zeeq"]);
+    expect(model.groups.hidden).toEqual([]);
+  });
+
+  it("moves a hidden row out of the header count and into the hidden group", () => {
+    const model = screenshotModel(["claude.ai Robinhood", "figma"]);
+
+    expect(names(model.groups.actionable)).toEqual(["linear", "notion"]);
+    expect(names(model.groups.stuck)).toEqual(["slack"]);
+    expect(names(model.groups.hidden)).toEqual(["claude.ai Robinhood", "figma"]);
+    expect(model.collapsed.headline).toEqual({ kind: "manyNeedAttention", count: 3 });
+  });
+
+  it("takes a hidden row out of the tone, so hiding every dead end turns the strip green", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [server({ name: "notion" }), server({ name: "figma", status: "error" })],
+      sessionReports: [report({ serverName: "claude.ai Robinhood" })],
+      hiddenNames: ["figma", "claude.ai Robinhood"],
+    });
+
+    expect(model.collapsed.tone).toBe("ok");
+    expect(model.collapsed.hasIssues).toBe(false);
+    expect(model.collapsed.headline).toEqual({ kind: "connected", count: 1 });
+    // Still something to show: the hidden rows are where they get unhidden.
+    expect(model.hasData).toBe(true);
+  });
+
+  it("names the one row left visible once the others are hidden", () => {
+    const model = screenshotModel(["claude.ai Robinhood", "figma", "notion", "slack"]);
+
+    expect(model.collapsed.headline).toEqual({ kind: "needsSignIn", name: "linear" });
+  });
+
+  it("ignores a hidden name while its server is healthy, and reports it as recovered", () => {
+    const model = screenshotModel(["amplitude", "figma"]);
+
+    expect(names(model.groups.connected)).toContain("amplitude");
+    expect(names(model.groups.hidden)).toEqual(["figma"]);
+    expect(model.recoveredHiddenNames).toEqual(["amplitude"]);
+  });
+
+  it("keeps a hidden name that is still broken, or still connecting, out of the recovered list", () => {
+    const model = screenshotModel(["figma", "sentry"]);
+
+    expect(model.recoveredHiddenNames).toEqual([]);
+  });
+});
+
+describe("buildMcpStatusStripModel hidden rows over time", () => {
+  function names(rows: McpStatusRow[]): string[] {
+    return rows.map((row) => row.name);
+  }
+
+  it("keeps a hidden server hidden through every tick of a reconnect until it really connects", () => {
+    const at = (status: McpStatusServerEntry["status"]) =>
+      buildMcpStatusStripModel({
+        servers: [server({ name: "notion" }), server({ name: "zeeq", status })],
+        sessionReports: [],
+        hiddenNames: ["zeeq"],
+      });
+
+    for (const status of ["error", "connecting", "needs-auth", "disabled"] as const) {
+      const model = at(status);
+      expect(names(model.groups.hidden), status).toEqual(["zeeq"]);
+      expect(names(model.groups.connected), status).toEqual(["notion"]);
+      expect(model.recoveredHiddenNames, status).toEqual([]);
+    }
+
+    const connected = at("connected");
+    expect(names(connected.groups.connected)).toEqual(["notion", "zeeq"]);
+    expect(connected.groups.hidden).toEqual([]);
+    expect(connected.recoveredHiddenNames).toEqual(["zeeq"]);
+  });
+
+  it("releases a hidden session-only name once its sessions report it connected", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [server({ name: "notion" })],
+      sessionReports: [
+        report({ serverName: "claude.ai Robinhood", agentId: "a1", status: "connected" }),
+        report({ serverName: "claude.ai Robinhood", agentId: "a2", status: "connected" }),
+      ],
+      hiddenNames: ["claude.ai Robinhood"],
+    });
+
+    // The row is gone — connected reports never make one — so the release is all that is left.
+    expect(names(model.rows)).toEqual(["notion"]);
+    expect(model.recoveredHiddenNames).toEqual(["claude.ai Robinhood"]);
+  });
+
+  it("keeps a session-only name hidden while any session still reports it unhealthy", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [],
+      sessionReports: [
+        report({ serverName: "claude.ai Robinhood", agentId: "a1", status: "connected" }),
+        report({ serverName: "claude.ai Robinhood", agentId: "a2", status: "needs-auth" }),
+      ],
+      hiddenNames: ["claude.ai Robinhood"],
+    });
+
+    expect(names(model.groups.hidden)).toEqual(["claude.ai Robinhood"]);
+    expect(model.recoveredHiddenNames).toEqual([]);
+  });
+
+  it("lets the gateway's own status decide for a server it brokers, not a session's report", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [server({ name: "figma", status: "needs-auth" })],
+      sessionReports: [report({ serverName: "figma", status: "connected" })],
+      hiddenNames: ["figma"],
+    });
+
+    expect(names(model.groups.hidden)).toEqual(["figma"]);
+    expect(model.recoveredHiddenNames).toEqual([]);
+  });
+
+  it("does not release a hidden name nothing reports at all", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [server({ name: "notion" })],
+      sessionReports: [],
+      hiddenNames: ["claude.ai Robinhood"],
+    });
+
+    expect(model.recoveredHiddenNames).toEqual([]);
   });
 });

@@ -7,12 +7,12 @@ import type {
   McpGatewayAuthStartPayload,
   McpGatewayServerAdoptPayload,
 } from "@getpaseo/client/internal/daemon-client";
-import { useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
-import { useHostRuntimeClient, useHostRuntimeIsConnected, useHosts } from "@/runtime/host-runtime";
-import { orderHostsLocalFirst, resolveActiveHostServerId } from "@/types/host-connection";
+import { useActiveHostServerId } from "@/hooks/use-active-host-server-id";
+import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import { useReplicaQuery } from "@/data/query";
 import { openExternalUrl } from "@/utils/open-external-url";
+import { useMcpHiddenServerNames, useMcpHiddenServersStore } from "./mcp-hidden-servers-store";
 import {
   buildMcpStatusStripModel,
   type McpStatusActionFailure,
@@ -36,27 +36,10 @@ export function mcpStatusQueryKey(serverId: string | null): QueryKey {
 
 /**
  * Resolves the "active host" the strip scopes to (KTD10: host-scoped in v1, aggregation
- * deferred). Mirrors settings-screen.tsx's host resolution with no picker selection of its
- * own: the connected local daemon, else the first connected host.
+ * deferred). Re-exported from the shared `useActiveHostServerId` so existing callers of this name
+ * don't need to change.
  */
-export function useMcpStatusActiveServerId(): string | null {
-  const hosts = useHosts();
-  const localServerId = useLocalDaemonServerId();
-  const orderedHosts = useMemo(
-    () => orderHostsLocalFirst(hosts, localServerId),
-    [hosts, localServerId],
-  );
-  return useMemo(
-    () =>
-      resolveActiveHostServerId({
-        selectedServerId: null,
-        localServerId,
-        hosts,
-        orderedHosts,
-      }),
-    [localServerId, hosts, orderedHosts],
-  );
-}
+export const useMcpStatusActiveServerId = useActiveHostServerId;
 
 function agentLabelFallback(title: string | null, fallback: string): string {
   const trimmed = title?.trim() ?? "";
@@ -114,9 +97,15 @@ export interface UseMcpStatusResult {
   adoptServer: (name: string, agentId: string) => Promise<McpGatewayServerAdoptPayload>;
   /** Opens claude.ai's connector settings — the only place claude.ai connectors get authorized. */
   openClaudeAiConnectors: () => Promise<void>;
-  /** True while either the auth or the adopt mutation is in flight. */
-  isStartingAuth: boolean;
+  /** Servers with a sign-in or broker request in flight. Per row, so one slow sign-in leaves
+   * every other row's button usable. */
+  pendingNames: ReadonlySet<string>;
+  /** Hides an unhealthy server on this host: out of the header's count and tone. */
+  hideServer: (name: string) => void;
+  unhideServer: (name: string) => void;
 }
+
+const NO_PENDING: ReadonlySet<string> = new Set();
 
 export function useMcpStatus(): UseMcpStatusResult {
   const { t } = useTranslation();
@@ -152,6 +141,10 @@ export function useMcpStatus(): UseMcpStatusResult {
     });
   }, []);
 
+  const hiddenNames = useMcpHiddenServerNames(serverId);
+  const hide = useMcpHiddenServersStore((state) => state.hide);
+  const unhide = useMcpHiddenServersStore((state) => state.unhide);
+
   const model = useMemo(
     () =>
       buildMcpStatusStripModel({
@@ -159,8 +152,31 @@ export function useMcpStatus(): UseMcpStatusResult {
         sessionReports,
         canAdopt: supportsAdopt,
         failures,
+        hiddenNames,
       }),
-    [statusQuery.data, sessionReports, supportsAdopt, failures],
+    [statusQuery.data, sessionReports, supportsAdopt, failures, hiddenNames],
+  );
+
+  // A hidden server that connects again is released, so the next time it breaks the strip says
+  // so. Hiding is for a dead end, and one that connected was not.
+  const { recoveredHiddenNames } = model;
+  useEffect(() => {
+    if (serverId && recoveredHiddenNames.length > 0) {
+      unhide(serverId, recoveredHiddenNames);
+    }
+  }, [serverId, recoveredHiddenNames, unhide]);
+
+  const hideServer = useCallback(
+    (name: string) => {
+      if (serverId) hide(serverId, name);
+    },
+    [hide, serverId],
+  );
+  const unhideServer = useCallback(
+    (name: string) => {
+      if (serverId) unhide(serverId, [name]);
+    },
+    [unhide, serverId],
   );
 
   // Drop a row's recorded failure once the daemon's own view of that server moves on: a fresh
@@ -192,6 +208,20 @@ export function useMcpStatus(): UseMcpStatusResult {
     });
   }, [model.rows]);
 
+  const [pendingNames, setPendingNames] = useState<ReadonlySet<string>>(NO_PENDING);
+  const whilePending = useCallback(async <T>(name: string, run: () => Promise<T>): Promise<T> => {
+    setPendingNames((prev) => new Set(prev).add(name));
+    try {
+      return await run();
+    } finally {
+      setPendingNames((prev) => {
+        const next = new Set(prev);
+        next.delete(name);
+        return next.size === 0 ? NO_PENDING : next;
+      });
+    }
+  }, []);
+
   const startAuthMutation = useMutation({
     mutationFn: async (name: string) => {
       if (!client) {
@@ -208,7 +238,7 @@ export function useMcpStatus(): UseMcpStatusResult {
   const startAuth = useCallback(
     async (name: string) => {
       clearFailure(name);
-      const result = await startAuthMutation.mutateAsync(name);
+      const result = await whilePending(name, () => startAuthMutation.mutateAsync(name));
       if (result.error && !result.authorizationUrl) {
         setFailures((prev) => ({
           ...prev,
@@ -223,7 +253,7 @@ export function useMcpStatus(): UseMcpStatusResult {
       }
       return result;
     },
-    [clearFailure, startAuthMutation],
+    [clearFailure, startAuthMutation, whilePending],
   );
 
   const adoptMutation = useMutation({
@@ -242,7 +272,7 @@ export function useMcpStatus(): UseMcpStatusResult {
   const adoptServer = useCallback(
     async (name: string, agentId: string) => {
       clearFailure(name);
-      const result = await adoptMutation.mutateAsync({ name, agentId });
+      const result = await whilePending(name, () => adoptMutation.mutateAsync({ name, agentId }));
       if (result.error && !result.authorizationUrl) {
         setFailures((prev) => ({
           ...prev,
@@ -257,7 +287,7 @@ export function useMcpStatus(): UseMcpStatusResult {
       }
       return result;
     },
-    [adoptMutation, clearFailure],
+    [adoptMutation, clearFailure, whilePending],
   );
 
   const openClaudeAiConnectors = useCallback(async () => {
@@ -271,6 +301,8 @@ export function useMcpStatus(): UseMcpStatusResult {
     startAuth,
     adoptServer,
     openClaudeAiConnectors,
-    isStartingAuth: startAuthMutation.isPending || adoptMutation.isPending,
+    pendingNames,
+    hideServer,
+    unhideServer,
   };
 }

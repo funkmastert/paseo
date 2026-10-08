@@ -1041,6 +1041,9 @@ export const PersistedConfigSchema = z
         daemonVitals: AgentDaemonVitalsSchema.optional(),
         restartRecovery: AgentRestartRecoverySchema.optional(),
         tokenAudit: AgentTokenAuditSchema.optional(),
+        // Token usage by model and role, read from transcripts. On unless `enabled` is false; off
+        // means no transcript reads. See docs/token-usage.md.
+        tokenUsage: z.object({ enabled: z.boolean().optional() }).strict().optional(),
         providerUsage: AgentProviderUsageSchema.optional(),
         // Any value loads; `AgentJevSchema` is what JEV itself checks (see above).
         jev: z.union([AgentJevSchema, z.unknown()]).optional(),

@@ -41,10 +41,11 @@ describe("resolveSidebarNavItems", () => {
       { key: "schedules", visible: true },
       { key: "ask-jev", visible: true },
       { key: "knowledge", visible: true },
+      { key: "token-usage", visible: true },
       { key: kanbanKey, visible: true },
       { key: notesKey, visible: true },
     ]);
-    expect(items[6]).toEqual({ kind: "plugin", key: kanbanKey, group: kanban, visible: true });
+    expect(items[7]).toEqual({ kind: "plugin", key: kanbanKey, group: kanban, visible: true });
     expect(items[0]).toEqual({
       kind: "builtin",
       key: "new-workspace",
@@ -71,6 +72,7 @@ describe("resolveSidebarNavItems", () => {
       { key: "search", visible: true },
       { key: "ask-jev", visible: true },
       { key: "knowledge", visible: true },
+      { key: "token-usage", visible: true },
       { key: notesKey, visible: true },
     ]);
   });
@@ -92,6 +94,7 @@ describe("resolveSidebarNavItems", () => {
       "schedules",
       "ask-jev",
       "knowledge",
+      "token-usage",
     ]);
   });
 
@@ -111,6 +114,7 @@ describe("resolveSidebarNavItems", () => {
       { key: "schedules", visible: true },
       { key: "ask-jev", visible: true },
       { key: "knowledge", visible: true },
+      { key: "token-usage", visible: true },
     ]);
   });
 });
@@ -128,6 +132,7 @@ describe("setSidebarNavItemVisible", () => {
       { key: "schedules", visible: true },
       { key: "ask-jev", visible: true },
       { key: "knowledge", visible: true },
+      { key: "token-usage", visible: true },
       { key: kanbanKey, visible: true },
     ]);
   });
@@ -149,6 +154,7 @@ describe("setSidebarNavItemVisible", () => {
       { key: "schedules", visible: true },
       { key: "ask-jev", visible: true },
       { key: "knowledge", visible: true },
+      { key: "token-usage", visible: true },
     ]);
   });
 
@@ -172,6 +178,7 @@ describe("setSidebarNavItemVisible", () => {
       { key: "schedules", visible: true },
       { key: "ask-jev", visible: true },
       { key: "knowledge", visible: true },
+      { key: "token-usage", visible: true },
     ]);
     expect(summarize(resolveSidebarNavItems({ pluginGroups: [notes], preferences: next }))).toEqual(
       next,
@@ -200,6 +207,7 @@ describe("moveSidebarNavItem", () => {
       "schedules",
       "ask-jev",
       "knowledge",
+      "token-usage",
       kanbanKey,
     ]);
   });
@@ -213,8 +221,9 @@ describe("moveSidebarNavItem", () => {
       "search",
       "schedules",
       "ask-jev",
-      kanbanKey,
+      "token-usage",
       "knowledge",
+      kanbanKey,
     ]);
   });
 
@@ -259,5 +268,6 @@ describe("builtinSidebarNavShortcutAction", () => {
     expect(builtinSidebarNavShortcutAction("schedules")).toBeNull();
     expect(builtinSidebarNavShortcutAction("ask-jev")).toBeNull();
     expect(builtinSidebarNavShortcutAction("knowledge")).toBeNull();
+    expect(builtinSidebarNavShortcutAction("token-usage")).toBeNull();
   });
 });
