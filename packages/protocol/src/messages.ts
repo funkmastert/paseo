@@ -74,6 +74,24 @@ import {
   UsageHistoryGetResponseSchema,
 } from "./usage-history/rpc-schemas.js";
 import {
+  KnowledgeBaseStatusRequestSchema,
+  KnowledgeBaseStatusResponseSchema,
+  KnowledgeBaseNotesListRequestSchema,
+  KnowledgeBaseNotesListResponseSchema,
+  KnowledgeBaseNoteGetRequestSchema,
+  KnowledgeBaseNoteGetResponseSchema,
+  KnowledgeBaseNoteWriteRequestSchema,
+  KnowledgeBaseNoteWriteResponseSchema,
+  KnowledgeBaseSearchRequestSchema,
+  KnowledgeBaseSearchResponseSchema,
+  KnowledgeBaseGraphGetRequestSchema,
+  KnowledgeBaseGraphGetResponseSchema,
+  KnowledgeBaseProjectRenameRequestSchema,
+  KnowledgeBaseProjectRenameResponseSchema,
+  KnowledgeBaseProjectMergeRequestSchema,
+  KnowledgeBaseProjectMergeResponseSchema,
+} from "./knowledge-base/rpc-schemas.js";
+import {
   RestartRecoveryGetPlanRequestSchema,
   RestartRecoveryApplyRequestSchema,
   RestartRecoveryDismissRequestSchema,
@@ -4036,6 +4054,14 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   LoopInspectRequestSchema,
   LoopLogsRequestSchema,
   LoopStopRequestSchema,
+  KnowledgeBaseStatusRequestSchema,
+  KnowledgeBaseNotesListRequestSchema,
+  KnowledgeBaseNoteGetRequestSchema,
+  KnowledgeBaseNoteWriteRequestSchema,
+  KnowledgeBaseSearchRequestSchema,
+  KnowledgeBaseGraphGetRequestSchema,
+  KnowledgeBaseProjectRenameRequestSchema,
+  KnowledgeBaseProjectMergeRequestSchema,
 ]);
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
@@ -7755,6 +7781,14 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   LoopStopResponseSchema,
   DaemonUpdateProgressMessageSchema,
   DaemonUpdateResponseSchema,
+  KnowledgeBaseStatusResponseSchema,
+  KnowledgeBaseNotesListResponseSchema,
+  KnowledgeBaseNoteGetResponseSchema,
+  KnowledgeBaseNoteWriteResponseSchema,
+  KnowledgeBaseSearchResponseSchema,
+  KnowledgeBaseGraphGetResponseSchema,
+  KnowledgeBaseProjectRenameResponseSchema,
+  KnowledgeBaseProjectMergeResponseSchema,
 ]);
 
 export type SessionOutboundMessage = z.infer<typeof SessionOutboundMessageSchema>;
