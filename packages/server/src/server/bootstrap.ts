@@ -2089,6 +2089,7 @@ export async function createPaseoDaemon(
       androidEmulatorCount = devices.filter(
         (device) => !device.physical && device.state === "device",
       ).length;
+      physicalDeviceLeaseManager.detectionChanged();
     },
     pidFile: createAdbTrackDevicesPidFile(path.join(config.paseoHome, "adb-track-devices.pid")),
     logger: logger.child({ module: "adb-track-devices" }),
@@ -2096,6 +2097,7 @@ export async function createPaseoDaemon(
   const devicectlPollingService = new DevicectlPollingService({
     onDevicesChanged: (devices) => {
       iosPhysicalDevices = toPhysicalIosDevices(devices);
+      physicalDeviceLeaseManager.detectionChanged();
     },
     logger: logger.child({ module: "devicectl-polling" }),
   });
@@ -2107,6 +2109,7 @@ export async function createPaseoDaemon(
       androidPhysicalDevices = [];
       androidEmulatorCount = 0;
       iosPhysicalDevices = [];
+      physicalDeviceLeaseManager.detectionChanged();
     },
     logger: logger.child({ module: "physical-devices" }),
   });

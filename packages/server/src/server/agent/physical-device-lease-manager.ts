@@ -127,6 +127,7 @@ export class PhysicalDeviceLeaseManager {
   private leases: PhysicalDeviceLease[] = [];
   private blocked: PhysicalDeviceStatusBlocked[] = [];
   private readonly listeners = new Set<() => void>();
+  private lastDetectionFingerprint: string;
 
   constructor(options: PhysicalDeviceLeaseManagerOptions) {
     this.listConnectedDevices = options.listConnectedDevices;
@@ -139,6 +140,7 @@ export class PhysicalDeviceLeaseManager {
     this.graceMs = (options.graceMinutes ?? DEFAULT_GRACE_MINUTES) * 60_000;
     this.maxLeaseMs = (options.maxLeaseHours ?? DEFAULT_MAX_LEASE_HOURS) * 3_600_000;
     this.createLeaseId = options.createLeaseId ?? (() => `physical-${++leaseCounter}`);
+    this.lastDetectionFingerprint = this.connectedFingerprint();
   }
 
   subscribe(listener: () => void): () => void {
@@ -150,6 +152,34 @@ export class PhysicalDeviceLeaseManager {
    * agents.deviceLeases toggle doesn't otherwise make this push a fresh update on its own. */
   refreshSnapshot(): void {
     this.notify();
+  }
+
+  /**
+   * Called by AdbTrackDevicesService's and DevicectlPollingService's `onDevicesChanged`, and by
+   * PhysicalDeviceDetection's `onStopped` — the only way this manager hears about a connect, a
+   * disconnect, or a Wi-Fi iPhone's idle flip. Reconciles right away, so a disconnect starts its
+   * grace clock now rather than waiting for the next checkout or install-gate call, then notifies
+   * only if the connected list actually changed: devicectl polls every 15s with identical
+   * results, and every notify pushes a device_status_update to every subscribed client.
+   */
+  detectionChanged(): void {
+    const leasesChanged = this.reconcile();
+    const fingerprint = this.connectedFingerprint();
+    const fingerprintChanged = fingerprint !== this.lastDetectionFingerprint;
+    this.lastDetectionFingerprint = fingerprint;
+    // reconcile() already notified for a lease it changed (a disconnect starting the grace
+    // clock, an expiry). Don't notify twice for the same event.
+    if (fingerprintChanged && !leasesChanged) this.notify();
+  }
+
+  private connectedFingerprint(): string {
+    return this.listConnectedDevices()
+      .map(
+        (device) =>
+          `${device.id}|${device.platform}|${device.transport}|${device.idle ? "1" : "0"}|${device.name ?? ""}`,
+      )
+      .sort()
+      .join(";");
   }
 
   private notify(): void {
@@ -170,7 +200,9 @@ export class PhysicalDeviceLeaseManager {
     return this.readDaemonConfig().deviceLeases?.dryRun ?? false;
   }
 
-  private reconcile(): void {
+  /** Returns whether any lease changed, so a caller that already notified for it (detectionChanged)
+   * can skip a redundant second notify. */
+  private reconcile(): boolean {
     const connected = this.listConnectedDevices();
     const result = reconcilePhysicalDeviceLeases({
       leases: this.leases,
@@ -187,6 +219,7 @@ export class PhysicalDeviceLeaseManager {
     this.leases = result.leases;
     if (result.released.length > 0) this.logRelease(result.released);
     if (changed) this.notify();
+    return changed;
   }
 
   private logRelease(released: readonly PhysicalLeaseRelease[]): void {
