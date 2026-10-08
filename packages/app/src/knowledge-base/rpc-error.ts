@@ -1,8 +1,15 @@
 /**
  * The `kb.*` RPCs answer failures as `rpc_error` with a code (`disabled`, `not_found`, `conflict`,
- * `search_unavailable`); the client surfaces it as an error carrying `code`.
+ * `search_unavailable`, `invalid_request`); the client surfaces it as an error carrying `code`.
+ * `invalid_request` is U9's: the knowledge base service rejects an empty rename title or a merge
+ * of a project into itself this way (knowledge-base-session.ts `INVALID_REQUEST_ERROR_NAME`).
  */
-export type KnowledgeBaseErrorCode = "disabled" | "not_found" | "conflict" | "search_unavailable";
+export type KnowledgeBaseErrorCode =
+  | "disabled"
+  | "not_found"
+  | "conflict"
+  | "search_unavailable"
+  | "invalid_request";
 
 export function knowledgeBaseErrorCode(error: unknown): string | null {
   if (error instanceof Error && "code" in error && typeof error.code === "string") {

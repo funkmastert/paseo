@@ -1,14 +1,17 @@
-import { useCallback, useState, type ReactElement } from "react";
+import { useCallback, useMemo, useState, type ReactElement } from "react";
 import { Text, View } from "react-native";
 import { router } from "expo-router";
 import { useIsFocused } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
 import type { KnowledgeBaseNoteSummary } from "@getpaseo/protocol/knowledge-base/rpc-schemas";
-import { StyleSheet } from "react-native-unistyles";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { BackHeader } from "@/components/headers/back-header";
 import { MenuHeader } from "@/components/headers/menu-header";
 import { ScreenHeader } from "@/components/headers/screen-header";
 import { HostFilter } from "@/components/hosts/host-filter";
+import { Button } from "@/components/ui/button";
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SETTINGS_DESKTOP_SIDEBAR_WIDTH, useIsCompactFormFactor } from "@/constants/layout";
 import {
   resolveKnowledgeBaseAvailability,
@@ -18,15 +21,26 @@ import {
   KnowledgeBaseAvailabilityNotice,
   KnowledgeBaseSidecarNotice,
 } from "@/knowledge-base/availability-view";
+import { layoutKnowledgeGraph } from "@/knowledge-base/graph/graph-layout-model";
+import { KnowledgeGraphView } from "@/knowledge-base/graph/graph-view";
+import {
+  getLastKnowledgeViewMode,
+  setLastKnowledgeViewMode,
+  type KnowledgeBaseViewMode,
+} from "@/knowledge-base/graph/graph-view-state";
 import { createKnowledgeLeaveGuard, type KnowledgeLeaveGuard } from "@/knowledge-base/leave-guard";
 import { KnowledgeNoteList } from "@/knowledge-base/note-list";
 import {
+  useKnowledgeBaseGraph,
   useKnowledgeBaseHost,
   useKnowledgeBaseNotes,
   useKnowledgeBaseStatus,
+  type KnowledgeGraphData,
+  type KnowledgeGraphLoadState,
   type KnowledgeNotesLoadState,
 } from "@/knowledge-base/use-knowledge-base";
 import { useHosts } from "@/runtime/host-runtime";
+import type { Theme } from "@/styles/theme";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import type { HostProfile } from "@/types/host-connection";
 import { WindowChromeRegion } from "@/utils/desktop-window";
@@ -38,6 +52,9 @@ import {
 import { KnowledgeNoteScreen } from "./knowledge-note-screen";
 
 const EMPTY_NOTES: readonly KnowledgeBaseNoteSummary[] = [];
+const ThemedLoadingSpinner = withUnistyles(LoadingSpinner, (theme: Theme) => ({
+  color: theme.colors.foregroundMuted,
+}));
 
 export interface KnowledgeBaseScreenProps {
   /** `?host=`; falls back to the active workspace's host, then the first host. */
@@ -94,6 +111,20 @@ function KnowledgeBaseScreenContent({
   });
   const notes = useKnowledgeBaseNotes(serverId, availability.kind === "ready");
   const [guard] = useState(createKnowledgeLeaveGuard);
+  const [viewMode, setViewModeState] = useState<KnowledgeBaseViewMode>(() =>
+    getLastKnowledgeViewMode(serverId),
+  );
+  const setViewMode = useCallback(
+    (mode: KnowledgeBaseViewMode) => {
+      setLastKnowledgeViewMode(serverId, mode);
+      setViewModeState(mode);
+    },
+    [serverId],
+  );
+  const graph = useKnowledgeBaseGraph(
+    serverId,
+    availability.kind === "ready" && viewMode === "graph",
+  );
 
   const openNote = useCallback(
     (path: string) => {
@@ -108,6 +139,18 @@ function KnowledgeBaseScreenContent({
       })();
     },
     [guard, isCompact, selectionParam, serverId],
+  );
+  /** After a rename or merge: no dirty draft to guard against (both are disabled while dirty). */
+  const replaceNote = useCallback(
+    (path: string) => {
+      if (!serverId) return;
+      if (isCompact) {
+        router.replace(buildKnowledgeNoteRoute(path, serverId));
+        return;
+      }
+      router.setParams({ [selectionParam]: knowledgeNoteRouteId(path) });
+    },
+    [isCompact, selectionParam, serverId],
   );
   const closeNote = useCallback(() => {
     void (async () => {
@@ -140,10 +183,15 @@ function KnowledgeBaseScreenContent({
     notes: notes.state,
     selectedPath,
     guard,
+    viewMode,
+    graph: graph.state,
     onRetryStatus: status.refetch,
     onRetryNotes: notes.refetch,
+    onRetryGraph: graph.refetch,
+    onViewModeChange: setViewMode,
     onSelectHost: selectHost,
     onOpenNote: openNote,
+    onReplaceNote: replaceNote,
     onCloseNote: closeNote,
     title: t("knowledgeBase.title"),
   };
@@ -158,16 +206,31 @@ interface KnowledgeBaseLayoutProps {
   notes: KnowledgeNotesLoadState;
   selectedPath: string | null;
   guard: KnowledgeLeaveGuard;
+  viewMode: KnowledgeBaseViewMode;
+  graph: KnowledgeGraphLoadState;
   onRetryStatus: () => void;
   onRetryNotes: () => void;
+  onRetryGraph: () => void;
+  onViewModeChange: (mode: KnowledgeBaseViewMode) => void;
   onSelectHost: (serverId: string) => void;
   onOpenNote: (path: string) => void;
+  onReplaceNote: (path: string) => void;
   onCloseNote: () => void;
   title: string;
 }
 
 function KnowledgeBaseCompactLayout(props: KnowledgeBaseLayoutProps): ReactElement {
-  const { serverId, availability, notes, selectedPath, title } = props;
+  const { serverId, availability, notes, selectedPath, title, viewMode, onViewModeChange } = props;
+  const viewModeControl = useMemo(
+    () => (
+      <KnowledgeViewModeControl
+        availability={availability}
+        viewMode={viewMode}
+        onViewModeChange={onViewModeChange}
+      />
+    ),
+    [availability, viewMode, onViewModeChange],
+  );
   if (selectedPath !== null) {
     if (availability.kind === "ready" && serverId) {
       return (
@@ -179,6 +242,7 @@ function KnowledgeBaseCompactLayout(props: KnowledgeBaseLayoutProps): ReactEleme
           layout="compact"
           guard={props.guard}
           onOpenNote={props.onOpenNote}
+          onReplaceNote={props.onReplaceNote}
           onBack={props.onCloseNote}
         />
       );
@@ -192,7 +256,7 @@ function KnowledgeBaseCompactLayout(props: KnowledgeBaseLayoutProps): ReactEleme
   }
   return (
     <View style={styles.container} testID="knowledge-screen">
-      <MenuHeader title={title} />
+      <MenuHeader title={title} rightContent={viewModeControl} />
       <KnowledgeBaseListPane {...props} showChevron />
     </View>
   );
@@ -200,7 +264,17 @@ function KnowledgeBaseCompactLayout(props: KnowledgeBaseLayoutProps): ReactEleme
 
 function KnowledgeBaseSplitLayout(props: KnowledgeBaseLayoutProps): ReactElement {
   const { t } = useTranslation();
-  const { serverId, availability, notes, selectedPath, title } = props;
+  const { serverId, availability, notes, selectedPath, title, viewMode, onViewModeChange } = props;
+  const viewModeControl = useMemo(
+    () => (
+      <KnowledgeViewModeControl
+        availability={availability}
+        viewMode={viewMode}
+        onViewModeChange={onViewModeChange}
+      />
+    ),
+    [availability, viewMode, onViewModeChange],
+  );
   if (availability.kind !== "ready" || !serverId) {
     return (
       <View style={styles.container} testID="knowledge-screen">
@@ -214,7 +288,7 @@ function KnowledgeBaseSplitLayout(props: KnowledgeBaseLayoutProps): ReactElement
       <View style={styles.splitRow}>
         <WindowChromeRegion corners="top-left">
           <View style={styles.listPane}>
-            <MenuHeader title={title} />
+            <MenuHeader title={title} rightContent={viewModeControl} />
             <KnowledgeBaseListPane {...props} showChevron={false} />
           </View>
         </WindowChromeRegion>
@@ -229,6 +303,7 @@ function KnowledgeBaseSplitLayout(props: KnowledgeBaseLayoutProps): ReactElement
                 layout="pane"
                 guard={props.guard}
                 onOpenNote={props.onOpenNote}
+                onReplaceNote={props.onReplaceNote}
                 onBack={props.onCloseNote}
               />
             ) : (
@@ -281,6 +356,43 @@ function KnowledgeBaseBlocked(props: KnowledgeBaseLayoutProps): ReactElement | n
   );
 }
 
+/** List / Graph segmented control (U9, KTD-11): sits in the screen header on every layout. */
+function KnowledgeViewModeControl({
+  availability,
+  viewMode,
+  onViewModeChange,
+}: Pick<
+  KnowledgeBaseLayoutProps,
+  "availability" | "viewMode" | "onViewModeChange"
+>): ReactElement | null {
+  const { t } = useTranslation();
+  const options = useMemo(
+    () => [
+      {
+        value: "list" as const,
+        label: t("knowledgeBase.view.list"),
+        testID: "knowledge-view-list",
+      },
+      {
+        value: "graph" as const,
+        label: t("knowledgeBase.view.graph"),
+        testID: "knowledge-view-graph",
+      },
+    ],
+    [t],
+  );
+  if (availability.kind !== "ready") return null;
+  return (
+    <SegmentedControl
+      options={options}
+      value={viewMode}
+      onValueChange={onViewModeChange}
+      size="sm"
+      testID="knowledge-view-mode"
+    />
+  );
+}
+
 function KnowledgeBaseListPane(
   props: KnowledgeBaseLayoutProps & { showChevron: boolean },
 ): ReactElement | null {
@@ -294,17 +406,79 @@ function KnowledgeBaseListPane(
           <KnowledgeBaseSidecarNotice banner={availability.banner} />
         </View>
       ) : null}
-      <KnowledgeNoteList
-        key={serverId}
-        serverId={serverId}
-        notes={props.notes}
-        onRetry={props.onRetryNotes}
-        fullTextSearch={availability.fullTextSearch}
-        selectedPath={props.selectedPath}
-        showChevron={props.showChevron}
-        onOpenNote={props.onOpenNote}
-      />
+      {props.viewMode === "graph" ? (
+        <KnowledgeGraphPane
+          graph={props.graph}
+          selectedPath={props.selectedPath}
+          onRetryGraph={props.onRetryGraph}
+          onOpenNote={props.onOpenNote}
+        />
+      ) : (
+        <KnowledgeNoteList
+          key={serverId}
+          serverId={serverId}
+          notes={props.notes}
+          onRetry={props.onRetryNotes}
+          fullTextSearch={availability.fullTextSearch}
+          selectedPath={props.selectedPath}
+          showChevron={props.showChevron}
+          onOpenNote={props.onOpenNote}
+        />
+      )}
     </View>
+  );
+}
+
+function KnowledgeGraphPane({
+  graph,
+  selectedPath,
+  onRetryGraph,
+  onOpenNote,
+}: {
+  graph: KnowledgeGraphLoadState;
+  selectedPath: string | null;
+  onRetryGraph: () => void;
+  onOpenNote: (path: string) => void;
+}): ReactElement {
+  const { t } = useTranslation();
+  if (graph.kind === "loading") {
+    return (
+      <View style={styles.centered} testID="knowledge-graph-loading">
+        <ThemedLoadingSpinner size="large" />
+      </View>
+    );
+  }
+  if (graph.kind === "error") {
+    return (
+      <View style={styles.centered} testID="knowledge-graph-error">
+        <Text style={styles.mutedText}>
+          {t("knowledgeBase.list.loadFailed", { message: graph.message })}
+        </Text>
+        <Button variant="outline" size="sm" onPress={onRetryGraph}>
+          {t("common.actions.retry")}
+        </Button>
+      </View>
+    );
+  }
+  return (
+    <KnowledgeGraphReady graph={graph.graph} selectedPath={selectedPath} onOpenNote={onOpenNote} />
+  );
+}
+
+function KnowledgeGraphReady({
+  graph,
+  selectedPath,
+  onOpenNote,
+}: {
+  graph: KnowledgeGraphData;
+  selectedPath: string | null;
+  onOpenNote: (path: string) => void;
+}): ReactElement {
+  // Layout runs here, in the model, never during render's own body above this component, and is
+  // memoized per graph revision (the plan's U9 Approach) rather than recomputed on every render.
+  const layout = useMemo(() => layoutKnowledgeGraph(graph.nodes, graph.edges), [graph]);
+  return (
+    <KnowledgeGraphView layout={layout} selectedPath={selectedPath} onSelectNode={onOpenNote} />
   );
 }
 

@@ -24,8 +24,12 @@ import { MAX_CONTENT_WIDTH } from "@/constants/layout";
 import { FileConflictAlert, type FileConflictAlertState } from "@/file-pane/conflict-alert";
 import type { FileConflictCallout } from "@/file-pane/editor/model";
 import { askKnowledgeLeaveDecision, type KnowledgeLeaveGuard } from "@/knowledge-base/leave-guard";
+import type { MergeProjectCandidate } from "@/knowledge-base/merge-project-form-model";
+import { MergeProjectSheet } from "@/knowledge-base/merge-project-sheet";
 import { KnowledgeNoteEditor, type KnowledgeNoteRead } from "@/knowledge-base/note-editor-model";
 import { KnowledgeNoteMarkdown } from "@/knowledge-base/note-markdown";
+import { KnowledgeNoteMenu } from "@/knowledge-base/note-menu";
+import { RenameProjectSheet } from "@/knowledge-base/rename-project-sheet";
 import { useKnowledgeLeaveBlockers } from "@/knowledge-base/use-leave-blockers";
 import {
   useKnowledgeBaseNote,
@@ -35,6 +39,8 @@ import {
   type KnowledgeNoteResult,
 } from "@/knowledge-base/use-knowledge-base";
 import { KnowledgeNoteEditorSurface } from "./knowledge-note-editor";
+
+type NoteSheet = "none" | "rename" | "merge";
 
 const ThemedLoadingSpinner = withUnistyles(LoadingSpinner, (theme) => ({
   color: theme.colors.foregroundMuted,
@@ -52,6 +58,8 @@ export interface KnowledgeNoteScreenProps {
   guard: KnowledgeLeaveGuard;
   onOpenNote: (path: string) => void;
   onBack: () => void;
+  /** After a rename or merge: replaces the route with the note's new or target path. */
+  onReplaceNote: (path: string) => void;
 }
 
 /** One note: read it, follow its links and backlinks, or edit the whole file. */
@@ -63,6 +71,7 @@ export function KnowledgeNoteScreen({
   guard,
   onOpenNote,
   onBack,
+  onReplaceNote,
 }: KnowledgeNoteScreenProps): ReactElement {
   const { t } = useTranslation();
   const { state, refetch } = useKnowledgeBaseNote(serverId, path, true);
@@ -72,18 +81,86 @@ export function KnowledgeNoteScreen({
   const startEditing = useCallback(() => {
     if (result?.status === "ready") setEditing(result.note);
   }, [result]);
+  const [sheet, setSheet] = useState<NoteSheet>("none");
+  const openRename = useCallback(() => setSheet("rename"), []);
+  const openMerge = useCallback(() => setSheet("merge"), []);
+  const closeSheet = useCallback(() => setSheet("none"), []);
+  const handleRenamed = useCallback(
+    (renamed: { path: string }) => onReplaceNote(renamed.path),
+    [onReplaceNote],
+  );
+  const handleMerged = useCallback(
+    (target: { path: string }) => onReplaceNote(target.path),
+    [onReplaceNote],
+  );
+
+  const noteType = result?.status === "ready" ? result.note.noteType : null;
+  const projectCandidates: MergeProjectCandidate[] = useMemo(
+    () =>
+      notes
+        .filter((note) => note.noteType === "project" && note.path !== path)
+        .map((note) => ({ path: note.path, permalink: note.permalink, title: note.title })),
+    [notes, path],
+  );
+  const renameSnapshot = useMemo(() => {
+    if (!(noteType === "project" && result?.status === "ready")) return null;
+    return {
+      path: result.note.path,
+      currentTitle: result.note.title,
+      otherProjectTitles: projectCandidates.map((candidate) => candidate.title),
+    };
+  }, [noteType, projectCandidates, result]);
+  const mergeSnapshot = useMemo(() => {
+    if (!(noteType === "project" && result?.status === "ready")) return null;
+    return {
+      source: {
+        path: result.note.path,
+        permalink: result.note.permalink,
+        title: result.note.title,
+      },
+      candidates: projectCandidates,
+    };
+  }, [noteType, projectCandidates, result]);
+  const sheets = (
+    <>
+      {sheet === "rename" && renameSnapshot ? (
+        <RenameProjectSheet
+          visible
+          onClose={closeSheet}
+          serverId={serverId}
+          snapshot={renameSnapshot}
+          onRenamed={handleRenamed}
+        />
+      ) : null}
+      {sheet === "merge" && mergeSnapshot ? (
+        <MergeProjectSheet
+          visible
+          onClose={closeSheet}
+          serverId={serverId}
+          snapshot={mergeSnapshot}
+          onMerged={handleMerged}
+        />
+      ) : null}
+    </>
+  );
 
   if (editing) {
     return (
-      <KnowledgeNoteEditing
-        serverId={serverId}
-        initialNote={editing}
-        result={result}
-        layout={layout}
-        guard={guard}
-        onBack={onBack}
-        onDone={stopEditing}
-      />
+      <>
+        <KnowledgeNoteEditing
+          serverId={serverId}
+          initialNote={editing}
+          result={result}
+          layout={layout}
+          guard={guard}
+          noteType={noteType ?? "note"}
+          onBack={onBack}
+          onDone={stopEditing}
+          onOpenRename={openRename}
+          onOpenMerge={openMerge}
+        />
+        {sheets}
+      </>
     );
   }
 
@@ -91,6 +168,12 @@ export function KnowledgeNoteScreen({
   return (
     <View style={styles.container} testID="knowledge-note-screen">
       <NoteHeader layout={layout} title={title} onBack={onBack}>
+        <KnowledgeNoteMenu
+          noteType={noteType ?? "note"}
+          dirty={false}
+          onRename={openRename}
+          onMerge={openMerge}
+        />
         <Button
           variant="outline"
           size="sm"
@@ -108,6 +191,7 @@ export function KnowledgeNoteScreen({
         onRetry={refetch}
         onBack={onBack}
       />
+      {sheets}
     </View>
   );
 }
@@ -249,8 +333,11 @@ interface KnowledgeNoteEditingProps {
   result: KnowledgeNoteResult | null;
   layout: KnowledgeNoteLayout;
   guard: KnowledgeLeaveGuard;
+  noteType: string;
   onBack: () => void;
   onDone: () => void;
+  onOpenRename: () => void;
+  onOpenMerge: () => void;
 }
 
 function KnowledgeNoteEditing({
@@ -259,8 +346,11 @@ function KnowledgeNoteEditing({
   result,
   layout,
   guard,
+  noteType,
   onBack,
   onDone,
+  onOpenRename,
+  onOpenMerge,
 }: KnowledgeNoteEditingProps): ReactElement {
   const { t } = useTranslation();
   const backend = useKnowledgeNoteEditorBackend(serverId);
@@ -308,6 +398,12 @@ function KnowledgeNoteEditing({
             {t("knowledgeBase.note.saved")}
           </Text>
         ) : null}
+        <KnowledgeNoteMenu
+          noteType={noteType}
+          dirty={file.modified}
+          onRename={onOpenRename}
+          onMerge={onOpenMerge}
+        />
         <Button variant="ghost" size="sm" onPress={handleClose} testID="knowledge-note-cancel">
           {file.modified ? t("knowledgeBase.note.cancel") : t("knowledgeBase.note.done")}
         </Button>

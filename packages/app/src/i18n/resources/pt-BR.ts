@@ -2179,6 +2179,13 @@ export const ptBR: TranslationResources = {
   },
   knowledgeBase: {
     title: "Conhecimento",
+    view: {
+      list: "Lista",
+      graph: "Grafo",
+    },
+    graph: {
+      label: "Grafo de conhecimento",
+    },
     availability: {
       noHostTitle: "Nenhum host",
       noHostDescription: "Adicione um host para navegar pela base de conhecimento dele.",
@@ -2226,12 +2233,48 @@ export const ptBR: TranslationResources = {
       backlinks: "Vinculada a partir de",
       removedSecrets_one: "{{count}} segredo removido antes de salvar",
       removedSecrets_other: "{{count}} segredos removidos antes de salvar",
+      menu: {
+        accessibility: "Ações do projeto",
+        rename: "Renomear projeto",
+        merge: "Mesclar com…",
+      },
     },
     leave: {
       title: "Alterações não salvas",
       message: "Salvar suas alterações em {{title}} antes de sair?",
       save: "Salvar",
       discard: "Descartar",
+    },
+    rename: {
+      title: "Renomear projeto",
+      titleLabel: "Título",
+      save: "Renomear",
+      saving: "Renomeando...",
+      emptyError: "Um projeto precisa de um título.",
+      duplicateError: "Outro projeto já tem esse título.",
+      renameFailed: "Não foi possível renomear: {{message}}",
+    },
+    merge: {
+      title: "Mesclar projeto",
+      pickTargetLabel: "Mesclar com",
+      noOtherProjects: "Não há outros projetos para mesclar.",
+      reviewTitle: "Isto vai mover",
+      counts: {
+        links: "Links",
+        decisions: "Decisões",
+        rules: "Regras",
+        agents: "Agentes",
+        workspaces: "Espaços de trabalho",
+      },
+      checkFailed: "Não foi possível verificar a mesclagem: {{message}}",
+      mergeFailed: "Não foi possível mesclar: {{message}}",
+      confirmTitle: "Mesclar {{source}} com {{target}}?",
+      confirmMessage:
+        "Isto move todos os links, decisões, regras, agentes e espaços de trabalho para {{target}} e remove {{source}}. Esta ação não pode ser desfeita.",
+      confirmButton: "Mesclar",
+      merging: "Mesclando...",
+      back: "Voltar",
+      cancel: "Cancelar",
     },
   },
   review: {

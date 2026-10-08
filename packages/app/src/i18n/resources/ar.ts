@@ -2146,6 +2146,13 @@ export const ar: TranslationResources = {
   },
   knowledgeBase: {
     title: "المعرفة",
+    view: {
+      list: "قائمة",
+      graph: "رسم بياني",
+    },
+    graph: {
+      label: "الرسم البياني للمعرفة",
+    },
     availability: {
       noHostTitle: "لا يوجد مضيف",
       noHostDescription: "أضف مضيفًا لتصفح قاعدة معرفته.",
@@ -2191,12 +2198,48 @@ export const ar: TranslationResources = {
       backlinks: "مرتبطة من",
       removedSecrets_one: "تمت إزالة {{count}} سر قبل الحفظ",
       removedSecrets_other: "تمت إزالة {{count}} أسرار قبل الحفظ",
+      menu: {
+        accessibility: "إجراءات المشروع",
+        rename: "إعادة تسمية المشروع",
+        merge: "الدمج مع…",
+      },
     },
     leave: {
       title: "تغييرات غير محفوظة",
       message: "هل تريد حفظ تغييراتك على {{title}} قبل المغادرة؟",
       save: "حفظ",
       discard: "تجاهل",
+    },
+    rename: {
+      title: "إعادة تسمية المشروع",
+      titleLabel: "العنوان",
+      save: "إعادة التسمية",
+      saving: "جارٍ إعادة التسمية...",
+      emptyError: "يحتاج المشروع إلى عنوان.",
+      duplicateError: "يستخدم مشروع آخر هذا العنوان بالفعل.",
+      renameFailed: "تعذرت إعادة التسمية: {{message}}",
+    },
+    merge: {
+      title: "دمج المشروع",
+      pickTargetLabel: "الدمج مع",
+      noOtherProjects: "لا توجد مشاريع أخرى للدمج معها.",
+      reviewTitle: "سيتم نقل",
+      counts: {
+        links: "الروابط",
+        decisions: "القرارات",
+        rules: "القواعد",
+        agents: "الوكلاء",
+        workspaces: "مساحات العمل",
+      },
+      checkFailed: "تعذر فحص الدمج: {{message}}",
+      mergeFailed: "تعذر الدمج: {{message}}",
+      confirmTitle: "دمج {{source}} مع {{target}}؟",
+      confirmMessage:
+        "سيتم نقل كل الروابط والقرارات والقواعد والوكلاء ومساحات العمل إلى {{target}} وحذف {{source}}. لا يمكن التراجع عن هذا الإجراء.",
+      confirmButton: "دمج",
+      merging: "جارٍ الدمج...",
+      back: "رجوع",
+      cancel: "إلغاء",
     },
   },
   review: {

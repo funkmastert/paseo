@@ -2119,6 +2119,13 @@ export const zhCN: TranslationResources = {
   },
   knowledgeBase: {
     title: "知识库",
+    view: {
+      list: "列表",
+      graph: "图谱",
+    },
+    graph: {
+      label: "知识图谱",
+    },
     availability: {
       noHostTitle: "没有主机",
       noHostDescription: "添加主机以浏览其知识库。",
@@ -2164,12 +2171,48 @@ export const zhCN: TranslationResources = {
       backlinks: "链接到此处的笔记",
       removedSecrets_one: "保存前移除了 {{count}} 个密钥",
       removedSecrets_other: "保存前移除了 {{count}} 个密钥",
+      menu: {
+        accessibility: "项目操作",
+        rename: "重命名项目",
+        merge: "合并到…",
+      },
     },
     leave: {
       title: "未保存的更改",
       message: "离开前要保存对 {{title}} 的更改吗?",
       save: "保存",
       discard: "放弃",
+    },
+    rename: {
+      title: "重命名项目",
+      titleLabel: "标题",
+      save: "重命名",
+      saving: "正在重命名...",
+      emptyError: "项目需要一个标题。",
+      duplicateError: "另一个项目已使用此标题。",
+      renameFailed: "无法重命名:{{message}}",
+    },
+    merge: {
+      title: "合并项目",
+      pickTargetLabel: "合并到",
+      noOtherProjects: "没有其他项目可以合并。",
+      reviewTitle: "将会移动",
+      counts: {
+        links: "链接",
+        decisions: "决定",
+        rules: "规则",
+        agents: "代理",
+        workspaces: "工作区",
+      },
+      checkFailed: "无法检查合并:{{message}}",
+      mergeFailed: "无法合并:{{message}}",
+      confirmTitle: "将 {{source}} 合并到 {{target}}?",
+      confirmMessage:
+        "这会将所有链接、决定、规则、代理和工作区移动到 {{target}},并删除 {{source}}。此操作无法撤销。",
+      confirmButton: "合并",
+      merging: "正在合并...",
+      back: "返回",
+      cancel: "取消",
     },
   },
   review: {

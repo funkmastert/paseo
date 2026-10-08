@@ -2155,6 +2155,13 @@ export const en = {
   },
   knowledgeBase: {
     title: "Knowledge",
+    view: {
+      list: "List",
+      graph: "Graph",
+    },
+    graph: {
+      label: "Knowledge graph",
+    },
     availability: {
       noHostTitle: "No host",
       noHostDescription: "Add a host to browse its knowledge base.",
@@ -2202,12 +2209,48 @@ export const en = {
       backlinks: "Linked from",
       removedSecrets_one: "Removed {{count}} secret before saving",
       removedSecrets_other: "Removed {{count}} secrets before saving",
+      menu: {
+        accessibility: "Project actions",
+        rename: "Rename project",
+        merge: "Merge into…",
+      },
     },
     leave: {
       title: "Unsaved changes",
       message: "Save your changes to {{title}} before leaving?",
       save: "Save",
       discard: "Discard",
+    },
+    rename: {
+      title: "Rename project",
+      titleLabel: "Title",
+      save: "Rename",
+      saving: "Renaming...",
+      emptyError: "A project needs a title.",
+      duplicateError: "Another project already has this title.",
+      renameFailed: "Unable to rename: {{message}}",
+    },
+    merge: {
+      title: "Merge project",
+      pickTargetLabel: "Merge into",
+      noOtherProjects: "There are no other projects to merge into.",
+      reviewTitle: "This will move",
+      counts: {
+        links: "Links",
+        decisions: "Decisions",
+        rules: "Rules",
+        agents: "Agents",
+        workspaces: "Workspaces",
+      },
+      checkFailed: "Unable to check the merge: {{message}}",
+      mergeFailed: "Unable to merge: {{message}}",
+      confirmTitle: "Merge {{source}} into {{target}}?",
+      confirmMessage:
+        "This moves every link, decision, rule, agent and workspace into {{target}} and removes {{source}}. This cannot be undone.",
+      confirmButton: "Merge",
+      merging: "Merging...",
+      back: "Back",
+      cancel: "Cancel",
     },
   },
   review: {

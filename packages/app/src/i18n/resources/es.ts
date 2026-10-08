@@ -2195,6 +2195,13 @@ export const es: TranslationResources = {
   },
   knowledgeBase: {
     title: "Conocimiento",
+    view: {
+      list: "Lista",
+      graph: "Grafo",
+    },
+    graph: {
+      label: "Grafo de conocimiento",
+    },
     availability: {
       noHostTitle: "Sin host",
       noHostDescription: "Añade un host para explorar su base de conocimiento.",
@@ -2242,12 +2249,48 @@ export const es: TranslationResources = {
       backlinks: "Enlazada desde",
       removedSecrets_one: "Se eliminó {{count}} secreto antes de guardar",
       removedSecrets_other: "Se eliminaron {{count}} secretos antes de guardar",
+      menu: {
+        accessibility: "Acciones del proyecto",
+        rename: "Renombrar proyecto",
+        merge: "Combinar con…",
+      },
     },
     leave: {
       title: "Cambios sin guardar",
       message: "¿Guardar los cambios en {{title}} antes de salir?",
       save: "Guardar",
       discard: "Descartar",
+    },
+    rename: {
+      title: "Renombrar proyecto",
+      titleLabel: "Título",
+      save: "Renombrar",
+      saving: "Renombrando...",
+      emptyError: "Un proyecto necesita un título.",
+      duplicateError: "Otro proyecto ya tiene este título.",
+      renameFailed: "No se puede renombrar: {{message}}",
+    },
+    merge: {
+      title: "Combinar proyecto",
+      pickTargetLabel: "Combinar con",
+      noOtherProjects: "No hay otros proyectos con los que combinar.",
+      reviewTitle: "Esto moverá",
+      counts: {
+        links: "Enlaces",
+        decisions: "Decisiones",
+        rules: "Reglas",
+        agents: "Agentes",
+        workspaces: "Espacios de trabajo",
+      },
+      checkFailed: "No se puede comprobar la combinación: {{message}}",
+      mergeFailed: "No se puede combinar: {{message}}",
+      confirmTitle: "¿Combinar {{source}} con {{target}}?",
+      confirmMessage:
+        "Esto mueve todos los enlaces, decisiones, reglas, agentes y espacios de trabajo a {{target}} y elimina {{source}}. Esta acción no se puede deshacer.",
+      confirmButton: "Combinar",
+      merging: "Combinando...",
+      back: "Atrás",
+      cancel: "Cancelar",
     },
   },
   review: {

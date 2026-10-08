@@ -2166,6 +2166,13 @@ export const ja: TranslationResources = {
   },
   knowledgeBase: {
     title: "ナレッジ",
+    view: {
+      list: "リスト",
+      graph: "グラフ",
+    },
+    graph: {
+      label: "ナレッジグラフ",
+    },
     availability: {
       noHostTitle: "ホストがありません",
       noHostDescription: "ナレッジベースを閲覧するにはホストを追加してください。",
@@ -2213,12 +2220,48 @@ export const ja: TranslationResources = {
       backlinks: "このノートへのリンク元",
       removedSecrets_one: "保存前に {{count}} 件のシークレットを削除しました",
       removedSecrets_other: "保存前に {{count}} 件のシークレットを削除しました",
+      menu: {
+        accessibility: "プロジェクトの操作",
+        rename: "プロジェクト名を変更",
+        merge: "統合先を選ぶ…",
+      },
     },
     leave: {
       title: "未保存の変更",
       message: "移動する前に {{title}} の変更を保存しますか?",
       save: "保存",
       discard: "破棄",
+    },
+    rename: {
+      title: "プロジェクト名を変更",
+      titleLabel: "タイトル",
+      save: "変更",
+      saving: "変更中...",
+      emptyError: "プロジェクトにはタイトルが必要です。",
+      duplicateError: "そのタイトルは別のプロジェクトで使われています。",
+      renameFailed: "名前を変更できません: {{message}}",
+    },
+    merge: {
+      title: "プロジェクトを統合",
+      pickTargetLabel: "統合先",
+      noOtherProjects: "統合できる他のプロジェクトはありません。",
+      reviewTitle: "移動される内容",
+      counts: {
+        links: "リンク",
+        decisions: "決定事項",
+        rules: "ルール",
+        agents: "エージェント",
+        workspaces: "ワークスペース",
+      },
+      checkFailed: "統合内容を確認できません: {{message}}",
+      mergeFailed: "統合できません: {{message}}",
+      confirmTitle: "{{source}} を {{target}} に統合しますか?",
+      confirmMessage:
+        "すべてのリンク、決定事項、ルール、エージェント、ワークスペースが {{target}} に移動し、{{source}} は削除されます。この操作は元に戻せません。",
+      confirmButton: "統合",
+      merging: "統合中...",
+      back: "戻る",
+      cancel: "キャンセル",
     },
   },
   review: {

@@ -2199,6 +2199,13 @@ export const fr: TranslationResources = {
   },
   knowledgeBase: {
     title: "Connaissances",
+    view: {
+      list: "Liste",
+      graph: "Graphe",
+    },
+    graph: {
+      label: "Graphe des connaissances",
+    },
     availability: {
       noHostTitle: "Aucun hôte",
       noHostDescription: "Ajoutez un hôte pour parcourir sa base de connaissances.",
@@ -2246,12 +2253,48 @@ export const fr: TranslationResources = {
       backlinks: "Liée depuis",
       removedSecrets_one: "{{count}} secret retiré avant l'enregistrement",
       removedSecrets_other: "{{count}} secrets retirés avant l'enregistrement",
+      menu: {
+        accessibility: "Actions du projet",
+        rename: "Renommer le projet",
+        merge: "Fusionner avec…",
+      },
     },
     leave: {
       title: "Modifications non enregistrées",
       message: "Enregistrer vos modifications de {{title}} avant de quitter ?",
       save: "Enregistrer",
       discard: "Ignorer",
+    },
+    rename: {
+      title: "Renommer le projet",
+      titleLabel: "Titre",
+      save: "Renommer",
+      saving: "Renommage...",
+      emptyError: "Un projet a besoin d'un titre.",
+      duplicateError: "Un autre projet porte déjà ce titre.",
+      renameFailed: "Impossible de renommer : {{message}}",
+    },
+    merge: {
+      title: "Fusionner le projet",
+      pickTargetLabel: "Fusionner avec",
+      noOtherProjects: "Aucun autre projet avec lequel fusionner.",
+      reviewTitle: "Ceci va déplacer",
+      counts: {
+        links: "Liens",
+        decisions: "Décisions",
+        rules: "Règles",
+        agents: "Agents",
+        workspaces: "Espaces de travail",
+      },
+      checkFailed: "Impossible de vérifier la fusion : {{message}}",
+      mergeFailed: "Impossible de fusionner : {{message}}",
+      confirmTitle: "Fusionner {{source}} avec {{target}} ?",
+      confirmMessage:
+        "Ceci déplace tous les liens, décisions, règles, agents et espaces de travail vers {{target}} et supprime {{source}}. Cette action est irréversible.",
+      confirmButton: "Fusionner",
+      merging: "Fusion en cours...",
+      back: "Retour",
+      cancel: "Annuler",
     },
   },
   review: {

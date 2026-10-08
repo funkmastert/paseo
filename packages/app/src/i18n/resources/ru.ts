@@ -2179,6 +2179,13 @@ export const ru: TranslationResources = {
   },
   knowledgeBase: {
     title: "Знания",
+    view: {
+      list: "Список",
+      graph: "Граф",
+    },
+    graph: {
+      label: "Граф знаний",
+    },
     availability: {
       noHostTitle: "Нет хоста",
       noHostDescription: "Добавьте хост, чтобы просматривать его базу знаний.",
@@ -2225,12 +2232,48 @@ export const ru: TranslationResources = {
       backlinks: "Ссылаются сюда",
       removedSecrets_one: "Перед сохранением удалён {{count}} секрет",
       removedSecrets_other: "Секретов удалено перед сохранением: {{count}}",
+      menu: {
+        accessibility: "Действия с проектом",
+        rename: "Переименовать проект",
+        merge: "Объединить с…",
+      },
     },
     leave: {
       title: "Несохранённые изменения",
       message: "Сохранить изменения в {{title}} перед уходом?",
       save: "Сохранить",
       discard: "Отбросить",
+    },
+    rename: {
+      title: "Переименовать проект",
+      titleLabel: "Название",
+      save: "Переименовать",
+      saving: "Переименование...",
+      emptyError: "У проекта должно быть название.",
+      duplicateError: "Другой проект уже использует это название.",
+      renameFailed: "Не удалось переименовать: {{message}}",
+    },
+    merge: {
+      title: "Объединить проект",
+      pickTargetLabel: "Объединить с",
+      noOtherProjects: "Нет других проектов для объединения.",
+      reviewTitle: "Будет перенесено",
+      counts: {
+        links: "Ссылки",
+        decisions: "Решения",
+        rules: "Правила",
+        agents: "Агенты",
+        workspaces: "Рабочие области",
+      },
+      checkFailed: "Не удалось проверить объединение: {{message}}",
+      mergeFailed: "Не удалось объединить: {{message}}",
+      confirmTitle: "Объединить {{source}} с {{target}}?",
+      confirmMessage:
+        "Все ссылки, решения, правила, агенты и рабочие области переместятся в {{target}}, а {{source}} будет удалён. Это действие нельзя отменить.",
+      confirmButton: "Объединить",
+      merging: "Объединение...",
+      back: "Назад",
+      cancel: "Отмена",
     },
   },
   review: {

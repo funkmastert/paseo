@@ -2157,6 +2157,13 @@ export const ko: TranslationResources = {
   },
   knowledgeBase: {
     title: "지식",
+    view: {
+      list: "목록",
+      graph: "그래프",
+    },
+    graph: {
+      label: "지식 그래프",
+    },
     availability: {
       noHostTitle: "호스트 없음",
       noHostDescription: "호스트를 추가하면 해당 지식 베이스를 볼 수 있습니다.",
@@ -2204,12 +2211,48 @@ export const ko: TranslationResources = {
       backlinks: "이 노트를 링크한 노트",
       removedSecrets_one: "저장하기 전에 비밀 정보 {{count}}개를 제거했습니다",
       removedSecrets_other: "저장하기 전에 비밀 정보 {{count}}개를 제거했습니다",
+      menu: {
+        accessibility: "프로젝트 작업",
+        rename: "프로젝트 이름 변경",
+        merge: "병합 대상 선택…",
+      },
     },
     leave: {
       title: "저장하지 않은 변경 사항",
       message: "나가기 전에 {{title}}의 변경 사항을 저장할까요?",
       save: "저장",
       discard: "버리기",
+    },
+    rename: {
+      title: "프로젝트 이름 변경",
+      titleLabel: "제목",
+      save: "이름 변경",
+      saving: "이름 변경 중...",
+      emptyError: "프로젝트에는 제목이 필요합니다.",
+      duplicateError: "다른 프로젝트가 이미 이 제목을 사용하고 있습니다.",
+      renameFailed: "이름을 변경할 수 없습니다: {{message}}",
+    },
+    merge: {
+      title: "프로젝트 병합",
+      pickTargetLabel: "병합 대상",
+      noOtherProjects: "병합할 다른 프로젝트가 없습니다.",
+      reviewTitle: "다음 항목이 이동됩니다",
+      counts: {
+        links: "링크",
+        decisions: "결정",
+        rules: "규칙",
+        agents: "에이전트",
+        workspaces: "워크스페이스",
+      },
+      checkFailed: "병합 내용을 확인할 수 없습니다: {{message}}",
+      mergeFailed: "병합할 수 없습니다: {{message}}",
+      confirmTitle: "{{source}}을 {{target}}에 병합할까요?",
+      confirmMessage:
+        "모든 링크, 결정, 규칙, 에이전트, 워크스페이스가 {{target}}으로 이동하고 {{source}}은 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
+      confirmButton: "병합",
+      merging: "병합 중...",
+      back: "뒤로",
+      cancel: "취소",
     },
   },
   review: {

@@ -1,6 +1,9 @@
 import { useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type {
+  KnowledgeBaseGraphEdge,
+  KnowledgeBaseGraphNode,
+  KnowledgeBaseMergeCounts,
   KnowledgeBaseNoteGetResponse,
   KnowledgeBaseNoteSummary,
   KnowledgeBaseSearchResult,
@@ -35,6 +38,16 @@ export type KnowledgeNotesLoadState =
   | { kind: "loading" }
   | { kind: "error"; message: string }
   | { kind: "loaded"; notes: readonly KnowledgeBaseNoteSummary[] };
+
+export interface KnowledgeGraphData {
+  nodes: readonly KnowledgeBaseGraphNode[];
+  edges: readonly KnowledgeBaseGraphEdge[];
+}
+
+export type KnowledgeGraphLoadState =
+  | { kind: "loading" }
+  | { kind: "error"; message: string }
+  | { kind: "loaded"; graph: KnowledgeGraphData };
 
 export type KnowledgeNoteLoadState =
   | { kind: "loading" }
@@ -118,6 +131,93 @@ export function useKnowledgeBaseNotes(
   if (query.data) state = { kind: "loaded", notes: query.data };
   else if (query.error) state = { kind: "error", message: knowledgeBaseErrorMessage(query.error) };
   return { state, refetch: retry };
+}
+
+/** The graph (U9, KTD-11): every note, for the Graph view. Polls like the list. */
+export function useKnowledgeBaseGraph(
+  serverId: string | null,
+  enabled: boolean,
+): { state: KnowledgeGraphLoadState; refetch: () => void } {
+  const client = useKnowledgeBaseClient(serverId);
+  const queryFn = useCallback(async (): Promise<KnowledgeGraphData> => {
+    const graph = await requireClient(client).getKnowledgeBaseGraph();
+    return { nodes: graph.nodes, edges: graph.edges };
+  }, [client]);
+  const query = useFetchQuery({
+    queryKey: knowledgeBaseQueryKey(serverId, "graph"),
+    dataShape: "value",
+    staleTimeMs: KNOWLEDGE_BASE_LIST_POLL_MS,
+    queryFn,
+    enabled: enabled && Boolean(client),
+    refetchInterval: KNOWLEDGE_BASE_LIST_POLL_MS,
+  });
+  const { refetch } = query;
+  const retry = useCallback(() => void refetch(), [refetch]);
+
+  let state: KnowledgeGraphLoadState = { kind: "loading" };
+  if (query.data) state = { kind: "loaded", graph: query.data };
+  else if (query.error) state = { kind: "error", message: knowledgeBaseErrorMessage(query.error) };
+  return { state, refetch: retry };
+}
+
+export interface KnowledgeBaseProjectActions {
+  rename(input: { path: string; title: string }): Promise<{
+    path: string;
+    permalink: string;
+    title: string;
+  }>;
+  mergeDryRun(input: {
+    sourcePath: string;
+    targetPath: string;
+  }): Promise<{ moved: KnowledgeBaseMergeCounts }>;
+  merge(input: { sourcePath: string; targetPath: string }): Promise<{
+    target: { path: string; permalink: string; title: string };
+  }>;
+}
+
+/** Rename and merge (U9, KTD-11): invalidates the note list and every note touched. */
+export function useKnowledgeBaseProjectActions(
+  serverId: string | null,
+): KnowledgeBaseProjectActions {
+  const client = useKnowledgeBaseClient(serverId);
+  const queryClient = useQueryClient();
+  const invalidateNote = useCallback(
+    (path: string) =>
+      queryClient.invalidateQueries({ queryKey: knowledgeBaseQueryKey(serverId, "note", path) }),
+    [queryClient, serverId],
+  );
+  const invalidateLists = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: knowledgeBaseQueryKey(serverId, "notes") });
+    void queryClient.invalidateQueries({ queryKey: knowledgeBaseQueryKey(serverId, "graph") });
+  }, [queryClient, serverId]);
+  return useMemo<KnowledgeBaseProjectActions>(
+    () => ({
+      async rename(input) {
+        const result = await requireClient(client).renameKnowledgeBaseProject(input);
+        invalidateLists();
+        void invalidateNote(input.path);
+        return result;
+      },
+      async mergeDryRun(input) {
+        const result = await requireClient(client).mergeKnowledgeBaseProjects({
+          ...input,
+          dryRun: true,
+        });
+        return { moved: result.moved };
+      },
+      async merge(input) {
+        const result = await requireClient(client).mergeKnowledgeBaseProjects({
+          ...input,
+          dryRun: false,
+        });
+        invalidateLists();
+        void invalidateNote(input.sourcePath);
+        void invalidateNote(input.targetPath);
+        return { target: result.target };
+      },
+    }),
+    [client, invalidateLists, invalidateNote],
+  );
 }
 
 async function readNote(
