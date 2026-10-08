@@ -177,7 +177,8 @@ export async function resolveBasicMemoryExecutable(
   return null;
 }
 
-function defaultFallbackBinDirs(): string[] {
+/** Where `uv tool install` puts its shims. Used when a bare command name isn't on PATH. */
+export function defaultFallbackBinDirs(): string[] {
   return [path.join(os.homedir(), ".local", "bin")];
 }
 

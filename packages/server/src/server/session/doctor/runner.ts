@@ -4,6 +4,7 @@ import { buildCheck } from "./build.js";
 import { configCheck } from "./config.js";
 import { finding, type DoctorCheck, type DoctorContext } from "./context.js";
 import { diskCheck } from "./disk.js";
+import { knowledgeBaseCheck } from "./knowledge-base.js";
 import { mcpGatewayCheck } from "./mcp-gateway.js";
 import { pluginCheck } from "./plugins.js";
 import { saturationCheck } from "./saturation.js";
@@ -22,6 +23,7 @@ export const DOCTOR_CHECKS: readonly DoctorCheck[] = [
   diskCheck,
   saturationCheck,
   worktreeCheck,
+  knowledgeBaseCheck,
 ];
 
 function timeoutFor(check: DoctorCheck, ctx: DoctorContext): number {

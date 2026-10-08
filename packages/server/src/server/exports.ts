@@ -115,3 +115,11 @@ export {
   runTokenAudit,
   type TokenAuditRow,
 } from "./session/doctor/index.js";
+
+// `paseo kb setup` (docs/knowledge-base.md, KTD-4): finds `uv`, installs the pinned Basic Memory
+// release, and resolves the installed binary. The daemon never installs software.
+export {
+  BASIC_MEMORY_VERSION,
+  defaultFallbackBinDirs as basicMemoryDefaultFallbackBinDirs,
+  resolveBasicMemoryExecutable,
+} from "./knowledge-base/basic-memory-sidecar.js";
