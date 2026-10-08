@@ -196,6 +196,11 @@ import {
 } from "./session/usage-history/usage-history-session.js";
 import type { UsageHistoryStore } from "./usage-history/usage-history-store.js";
 import {
+  createKnowledgeBaseSession,
+  type KnowledgeBaseBackend,
+  type KnowledgeBaseSession,
+} from "./session/knowledge-base/knowledge-base-session.js";
+import {
   createContextUsageSession,
   type ContextUsageSession,
 } from "./session/context-usage/context-usage-session.js";
@@ -581,6 +586,9 @@ export interface SessionOptions {
   usageHistory?: UsageHistoryStore;
   contextUsage?: AgentContextUsageService;
   jev?: JevService | null;
+  /** The `kb.*` RPCs' backend (docs/knowledge-base.md). Always passed; `isEnabled()` follows
+   *  config reloads, so `kb.status` works even while the feature is off. */
+  knowledgeBase?: KnowledgeBaseBackend | null;
   hubExecutionAgents?: HubExecutionAgents;
   hubRelationships?: HubRelationshipManagement;
   serviceProxy?: ServiceProxySubsystem;
@@ -841,6 +849,7 @@ export class Session {
   private readonly usageHistorySession: UsageHistorySession | null;
   private readonly contextUsageSession: ContextUsageSession | null;
   private readonly jevSession: JevSession | null;
+  private readonly knowledgeBaseSession: KnowledgeBaseSession;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
   private readonly agentConfigSession: AgentConfigSession;
   private readonly projectConfigSession: ProjectConfigSession;
@@ -897,6 +906,7 @@ export class Session {
       usageHistory,
       contextUsage,
       jev,
+      knowledgeBase,
       serviceProxy,
       scriptRuntimeStore,
       workspaceSetupSnapshots,
@@ -1054,6 +1064,11 @@ export class Session {
       host: { emit: (msg) => this.emit(msg) },
       store: usageHistory,
       logger: this.sessionLogger,
+    });
+    this.knowledgeBaseSession = createKnowledgeBaseSession({
+      host: { emit: (msg) => this.emit(msg) },
+      logger: this.sessionLogger,
+      backend: knowledgeBase,
     });
     this.contextUsageSession = createContextUsageSession({
       host: { emit: (msg) => this.emit(msg) },
@@ -2249,6 +2264,7 @@ export class Session {
       this.dispatchWorkspaceLifecycleMessage(msg) ??
       this.dispatchWorkspaceFileMessage(msg, source) ??
       this.dispatchProviderMessage(msg) ??
+      this.dispatchKnowledgeBaseMessage(msg) ??
       this.dispatchUsageMessage(msg) ??
       this.dispatchOrchestrationSkillsMessage(msg) ??
       this.dispatchPluginDirectoryMessage(msg) ??
@@ -2294,6 +2310,30 @@ export class Session {
       this.dispatchWorkspaceSetupMessage(msg) ??
       this.dispatchWorkspaceAndProjectMessage(msg)
     );
+  }
+
+  /** The `kb.*` RPCs (docs/knowledge-base.md, KTD-12). */
+  private dispatchKnowledgeBaseMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "kb.status.request":
+        return this.knowledgeBaseSession.handleStatus(msg);
+      case "kb.notes.list.request":
+        return this.knowledgeBaseSession.handleNotesList(msg);
+      case "kb.note.get.request":
+        return this.knowledgeBaseSession.handleNoteGet(msg);
+      case "kb.note.write.request":
+        return this.knowledgeBaseSession.handleNoteWrite(msg);
+      case "kb.search.request":
+        return this.knowledgeBaseSession.handleSearch(msg);
+      case "kb.graph.get.request":
+        return this.knowledgeBaseSession.handleGraphGet(msg);
+      case "kb.project.rename.request":
+        return this.knowledgeBaseSession.handleProjectRename(msg);
+      case "kb.project.merge.request":
+        return this.knowledgeBaseSession.handleProjectMerge(msg);
+      default:
+        return undefined;
+    }
   }
 
   /** Usage reads: the accounts' usage history, an agent's context breakdown, and JEV. */

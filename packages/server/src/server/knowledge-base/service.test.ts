@@ -701,6 +701,7 @@ describe("rename and merge", () => {
       modifiedAt: expect.any(Number),
       linkCount: 0,
       decisionCount: 0,
+      aliases: ["Checkout redesign"],
     });
     expect(await projectFiles()).toEqual(["checkout-revamp.md"]);
     const note = await readNote("projects/checkout-revamp.md");
@@ -906,6 +907,7 @@ describe("the kb.* backend", () => {
         modifiedAt: expect.any(Number),
         linkCount: 1,
         decisionCount: 1,
+        aliases: [],
       },
       {
         path: "scratch/ideas.md",
@@ -915,6 +917,7 @@ describe("the kb.* backend", () => {
         modifiedAt: expect.any(Number),
         linkCount: 0,
         decisionCount: 0,
+        aliases: [],
       },
     ]);
   });

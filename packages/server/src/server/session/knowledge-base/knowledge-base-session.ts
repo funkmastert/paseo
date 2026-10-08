@@ -7,6 +7,7 @@ import type {
   KnowledgeBaseSearchResult,
   KnowledgeBaseSidecarStatus,
 } from "@getpaseo/protocol/knowledge-base/rpc-schemas";
+import { BasicMemorySearchError } from "../../knowledge-base/basic-memory-client.js";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
 
 /**
@@ -107,6 +108,20 @@ const DISABLED_STATUS: KnowledgeBaseBackendStatus = {
   setupHint: "Add a knowledgeBase section to config.json and reload. See docs/knowledge-base.md.",
 };
 
+/**
+ * `KnowledgeBaseService` (U5, knowledge-base/service.ts) throws two more domain errors this
+ * session maps to an `rpc_error` code. Matched by `error.name` rather than `instanceof` so this
+ * module does not import the service module: the service already imports from here (it
+ * implements `KnowledgeBaseBackend` and throws the two conflict/unavailable errors below), and a
+ * reverse import would make the two files circular.
+ */
+const PROJECT_EXISTS_ERROR_NAME = "KnowledgeProjectExistsError";
+const INVALID_REQUEST_ERROR_NAME = "InvalidKnowledgeRequestError";
+
+function errorNamed(error: unknown, name: string): error is Error {
+  return error instanceof Error && error.name === name;
+}
+
 interface KnowledgeBaseSessionLogger {
   warn: (obj: object, msg?: string) => void;
 }
@@ -114,8 +129,10 @@ interface KnowledgeBaseSessionLogger {
 export interface KnowledgeBaseSessionOptions {
   host: { emit: (message: SessionOutboundMessage) => void };
   logger: KnowledgeBaseSessionLogger;
-  /** Null while the daemon has not wired the service (defensive; bootstrap always wires one). */
-  backend: KnowledgeBaseBackend | null;
+  /** Absent or null while the daemon has not wired the service (defensive; bootstrap always
+   *  wires one). Accepts `undefined` too so callers can pass an optional field straight through
+   *  without an inline `?? null` at the call site. */
+  backend: KnowledgeBaseBackend | null | undefined;
 }
 
 type DisableableRequestType = Exclude<
@@ -131,7 +148,7 @@ export class KnowledgeBaseSession {
   constructor(options: KnowledgeBaseSessionOptions) {
     this.host = options.host;
     this.logger = options.logger;
-    this.backend = options.backend;
+    this.backend = options.backend ?? null;
   }
 
   async handleStatus(
@@ -216,6 +233,14 @@ export class KnowledgeBaseSession {
           this.emitError(msg, "search_unavailable", error.message);
           return;
         }
+        // The service already turns a BasicMemorySearchError coded "search_unavailable" into
+        // KnowledgeBaseSearchUnavailableError above; "search_timeout" reaches here unwrapped
+        // because it is still a real search, just one that ran out of time (BASIC_MEMORY_SEARCH_
+        // TIMEOUT_MS), so it gets the same wire code rather than the generic failure below.
+        if (error instanceof BasicMemorySearchError && error.code === "search_timeout") {
+          this.emitError(msg, "search_unavailable", error.message);
+          return;
+        }
         throw error;
       }
     });
@@ -279,8 +304,9 @@ export class KnowledgeBaseSession {
     });
   }
 
-  /** Runs `fn` with `this.backend`, answering `rpc_error` code `"disabled"` when it is null, and
-   *  logging plus answering a generic failure for anything `fn` does not translate itself. */
+  /** Runs `fn` with `this.backend`, answering `rpc_error` code `"disabled"` when it is null, the
+   *  two service-level errors below their own code, and logging plus answering a generic failure
+   *  for anything else `fn` does not translate itself. */
   private async withBackend(
     msg: Extract<SessionInboundMessage, { type: DisableableRequestType }>,
     fn: (backend: KnowledgeBaseBackend) => Promise<void>,
@@ -292,6 +318,14 @@ export class KnowledgeBaseSession {
     try {
       await fn(this.backend);
     } catch (error) {
+      if (errorNamed(error, PROJECT_EXISTS_ERROR_NAME)) {
+        this.emitError(msg, "conflict", error.message);
+        return;
+      }
+      if (errorNamed(error, INVALID_REQUEST_ERROR_NAME)) {
+        this.emitError(msg, "invalid_request", error.message);
+        return;
+      }
       const err = error instanceof Error ? error : new Error(String(error));
       this.logger.warn({ err, type: msg.type }, "kb request failed");
       this.emitError(msg, "kb_operation_failed", err.message);

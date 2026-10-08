@@ -45,6 +45,13 @@ export const KnowledgeBaseNoteSummarySchema = z.object({
   modifiedAt: z.number(),
   linkCount: z.number().int().nonnegative(),
   decisionCount: z.number().int().nonnegative(),
+  /**
+   * The note's frontmatter `aliases` (a prior title, after a rename). Optional so a host still
+   * sending the old shape keeps parsing; absent means "none known," same as an empty array. The
+   * app's list filters by title and alias while Basic Memory is down, so a renamed project stays
+   * findable by its old name.
+   */
+  aliases: z.array(z.string()).optional(),
 });
 
 export const KnowledgeBaseBacklinkSchema = z.object({

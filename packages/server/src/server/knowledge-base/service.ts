@@ -1077,6 +1077,9 @@ function sidecarSetupHint(status: BasicMemorySidecarStatus): string | null {
 function describeNote(notePath: string, content: string, modifiedAt: number): DescribedNote {
   const stem = notePath.slice(0, -".md".length);
   const doc = parseNoteOrNull(content);
+  // A prior title, after a rename (note-format's renameNote). The app's list filters by title
+  // and alias while Basic Memory is down, so a renamed project stays findable by its old name.
+  const aliases = doc ? getFrontmatterList(doc, "aliases") : [];
   const summary: KnowledgeBaseBackendNoteSummary = {
     path: notePath,
     permalink: (doc && getFrontmatterScalar(doc, "permalink")) ?? stem,
@@ -1085,11 +1088,12 @@ function describeNote(notePath: string, content: string, modifiedAt: number): De
     modifiedAt,
     linkCount: doc ? countObservations(doc, "Links") : 0,
     decisionCount: doc ? countObservations(doc, "Decisions") : 0,
+    aliases,
   };
   const outgoing = Array.from(new Set(extractWikiLinkTargets(content))).filter(
     (target) => target.length > 0,
   );
-  return { summary, content, aliases: doc ? getFrontmatterList(doc, "aliases") : [], outgoing };
+  return { summary, content, aliases, outgoing };
 }
 
 function parseNoteOrNull(content: string): NoteDocument | null {

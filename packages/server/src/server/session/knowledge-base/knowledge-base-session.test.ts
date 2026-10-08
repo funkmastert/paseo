@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { BasicMemorySearchError } from "../../knowledge-base/basic-memory-client.js";
+import {
+  InvalidKnowledgeRequestError,
+  KnowledgeProjectExistsError,
+} from "../../knowledge-base/service.js";
 import type { SessionOutboundMessage } from "../../messages.js";
 import {
   type KnowledgeBaseBackend,
@@ -245,6 +250,34 @@ describe("KnowledgeBaseSession", () => {
         payload: { code: "search_unavailable" },
       });
     });
+
+    it("also answers search_unavailable when the search client times out", async () => {
+      const backend = fakeBackend({
+        search: async () => {
+          throw new BasicMemorySearchError("search_timeout", "Basic Memory search timed out");
+        },
+      });
+      const { session, emitted } = createSession(backend);
+      await session.handleSearch({ type: "kb.search.request", requestId: "r1", query: "x" });
+      expect(emitted[0]).toMatchObject({
+        type: "rpc_error",
+        payload: { code: "search_unavailable" },
+      });
+    });
+
+    it("does not translate other search-client failures", async () => {
+      const backend = fakeBackend({
+        search: async () => {
+          throw new BasicMemorySearchError("search_failed", "Basic Memory returned a bad shape");
+        },
+      });
+      const { session, emitted } = createSession(backend);
+      await session.handleSearch({ type: "kb.search.request", requestId: "r1", query: "x" });
+      expect(emitted[0]).toMatchObject({
+        type: "rpc_error",
+        payload: { code: "kb_operation_failed" },
+      });
+    });
   });
 
   describe("kb.graph.get", () => {
@@ -283,6 +316,38 @@ describe("KnowledgeBaseSession", () => {
       });
       expect(emitted[0]).toMatchObject({ type: "rpc_error", payload: { code: "not_found" } });
     });
+
+    it("answers conflict when the new title collides with an existing project", async () => {
+      const backend = fakeBackend({
+        rename: async () => {
+          throw new KnowledgeProjectExistsError("checkout-redesign-v2");
+        },
+      });
+      const { session, emitted } = createSession(backend);
+      await session.handleProjectRename({
+        type: "kb.project.rename.request",
+        requestId: "r1",
+        path: NOTE.path,
+        title: "Checkout redesign v2",
+      });
+      expect(emitted[0]).toMatchObject({ type: "rpc_error", payload: { code: "conflict" } });
+    });
+
+    it("answers invalid_request for an empty title", async () => {
+      const backend = fakeBackend({
+        rename: async () => {
+          throw new InvalidKnowledgeRequestError("A project needs a title.");
+        },
+      });
+      const { session, emitted } = createSession(backend);
+      await session.handleProjectRename({
+        type: "kb.project.rename.request",
+        requestId: "r1",
+        path: NOTE.path,
+        title: "",
+      });
+      expect(emitted[0]).toMatchObject({ type: "rpc_error", payload: { code: "invalid_request" } });
+    });
   });
 
   describe("kb.project.merge", () => {
@@ -315,6 +380,23 @@ describe("KnowledgeBaseSession", () => {
         dryRun: false,
       });
       expect(emitted[0]).toMatchObject({ type: "rpc_error", payload: { code: "not_found" } });
+    });
+
+    it("answers invalid_request for a self-merge", async () => {
+      const backend = fakeBackend({
+        merge: async () => {
+          throw new InvalidKnowledgeRequestError("A project cannot be merged into itself.");
+        },
+      });
+      const { session, emitted } = createSession(backend);
+      await session.handleProjectMerge({
+        type: "kb.project.merge.request",
+        requestId: "r1",
+        sourcePath: "projects/a.md",
+        targetPath: "projects/a.md",
+        dryRun: false,
+      });
+      expect(emitted[0]).toMatchObject({ type: "rpc_error", payload: { code: "invalid_request" } });
     });
   });
 

@@ -91,6 +91,41 @@ describe("kb.notes.list", () => {
       }).payload.notes,
     ).toEqual([note]);
   });
+
+  it("round-trips a note's aliases when present", () => {
+    const withAliases = {
+      path: "projects/checkout-revamp.md",
+      permalink: "projects/checkout-revamp",
+      title: "Checkout revamp",
+      noteType: "project",
+      modifiedAt: 1700000000000,
+      linkCount: 0,
+      decisionCount: 0,
+      aliases: ["Checkout redesign"],
+    };
+    const parsed = KnowledgeBaseNotesListResponseSchema.parse({
+      type: "kb.notes.list.response",
+      payload: { requestId: "r1", notes: [withAliases] },
+    }).payload.notes[0];
+    expect(parsed).toEqual(withAliases);
+  });
+
+  it("leaves aliases undefined when the note carries none", () => {
+    const noAliases = {
+      path: "inbox.md",
+      permalink: "inbox",
+      title: "Inbox",
+      noteType: "inbox",
+      modifiedAt: 1700000000000,
+      linkCount: 0,
+      decisionCount: 0,
+    };
+    const parsed = KnowledgeBaseNotesListResponseSchema.parse({
+      type: "kb.notes.list.response",
+      payload: { requestId: "r1", notes: [noAliases] },
+    }).payload.notes[0];
+    expect(parsed?.aliases).toBeUndefined();
+  });
 });
 
 describe("kb.note.get", () => {
