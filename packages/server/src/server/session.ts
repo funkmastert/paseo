@@ -300,6 +300,7 @@ import {
 import { runGitCommand } from "../utils/run-git-command.js";
 import { CreateAgentLifecycleDispatch } from "./agent/create-agent-lifecycle-dispatch.js";
 import { resolveWorktreeSourceCwd } from "./workspace-source.js";
+import { captureLinksFromPrompt } from "./knowledge-base/link-capture.js";
 
 type ProviderSubagentManagerEvent = Extract<
   AgentManagerEvent,
@@ -4054,6 +4055,7 @@ export class Session {
         logger: this.sessionLogger,
       });
       this.recordHumanPrompt(delivered.agentId, messageId ?? null);
+      captureLinksFromPrompt(delivered.agentId, prompt, this.sessionLogger);
       return { ok: true };
     } catch (error) {
       this.handleAgentRunError(agentId, error, "Failed to send agent message");
@@ -8292,6 +8294,7 @@ export class Session {
         await send();
       }
       this.recordHumanPrompt(agentId, msg.messageId ?? null);
+      captureLinksFromPrompt(agentId, prompt, this.sessionLogger);
 
       this.emit({
         type: "send_agent_message_response",
