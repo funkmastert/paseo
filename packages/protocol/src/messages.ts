@@ -74,6 +74,10 @@ import {
   UsageHistoryGetResponseSchema,
 } from "./usage-history/rpc-schemas.js";
 import {
+  TokenUsageGetBreakdownRequestSchema,
+  TokenUsageGetBreakdownResponseSchema,
+} from "./token-usage/rpc-schemas.js";
+import {
   RestartRecoveryGetPlanRequestSchema,
   RestartRecoveryApplyRequestSchema,
   RestartRecoveryDismissRequestSchema,
@@ -3907,6 +3911,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ProviderDiagnosticRequestMessageSchema,
   ProviderUsageListRequestMessageSchema,
   UsageHistoryGetRequestSchema,
+  TokenUsageGetBreakdownRequestSchema,
   AgentContextUsageReadRequestSchema,
   JevDecideRequestSchema,
   JevStatusRequestSchema,
@@ -4380,6 +4385,9 @@ export const ServerInfoStatusPayloadSchema = z
         deviceLeases: z.boolean().optional(),
         // COMPAT(usageHistory): added in v0.8.2, remove gate after 2027-09-23.
         usageHistory: z.boolean().optional(),
+        // COMPAT(tokenUsage): added in v0.8.x, remove gate after 2027-10-07. Token usage by model
+        // and role from transcripts (docs/token-usage.md).
+        tokenUsage: z.boolean().optional(),
         // COMPAT(agentContextUsage): added in v0.8.2, remove gate after 2027-09-24.
         agentContextUsage: z.boolean().optional(),
         // COMPAT(jev): added in v0.8.x, remove gate after 2027-03-28.
@@ -7710,6 +7718,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ProviderDiagnosticResponseMessageSchema,
   ProviderUsageListResponseMessageSchema,
   UsageHistoryGetResponseSchema,
+  TokenUsageGetBreakdownResponseSchema,
   AgentContextUsageReadResponseSchema,
   JevDecideResponseSchema,
   JevStatusResponseSchema,
