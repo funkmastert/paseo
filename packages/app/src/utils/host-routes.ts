@@ -432,6 +432,10 @@ export function buildAskJevRoute() {
   return "/ask-jev" as const;
 }
 
+export function buildTokenUsageRoute() {
+  return "/tokens" as const;
+}
+
 /** JEV belongs to a host, not a workspace (docs/jev.md, "The JEV dashboard"). */
 export function buildJevDashboardRoute(serverId?: string, agentId?: string) {
   const params = new URLSearchParams();

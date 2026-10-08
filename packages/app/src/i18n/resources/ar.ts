@@ -1163,6 +1163,7 @@ export const ar: TranslationResources = {
       schedules: "الجداول",
       askJev: "اسأل JEV",
       jevDashboard: "لوحة تحكم JEV",
+      tokenUsage: "الرموز",
     },
     worktreeSetup: {
       title: "إعداد البرامج النصية لشجرة العمل",
@@ -2053,23 +2054,33 @@ export const ar: TranslationResources = {
     },
   },
   mcpStatus: {
-    collapsedSummary: {
-      healthy: "خوادم MCP متصلة",
-      issues: "مشاكل MCP: {{names}}",
+    headline: {
+      needsSignIn: "{{name}} يتطلب تسجيل الدخول",
+      needsAttention: "{{name}} يحتاج إلى انتباه",
+      manyNeedAttention_one: "{{count}} خادم MCP يحتاج إلى انتباه",
+      manyNeedAttention_other: "{{count}} خوادم MCP تحتاج إلى انتباه",
+      connected_one: "{{count}} خادم MCP متصل",
+      connected_other: "{{count}} خوادم MCP متصلة",
     },
     status: {
       connected: "متصل",
       connecting: "جاري الاتصال",
-      needsAuth: "يتطلب المصادقة",
+      needsAuth: "يتطلب تسجيل الدخول",
       error: "خطأ",
       disabled: "معطل",
       sessionReported: "مشكلة في الجلسة",
-      claudeAiConnector: "سجّل الدخول لكل حساب Claude",
+      claudeAiConnector: "موصل claude.ai",
     },
-    authAction: "المصادقة",
-    reauthAction: "إعادة المصادقة",
+    authAction: "تسجيل الدخول",
+    reauthAction: "تسجيل الدخول مجددًا",
     adoptAction: "التوسيط وتسجيل الدخول",
-    openClaudeAiAction: "افتح claude.ai",
+    hideAction: "إخفاء",
+    unhideAction: "إظهار",
+    copyAction: "نسخ",
+    more: "المزيد",
+    less: "أقل",
+    connectedGroup: "{{count}} متصل",
+    hiddenGroup: "{{count}} مخفي",
     authError: "فشلت المصادقة: {{error}}",
     failure: {
       gatewayDisabled: "بوابة MCP معطلة على هذا المضيف.",
@@ -2142,6 +2153,10 @@ export const ar: TranslationResources = {
     jevDryRun: "تشغيل تجريبي",
     jevOlder: "{{count}} أقدم",
     jevAllActivity: "كل نشاط JEV",
+  },
+  tokenUsage: {
+    byModelTitle: "الرموز حسب النموذج",
+    byRoleTitle: "الرموز حسب الدور",
   },
   review: {
     comment: {

@@ -1175,6 +1175,7 @@ export const ja: TranslationResources = {
       schedules: "スケジュール",
       askJev: "JEV に質問",
       jevDashboard: "JEV ダッシュボード",
+      tokenUsage: "トークン",
     },
     worktreeSetup: {
       title: "ワークツリースクリプトを設定",
@@ -2072,23 +2073,33 @@ export const ja: TranslationResources = {
     },
   },
   mcpStatus: {
-    collapsedSummary: {
-      healthy: "MCPサーバーは接続済み",
-      issues: "MCPの問題: {{names}}",
+    headline: {
+      needsSignIn: "{{name}} はサインインが必要です",
+      needsAttention: "{{name}} は対応が必要です",
+      manyNeedAttention_one: "{{count}} 件の MCP サーバーに対応が必要です",
+      manyNeedAttention_other: "{{count}} 件の MCP サーバーに対応が必要です",
+      connected_one: "{{count}} 件の MCP サーバーが接続済み",
+      connected_other: "{{count}} 件の MCP サーバーが接続済み",
     },
     status: {
       connected: "接続済み",
       connecting: "接続中",
-      needsAuth: "認証が必要",
+      needsAuth: "サインインが必要",
       error: "エラー",
       disabled: "無効",
       sessionReported: "セッションの問題",
-      claudeAiConnector: "Claude アカウントごとにサインイン",
+      claudeAiConnector: "claude.ai コネクタ",
     },
-    authAction: "認証する",
-    reauthAction: "再認証する",
+    authAction: "サインイン",
+    reauthAction: "再度サインイン",
     adoptAction: "中継して認証する",
-    openClaudeAiAction: "claude.ai を開く",
+    hideAction: "非表示",
+    unhideAction: "表示",
+    copyAction: "コピー",
+    more: "もっと見る",
+    less: "閉じる",
+    connectedGroup: "接続済み {{count}} 件",
+    hiddenGroup: "非表示 {{count}} 件",
     authError: "認証に失敗しました: {{error}}",
     failure: {
       gatewayDisabled: "このホストでは MCP ゲートウェイが無効です。",
@@ -2162,6 +2173,10 @@ export const ja: TranslationResources = {
     jevDryRun: "ドライラン",
     jevOlder: "ほか {{count}} 件",
     jevAllActivity: "すべての JEV アクティビティ",
+  },
+  tokenUsage: {
+    byModelTitle: "モデル別トークン",
+    byRoleTitle: "ロール別トークン",
   },
   review: {
     comment: {

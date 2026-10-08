@@ -2,9 +2,63 @@ import type { TFunction } from "i18next";
 import { showsReporterProvenance } from "./mcp-status-strip-model";
 import type {
   McpStatusActionFailure,
+  McpStatusHeadline,
   McpStatusRow,
   McpStatusRowAnnotation,
 } from "./mcp-status-strip-model";
+
+/** The strip's header line. Which of these applies is the model's call (`deriveHeadline`). */
+export function headlineText(t: TFunction, headline: McpStatusHeadline): string {
+  switch (headline.kind) {
+    case "needsSignIn":
+      return t("mcpStatus.headline.needsSignIn", { name: headline.name });
+    case "needsAttention":
+      return t("mcpStatus.headline.needsAttention", { name: headline.name });
+    case "manyNeedAttention":
+      return t("mcpStatus.headline.manyNeedAttention", { count: headline.count });
+    case "connected":
+      return t("mcpStatus.headline.connected", { count: headline.count });
+  }
+}
+
+/** The row's status, then who reported it when that says something ("… · on claude-2"). */
+export function statusText(t: TFunction, row: McpStatusRow): string {
+  const status = t(`mcpStatus.status.${row.statusKey}`);
+  const reporters = reportedByText(t, row);
+  return reporters ? `${status} · ${reporters}` : status;
+}
+
+/**
+ * A connected-group row's trailing status, or nothing when it is plain "Connected": nine of those
+ * in a column repeat what the green dots already say. Reporters keep it, because on a server the
+ * gateway calls healthy they are the only sign of trouble.
+ */
+export function compactStatusText(t: TFunction, row: McpStatusRow): string | null {
+  if (row.statusKey === "connected" && !reportedByText(t, row)) {
+    return null;
+  }
+  return statusText(t, row);
+}
+
+/**
+ * The line under a row's name: what went wrong when something has, otherwise the status. Never
+ * both — "Needs sign-in" over "Sign-in failed: …" says the same thing twice.
+ */
+export function secondLineText(t: TFunction, row: McpStatusRow): string {
+  return row.failure ? failureText(t, row, row.failure) : statusText(t, row);
+}
+
+/** The row's button label. Every path that ends in a browser sign-in is called one. */
+export function actionLabelText(t: TFunction, row: McpStatusRow): string {
+  switch (row.action) {
+    case "adopt":
+      return t("mcpStatus.adoptAction");
+    case "openClaudeAi":
+      return t("mcpStatus.authAction");
+    default:
+      return t(row.statusKey === "error" ? "mcpStatus.reauthAction" : "mcpStatus.authAction");
+  }
+}
 
 /**
  * Who is affected, or nothing when saying so adds nothing (`showsReporterProvenance`). When

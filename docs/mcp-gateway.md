@@ -33,7 +33,7 @@ Add an `mcpGateway` section to the daemon config (`~/.paseo/config.json`):
 ```
 
 - `transport`: `http` (streamable HTTP) or `sse`.
-- `critical`: critical-tier servers get named in the collapsed strip when unhealthy and fire an immediate push notification on auth loss or unavailability. Non-critical servers change strip state only.
+- `critical`: critical-tier servers decide the strip's tone first when unhealthy, sort first among its problems, and fire an immediate push notification on auth loss or unavailability. Non-critical servers change strip state only.
 - `auth`: `oauth` (default) or `static`. Secrets never go in this config — it is broadcast to every connected client. Static header values live in the private token store (below).
 - `sessionMode`: `overlay` (default) or `strict`. How brokered entries meet the CLI's own MCP loading; see Session injection.
 - `localServers`: stdio servers the daemon runs itself; see Local servers.
@@ -43,7 +43,7 @@ When the gateway is disabled or unconfigured, nothing is constructed and session
 
 ## Auth flow
 
-1. The strip shows a server as needs-auth. Press its auth button.
+1. The strip shows a server as needing sign-in. Press its **Sign in** button.
 2. The client calls `mcp_gateway.auth.start` and opens the returned authorization URL externally.
 3. The provider redirects to `/mcp/gateway/oauth/callback` on the daemon's reachable base URL. The daemon exchanges the code (PKCE, single-use state), persists tokens, reconnects upstream, and broadcasts `mcp_status_update` — running sessions' next tool call succeeds.
 
@@ -76,7 +76,7 @@ Omit `clientSecret` for a public client. Register the app's redirect URI as the 
 
 Both fields are ignored by daemons older than this feature, and such a daemon rewrites the file without them the next time it saves a token, so upgrade the daemon before you add them.
 
-You do not have to derive any of this: sign-in fails with `client_not_registered`, and the strip shows the exact redirect URI, the resolved path of this file, and the JSON to add, with a copy button — it is the one failure whose whole point is to be read and followed. The daemon re-reads `tokens.json` on every credential lookup, so pressing sign in again picks the record up without a restart.
+You do not have to derive any of this: sign-in fails with `client_not_registered`, and the strip shows, under the row's **More**, the exact redirect URI, the resolved path of this file, and the JSON to add, with **Copy** — it is the one failure whose whole point is to be read and followed. The daemon re-reads `tokens.json` on every credential lookup, so pressing sign in again picks the record up without a restart.
 
 Stored credentials outrank anything a past dynamic registration saved, and the SDK never registers when they are present, so the hand-written record is never overwritten.
 
@@ -119,7 +119,7 @@ Figma is the worked example. [Framelink](https://github.com/GLips/Figma-Context-
 
 ## When an action fails
 
-Both actions the strip offers — **Authenticate** on a brokered server and **Broker & sign in** on a session-reported one — answer with a `reason` beside their `error` sentence. One sentence cannot be both a log line and the thing a person reads, and the strip cannot decide whether the button is still worth offering without knowing the cause. `action-failure.ts` owns one vocabulary for both:
+Both actions the strip offers — **Sign in** on a brokered server and **Broker & sign in** on a session-reported one — answer with a `reason` beside their `error` sentence. One sentence cannot be both a log line and the thing a person reads, and the strip cannot decide whether the button is still worth offering without knowing the cause. `action-failure.ts` owns one vocabulary for both:
 
 | Reason                        | What happened                                            | Can the button help?  |
 | ----------------------------- | -------------------------------------------------------- | --------------------- |
@@ -139,7 +139,9 @@ Both actions the strip offers — **Authenticate** on a brokered server and **Br
 | `server_unreachable`          | The upstream could not be reached                        | Yes                   |
 | `authorization_failed`        | Sign-in itself failed                                    | Yes                   |
 
-Only the last one is authentication. The strip withdraws the action for the "no" rows and shows the reason in its place; it never withdraws one on a reason it does not recognise, so a daemon naming a new cause degrades to "still offered" rather than to a dead row. `server_rejected` and `server_unreachable` stay actionable on purpose: an upstream that is down or refusing now may not be in a minute, and removing the only way to find out is worse than a button that sometimes fails again.
+Only the last one is authentication. The strip withdraws the action for the "no" rows, shows the reason in its place, and offers **Hide** in the button's slot; it never withdraws one on a reason it does not recognise, so a daemon naming a new cause degrades to "still offered" rather than to a dead row. `server_rejected` and `server_unreachable` stay actionable on purpose: an upstream that is down or refusing now may not be in a minute, and removing the only way to find out is worse than a button that sometimes fails again.
+
+Any unhealthy row can be hidden: **Hide** on a row with no action, or from the row's context menu (right-click on desktop, long-press on a phone). A hidden row leaves the header's count and tone and folds under "N hidden", where it can be unhidden. The list is per host and per client — the desktop app and the phone keep their own — and a hidden server that connects again is released, so the next time it breaks the strip says so. Hiding is for a dead end you have accepted, like a claude.ai connector you never use; without it, one permanent amber row makes the strip's dot mean nothing.
 
 A remedy travels as host specifics — `remedyCommand`, `remedyPath`, `remedyRedirectUrl` — never as a composed sentence. The client owns the wording and translates it; the daemon owns the paths and URIs, which no translation should touch. Nothing in a remedy is a secret.
 
@@ -190,7 +192,7 @@ Gate the button on `server_info.features.mcpGatewayAdopt`; an older daemon shows
 
 ### claude.ai connectors
 
-A `claude.ai …` server is a connector on the Claude account, proxied by Anthropic. Its credential is held by claude.ai for that account, never in a file the daemon can read, and no URL exists that the gateway could broker. So each Claude account signs in to each connector separately, on claude.ai, and the daemon cannot do it for you. Their strip rows say "Sign in per Claude account", name the account that reported them, and open claude.ai's connector settings; that is the whole of what Paseo can do. If a service offers both a connector and a plain MCP URL (Notion does), configure the URL in `mcpGateway.servers` and sign in once there instead.
+A `claude.ai …` server is a connector on the Claude account, proxied by Anthropic. Its credential is held by claude.ai for that account, never in a file the daemon can read, and no URL exists that the gateway could broker. So each Claude account signs in to each connector separately, on claude.ai, and the daemon cannot do it for you. Their strip rows say "claude.ai connector", name the account that reported them, and their **Sign in** opens claude.ai's connector settings; that is the whole of what Paseo can do. If a service offers both a connector and a plain MCP URL (Notion does), configure the URL in `mcpGateway.servers` and sign in once there instead.
 
 ## Tokens
 
@@ -236,4 +238,4 @@ The daemon never edits an account's config dir. To stop waiting out the window, 
 
 ### Session-reported statuses
 
-Per-session MCP statuses reported by the SDK at init are captured onto the agent (live-only) and surface in the strip grouped by server: one session-reported row per server name with a reporter count, no auth action, because the daemon holds no credential for that server. When the gateway has no servers of its own, those rows still drive the collapsed summary — it names them rather than reading "connected".
+Per-session MCP statuses reported by the SDK at init are captured onto the agent (live-only) and surface in the strip grouped by server: one session-reported row per server name with a reporter count, no auth action, because the daemon holds no credential for that server. When the gateway has no servers of its own, those rows still drive the header — it counts or names them rather than reading "connected".

@@ -5,6 +5,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mcpStatusQueryKey, useMcpStatus, type McpStatusPayload } from "./use-mcp-status";
+import { useMcpHiddenServersStore } from "./mcp-hidden-servers-store";
+import type { McpStatusServerEntry } from "./mcp-status-strip-model";
 
 const HOST: { serverId: string; label: string } = { serverId: "server-1", label: "Local" };
 
@@ -49,6 +51,37 @@ function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }
 
+/** A wrapper whose cache already holds this host's mcp_status_update snapshot. */
+function wrapperWithServers(servers: McpStatusServerEntry[]) {
+  return function Wrapper({ children }: { children: ReactNode }) {
+    const [queryClient] = React.useState(() => {
+      const client = new QueryClient();
+      const payload: McpStatusPayload = { servers, generatedAt: "2026-10-07T00:00:00.000Z" };
+      client.setQueryData(mcpStatusQueryKey(HOST.serverId), payload);
+      return client;
+    });
+    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  };
+}
+
+function enableMcpStatus(): void {
+  sessionState.current = {
+    sessions: {
+      "server-1": {
+        serverInfo: { features: { mcpStatus: true } },
+        agents: new Map(),
+      },
+    },
+  };
+}
+
+const needsAuth = (name: string): McpStatusServerEntry => ({
+  name,
+  status: "needs-auth",
+  critical: false,
+  lastChangedAt: 1,
+});
+
 describe("useMcpStatus", () => {
   beforeEach(() => {
     sessionState.current = {
@@ -62,6 +95,7 @@ describe("useMcpStatus", () => {
     startMcpGatewayAuthMock.mockReset();
     adoptMcpGatewayServerMock.mockReset();
     openExternalUrlMock.mockClear();
+    useMcpHiddenServersStore.setState({ hiddenByServerId: {} });
   });
 
   it("brokers a session-reported server through the daemon and opens the returned sign-in URL", async () => {
@@ -321,5 +355,82 @@ describe("useMcpStatus", () => {
     });
     expect(result.current.model.rows[0]?.action).toBeUndefined();
     expect(openExternalUrlMock).not.toHaveBeenCalled();
+  });
+
+  it("tracks a pending sign-in per row, so one slow sign-in leaves the others usable", async () => {
+    enableMcpStatus();
+    let finishLinear: (value: unknown) => void = () => undefined;
+    startMcpGatewayAuthMock.mockImplementation((name: string) =>
+      name === "linear"
+        ? new Promise((resolve) => {
+            finishLinear = resolve;
+          })
+        : Promise.resolve({ requestId: "req-n", authorizationUrl: null, error: null }),
+    );
+    const { result } = renderHook(() => useMcpStatus(), {
+      wrapper: wrapperWithServers([needsAuth("linear"), needsAuth("notion")]),
+    });
+
+    let linearDone: Promise<unknown> = Promise.resolve();
+    act(() => {
+      linearDone = result.current.startAuth("linear");
+    });
+    await waitFor(() => expect(result.current.pendingNames.has("linear")).toBe(true));
+    expect(result.current.pendingNames.has("notion")).toBe(false);
+
+    // notion's sign-in runs and finishes while linear's is still out.
+    await act(async () => {
+      await result.current.startAuth("notion");
+    });
+    expect(startMcpGatewayAuthMock).toHaveBeenCalledWith("notion");
+    expect([...result.current.pendingNames]).toEqual(["linear"]);
+
+    await act(async () => {
+      finishLinear({ requestId: "req-l", authorizationUrl: null, error: null });
+      await linearDone;
+    });
+    expect(result.current.pendingNames.size).toBe(0);
+  });
+
+  it("hides a server on this host and unhides it again", async () => {
+    enableMcpStatus();
+    const { result } = renderHook(() => useMcpStatus(), {
+      wrapper: wrapperWithServers([needsAuth("linear"), needsAuth("figma")]),
+    });
+    await waitFor(() => expect(result.current.model.groups.actionable).toHaveLength(2));
+
+    act(() => result.current.hideServer("figma"));
+
+    expect(result.current.model.groups.hidden.map((row) => row.name)).toEqual(["figma"]);
+    expect(result.current.model.collapsed.headline).toEqual({
+      kind: "needsSignIn",
+      name: "linear",
+    });
+    expect(useMcpHiddenServersStore.getState().hiddenByServerId[HOST.serverId]).toEqual(["figma"]);
+
+    act(() => result.current.unhideServer("figma"));
+
+    expect(result.current.model.groups.hidden).toEqual([]);
+    expect(useMcpHiddenServersStore.getState().hiddenByServerId[HOST.serverId]).toEqual([]);
+  });
+
+  it("releases a hidden server once it connects, so its next break shows", async () => {
+    enableMcpStatus();
+    useMcpHiddenServersStore.setState({
+      hiddenByServerId: { [HOST.serverId]: ["zeeq", "figma"] },
+    });
+
+    renderHook(() => useMcpStatus(), {
+      wrapper: wrapperWithServers([
+        { name: "zeeq", status: "connected", critical: false, lastChangedAt: 1 },
+        needsAuth("figma"),
+      ]),
+    });
+
+    await waitFor(() =>
+      expect(useMcpHiddenServersStore.getState().hiddenByServerId[HOST.serverId]).toEqual([
+        "figma",
+      ]),
+    );
   });
 });

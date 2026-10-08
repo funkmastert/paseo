@@ -89,6 +89,7 @@ test.describe("Sidebar items in Appearance settings", () => {
         { key: "history", visible: false },
         { key: "search", visible: true },
         { key: "ask-jev", visible: true },
+        { key: "token-usage", visible: true },
       ]);
 
       await leaveSettings(page);
