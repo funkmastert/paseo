@@ -749,6 +749,7 @@ export const AgentJevSchema = z
         timeoutMs: z.number().optional(),
         applyHard: z.boolean().optional(),
         applyRole: z.boolean().optional(),
+        auditDeclared: z.boolean().optional(),
       })
       .strict()
       .optional(),

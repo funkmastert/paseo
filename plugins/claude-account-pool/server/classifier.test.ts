@@ -387,6 +387,33 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
 
     expect(classifyAgent(input, world({ policy: LIVE_POLICY }))).toEqual(classifyAgent(input, world({ policy: LIVE_POLICY })));
   });
+
+  it("the declared-label audit: a declared label always wins, but wouldBe reads JEV's own answer, not the applied decision", () => {
+    const declaredHard = child({
+      title: "retry loop",
+      initialPrompt: "Implement the retry loop in the fetch helper.",
+      labels: { "paseo.task-class": "hard" },
+    });
+    const hint: ClassifierInput["jevHint"] = {
+      status: "shadow",
+      callId: "call-audit",
+      answers: { taskClass: { choice: "mechanical", confidence: 0.95 }, reasoning: { score: 0.2, confidence: 0.9 } },
+      proposal: { taskClass: "mechanical" },
+      applyHard: true,
+      applyRole: true,
+    };
+
+    const decision = classifyAgent({ ...declaredHard, jevHint: hint }, world({ policy: LIVE_POLICY }));
+
+    // The declared label still decides the real class — `resolveTaskClass` never even looks past it.
+    expect(decision.taskClass).toMatchObject({ taskClass: "hard", source: "declared" });
+    expect(decision.jev?.applied).toBe(false);
+    // `base` is what actually runs (the declared class); `wouldBe` is JEV's own answer, ignoring
+    // the label — if it read "hard" too (the declared-label short circuit, unstripped), the audit
+    // would have nothing to measure.
+    expect(decision.jev?.base?.taskClass).toBe("hard");
+    expect(decision.jev?.wouldBe).toMatchObject({ taskClass: "mechanical", move: "down" });
+  });
 });
 
 describe("classifyAgent — the JEV agent tools' arm", () => {

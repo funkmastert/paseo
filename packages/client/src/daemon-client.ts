@@ -5350,6 +5350,7 @@ export class DaemonClient {
       questions: JevQuestions;
       scope?: { cwd: string; parentAgentId?: string };
       deadlineMs?: number;
+      shadow?: true;
     },
     options?: { requestId?: string; timeout?: number },
   ): Promise<JevDecidePayload> {

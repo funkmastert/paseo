@@ -100,9 +100,24 @@ export interface SpawnHintAvailability {
   shadow: boolean;
   applyHard: boolean;
   applyRole: boolean;
+  /** `agents.jev.spawnHint.auditDeclared`: ask a declared child too, always in shadow. */
+  auditDeclared: boolean;
 }
 
-export type SpawnHintPlan = { ask: false; skip: SpawnHintSkip } | { ask: true; taskClass: boolean; role: boolean };
+export type SpawnHintPlan =
+  | { ask: false; skip: SpawnHintSkip }
+  | {
+      ask: true;
+      taskClass: boolean;
+      role: boolean;
+      /**
+       * A declared `paseo.task-class` label decided this create already; the answer is asked only
+       * to measure it (`agents.jev.spawnHint.auditDeclared`, docs/jev.md "Feature 2") and must
+       * never move the label, model or thinking. `fetchSpawnHint` sends it as `shadow: true` so
+       * the call can never count as a live answer, whatever `spawnHint.shadow` says.
+       */
+      declaredAudit: boolean;
+    };
 
 /** The model and thinking a class would give this create. Two classes that agree cannot be told apart by an answer. */
 function outcomeKey(input: ClassifierInput, world: ClassifierWorld, taskClass: string): string {
@@ -128,7 +143,7 @@ function outcomeKey(input: ClassifierInput, world: ClassifierWorld, taskClass: s
 export function planSpawnHint(
   input: ClassifierInput,
   world: ClassifierWorld,
-  options: { applyRole: boolean },
+  options: { applyRole: boolean; auditDeclared: boolean },
 ): SpawnHintPlan {
   const hasCaller = input.callerAgentId !== undefined && input.callerAgentId !== "";
   if (!hasCaller && !placesRootAsChild(world.policy, input.labels)) {
@@ -145,14 +160,20 @@ export function planSpawnHint(
       : baseline.source === "classified" && baseline.taskClass === "hard"
         ? "hard-seed"
         : null;
+  // The audit only measures a genuine child's own declared label: a schedule-run root create is
+  // placed like a child for role resolution, but it is a person's or a daemon job's own call, not
+  // another agent's, and stays unasked like any other root create.
+  if (fixed === "declared" && options.auditDeclared && hasCaller) {
+    return { ask: true, taskClass: true, role: false, declaredAudit: true };
+  }
   const classMatters =
     fixed === null && new Set(TASK_CLASS_IDS.map((taskClass) => outcomeKey(input, world, taskClass))).size > 1;
   const roleGuessed = hasCaller && resolveRole(world.policy, textInput).tier >= 3;
   if (classMatters) {
-    return { ask: true, taskClass: true, role: roleGuessed };
+    return { ask: true, taskClass: true, role: roleGuessed, declaredAudit: false };
   }
   if (roleGuessed && options.applyRole) {
-    return { ask: true, taskClass: false, role: true };
+    return { ask: true, taskClass: false, role: true, declaredAudit: false };
   }
   return { ask: false, skip: fixed ?? "no-effect" };
 }
@@ -170,20 +191,31 @@ export function spawnHintPreview(
   if (!availability?.active || availability.shadow) {
     return undefined;
   }
-  const plan = planSpawnHint(input, world, { applyRole: availability.applyRole });
-  if (!plan.ask) {
+  const plan = planSpawnHint(input, world, {
+    applyRole: availability.applyRole,
+    auditDeclared: availability.auditDeclared,
+  });
+  // A declared-audit ask never decides anything — the label already did — so the preview says
+  // nothing, the same as any other declared create.
+  if (!plan.ask || plan.declaredAudit) {
     return undefined;
   }
   return { status: "decided-at-create", role: plan.role && availability.applyRole };
 }
 
-/** The state sent: title, the start of the prompt, and who spawned it. */
+/**
+ * The state sent: title, the start of the prompt, who spawned it, and the declared class when
+ * the create already has one (the declared-label audit, docs/jev.md "Feature 2") — the only case
+ * `planSpawnHint` asks with a `paseo.task-class` label present.
+ */
 export function buildSpawnHintState(input: ClassifierInput): Record<string, string> {
   const hasCaller = input.callerAgentId !== undefined && input.callerAgentId !== "";
+  const declaredTaskClass = input.labels?.[TASK_CLASS_LABEL];
   return {
     title: input.title ?? "",
     prompt: (input.initialPrompt ?? "").slice(0, SPAWN_HINT_PROMPT_CHARS),
     spawned_by: hasCaller ? "another agent" : "a person or a daemon job",
+    ...(declaredTaskClass !== undefined ? { declared_task_class: declaredTaskClass } : {}),
   };
 }
 
@@ -388,7 +420,10 @@ async function withinBound<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 export async function fetchSpawnHint(options: FetchSpawnHintOptions): Promise<SpawnHint> {
   try {
     const { input, world, availability, paseo } = options;
-    const plan = planSpawnHint(input, world, { applyRole: availability?.applyRole ?? false });
+    const plan = planSpawnHint(input, world, {
+      applyRole: availability?.applyRole ?? false,
+      auditDeclared: availability?.auditDeclared ?? false,
+    });
     if (!plan.ask) {
       return { status: "not-needed", reason: plan.skip };
     }
@@ -416,6 +451,9 @@ export async function fetchSpawnHint(options: FetchSpawnHintOptions): Promise<Sp
           questions: buildSpawnHintQuestions(world.policy, plan),
           scope: { cwd: options.cwd, ...(hasCaller ? { parentAgentId: input.callerAgentId } : {}) },
           deadlineMs: SPAWN_HINT_DEADLINE_MS,
+          // The declared-label audit must never count as a live answer, whatever
+          // `spawnHint.shadow` says: it can only make the call shadow, never live.
+          ...(plan.declaredAudit ? { shadow: true as const } : {}),
         },
         { timeout: SPAWN_HINT_RPC_TIMEOUT_MS },
       ),

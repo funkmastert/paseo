@@ -116,6 +116,10 @@ describe("resolveJevConfig defaults", () => {
     expect(config.spawnHint.applyRole).toBe(false);
   });
 
+  test("spawnHint auditDeclared defaults on", () => {
+    expect(config.spawnHint.auditDeclared).toBe(true);
+  });
+
   test("agentTools lane defaults", () => {
     expect(config.agentTools.maxConcurrent).toBe(4);
     expect(config.agentTools.maxConcurrentPerCall).toBe(2);

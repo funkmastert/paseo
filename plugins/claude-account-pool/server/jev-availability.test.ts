@@ -35,7 +35,7 @@ function status(overrides: Partial<JevStatus> = {}): JevStatus {
       agentTools: { enabled: true, shadow: false },
     },
     lanes: { control: LANE, agentTools: LANE, interactive: LANE },
-    spawnHint: { applyHard: false, applyRole: false },
+    spawnHint: { applyHard: false, applyRole: false, auditDeclared: false },
     agentTools: SERVED,
     todayByFeature: {},
     last7Days: [],
@@ -44,7 +44,7 @@ function status(overrides: Partial<JevStatus> = {}): JevStatus {
 }
 
 const ON: JevAvailabilitySnapshot = {
-  spawnHint: { active: true, reason: null, shadow: true, applyHard: false, applyRole: false },
+  spawnHint: { active: true, reason: null, shadow: true, applyHard: false, applyRole: false, auditDeclared: false },
   agentTools: { active: true, served: true, assignShare: 0.5 },
 };
 
@@ -78,14 +78,25 @@ describe("snapshotOf", () => {
     const snapshot = snapshotOf(
       status({
         features: { spawnHint: { enabled: true, shadow: false }, agentTools: { enabled: true, shadow: false } },
-        spawnHint: { applyHard: true, applyRole: true },
+        spawnHint: { applyHard: true, applyRole: true, auditDeclared: true },
         agentTools: { assignShare: 7 },
       }),
     );
 
-    expect(snapshot.spawnHint).toMatchObject({ shadow: false, applyHard: true, applyRole: true });
+    expect(snapshot.spawnHint).toMatchObject({
+      shadow: false,
+      applyHard: true,
+      applyRole: true,
+      auditDeclared: true,
+    });
     expect(snapshot.agentTools.assignShare).toBe(1);
     expect(snapshotOf(status({ features: {} })).spawnHint.shadow).toBe(true);
+  });
+
+  it("defaults auditDeclared off when an older daemon omits it", () => {
+    expect(snapshotOf(status({ spawnHint: { applyHard: false, applyRole: false } })).spawnHint.auditDeclared).toBe(
+      false,
+    );
   });
 });
 

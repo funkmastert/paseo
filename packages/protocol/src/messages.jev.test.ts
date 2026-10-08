@@ -37,6 +37,21 @@ describe("jev.decide", () => {
     expect(parsed.type).toBe("jev.decide.request");
   });
 
+  test("accepts the optional shadow flag", () => {
+    const parsed = SessionInboundMessageSchema.parse({
+      type: "jev.decide.request",
+      requestId: "req-1",
+      feature: "spawnHint",
+      callSite: "classifier.spawn-hint",
+      state: { title: "Fix the parser", prompt: "Rename the field", spawned_by: "a person" },
+      questions,
+      scope: { cwd: "/repo" },
+      shadow: true,
+    }) as { shadow?: true };
+
+    expect(parsed.shadow).toBe(true);
+  });
+
   test("routes an answered outcome through the session outbound union", () => {
     const message = {
       type: "jev.decide.response",

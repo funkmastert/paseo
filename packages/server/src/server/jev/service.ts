@@ -1102,6 +1102,7 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
       spawnHint: {
         applyHard: config?.spawnHint.applyHard ?? false,
         applyRole: config?.spawnHint.applyRole ?? false,
+        auditDeclared: config?.spawnHint.auditDeclared ?? false,
       },
       agentTools: {
         assignShare: config?.agentTools.assignShare ?? 0,

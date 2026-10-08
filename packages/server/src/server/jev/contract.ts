@@ -313,7 +313,7 @@ export interface JevStatus {
   features: Record<JevFeatureId, JevFeatureStatus>;
   lanes: Record<JevLane, JevLaneStatus>;
   /** Read by the account-pool plugin on its 60-second poll. */
-  spawnHint: { applyHard: boolean; applyRole: boolean };
+  spawnHint: { applyHard: boolean; applyRole: boolean; auditDeclared: boolean };
   /**
    * Read by the account-pool plugin to split eligible creates into the D8 arms. `served`: this
    * daemon registers the JEV agent tools for agents labelled `on`.

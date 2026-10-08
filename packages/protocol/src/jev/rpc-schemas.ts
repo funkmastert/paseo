@@ -77,6 +77,10 @@ export const JevDecideRequestSchema = z.object({
   questions: JevQuestionsSchema,
   scope: z.object({ cwd: z.string(), parentAgentId: z.string().optional() }).optional(),
   deadlineMs: z.number().optional(),
+  // Answer as shadow even when the feature is live; it can only make a call shadow, never live
+  // (docs/jev.md, "Feature 2"). The spawn hint's declared-label audit sends it so a declared
+  // child's call never counts as a live answer.
+  shadow: z.literal(true).optional(),
 });
 
 export const JevDecideResponseSchema = z.object({
@@ -137,7 +141,12 @@ export const JevStatusSchema = z.object({
   model: z.string(),
   features: z.record(z.string(), JevFeatureStatusSchema),
   lanes: z.record(z.string(), JevLaneStatusSchema),
-  spawnHint: z.object({ applyHard: z.boolean(), applyRole: z.boolean() }),
+  spawnHint: z.object({
+    applyHard: z.boolean(),
+    applyRole: z.boolean(),
+    // Absent from an older daemon: `agents.jev.spawnHint.auditDeclared` (docs/jev.md "Feature 2").
+    auditDeclared: z.boolean().optional(),
+  }),
   agentTools: z.object({
     assignShare: z.number(),
     // Absent from a daemon without the JEV agent tools: true when this daemon lists them to the

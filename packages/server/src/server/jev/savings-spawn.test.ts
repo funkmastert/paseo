@@ -166,6 +166,36 @@ describe("the spawn hint's savings record", () => {
     });
   });
 
+  test("a declared hard child JEV judged standard prices as a would-have saving once it settles (the declared-label audit)", async () => {
+    const { savings, recorder } = await setup();
+    const declaredAuditLabels = {
+      "paseo.jev-call": "call-7",
+      "paseo.jev-spawn":
+        "v1;base=hard/claude-opus-5-5;would=standard/claude-sonnet-5;move=down;applied=0",
+      "paseo.task-class": "hard",
+      "paseo.task-class-source": "declared",
+    };
+
+    recorder.onAgent(child({ labels: declaredAuditLabels }));
+    const [pending] = savings.events({ range: "today" }).events;
+    // Never applied: the declared label ran the child, not JEV's answer.
+    expect(pending).toMatchObject({ mode: "shadow", decision: { changed: false } });
+
+    recorder.onAgent(
+      child({
+        labels: declaredAuditLabels,
+        closed: true,
+        totalTokens: 100_000,
+        model: "claude-opus-5-5",
+      }),
+    );
+    const [settled] = savings.events({ range: "today" }).events;
+    // A declared hard child cost Opus; JEV's audited answer would have run Sonnet. The over-
+    // labelling has a real, positive would-have saving, which is the whole point of auditing it.
+    expect(settled?.pending).toBe(false);
+    expect(settled?.tokensSavedEstimate).toBeGreaterThan(0);
+  });
+
   test("an agent with no spawn label, or created before the daemon with no record, is left alone", async () => {
     const { savings, recorder } = await setup();
 

@@ -39,7 +39,11 @@ export interface ResolvedJevConfig {
   excludeRemotes: string[];
   excludeTextMarkers: string[];
   audit: { enabled: boolean; maxBytes: number; retainDays: number };
-  spawnHint: ResolvedJevFeatureConfig & { applyHard: boolean; applyRole: boolean };
+  spawnHint: ResolvedJevFeatureConfig & {
+    applyHard: boolean;
+    applyRole: boolean;
+    auditDeclared: boolean;
+  };
   remediationTriage: ResolvedJevFeatureConfig;
   notificationTriage: ResolvedJevFeatureConfig;
   agentTools: {
@@ -313,6 +317,7 @@ export function resolveJevConfig(
       ...resolveFeature(spawnHint, { enabled: true, shadow: true, timeoutMs: 1500 }),
       applyHard: bool(spawnHint["applyHard"], false),
       applyRole: bool(spawnHint["applyRole"], false),
+      auditDeclared: bool(spawnHint["auditDeclared"], true),
     },
     remediationTriage: resolveFeature(section["remediationTriage"], {
       enabled: true,

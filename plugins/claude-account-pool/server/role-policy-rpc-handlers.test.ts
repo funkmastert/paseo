@@ -911,7 +911,14 @@ describe("explain — the thinking decision", () => {
     ).explain(input, context(fakePaseo({})));
 
   it("says an unlabelled child's class is decided at create once JEV's hint is live, and applies nothing", async () => {
-    const live = { active: true, reason: null, shadow: false, applyHard: false, applyRole: false };
+    const live = {
+      active: true,
+      reason: null,
+      shadow: false,
+      applyHard: false,
+      applyRole: false,
+      auditDeclared: false,
+    };
     const handlers = createRoleModelPolicyRpcHandlers(
       baseDeps({
         policyCache: fakePolicyCache(policy),

@@ -2383,6 +2383,36 @@ describe("JEV's labels", () => {
     );
   });
 
+  it("the declared-label audit: a declared hard child keeps its label and model, but the labels record JEV's class with applied 0", () => {
+    const declaredHard = request({
+      callerAgentId: "c1",
+      labels: { [AGENT_ROLE_LABEL]: "worker", [TASK_CLASS_LABEL]: "hard" },
+      initialPrompt: "Implement the retry helper.",
+      config: { provider: "claude", cwd: "/tmp/work" },
+    });
+    const auditHint: SpawnHint = {
+      status: "shadow",
+      callId: "jev-call-audit",
+      answers: { taskClass: { choice: "mechanical", confidence: 0.95 }, reasoning: { score: 0.2, confidence: 0.9 } },
+      proposal: { taskClass: "mechanical" },
+      applyHard: false,
+      applyRole: false,
+    };
+
+    const result = createRoleRouter(jevOptions())({ ...declaredHard, jevHint: auditHint }, fakeContext);
+
+    // The declared label still wins: the class, model and thinking are unchanged from a plain
+    // declared create.
+    const withoutHint = createRoleRouter(jevOptions())(declaredHard, fakeContext);
+    expect(result?.config.model).toBe(withoutHint?.config.model);
+    expect(result?.labels?.[AGENT_ROLE_LABEL]).toBe("worker");
+    expect(result?.labels?.[TASK_CLASS_SOURCE_LABEL]).toBe("declared");
+    expect(result?.labels?.[JEV_CALL_LABEL]).toBe("jev-call-audit");
+    expect(result?.labels?.[JEV_SPAWN_LABEL]).toBe(
+      "v1;base=hard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0",
+    );
+  });
+
   it("a hint that is not an answer writes nothing", () => {
     const router = createRoleRouter(jevOptions());
 

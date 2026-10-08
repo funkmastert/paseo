@@ -130,7 +130,7 @@ const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
       resetsAt: new Date(0).toISOString(),
     },
   },
-  spawnHint: { applyHard: false, applyRole: false },
+  spawnHint: { applyHard: false, applyRole: false, auditDeclared: false },
   agentTools: { assignShare: 0, served: false },
   todayByFeature: {
     spawnHint: {
@@ -391,6 +391,9 @@ export class JevSession {
         scope,
         subject: msg.scope?.parentAgentId ? { callerAgentId: msg.scope.parentAgentId } : undefined,
         deadlineMs: msg.deadlineMs,
+        // The declared-label audit (docs/jev.md, "Feature 2") asks this true so a declared
+        // child's call never counts as a live answer, whatever `spawnHint.shadow` says.
+        ...(msg.shadow === true ? { shadow: true as const } : {}),
       });
 
       if (outcome.kind === "answered" || outcome.kind === "shadow") {

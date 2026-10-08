@@ -1271,6 +1271,18 @@ function decideOutputStyle(
   };
 }
 
+/** Labels with `key` removed, or the same object when it was never present. */
+function omitLabel(
+  labels: Record<string, string> | undefined,
+  key: string,
+): Record<string, string> | undefined {
+  if (labels?.[key] === undefined) {
+    return labels;
+  }
+  const { [key]: _omitted, ...rest } = labels;
+  return rest;
+}
+
 /** Cheaper to dearer, for `wouldBe.move`. No class is the standard pool. */
 function classRank(taskClass: TaskClassId | undefined): number {
   return taskClass === undefined ? TASK_CLASS_IDS.indexOf("standard") : TASK_CLASS_IDS.indexOf(taskClass);
@@ -1414,9 +1426,18 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     textInput,
     hint ? { proposed: proposedClass, applyMechanical: live, applyHard: live && hint.applyHard } : undefined,
   );
-  // What JEV would make it with every switch on, for `wouldBe`.
+  // What JEV would make it with every switch on, for `wouldBe`. A declared label always wins
+  // `resolveTaskClass`'s own precedence before it ever looks at `jev`, so the declared-label
+  // audit (docs/jev.md, "Feature 2") strips the label here: otherwise a declared `hard` child's
+  // `wouldBe` could never read anything but `hard`, and the audit would have nothing to measure.
+  const declaredTaskClassLabel = textInput.labels?.[TASK_CLASS_LABEL];
+  const wouldBeTextInput =
+    declaredTaskClassLabel === undefined
+      ? textInput
+      : { ...textInput, labels: omitLabel(textInput.labels, TASK_CLASS_LABEL) };
   const wouldBeClass = hint
-    ? resolveTaskClass(textInput, { proposed: proposedClass, applyMechanical: true, applyHard: true }).taskClass
+    ? resolveTaskClass(wouldBeTextInput, { proposed: proposedClass, applyMechanical: true, applyHard: true })
+        .taskClass
     : classResolution.taskClass;
   const classPartial = {
     taskClass: classResolution.taskClass,
