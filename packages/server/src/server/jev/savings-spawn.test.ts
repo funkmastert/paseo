@@ -134,6 +134,7 @@ describe("the spawn hint's savings record", () => {
       pending: true,
       decision: { wouldBe: "mechanical on claude-haiku-4-5", changed: false },
     });
+    expect(savings.factsOf(pending!.id)).not.toMatchObject({ declaredAudit: true });
 
     recorder.onAgent(child({ closed: true, totalTokens: 100_000 }));
     const [settled] = savings.events({ range: "today" }).events;
@@ -166,12 +167,19 @@ describe("the spawn hint's savings record", () => {
     });
   });
 
-  test("a declared hard child JEV judged standard prices as a would-have saving once it settles (the declared-label audit)", async () => {
+  test("a declared hard child JEV judged mechanical prices as a would-have saving once it settles (the declared-label audit)", async () => {
     const { savings, recorder } = await setup();
+    // The exact string `classifyAgent` + the role router produce for this scenario — a declared
+    // `hard` child whose JEV answer reads `mechanical` — per
+    // role-router.test.ts "the declared-label audit: a declared hard child keeps its label and
+    // model...". Reusing that literal here, rather than an unrelated hand-picked one, means a
+    // regression in what the real pipeline writes (finding #1: `wouldBe` drifting off JEV's own
+    // answer) breaks that test, and a regression in how this module prices the same string breaks
+    // this one.
     const declaredAuditLabels = {
       "paseo.jev-call": "call-7",
       "paseo.jev-spawn":
-        "v1;base=hard/claude-opus-5-5;would=standard/claude-sonnet-5;move=down;applied=0",
+        "v1;base=hard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0",
       "paseo.task-class": "hard",
       "paseo.task-class-source": "declared",
     };
@@ -180,20 +188,20 @@ describe("the spawn hint's savings record", () => {
     const [pending] = savings.events({ range: "today" }).events;
     // Never applied: the declared label ran the child, not JEV's answer.
     expect(pending).toMatchObject({ mode: "shadow", decision: { changed: false } });
+    // Marked so the evidence counters keep it out of the go-live rule (finding #4).
+    expect(savings.factsOf(pending!.id)).toMatchObject({ declaredAudit: true });
 
     recorder.onAgent(
       child({
         labels: declaredAuditLabels,
         closed: true,
         totalTokens: 100_000,
-        model: "claude-opus-5-5",
+        model: "claude-sonnet-5",
       }),
     );
     const [settled] = savings.events({ range: "today" }).events;
-    // A declared hard child cost Opus; JEV's audited answer would have run Sonnet. The over-
-    // labelling has a real, positive would-have saving, which is the whole point of auditing it.
-    expect(settled?.pending).toBe(false);
-    expect(settled?.tokensSavedEstimate).toBeGreaterThan(0);
+    // W x (w(base=sonnet) 0.50 - w(m=haiku, shadow so m is wouldModel) 0.25) = 100_000 x 0.25.
+    expect(settled).toMatchObject({ pending: false, tokensSavedEstimate: 25_000 });
   });
 
   test("an agent with no spawn label, or created before the daemon with no record, is left alone", async () => {

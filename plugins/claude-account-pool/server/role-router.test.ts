@@ -2515,6 +2515,21 @@ describe("JEV's labels", () => {
       expect(hintOf(router({ ...unlabelled(), jevTools: tools(0.9) }, fakeContext))).toBeUndefined();
     });
 
+    it("gives a non-Claude create neither an arm nor the hint, and the request passes through untouched", () => {
+      const base = unlabelled();
+      const codexCreate = {
+        ...base,
+        request: { ...base.request, config: { ...base.request.config, provider: "codex", model: "gpt-5" } },
+        jevTools: tools(0.1),
+      };
+
+      const result = createRoleRouter(jevOptions())(codexCreate, fakeContext);
+
+      expect(result?.labels?.[JEV_TOOLS_LABEL]).toBeUndefined();
+      expect(hintOf(result)).toBeUndefined();
+      expect(result?.config.providerOptions).toBeUndefined();
+    });
+
     it("adds no hint when the arm was never evaluated (the daemon serves no JEV tools)", () => {
       const result = createRoleRouter(jevOptions())(unlabelled(), fakeContext);
 

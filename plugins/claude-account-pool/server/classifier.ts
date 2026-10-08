@@ -1271,16 +1271,23 @@ function decideOutputStyle(
   };
 }
 
-/** Labels with `key` removed, or the same object when it was never present. */
-function omitLabel(
-  labels: Record<string, string> | undefined,
-  key: string,
-): Record<string, string> | undefined {
-  if (labels?.[key] === undefined) {
-    return labels;
-  }
-  const { [key]: _omitted, ...rest } = labels;
-  return rest;
+/**
+ * The declared-label audit's `wouldBe` (docs/jev.md, "Auditing a declared label"): JEV's own
+ * `task_class` answer, read directly. A declared label always wins `resolveTaskClass`'s own
+ * precedence before it ever looks at a hint, so re-running it with the label stripped falls back
+ * to the keyword seeds or the default for most answers — `standard`, `other`, a hard answer below
+ * its apply floor, or a role-only ask that carries no `task_class` question at all — none of which
+ * is JEV's answer. A missing or unrecognized choice means nothing to measure: `wouldBe` stays the
+ * declared class itself.
+ */
+function declaredAuditWouldBe(
+  hint: Extract<SpawnHint, { status: "answered" | "shadow" }>,
+  declaredClass: TaskClassId | undefined,
+): TaskClassId | undefined {
+  const answered = hint.answers.taskClass?.choice;
+  return answered !== undefined && (TASK_CLASS_IDS as readonly string[]).includes(answered)
+    ? (answered as TaskClassId)
+    : declaredClass;
 }
 
 /** Cheaper to dearer, for `wouldBe.move`. No class is the standard pool. */
@@ -1318,13 +1325,25 @@ function hintNote(
 
 /**
  * The JEV agent tools' arm. Eligible when the feature could send now, the
- * decided tool profile keeps `Read`, and the D7 check passed; the draw then
- * picks the arm, so both arms are agents the classifier treated alike.
+ * create runs on a Claude-family provider, the decided tool profile keeps
+ * `Read`, and the D7 check passed; the draw then picks the arm, so both arms
+ * are agents the classifier treated alike.
  */
-function decideJevTools(world: ClassifierWorld, tools: ToolDecision): JevToolsDecision | undefined {
+function decideJevTools(
+  world: ClassifierWorld,
+  tools: ToolDecision,
+  providerFamily: string,
+): JevToolsDecision | undefined {
   const jevTools = world.jevToolsAvailable;
   if (!jevTools) {
     return undefined;
+  }
+  // The tools reach the agent over its own MCP session, and the discovery hint rides on
+  // `providerOptions.appendSystemPrompt`, a Claude-only key other providers' strict option
+  // schemas reject outright. Both are Claude Code behaviour, so a non-Claude create is never
+  // drawn into either D8 arm.
+  if (providerFamily !== POOL_FAMILY) {
+    return { arm: null, reason: `No JEV tools: this is a ${echoed(providerFamily)} create, and the tools are Claude-only.` };
   }
   if (!jevTools.active) {
     return { arm: null, reason: "No JEV tools: agents.jev.agentTools cannot send a call on this host right now." };
@@ -1426,19 +1445,14 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     textInput,
     hint ? { proposed: proposedClass, applyMechanical: live, applyHard: live && hint.applyHard } : undefined,
   );
-  // What JEV would make it with every switch on, for `wouldBe`. A declared label always wins
-  // `resolveTaskClass`'s own precedence before it ever looks at `jev`, so the declared-label
-  // audit (docs/jev.md, "Feature 2") strips the label here: otherwise a declared `hard` child's
-  // `wouldBe` could never read anything but `hard`, and the audit would have nothing to measure.
-  const declaredTaskClassLabel = textInput.labels?.[TASK_CLASS_LABEL];
-  const wouldBeTextInput =
-    declaredTaskClassLabel === undefined
-      ? textInput
-      : { ...textInput, labels: omitLabel(textInput.labels, TASK_CLASS_LABEL) };
-  const wouldBeClass = hint
-    ? resolveTaskClass(wouldBeTextInput, { proposed: proposedClass, applyMechanical: true, applyHard: true })
-        .taskClass
-    : classResolution.taskClass;
+  // What JEV would make it with every switch on, for `wouldBe`. For a declared child (the
+  // declared-label audit, docs/jev.md "Auditing a declared label") that is JEV's own answer, read
+  // directly rather than re-run through the keyword classifier.
+  const wouldBeClass = !hint
+    ? classResolution.taskClass
+    : classResolution.source === "declared"
+      ? declaredAuditWouldBe(hint, classResolution.taskClass)
+      : resolveTaskClass(textInput, { proposed: proposedClass, applyMechanical: true, applyHard: true }).taskClass;
   const classPartial = {
     taskClass: classResolution.taskClass,
     source: classResolution.source,
@@ -1461,7 +1475,7 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     world.mcpGateway,
     toolRole.role,
   );
-  const jevTools = decideJevTools(world, tools);
+  const jevTools = decideJevTools(world, tools, familyOfProvider(world.pool, model.provider ?? input.requestedProvider ?? POOL_FAMILY));
 
   const decision: AgentDecision = { role: roleDecision, taskClass, model, tools, account, thinking, outputStyle, mcp };
   if (input.jevHint) {

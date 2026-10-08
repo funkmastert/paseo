@@ -577,6 +577,55 @@ describe("evidence rules", () => {
     });
   });
 
+  test("a declared-label audit record counts in its own bucket and not toward spawnHint's go-live rule", () => {
+    const facts = {
+      baseModel: "claude-sonnet-5",
+      wouldModel: "claude-haiku-4-5",
+      runningModel: "claude-sonnet-5",
+      agentTotalTokens: 100_000,
+      declaredAudit: true,
+    };
+    const decision = {
+      did: "hard on claude-sonnet-5",
+      wouldBe: "mechanical on claude-haiku-4-5",
+      changed: false,
+    };
+    const priced = priceSavings({
+      feature: "spawnHint",
+      mode: "shadow",
+      decision,
+      facts,
+      validation: null,
+    });
+
+    expect(
+      evidenceCounters({
+        feature: "spawnHint",
+        mode: "shadow",
+        decision,
+        facts,
+        validation: null,
+        price: priced,
+      }),
+    ).toEqual({ declaredAuditSettled: 1, declaredAuditSettledTokens: priced.tokens });
+  });
+
+  test("spawnHint's audit figure is reported beside the go-live rule, never inside it", () => {
+    const base = { settledShadow: 49, settledShadowTokens: -5 };
+    const plain = evaluateEvidence("spawnHint", base, 0);
+    expect(plain.met).toBeNull(); // under the 50 floor
+    expect(plain.observed).not.toContain("audit");
+
+    const withAudit = evaluateEvidence(
+      "spawnHint",
+      { ...base, declaredAuditSettled: 30, declaredAuditSettledTokens: 25_000 },
+      0,
+    );
+    expect(withAudit.observed).toContain("declared-label audit: 30 settled, would-have sum 25000");
+    // The audit never advances or changes the go-live verdict.
+    expect(withAudit.met).toBe(plain.met);
+  });
+
   test("the shadow-only counts are reported beside the live rule, never inside it", () => {
     const base = { bigWouldSkip: 200, bigWouldSkipFalse: 60, bigWouldSkipProjected: 1_000 };
     const plain = evaluateEvidence("readCheck", base, 0);

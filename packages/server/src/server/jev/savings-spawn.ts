@@ -1,4 +1,8 @@
-import { JEV_CALL_LABEL, JEV_SPAWN_LABEL } from "@getpaseo/protocol/agent-labels";
+import {
+  JEV_CALL_LABEL,
+  JEV_SPAWN_LABEL,
+  TASK_CLASS_SOURCE_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 
 import type { JevSavingsSink } from "./contract.js";
 import { JevSavingsLedger, savingsIdForCall } from "./savings.js";
@@ -140,6 +144,12 @@ export function createSpawnHintSavingsRecorder(options: {
                 runningModel: agent.model,
                 move: spawn.move,
                 applied: spawn.applied,
+                // The declared-label audit (docs/jev.md, "Auditing a declared label"): kept out of
+                // the go-live rule's evidence counters, which read "this child's class was never
+                // declared" (savings-formulas.ts).
+                ...(agent.labels[TASK_CLASS_SOURCE_LABEL] === "declared"
+                  ? { declaredAudit: true }
+                  : {}),
               },
               pending: true,
             }) || null;

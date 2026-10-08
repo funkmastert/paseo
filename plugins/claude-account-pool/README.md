@@ -850,9 +850,14 @@ plugin does:
 
 - **When it asks.** Only when the three classes would give the role resolved
   without JEV different models or thinking (`planSpawnHint`,
-  `server/jev-hint.ts`). A labelled create, one a risk keyword already made
-  `hard`, one with no text, and every root create never ask: a leader's class
-  cannot change what it runs.
+  `server/jev-hint.ts`). A labelled create asks too, in shadow only, when
+  `agents.jev.spawnHint.auditDeclared` is on (the default) — the
+  [declared-label audit](../../docs/jev.md#auditing-a-declared-label), which
+  measures a declared class against JEV's own answer without ever moving it.
+  One a risk keyword already made `hard`, one with no text, and every root
+  create never ask: a leader's class cannot change what it runs. A live
+  `applyRole` ask on a child whose role is a keyword guess wins over the audit
+  when both would apply, since one call cannot serve both.
 - **What applies.** The floors bias down. `mechanical` needs the class answer
   at 0.65 or more **and** a reasoning score of 0.8 or less. `hard` (0.85 and
   1.6) and a role (0.70) apply only with `agents.jev.spawnHint.applyHard` /
@@ -881,10 +886,14 @@ plugin does:
 
 The same poll (`jev.status`, every 60 s) decides the JEV agent tools, once
 the daemon serves them (`agentTools.served`, which the tools track sets):
-an eligible create (the feature on, `Read` not denied, the company-code check
-passed) is labelled `paseo.jev-tools` `on` or `control`, by a draw against
-`agentTools.assignShare`. The drawn arm replaces any value the caller sent,
-and an ineligible create loses one, so no caller picks its own arm. Until the
+an eligible create (the feature on, a Claude-family provider, `Read` not
+denied, the company-code check passed) is labelled `paseo.jev-tools` `on` or
+`control`, by a draw against `agentTools.assignShare`. The drawn arm replaces
+any value the caller sent, and an ineligible create loses one, so no caller
+picks its own arm. A non-Claude create (Codex, OpenCode, …) is never drawn
+into either arm: the tools reach an agent only over its own MCP session, and
+the `on` arm's discovery hint rides on `providerOptions.appendSystemPrompt`, a
+Claude-only key other providers' strict option schemas reject. Until the
 daemon serves the tools, nothing is labelled.
 
 #### A guess may pick a model. It may never remove a tool.

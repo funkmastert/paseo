@@ -370,10 +370,14 @@ export function applyToolProfile(
     nextPermissions.allow = union(stringArray(currentPermissions.allow), allowedTools.map(permissionRule));
   }
 
-  const next: Record<string, unknown> = {
-    ...current,
-    settings: { ...currentSettings, permissions: nextPermissions },
-  };
+  // Only rewrite `settings` when there is a deny or allow rule to add; a notice-only call (nothing
+  // denied or allowed, just `appendSystemPrompt`) must not manufacture an empty
+  // `settings.permissions` object out of nothing — that is new, unexplained shape for a provider
+  // that never saw it before.
+  const next: Record<string, unknown> = { ...current };
+  if (deniedTools.length > 0 || allowedTools.length > 0) {
+    next.settings = { ...currentSettings, permissions: nextPermissions };
+  }
   if (deniedTools.length > 0) {
     next.disallowedTools = union(stringArray(current.disallowedTools), deniedTools);
   }
