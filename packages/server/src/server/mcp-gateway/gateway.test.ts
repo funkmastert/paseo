@@ -841,6 +841,41 @@ describe("token lifecycle", () => {
     expect(gateway.getServerState("zeeq")?.status).toBe("connected");
   });
 
+  test("a background connection whose refresh hits a dead refresh token (invalid_grant) lands in needs-auth without touching the stored tokens, verifier, or client info", async () => {
+    const upstream = await startExpiringOAuthUpstream({
+      acceptedToken: "current-token",
+      refresh: { refreshToken: "refresh-the-upstream-expects", nextAccessToken: "new-token" },
+    });
+    const home = createTempHome();
+    const tokenStore = new McpGatewayTokenStore(home);
+    const registration = storedRegistration();
+    tokenStore.saveClientInformation("linear", registration);
+    const storedTokens = {
+      access_token: "stale-token",
+      token_type: "Bearer",
+      // Mismatches what the upstream's /token endpoint expects, so its refresh grant 400s
+      // invalid_grant — standing in for a refresh token the upstream has actually revoked.
+      refresh_token: "refresh-the-store-actually-has",
+    };
+    tokenStore.saveOAuthTokens("linear", storedTokens);
+    tokenStore.saveCodeVerifier("linear", "verifier-untouched");
+    const gateway = new McpGateway({
+      paseoHome: home,
+      config: { enabled: true, servers: { linear: { url: upstream.url, transport: "http" } } },
+      oauthRedirectBaseUrl: "https://daemon.example.test",
+    });
+
+    await gateway.start();
+
+    expect(gateway.getServerState("linear")?.status).toBe("needs-auth");
+    expect(upstream.refreshGrants).toBe(0);
+    // The background connection must never invalidate what an interactive sign-in is relying
+    // on: a concurrent flow's PKCE verifier, or the client registration it would re-use.
+    expect(tokenStore.getOAuthTokens("linear")).toEqual(storedTokens);
+    expect(tokenStore.getCodeVerifier("linear")).toBe("verifier-untouched");
+    expect(tokenStore.getClientInformation("linear")).toEqual(registration);
+  });
+
   test("sign-in asks for offline_access when only the authorization server offers it", async () => {
     const authServer = await startOAuthAuthorizationServer({
       authorizationServerScopes: ["mcp:tools", "offline_access"],

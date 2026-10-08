@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -282,21 +281,6 @@ describe("createGatewayOAuthClientProvider", () => {
   });
 });
 
-async function getAvailablePort(): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close(() => reject(new Error("Failed to acquire port")));
-        return;
-      }
-      server.close(() => resolve(address.port));
-    });
-  });
-}
-
 type RefreshBehavior = "succeed" | "invalid_grant" | "invalid_client";
 
 /**
@@ -335,18 +319,31 @@ interface FakeOAuthServer {
   close: () => Promise<void>;
 }
 
-/** A real discovery + DCR + authorize + token-exchange authorization server (KTD2/KTD3's
+/**
+ * A real discovery + DCR + authorize + token-exchange authorization server (KTD2/KTD3's
  * fixture pattern), minus the MCP resource server — this suite never calls a tool, only
- * `auth()`. */
+ * `auth()`. Listens on port 0 and reads back the bound port, rather than probing a free port
+ * and reusing it: a probe-then-reuse has a TOCTOU gap another process on the machine could
+ * grab the port through. `mcpAuthRouter` needs the port to sign `issuerUrl` with, so it is
+ * mounted after the real listen, once the bound port is known — adding middleware to an
+ * already-listening `express()` app is fine; only requests arriving after this point matter.
+ */
 async function startFakeOAuthServer(): Promise<FakeOAuthServer> {
-  const port = await getAvailablePort();
-  const baseUrl = new URL(`http://127.0.0.1:${port}`);
-  const resourceUrl = new URL("/mcp", baseUrl);
   const provider = new ConfigurableRefreshAuthProvider();
-
   const app = express();
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
+
+  const httpServer = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+    const server = app.listen(0, "127.0.0.1", () => resolve(server));
+  });
+  const address = httpServer.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to bind the fake OAuth server to a port");
+  }
+  const baseUrl = new URL(`http://127.0.0.1:${address.port}`);
+  const resourceUrl = new URL("/mcp", baseUrl);
+
   app.use(
     mcpAuthRouter({
       provider,
@@ -355,10 +352,6 @@ async function startFakeOAuthServer(): Promise<FakeOAuthServer> {
       scopesSupported: ["mcp:tools"],
     }),
   );
-
-  const httpServer = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
-    const server = app.listen(port, "127.0.0.1", () => resolve(server));
-  });
 
   return {
     url: resourceUrl.toString(),

@@ -222,6 +222,27 @@ export class McpGatewayTokenStore {
     this.setRecord(serverName, rest);
   }
 
+  /**
+   * Drops tokens, the PKCE verifier, and the dynamic client registration together, for
+   * `invalidateCredentials('all')` (`InvalidClientError`/`UnauthorizedClientError`): one
+   * logical state transition, so it is one read-modify-write against the token file rather
+   * than the three separate round trips that calling `clearOAuthTokens`, `clearCodeVerifier`,
+   * and `forgetClientInformation` in sequence would mean.
+   */
+  clearAllOAuthCredentials(serverName: string): void {
+    const record = this.getOAuthRecord(serverName);
+    if (!record || (!record.tokens && !record.codeVerifier && !record.clientInformation)) {
+      return;
+    }
+    const {
+      tokens: _droppedTokens,
+      codeVerifier: _droppedCodeVerifier,
+      clientInformation: _droppedClientInformation,
+      ...rest
+    } = record;
+    this.setRecord(serverName, rest);
+  }
+
   getClientCredentials(serverName: string): PreregisteredOAuthClient | undefined {
     return this.getOAuthRecord(serverName)?.clientCredentials;
   }

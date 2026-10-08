@@ -171,13 +171,17 @@ export function createGatewayOAuthClientProvider(
      * `saveDiscoveryState`, so there is nothing cached to invalidate.
      */
     invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery"): void {
-      if (scope === "tokens" || scope === "all") {
+      if (scope === "all") {
+        tokenStore.clearAllOAuthCredentials(serverName);
+        return;
+      }
+      if (scope === "tokens") {
         tokenStore.clearOAuthTokens(serverName);
       }
-      if (scope === "verifier" || scope === "all") {
+      if (scope === "verifier") {
         tokenStore.clearCodeVerifier(serverName);
       }
-      if (scope === "client" || scope === "all") {
+      if (scope === "client") {
         tokenStore.forgetClientInformation(serverName);
       }
     },
