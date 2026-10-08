@@ -259,7 +259,7 @@ The full types are in `jev/contract.ts`. Only `answered` may change behaviour. W
 
 Confidence floors are code constants, listed per feature below. They are thresholds, and code owns thresholds.
 
-Feature 14 added `awayReply` to `AgentJevSchema` after the foundation. A daemon with the foundation loads any `agents.jev`, but JEV turns itself off when the section breaks the running build's schema, so write an `awayReply` key only once the running daemon has feature 14.
+Feature 14 added `awayReply` to `AgentJevSchema` after the foundation. A daemon with the foundation loads any `agents.jev`, but JEV turns itself off when the section breaks the running build's schema, so write an `awayReply` key only once the running daemon has feature 14. The same applies to `spawnHint.auditDeclared`: write it, or roll back past the build that added it, only once the running daemon matches — it defaults on, so no edit is needed to turn the audit itself on or off.
 
 ### The D7 exclusion
 
