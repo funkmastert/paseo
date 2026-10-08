@@ -1197,6 +1197,7 @@ export const es: TranslationResources = {
       schedules: "Horarios",
       askJev: "Preguntar a JEV",
       jevDashboard: "Panel de JEV",
+      knowledge: "Conocimiento",
     },
     worktreeSetup: {
       title: "Configurar secuencias de comandos del árbol de trabajo",
@@ -2191,6 +2192,63 @@ export const es: TranslationResources = {
     jevDryRun: "Simulación",
     jevOlder: "{{count}} anteriores",
     jevAllActivity: "Toda la actividad de JEV",
+  },
+  knowledgeBase: {
+    title: "Conocimiento",
+    availability: {
+      noHostTitle: "Sin host",
+      noHostDescription: "Añade un host para explorar su base de conocimiento.",
+      connecting: "Esperando a que el host se conecte",
+      updateHostTitle: "Actualiza el host para usar la base de conocimiento",
+      updateHostDescription:
+        "El daemon de este host es anterior a la base de conocimiento. Actualízalo y vuelve.",
+      statusError: "No se puede acceder a la base de conocimiento",
+      disabledTitle: "La base de conocimiento está desactivada en este host",
+      disabledDescription:
+        "Instala Basic Memory en el host con este comando, añade a la configuración del daemon la sección knowledgeBase que imprime y recarga el daemon.",
+    },
+    sidecar: {
+      missingTitle: "Basic Memory no está instalado",
+      startingTitle: "Basic Memory se está iniciando",
+      backoffTitle: "Basic Memory se detuvo y se está reiniciando",
+      description:
+        "Las notas se siguen abriendo y guardando. La búsqueda solo compara títulos hasta que Basic Memory esté en ejecución.",
+    },
+    list: {
+      searchPlaceholder: "Buscar notas",
+      clearSearch: "Borrar búsqueda",
+      titleSearchOnly: "Búsqueda de texto completo no disponible. Solo se comparan títulos.",
+      noResults: "Sin resultados",
+      searchFailed: "No se pueden buscar notas: {{message}}",
+      loadFailed: "No se pueden cargar las notas: {{message}}",
+      empty: "Aún no hay proyectos",
+      selectNote: "Selecciona una nota",
+      linkCount_one: "{{count}} enlace",
+      linkCount_other: "{{count}} enlaces",
+      decisionCount_one: "{{count}} decisión",
+      decisionCount_other: "{{count}} decisiones",
+    },
+    note: {
+      edit: "Editar",
+      save: "Guardar",
+      saving: "Guardando...",
+      saved: "Guardado",
+      cancel: "Cancelar",
+      done: "Listo",
+      loadFailed: "No se puede cargar la nota: {{message}}",
+      saveFailed: "No se puede guardar la nota: {{message}}",
+      notFound: "Nota no encontrada",
+      backToList: "Volver a las notas",
+      backlinks: "Enlazada desde",
+      removedSecrets_one: "Se eliminó {{count}} secreto antes de guardar",
+      removedSecrets_other: "Se eliminaron {{count}} secretos antes de guardar",
+    },
+    leave: {
+      title: "Cambios sin guardar",
+      message: "¿Guardar los cambios en {{title}} antes de salir?",
+      save: "Guardar",
+      discard: "Descartar",
+    },
   },
   review: {
     comment: {

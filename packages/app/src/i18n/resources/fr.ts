@@ -1197,6 +1197,7 @@ export const fr: TranslationResources = {
       schedules: "Planifications",
       askJev: "Demander à JEV",
       jevDashboard: "Tableau de bord JEV",
+      knowledge: "Connaissances",
     },
     worktreeSetup: {
       title: "Configurer les scripts d'arbre de travail",
@@ -2195,6 +2196,63 @@ export const fr: TranslationResources = {
     jevDryRun: "Simulation",
     jevOlder: "{{count}} plus anciennes",
     jevAllActivity: "Toute l'activité JEV",
+  },
+  knowledgeBase: {
+    title: "Connaissances",
+    availability: {
+      noHostTitle: "Aucun hôte",
+      noHostDescription: "Ajoutez un hôte pour parcourir sa base de connaissances.",
+      connecting: "En attente de la connexion de l'hôte",
+      updateHostTitle: "Mettez à jour l'hôte pour la base de connaissances",
+      updateHostDescription:
+        "Le daemon de cet hôte est antérieur à la base de connaissances. Mettez-le à jour, puis revenez.",
+      statusError: "Impossible d'accéder à la base de connaissances",
+      disabledTitle: "La base de connaissances est désactivée sur cet hôte",
+      disabledDescription:
+        "Installez Basic Memory sur l'hôte avec cette commande, ajoutez la section knowledgeBase qu'elle affiche à la configuration du daemon, puis rechargez le daemon.",
+    },
+    sidecar: {
+      missingTitle: "Basic Memory n'est pas installé",
+      startingTitle: "Basic Memory démarre",
+      backoffTitle: "Basic Memory s'est arrêté et redémarre",
+      description:
+        "Les notes s'ouvrent et s'enregistrent toujours. La recherche ne porte que sur les titres tant que Basic Memory ne tourne pas.",
+    },
+    list: {
+      searchPlaceholder: "Rechercher des notes",
+      clearSearch: "Effacer la recherche",
+      titleSearchOnly: "Recherche en texte intégral indisponible. Titres uniquement.",
+      noResults: "Aucun résultat",
+      searchFailed: "Impossible de rechercher des notes : {{message}}",
+      loadFailed: "Impossible de charger les notes : {{message}}",
+      empty: "Aucun projet pour l'instant",
+      selectNote: "Sélectionnez une note",
+      linkCount_one: "{{count}} lien",
+      linkCount_other: "{{count}} liens",
+      decisionCount_one: "{{count}} décision",
+      decisionCount_other: "{{count}} décisions",
+    },
+    note: {
+      edit: "Modifier",
+      save: "Enregistrer",
+      saving: "Enregistrement...",
+      saved: "Enregistré",
+      cancel: "Annuler",
+      done: "Terminé",
+      loadFailed: "Impossible de charger la note : {{message}}",
+      saveFailed: "Impossible d'enregistrer la note : {{message}}",
+      notFound: "Note introuvable",
+      backToList: "Retour aux notes",
+      backlinks: "Liée depuis",
+      removedSecrets_one: "{{count}} secret retiré avant l'enregistrement",
+      removedSecrets_other: "{{count}} secrets retirés avant l'enregistrement",
+    },
+    leave: {
+      title: "Modifications non enregistrées",
+      message: "Enregistrer vos modifications de {{title}} avant de quitter ?",
+      save: "Enregistrer",
+      discard: "Ignorer",
+    },
   },
   review: {
     comment: {

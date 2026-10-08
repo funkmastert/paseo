@@ -1170,6 +1170,7 @@ export const ko: TranslationResources = {
       schedules: "일정",
       askJev: "JEV에게 묻기",
       jevDashboard: "JEV 대시보드",
+      knowledge: "지식",
     },
     worktreeSetup: {
       title: "워크트리 스크립트 설정",
@@ -2153,6 +2154,63 @@ export const ko: TranslationResources = {
     jevDryRun: "드라이 런",
     jevOlder: "이전 {{count}}건",
     jevAllActivity: "모든 JEV 활동",
+  },
+  knowledgeBase: {
+    title: "지식",
+    availability: {
+      noHostTitle: "호스트 없음",
+      noHostDescription: "호스트를 추가하면 해당 지식 베이스를 볼 수 있습니다.",
+      connecting: "호스트 연결을 기다리는 중",
+      updateHostTitle: "지식 베이스를 사용하려면 호스트를 업데이트하세요",
+      updateHostDescription:
+        "이 호스트의 데몬은 지식 베이스보다 오래된 버전입니다. 업데이트한 뒤 다시 오세요.",
+      statusError: "지식 베이스에 연결할 수 없습니다",
+      disabledTitle: "이 호스트에서 지식 베이스가 꺼져 있습니다",
+      disabledDescription:
+        "이 명령으로 호스트에 Basic Memory를 설치하고, 출력되는 knowledgeBase 섹션을 데몬 설정에 추가한 뒤 데몬을 다시 로드하세요.",
+    },
+    sidecar: {
+      missingTitle: "Basic Memory가 설치되어 있지 않습니다",
+      startingTitle: "Basic Memory를 시작하는 중",
+      backoffTitle: "Basic Memory가 중지되어 다시 시작하는 중",
+      description:
+        "노트는 계속 열고 저장할 수 있습니다. Basic Memory가 실행될 때까지 검색은 제목만 찾습니다.",
+    },
+    list: {
+      searchPlaceholder: "노트 검색",
+      clearSearch: "검색 지우기",
+      titleSearchOnly: "전체 텍스트 검색을 사용할 수 없습니다. 제목만 검색합니다.",
+      noResults: "결과 없음",
+      searchFailed: "노트를 검색할 수 없습니다: {{message}}",
+      loadFailed: "노트를 불러올 수 없습니다: {{message}}",
+      empty: "아직 프로젝트가 없습니다",
+      selectNote: "노트를 선택하세요",
+      linkCount_one: "링크 {{count}}개",
+      linkCount_other: "링크 {{count}}개",
+      decisionCount_one: "결정 {{count}}개",
+      decisionCount_other: "결정 {{count}}개",
+    },
+    note: {
+      edit: "편집",
+      save: "저장",
+      saving: "저장 중...",
+      saved: "저장됨",
+      cancel: "취소",
+      done: "완료",
+      loadFailed: "노트를 불러올 수 없습니다: {{message}}",
+      saveFailed: "노트를 저장할 수 없습니다: {{message}}",
+      notFound: "노트를 찾을 수 없습니다",
+      backToList: "노트 목록으로 돌아가기",
+      backlinks: "이 노트를 링크한 노트",
+      removedSecrets_one: "저장하기 전에 비밀 정보 {{count}}개를 제거했습니다",
+      removedSecrets_other: "저장하기 전에 비밀 정보 {{count}}개를 제거했습니다",
+    },
+    leave: {
+      title: "저장하지 않은 변경 사항",
+      message: "나가기 전에 {{title}}의 변경 사항을 저장할까요?",
+      save: "저장",
+      discard: "버리기",
+    },
   },
   review: {
     comment: {

@@ -61,6 +61,7 @@ const systemClock: FileEditorClock = {
 export class FileEditorModel {
   private readonly session: FileEditorSession;
   private readonly clock: FileEditorClock;
+  private readonly autosaveEnabled: boolean;
   private readonly listeners = new Set<() => void>();
   private snapshot: FileEditorSnapshot;
   private autosave: ReturnType<typeof setTimeout> | null = null;
@@ -79,9 +80,12 @@ export class FileEditorModel {
     file: FileEditorFile;
     session: FileEditorSession;
     clock?: FileEditorClock;
+    /** Off for editors that only save on an explicit Save (the knowledge-base note editor). */
+    autosave?: boolean;
   }) {
     this.session = input.session;
     this.clock = input.clock ?? systemClock;
+    this.autosaveEnabled = input.autosave ?? true;
     this.persistedContent = input.file.content;
     this.hasBom = input.file.hasBom;
     this.observed = { status: "ready", file: input.file };
@@ -340,6 +344,7 @@ export class FileEditorModel {
 
   private scheduleAutosave(): void {
     this.clearAutosave();
+    if (!this.autosaveEnabled) return;
     this.autosave = this.clock.setTimeout(() => {
       this.autosave = null;
       void this.save();

@@ -1175,6 +1175,7 @@ export const ja: TranslationResources = {
       schedules: "スケジュール",
       askJev: "JEV に質問",
       jevDashboard: "JEV ダッシュボード",
+      knowledge: "ナレッジ",
     },
     worktreeSetup: {
       title: "ワークツリースクリプトを設定",
@@ -2162,6 +2163,63 @@ export const ja: TranslationResources = {
     jevDryRun: "ドライラン",
     jevOlder: "ほか {{count}} 件",
     jevAllActivity: "すべての JEV アクティビティ",
+  },
+  knowledgeBase: {
+    title: "ナレッジ",
+    availability: {
+      noHostTitle: "ホストがありません",
+      noHostDescription: "ナレッジベースを閲覧するにはホストを追加してください。",
+      connecting: "ホストの接続を待っています",
+      updateHostTitle: "ナレッジベースを使うにはホストを更新してください",
+      updateHostDescription:
+        "このホストのデーモンはナレッジベースより古いバージョンです。更新してから戻ってください。",
+      statusError: "ナレッジベースに接続できません",
+      disabledTitle: "このホストではナレッジベースがオフです",
+      disabledDescription:
+        "このコマンドでホストに Basic Memory をインストールし、表示される knowledgeBase セクションをデーモンの設定に追加して、デーモンを再読み込みしてください。",
+    },
+    sidecar: {
+      missingTitle: "Basic Memory がインストールされていません",
+      startingTitle: "Basic Memory を起動しています",
+      backoffTitle: "Basic Memory が停止したため再起動しています",
+      description:
+        "ノートの表示と保存は引き続き使えます。Basic Memory が動作するまで、検索はタイトルのみが対象です。",
+    },
+    list: {
+      searchPlaceholder: "ノートを検索",
+      clearSearch: "検索をクリア",
+      titleSearchOnly: "全文検索は利用できません。タイトルのみ検索します。",
+      noResults: "結果がありません",
+      searchFailed: "ノートを検索できません: {{message}}",
+      loadFailed: "ノートを読み込めません: {{message}}",
+      empty: "プロジェクトはまだありません",
+      selectNote: "ノートを選択してください",
+      linkCount_one: "{{count}} 件のリンク",
+      linkCount_other: "{{count}} 件のリンク",
+      decisionCount_one: "{{count}} 件の決定事項",
+      decisionCount_other: "{{count}} 件の決定事項",
+    },
+    note: {
+      edit: "編集",
+      save: "保存",
+      saving: "保存中...",
+      saved: "保存しました",
+      cancel: "キャンセル",
+      done: "完了",
+      loadFailed: "ノートを読み込めません: {{message}}",
+      saveFailed: "ノートを保存できません: {{message}}",
+      notFound: "ノートが見つかりません",
+      backToList: "ノート一覧に戻る",
+      backlinks: "このノートへのリンク元",
+      removedSecrets_one: "保存前に {{count}} 件のシークレットを削除しました",
+      removedSecrets_other: "保存前に {{count}} 件のシークレットを削除しました",
+    },
+    leave: {
+      title: "未保存の変更",
+      message: "移動する前に {{title}} の変更を保存しますか?",
+      save: "保存",
+      discard: "破棄",
+    },
   },
   review: {
     comment: {

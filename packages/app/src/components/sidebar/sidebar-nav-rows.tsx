@@ -1,5 +1,12 @@
 import { router, usePathname } from "expo-router";
-import { CalendarClock, History, MessageCircleQuestion, Plus, Search } from "lucide-react-native";
+import {
+  BookOpen,
+  CalendarClock,
+  History,
+  MessageCircleQuestion,
+  Plus,
+  Search,
+} from "lucide-react-native";
 import { memo, useCallback, useMemo, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import { View, type StyleProp, type ViewStyle } from "react-native";
@@ -19,6 +26,7 @@ import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspac
 import { useWorkspace } from "@/stores/session-store-hooks";
 import {
   buildAskJevRoute,
+  buildKnowledgeBaseRoute,
   buildNewWorkspaceRoute,
   buildSchedulesRoute,
   buildSessionsRoute,
@@ -191,10 +199,31 @@ function SidebarAskJevRow({ onBeforeNavigate }: SidebarNavRowProps) {
   );
 }
 
+function SidebarKnowledgeRow({ onBeforeNavigate }: SidebarNavRowProps) {
+  const { t } = useTranslation();
+  const pathname = usePathname();
+  const handlePress = useCallback(() => {
+    onBeforeNavigate?.();
+    router.push(buildKnowledgeBaseRoute());
+  }, [onBeforeNavigate]);
+
+  return (
+    <SidebarHeaderRow
+      icon={BookOpen}
+      label={t(builtinSidebarNavLabelKey("knowledge"))}
+      onPress={handlePress}
+      isActive={pathname.startsWith("/knowledge")}
+      testID="sidebar-knowledge"
+      variant="compact"
+    />
+  );
+}
+
 const BUILTIN_ROWS: Record<BuiltinSidebarNavId, ComponentType<SidebarNavRowProps>> = {
   "new-workspace": SidebarNewWorkspaceRow,
   history: SidebarHistoryRow,
   search: SidebarSearchRow,
   schedules: SidebarSchedulesRow,
   "ask-jev": SidebarAskJevRow,
+  knowledge: SidebarKnowledgeRow,
 };
