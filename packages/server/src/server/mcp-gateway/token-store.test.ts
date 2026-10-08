@@ -110,6 +110,44 @@ describe("McpGatewayTokenStore", () => {
     expect(store.getOAuthTokens("zeeq")).toEqual({ access_token: "token-1", token_type: "Bearer" });
   });
 
+  test("clearOAuthTokens drops the dead tokens and keeps everything else", () => {
+    const store = new McpGatewayTokenStore(createTempHome());
+    store.saveClientInformation("zeeq", {
+      client_id: "client-1",
+      redirect_uris: ["https://daemon.example.test/mcp/gateway/oauth/callback"],
+    });
+    store.saveOAuthTokens("zeeq", {
+      access_token: "at-1",
+      token_type: "Bearer",
+      refresh_token: "rt-1",
+    });
+
+    store.clearOAuthTokens("zeeq");
+
+    expect(store.getOAuthTokens("zeeq")).toBeUndefined();
+    expect(store.getClientInformation("zeeq")).toEqual({
+      client_id: "client-1",
+      redirect_uris: ["https://daemon.example.test/mcp/gateway/oauth/callback"],
+    });
+  });
+
+  test("clearOAuthTokens on a server with no tokens is a no-op", () => {
+    const store = new McpGatewayTokenStore(createTempHome());
+    expect(() => store.clearOAuthTokens("zeeq")).not.toThrow();
+    expect(store.getOAuthTokens("zeeq")).toBeUndefined();
+  });
+
+  test("clearCodeVerifier drops the verifier and keeps the tokens", () => {
+    const store = new McpGatewayTokenStore(createTempHome());
+    store.saveCodeVerifier("zeeq", "verifier-1");
+    store.saveOAuthTokens("zeeq", { access_token: "at-1", token_type: "Bearer" });
+
+    store.clearCodeVerifier("zeeq");
+
+    expect(store.getCodeVerifier("zeeq")).toBeUndefined();
+    expect(store.getOAuthTokens("zeeq")).toEqual({ access_token: "at-1", token_type: "Bearer" });
+  });
+
   test("round-trips static auth header values, never touching config", () => {
     const paseoHome = createTempHome();
     const store = new McpGatewayTokenStore(paseoHome);

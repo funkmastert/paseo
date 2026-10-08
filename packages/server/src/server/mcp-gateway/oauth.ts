@@ -159,6 +159,28 @@ export function createGatewayOAuthClientProvider(
       }
       return codeVerifier;
     },
+    /**
+     * The SDK's `auth()` calls this before retrying once, on `InvalidGrantError` (scope
+     * `"tokens"`) or `InvalidClientError`/`UnauthorizedClientError` (scope `"all"`). Without
+     * it, the retry re-reads the same dead refresh token or stale client registration from the
+     * store and fails identically — surfacing as a stuck "Sign-in failed: Invalid refresh
+     * token" that pressing Sign in can never clear. Clearing the store here is what turns the
+     * retry into a genuine fresh authorization-code flow.
+     *
+     * `"discovery"` is a no-op: this provider never implements `discoveryState`/
+     * `saveDiscoveryState`, so there is nothing cached to invalidate.
+     */
+    invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery"): void {
+      if (scope === "tokens" || scope === "all") {
+        tokenStore.clearOAuthTokens(serverName);
+      }
+      if (scope === "verifier" || scope === "all") {
+        tokenStore.clearCodeVerifier(serverName);
+      }
+      if (scope === "client" || scope === "all") {
+        tokenStore.forgetClientInformation(serverName);
+      }
+    },
   };
 }
 

@@ -197,6 +197,31 @@ export class McpGatewayTokenStore {
     this.setRecord(serverName, rest);
   }
 
+  /**
+   * Drops stored tokens. The SDK's `auth()` calls this (via `invalidateCredentials('tokens')`)
+   * after a refresh attempt comes back `invalid_grant` — the refresh token is dead, so keeping
+   * it around would only make the next sign-in attempt retry the same failing refresh instead
+   * of starting a fresh authorization.
+   */
+  clearOAuthTokens(serverName: string): void {
+    const record = this.getOAuthRecord(serverName);
+    if (!record?.tokens) {
+      return;
+    }
+    const { tokens: _dropped, ...rest } = record;
+    this.setRecord(serverName, rest);
+  }
+
+  /** Drops a half-finished PKCE verifier so a fresh authorization attempt mints its own. */
+  clearCodeVerifier(serverName: string): void {
+    const record = this.getOAuthRecord(serverName);
+    if (!record?.codeVerifier) {
+      return;
+    }
+    const { codeVerifier: _dropped, ...rest } = record;
+    this.setRecord(serverName, rest);
+  }
+
   getClientCredentials(serverName: string): PreregisteredOAuthClient | undefined {
     return this.getOAuthRecord(serverName)?.clientCredentials;
   }
