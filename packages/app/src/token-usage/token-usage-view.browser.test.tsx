@@ -40,6 +40,7 @@ function ContentHarness({ width, backfilling = false }: { width: number; backfil
     <div style={style}>
       <TokenUsageContent
         breakdown={breakdown}
+        isLoading={false}
         unit="weighted"
         onUnitChange={NOOP}
         range="7d"

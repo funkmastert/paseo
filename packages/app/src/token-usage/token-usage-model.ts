@@ -1,52 +1,39 @@
-/**
- * Local shape for the KTD-6 wire contract (`usage.tokens.get_breakdown`), owned here until the
- * protocol unit lands `@getpaseo/protocol/token-usage/rpc-schemas`. U5 swaps every import of this
- * type for the generated one; the view-model functions below don't change because the shape is
- * fixed by KTD-6 either way.
- */
+import type {
+  TokenUsageCoverage,
+  TokenUsageGetBreakdownResponse,
+  TokenUsageRow,
+} from "@getpaseo/protocol/token-usage/rpc-schemas";
 
-export type TokenUsageRole = "leader" | "worker" | "outside";
-export type TokenUsageRange = "24h" | "7d" | "30d";
+export type {
+  TokenUsageCoverage,
+  TokenUsageRange,
+  TokenUsageRow,
+} from "@getpaseo/protocol/token-usage/rpc-schemas";
+export type TokenUsageBreakdown = TokenUsageGetBreakdownResponse["payload"];
 export type TokenUsageUnit = "weighted" | "raw";
 
-export const TOKEN_USAGE_ROLE_ORDER: readonly TokenUsageRole[] = ["leader", "worker", "outside"];
+/**
+ * The three buckets this screen renders. The wire's `role` is an open string
+ * (docs/protocol-compatibility.md — never narrow a closed enum): a daemon may add a fourth role
+ * before this app knows about it. `normalizeTokenUsageRole` is the one place that decides what an
+ * unrecognized role displays as.
+ */
+export type TokenUsageDisplayRole = "leader" | "worker" | "outside";
+
+export const TOKEN_USAGE_ROLE_ORDER: readonly TokenUsageDisplayRole[] = [
+  "leader",
+  "worker",
+  "outside",
+];
+
+/** An unrecognized role books under "outside" — same bucket as a session with no owning agent. */
+export function normalizeTokenUsageRole(role: string): TokenUsageDisplayRole {
+  if (role === "leader" || role === "worker") return role;
+  return "outside";
+}
 
 /** `model` is `"unknown"` when the response carried none (KTD-6). */
 export const TOKEN_USAGE_UNKNOWN_MODEL = "unknown";
-
-export interface TokenUsageRow {
-  provider: string;
-  model: string;
-  role: TokenUsageRole;
-  input: number;
-  cacheWrite: number;
-  cacheRead: number;
-  output: number;
-  weighted: number;
-  responses: number;
-}
-
-export interface TokenUsageBackfillState {
-  state: "pending" | "running" | "done" | "off";
-  filesDone: number;
-  filesTotal: number;
-}
-
-export interface TokenUsageCoverage {
-  enabled: boolean;
-  recordingSinceMs: number | null;
-  backfill: TokenUsageBackfillState;
-}
-
-export interface TokenUsageBreakdown {
-  requestId: string;
-  generatedAt: number;
-  range: TokenUsageRange;
-  rangeStartMs: number;
-  rows: TokenUsageRow[];
-  coverage: TokenUsageCoverage;
-  error?: string;
-}
 
 function rawTotal(row: TokenUsageRow): number {
   return row.input + row.cacheWrite + row.cacheRead + row.output;
@@ -69,7 +56,7 @@ function trimTrailingZero(formatted: string): string {
 }
 
 export interface TokenUsageRoleSegment {
-  role: TokenUsageRole;
+  role: TokenUsageDisplayRole;
   total: number;
   /** Share of the largest bar's total, so segments across bars compare on one scale. */
   fraction: number;
@@ -100,7 +87,7 @@ export function buildTokenUsageModelBars(
   interface Entry {
     provider: string;
     model: string;
-    roleTotals: Map<TokenUsageRole, number>;
+    roleTotals: Map<TokenUsageDisplayRole, number>;
   }
   const byModel = new Map<string, Entry>();
   for (const row of rows) {
@@ -110,8 +97,9 @@ export function buildTokenUsageModelBars(
       model: row.model,
       roleTotals: new Map(),
     };
+    const role = normalizeTokenUsageRole(row.role);
     const value = totalForUnit(row, unit);
-    entry.roleTotals.set(row.role, (entry.roleTotals.get(row.role) ?? 0) + value);
+    entry.roleTotals.set(role, (entry.roleTotals.get(role) ?? 0) + value);
     byModel.set(key, entry);
   }
 
@@ -147,7 +135,7 @@ export function buildTokenUsageModelBars(
 }
 
 export interface TokenUsageRoleTotal {
-  role: TokenUsageRole;
+  role: TokenUsageDisplayRole;
   total: number;
   formattedTotal: string;
 }
@@ -157,9 +145,10 @@ export function buildTokenUsageRoleTotals(
   rows: readonly TokenUsageRow[],
   unit: TokenUsageUnit,
 ): TokenUsageRoleTotal[] {
-  const totals = new Map<TokenUsageRole, number>();
+  const totals = new Map<TokenUsageDisplayRole, number>();
   for (const row of rows) {
-    totals.set(row.role, (totals.get(row.role) ?? 0) + totalForUnit(row, unit));
+    const role = normalizeTokenUsageRole(row.role);
+    totals.set(role, (totals.get(role) ?? 0) + totalForUnit(row, unit));
   }
   return TOKEN_USAGE_ROLE_ORDER.map((role) => {
     const total = totals.get(role) ?? 0;
@@ -180,7 +169,11 @@ export type TokenUsageDisplayState =
   | { kind: "empty" }
   | { kind: "data" };
 
-/** R11: progress while the backfill runs, an empty state once it's done and there's still nothing. */
+/**
+ * R11: progress while the backfill runs, an empty state once it's done and there's still nothing.
+ * `backfill.state` is an open string too; a state this app doesn't recognize yet behaves like
+ * "done" — no progress banner, since it isn't known to still be running.
+ */
 export function resolveTokenUsageDisplayState(
   rows: readonly TokenUsageRow[],
   coverage: TokenUsageCoverage,

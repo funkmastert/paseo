@@ -103,6 +103,25 @@ describe("usage.tokens.get_breakdown", () => {
     expect(SessionOutboundMessageSchema.safeParse(message).success).toBe(false);
   });
 
+  test("accepts a role or backfill state an older client doesn't know yet", () => {
+    // `role` and `backfill.state` are open strings, not closed enums (docs/protocol-compatibility.md
+    // — never narrow): a daemon that adds a fourth role or backfill state must not fail validation
+    // on an app that predates it.
+    const message = {
+      type: "usage.tokens.get_breakdown.response",
+      payload: {
+        ...payload,
+        rows: [{ ...payload.rows[0], role: "reviewer" }],
+        coverage: {
+          ...payload.coverage,
+          backfill: { ...payload.coverage.backfill, state: "paused" },
+        },
+      },
+    };
+
+    expect(SessionOutboundMessageSchema.safeParse(message).success).toBe(true);
+  });
+
   test("an older client ignores fields a newer daemon adds", () => {
     const message = {
       type: "usage.tokens.get_breakdown.response",

@@ -1,5 +1,4 @@
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
-import type { TokenUsageRole } from "@getpaseo/protocol/token-usage/rpc-schemas";
 import type { SessionIndexEntry } from "./token-usage-store.js";
 
 /**
@@ -7,7 +6,13 @@ import type { SessionIndexEntry } from "./token-usage-store.js";
  * parent agent is a leader, one with a parent is a worker, and a session no agent owns is
  * outside Paseo. The structure is all that is on disk; the classifier's finer role is not
  * persisted, so it cannot be reconstructed for history.
+ *
+ * `TokenUsageInternalRole` is a closed union on purpose, separate from the protocol's
+ * `TokenUsageRole` (an open string — docs/protocol-compatibility.md, never narrow a wire enum).
+ * The server only ever produces these three values; the open string on the wire is so a future
+ * daemon can add a fourth role without failing validation on an older app.
  */
+export type TokenUsageInternalRole = "leader" | "worker" | "outside";
 
 /** The fields of an agent record (stored or live) that name its provider sessions. */
 export interface AgentSessionSource {
@@ -37,7 +42,7 @@ export function sessionIdsOf(agent: AgentSessionSource): string[] {
   return [...ids];
 }
 
-export function roleOfParent(parentAgentId: string | null): TokenUsageRole {
+export function roleOfParent(parentAgentId: string | null): TokenUsageInternalRole {
   return parentAgentId === null ? "leader" : "worker";
 }
 
@@ -48,9 +53,9 @@ export function roleOfParent(parentAgentId: string | null): TokenUsageRole {
 export function buildSessionRoles(input: {
   records: readonly AgentSessionSource[];
   sessions: readonly SessionIndexEntry[];
-}): Map<string, TokenUsageRole> {
-  const newest = new Map<string, { role: TokenUsageRole; atMs: number }>();
-  const offer = (sessionId: string, role: TokenUsageRole, atMs: number) => {
+}): Map<string, TokenUsageInternalRole> {
+  const newest = new Map<string, { role: TokenUsageInternalRole; atMs: number }>();
+  const offer = (sessionId: string, role: TokenUsageInternalRole, atMs: number) => {
     const current = newest.get(sessionId);
     if (!current || atMs >= current.atMs) newest.set(sessionId, { role, atMs });
   };
@@ -68,11 +73,11 @@ export function buildSessionRoles(input: {
 /** The role to book under, or "defer" for a young session no agent claims yet. */
 export function resolveRole(input: {
   sessionId: string | null;
-  roles: ReadonlyMap<string, TokenUsageRole>;
+  roles: ReadonlyMap<string, TokenUsageInternalRole>;
   fileStartedMs: number;
   nowMs: number;
   graceMs?: number;
-}): TokenUsageRole | "defer" {
+}): TokenUsageInternalRole | "defer" {
   const known = input.sessionId ? input.roles.get(input.sessionId) : undefined;
   if (known) return known;
   const graceMs = input.graceMs ?? UNKNOWN_SESSION_GRACE_MS;

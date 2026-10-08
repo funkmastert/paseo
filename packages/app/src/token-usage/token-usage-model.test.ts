@@ -4,6 +4,7 @@ import {
   buildTokenUsageRoleTotals,
   formatCompactTokens,
   hasIncompleteAttribution,
+  normalizeTokenUsageRole,
   resolveTokenUsageDisplayState,
   type TokenUsageCoverage,
   type TokenUsageRow,
@@ -113,6 +114,29 @@ describe("buildTokenUsageRoleTotals", () => {
     expect(totals.map((entry) => entry.role)).toEqual(["leader", "worker", "outside"]);
     expect(totals.find((entry) => entry.role === "worker")?.total).toBe(0);
   });
+
+  it("books a role the app doesn't recognize yet under outside", () => {
+    // `role` is an open string on the wire (docs/protocol-compatibility.md): a daemon may add a
+    // fourth role before this app knows about it.
+    const rows: TokenUsageRow[] = [row({ role: "reviewer", weighted: 500 })];
+    const totals = buildTokenUsageRoleTotals(rows, "weighted");
+    expect(totals.find((entry) => entry.role === "outside")?.total).toBe(500);
+    expect(totals.find((entry) => entry.role === "leader")?.total).toBe(0);
+    expect(totals.find((entry) => entry.role === "worker")?.total).toBe(0);
+  });
+});
+
+describe("normalizeTokenUsageRole", () => {
+  it("passes leader and worker through unchanged", () => {
+    expect(normalizeTokenUsageRole("leader")).toBe("leader");
+    expect(normalizeTokenUsageRole("worker")).toBe("worker");
+  });
+
+  it("maps outside, and anything it doesn't recognize, to outside", () => {
+    expect(normalizeTokenUsageRole("outside")).toBe("outside");
+    expect(normalizeTokenUsageRole("reviewer")).toBe("outside");
+    expect(normalizeTokenUsageRole("")).toBe("outside");
+  });
 });
 
 describe("resolveTokenUsageDisplayState", () => {
@@ -135,6 +159,16 @@ describe("resolveTokenUsageDisplayState", () => {
       backfill: { state: "running", filesDone: 1, filesTotal: 10 },
     });
     expect(state).toEqual({ kind: "data" });
+  });
+
+  it('treats a backfill state it doesn\'t recognize yet as "done" — no progress banner', () => {
+    // `backfill.state` is an open string too (docs/protocol-compatibility.md): a daemon may add a
+    // state this app predates.
+    const state = resolveTokenUsageDisplayState([], {
+      ...EMPTY_COVERAGE,
+      backfill: { state: "paused", filesDone: 3, filesTotal: 10 },
+    });
+    expect(state).toEqual({ kind: "empty" });
   });
 });
 

@@ -1,8 +1,7 @@
 import { createReadStream, promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import type { TokenUsageRole } from "@getpaseo/protocol/token-usage/rpc-schemas";
-import { resolveRole } from "./token-usage-attribution.js";
+import { resolveRole, type TokenUsageInternalRole } from "./token-usage-attribution.js";
 import type {
   FileScanState,
   TokenUsageStore,
@@ -80,7 +79,7 @@ type ScanOutcome = "done" | "deferred" | "budget";
 type LineOutcome = "ok" | "defer";
 
 interface SweepContext {
-  roles: ReadonlyMap<string, TokenUsageRole>;
+  roles: ReadonlyMap<string, TokenUsageInternalRole>;
   nowMs: number;
   horizonMs: number;
   deadline: number;
@@ -139,7 +138,7 @@ export class TokenUsageScanner {
   }
 
   async sweep(input: {
-    roles: ReadonlyMap<string, TokenUsageRole>;
+    roles: ReadonlyMap<string, TokenUsageInternalRole>;
   }): Promise<TokenUsageSweepResult> {
     await this.store.load();
     const walkStart = performance.now();

@@ -8,7 +8,10 @@ export const TokenUsageRangeSchema = z.enum(["24h", "7d", "30d"]);
 // "leader"  - the session belongs to a Paseo agent with no parent agent
 // "worker"  - the session belongs to a Paseo agent spawned by another agent
 // "outside" - no Paseo agent owns the session
-export const TokenUsageRoleSchema = z.enum(["leader", "worker", "outside"]);
+// Open string, not a closed enum: a daemon that adds a fourth role must not fail validation on
+// an older app that doesn't know it yet (docs/protocol-compatibility.md — never narrow). The
+// server emits only the three values above; the app maps anything else to "outside".
+export const TokenUsageRoleSchema = z.string();
 
 // One provider x model x role with any usage in the range. Counts are the provider's own per-
 // response numbers summed; `weighted` is the cost-weighted total (docs/token-burn.md).
@@ -30,7 +33,9 @@ export const TokenUsageBackfillSchema = z.object({
   // "running" - reading the last 30 days of transcripts
   // "done"    - caught up; later sweeps only read appended lines
   // "off"     - the feature is turned off in config
-  state: z.enum(["pending", "running", "done", "off"]),
+  // Open string, not a closed enum, for the same reason as `TokenUsageRoleSchema` above. The app
+  // treats anything it doesn't recognize like "done" (no special progress UI).
+  state: z.string(),
   filesDone: z.number().nonnegative(),
   filesTotal: z.number().nonnegative(),
 });

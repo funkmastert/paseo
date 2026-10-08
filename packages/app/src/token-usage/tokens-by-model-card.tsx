@@ -4,14 +4,17 @@ import { settingsStyles } from "@/styles/settings";
 import {
   TOKEN_USAGE_ROLE_ORDER,
   type TokenUsageModelBar,
-  type TokenUsageRole,
+  type TokenUsageDisplayRole,
 } from "./token-usage-model";
 import { TOKEN_USAGE_ROLE_LABELS } from "./token-usage-role-colors";
 
 // A sliver stays visible for a non-zero segment, without pretending it's bigger than it is.
 const MIN_SEGMENT_FRACTION = 0.006;
 
-const ROLE_FILL_STYLE_NAMES: Record<TokenUsageRole, "roleLeader" | "roleWorker" | "roleOutside"> = {
+const ROLE_FILL_STYLE_NAMES: Record<
+  TokenUsageDisplayRole,
+  "roleLeader" | "roleWorker" | "roleOutside"
+> = {
   leader: "roleLeader",
   worker: "roleWorker",
   outside: "roleOutside",

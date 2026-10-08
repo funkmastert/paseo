@@ -98,7 +98,7 @@ export function buildTokenUsageFixture(range: TokenUsageRange): TokenUsageBreakd
   const now = Date.now();
   return {
     requestId: `fixture-${range}`,
-    generatedAt: now,
+    generatedAt: new Date(now).toISOString(),
     range,
     rangeStartMs: now - rangeDurationMs(range),
     rows: buildRows(RANGE_SCALE[range]),
@@ -115,7 +115,7 @@ export function buildTokenUsageBackfillingFixture(range: TokenUsageRange): Token
   const now = Date.now();
   return {
     requestId: `fixture-backfilling-${range}`,
-    generatedAt: now,
+    generatedAt: new Date(now).toISOString(),
     range,
     rangeStartMs: now - rangeDurationMs(range),
     rows: [],

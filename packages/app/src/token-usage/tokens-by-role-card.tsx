@@ -1,10 +1,13 @@
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { settingsStyles } from "@/styles/settings";
-import type { TokenUsageRole, TokenUsageRoleTotal } from "./token-usage-model";
+import type { TokenUsageDisplayRole, TokenUsageRoleTotal } from "./token-usage-model";
 import { TOKEN_USAGE_ROLE_LABELS } from "./token-usage-role-colors";
 
-const ROLE_FILL_STYLE_NAMES: Record<TokenUsageRole, "roleLeader" | "roleWorker" | "roleOutside"> = {
+const ROLE_FILL_STYLE_NAMES: Record<
+  TokenUsageDisplayRole,
+  "roleLeader" | "roleWorker" | "roleOutside"
+> = {
   leader: "roleLeader",
   worker: "roleWorker",
   outside: "roleOutside",

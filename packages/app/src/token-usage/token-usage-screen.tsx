@@ -3,9 +3,17 @@ import { useIsFocused } from "@react-navigation/native";
 import { ScrollView, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { MenuHeader } from "@/components/headers/menu-header";
-import { buildTokenUsageFixture } from "./token-usage-fixtures";
+import { useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
+import { useHostFeature } from "@/runtime/host-features";
+import { useHostRuntimeIsConnected, useHosts } from "@/runtime/host-runtime";
+import { orderHostsLocalFirst, resolveActiveHostServerId } from "@/types/host-connection";
 import type { TokenUsageRange, TokenUsageUnit } from "./token-usage-model";
-import { TokenUsageContent } from "./token-usage-view";
+import { useTokenUsage } from "./use-token-usage";
+import {
+  resolveTokenUsageAvailability,
+  TokenUsageAvailabilityBanner,
+  TokenUsageContent,
+} from "./token-usage-view";
 
 export function TokenUsageScreen(): ReactElement {
   const isFocused = useIsFocused();
@@ -17,13 +25,42 @@ export function TokenUsageScreen(): ReactElement {
   return <TokenUsageScreenContent />;
 }
 
+/** The active host this screen scopes to — no picker, same resolution as the sidebar target. */
+function useTokenUsageActiveServerId(): string | null {
+  const hosts = useHosts();
+  const localServerId = useLocalDaemonServerId();
+  const orderedHosts = useMemo(
+    () => orderHostsLocalFirst(hosts, localServerId),
+    [hosts, localServerId],
+  );
+  return useMemo(
+    () =>
+      resolveActiveHostServerId({
+        selectedServerId: null,
+        localServerId,
+        hosts,
+        orderedHosts,
+      }),
+    [localServerId, hosts, orderedHosts],
+  );
+}
+
 function TokenUsageScreenContent(): ReactElement {
   const [unit, setUnit] = useState<TokenUsageUnit>("weighted");
   const [range, setRange] = useState<TokenUsageRange>("7d");
 
-  // COMPAT(tokenUsage): fixture data, matching the props `use-token-usage.ts` (U5) will provide
-  // once U3's `usage.tokens.get_breakdown` RPC lands. Only this line changes in U5.
-  const breakdown = useMemo(() => buildTokenUsageFixture(range), [range]);
+  const serverId = useTokenUsageActiveServerId();
+  const connected = useHostRuntimeIsConnected(serverId ?? "");
+  const supported = useHostFeature(serverId, "tokenUsage");
+  const availability = resolveTokenUsageAvailability({
+    hasHost: serverId !== null,
+    connected,
+    supported,
+  });
+
+  const { data: breakdown, isLoading } = useTokenUsage(serverId, range, {
+    enabled: availability.kind === "ready",
+  });
 
   return (
     <View style={styles.container}>
@@ -34,13 +71,17 @@ function TokenUsageScreenContent(): ReactElement {
         testID="token-usage-screen"
       >
         <View style={styles.column}>
-          <TokenUsageContent
-            breakdown={breakdown}
-            unit={unit}
-            onUnitChange={setUnit}
-            range={range}
-            onRangeChange={setRange}
-          />
+          <TokenUsageAvailabilityBanner availability={availability} />
+          {availability.kind === "ready" ? (
+            <TokenUsageContent
+              breakdown={breakdown}
+              isLoading={isLoading}
+              unit={unit}
+              onUnitChange={setUnit}
+              range={range}
+              onRangeChange={setRange}
+            />
+          ) : null}
         </View>
       </ScrollView>
     </View>

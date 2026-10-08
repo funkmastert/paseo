@@ -1,9 +1,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { TokenUsageRole, TokenUsageRow } from "@getpaseo/protocol/token-usage/rpc-schemas";
+import type { TokenUsageRow } from "@getpaseo/protocol/token-usage/rpc-schemas";
 import { z } from "zod";
 import { weighTokenUsage } from "../agent/token-rate-tracker.js";
 import { writeFileAtomic } from "../atomic-file.js";
+import type { TokenUsageInternalRole } from "./token-usage-attribution.js";
 import { UNKNOWN_MODEL, type TokenCounts } from "./transcript-parsers.js";
 
 /**
@@ -51,7 +52,7 @@ export interface UsageBooking extends TokenCounts {
   atMs: number;
   provider: TranscriptProvider;
   model: string;
-  role: TokenUsageRole;
+  role: TokenUsageInternalRole;
   /** 1 for a new response, 0 for a later line of one already counted that reported more. */
   responses: number;
 }
@@ -496,7 +497,7 @@ function bucketKey(
   hourMs: number,
   provider: TranscriptProvider,
   model: string,
-  role: TokenUsageRole,
+  role: TokenUsageInternalRole,
 ): string {
   return `${hourMs}\u0000${provider}\u0000${model}\u0000${role}`;
 }

@@ -1,7 +1,8 @@
 import { useMemo, type ReactElement } from "react";
 import { Text, View } from "react-native";
-import { StyleSheet } from "react-native-unistyles";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Alert } from "@/components/ui/alert";
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
 import {
   buildTokenUsageModelBars,
@@ -24,6 +25,10 @@ import { TokensByRoleCard } from "./tokens-by-role-card";
  * fixture data today and will wire `use-token-usage.ts` in U5, without touching this file.
  */
 
+const ThemedLoadingSpinner = withUnistyles(LoadingSpinner, (theme) => ({
+  color: theme.colors.foregroundMuted,
+}));
+
 const UNIT_OPTIONS: SegmentedControlOption<TokenUsageUnit>[] = [
   { value: "weighted", label: "Weighted", testID: "token-usage-unit-weighted" },
   { value: "raw", label: "Raw", testID: "token-usage-unit-raw" },
@@ -35,8 +40,57 @@ const RANGE_OPTIONS: SegmentedControlOption<TokenUsageRange>[] = [
   { value: "30d", label: "30 days", testID: "token-usage-range-30d" },
 ];
 
+export type TokenUsageAvailability =
+  | { kind: "no-host" }
+  | { kind: "connecting" }
+  | { kind: "update-host" }
+  | { kind: "ready" };
+
+/** A deep link to this route on a host without the feature says to update the host (R6/U5). */
+export function resolveTokenUsageAvailability(input: {
+  hasHost: boolean;
+  connected: boolean;
+  supported: boolean;
+}): TokenUsageAvailability {
+  if (!input.hasHost) return { kind: "no-host" };
+  if (!input.connected) return { kind: "connecting" };
+  if (!input.supported) return { kind: "update-host" };
+  return { kind: "ready" };
+}
+
+export function TokenUsageAvailabilityBanner({
+  availability,
+}: {
+  availability: TokenUsageAvailability;
+}) {
+  switch (availability.kind) {
+    case "no-host":
+      return (
+        <Alert
+          title="No host"
+          description="Add a host to see token usage."
+          testID="token-usage-no-host"
+        />
+      );
+    case "connecting":
+      return <Alert title="Waiting for the host to connect" testID="token-usage-connecting" />;
+    case "update-host":
+      return (
+        <Alert
+          variant="info"
+          title="Update the host for token usage"
+          description="This host's daemon is older than the Tokens screen. Update it, then come back."
+          testID="token-usage-update-host"
+        />
+      );
+    case "ready":
+      return null;
+  }
+}
+
 export interface TokenUsageContentProps {
-  breakdown: TokenUsageBreakdown;
+  breakdown: TokenUsageBreakdown | undefined;
+  isLoading: boolean;
   unit: TokenUsageUnit;
   onUnitChange: (unit: TokenUsageUnit) => void;
   range: TokenUsageRange;
@@ -45,21 +99,24 @@ export interface TokenUsageContentProps {
 
 export function TokenUsageContent({
   breakdown,
+  isLoading,
   unit,
   onUnitChange,
   range,
   onRangeChange,
 }: TokenUsageContentProps): ReactElement {
-  const displayState = resolveTokenUsageDisplayState(breakdown.rows, breakdown.coverage);
+  const displayState = breakdown
+    ? resolveTokenUsageDisplayState(breakdown.rows, breakdown.coverage)
+    : null;
   const bars = useMemo(
-    () => buildTokenUsageModelBars(breakdown.rows, unit),
-    [breakdown.rows, unit],
+    () => (breakdown ? buildTokenUsageModelBars(breakdown.rows, unit) : []),
+    [breakdown, unit],
   );
   const roleTotals = useMemo(
-    () => buildTokenUsageRoleTotals(breakdown.rows, unit),
-    [breakdown.rows, unit],
+    () => (breakdown ? buildTokenUsageRoleTotals(breakdown.rows, unit) : []),
+    [breakdown, unit],
   );
-  const incompleteAttribution = hasIncompleteAttribution(breakdown.rows, unit);
+  const incompleteAttribution = breakdown ? hasIncompleteAttribution(breakdown.rows, unit) : false;
 
   return (
     <View style={styles.readyColumn}>
@@ -79,7 +136,13 @@ export function TokenUsageContent({
           testID="token-usage-range"
         />
       </View>
-      {displayState.kind === "backfilling" ? (
+      {!breakdown && isLoading ? (
+        <View style={styles.loadingRow} testID="token-usage-loading">
+          <ThemedLoadingSpinner size={14} />
+          <Text style={styles.loadingLabel}>Loading...</Text>
+        </View>
+      ) : null}
+      {displayState?.kind === "backfilling" ? (
         <Alert
           variant="info"
           title="Building the 30-day history"
@@ -87,12 +150,12 @@ export function TokenUsageContent({
           testID="token-usage-backfilling"
         />
       ) : null}
-      {displayState.kind === "empty" ? (
+      {displayState?.kind === "empty" ? (
         <Text style={styles.emptyState} testID="token-usage-empty">
           No token usage yet
         </Text>
       ) : null}
-      {displayState.kind === "data" ? (
+      {displayState?.kind === "data" ? (
         <>
           <TokensByModelCard bars={bars} />
           <TokensByRoleCard totals={roleTotals} />
@@ -115,6 +178,15 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: "row",
     flexWrap: "wrap",
     gap: theme.spacing[3],
+  },
+  loadingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+  },
+  loadingLabel: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
   },
   emptyState: {
     textAlign: "center",

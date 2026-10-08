@@ -1,21 +1,11 @@
 import { useMemo } from "react";
 import { useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
+import { useHostFeature } from "@/runtime/host-features";
 import { useHostRuntimeIsConnected, useHosts } from "@/runtime/host-runtime";
-import { useSessionStore } from "@/stores/session-store";
 import { orderHostsLocalFirst, resolveActiveHostServerId } from "@/types/host-connection";
 
 export interface SidebarTokenUsageTarget {
   serverId: string;
-}
-
-/**
- * COMPAT(tokenUsage): `server_info.features.tokenUsage` lands with the server/protocol unit of
- * this plan (KTD-6), in a different worktree. Until that key exists on `DaemonServerInfo`, read
- * the raw features payload instead of widening `HostFeatureName` from here. Swap this for
- * `useHostFeature(serverId, "tokenUsage")` once it lands — nothing else in this file changes.
- */
-function supportsTokenUsage(features: Record<string, unknown> | null | undefined): boolean {
-  return features?.tokenUsage === true;
 }
 
 /**
@@ -41,14 +31,7 @@ export function useSidebarTokenUsageTarget(): SidebarTokenUsageTarget | null {
     [localServerId, hosts, orderedHosts],
   );
   const connected = useHostRuntimeIsConnected(activeServerId ?? "");
-  const supported = useSessionStore((state) =>
-    supportsTokenUsage(
-      state.sessions[activeServerId ?? ""]?.serverInfo?.features as
-        | Record<string, unknown>
-        | null
-        | undefined,
-    ),
-  );
+  const supported = useHostFeature(activeServerId, "tokenUsage");
 
   if (!activeServerId || !connected || !supported) return null;
   return { serverId: activeServerId };
