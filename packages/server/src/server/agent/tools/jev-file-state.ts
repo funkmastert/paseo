@@ -759,7 +759,7 @@ async function resolveDeniedRoots(homeDir: string, paseoHome: string): Promise<D
  * under `$PASEO_HOME`, not only worktrees. Checked again here in case a caller reaches this with
  * one some other way; dropping it leaves no carve-out rather than guessing a safe substitute.
  */
-async function resolveWorktreeRoots(
+export async function resolveWorktreeRoots(
   paseoHome: string,
   worktreesRoot: string | undefined,
   platform: NodeJS.Platform,

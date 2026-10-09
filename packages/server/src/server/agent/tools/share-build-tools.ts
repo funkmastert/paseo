@@ -13,7 +13,8 @@ import path from "node:path";
 import type { Logger } from "pino";
 import { z } from "zod";
 import { resolvePathFromBase } from "../../path-utils.js";
-import type { PushNotificationSender } from "../../push/index.js";
+import type { NotifyDeliveryPreview, NotifyPolicy } from "../../notify-policy/notify-policy.js";
+import type { PushNotificationSender, PushPayload } from "../../push/index.js";
 import { finishAndroidShare } from "../../shared-builds/android-manifest.js";
 import { finishIosShare } from "../../shared-builds/ios-manifest.js";
 import {
@@ -23,13 +24,24 @@ import {
   type SharedBuildPlatform,
   type SharedBuildStore,
 } from "../../shared-builds/shared-build-store.js";
-import { runJevGit, samePathOrBelow, type JevGitRunner } from "./jev-file-state.js";
+import {
+  canonicalJevPath,
+  resolveWorktreeRoots,
+  runJevGit,
+  samePathOrBelow,
+  type JevGitRunner,
+} from "./jev-file-state.js";
 import type { PaseoToolConfig, PaseoToolExecutionContext, PaseoToolResult } from "./types.js";
 
 export interface SharedBuildsToolDependencies {
   store: Pick<SharedBuildStore, "share" | "unavailableReason">;
   /** Resolved per call: the sender exists only once the WebSocket server does. */
   getPushNotificationSender: () => PushNotificationSender | null;
+  /**
+   * What the notify policy would do with the push right now (bootstrap wires the daemon's own
+   * policy). Absent or throwing: the tool says the outcome is unconfirmed.
+   */
+  previewPush?: (meta: Parameters<NotifyPolicy["previewDelivery"]>[0]) => NotifyDeliveryPreview;
   serverId: string;
 }
 
@@ -53,8 +65,30 @@ export interface RegisterShareBuildToolsOptions {
   runGit?: JevGitRunner;
   platform?: NodeJS.Platform;
   homeDir?: string;
+  /** With `worktreesRoot`, where the worktrees root is: a cwd that is that root is refused. */
+  paseoHome?: string;
+  worktreesRoot?: string;
   logger: Logger;
 }
+
+interface RootContext {
+  runGit: JevGitRunner;
+  platform: NodeJS.Platform;
+  homeDir: string;
+  paseoHome?: string;
+  worktreesRoot?: string;
+}
+
+/** What happened to the push, for the agent to relay. Anything but `sent` means Tyler wasn't told. */
+export type SharePushOutcome =
+  | "sent"
+  | "folded"
+  | "digest"
+  | "logged"
+  | "no-device"
+  | "no-sender"
+  | "failed"
+  | "unconfirmed";
 
 interface ValidatedBuild {
   realPath: string;
@@ -69,7 +103,7 @@ const DESCRIPTION = [
   "Share only a build you produced for Tyler to try, from inside your working directory or its git worktree.",
   "Android: build a debug APK (`./gradlew :app:assembleDebug`) and share app/build/outputs/apk/debug/app-debug.apk. An AAB can't be installed this way.",
   "iPhone: export an ad-hoc IPA. Archive with `xcodebuild archive`, then `xcodebuild -exportArchive -exportOptionsPlist <plist>` with `method` set to `release-testing` (`ad-hoc` on Xcode before 15.3). Keep that export-options plist outside the repo, in a temp dir. It installs only on an iPhone registered on the ad-hoc provisioning profile.",
-  "Refused while free disk is low, and over the size caps; older shares are deleted to make room.",
+  "Caps, by default: 600 MB per build, 3 GB across all shares (the oldest are deleted to make room), links expire after 3 days. Refused while free disk is low.",
 ].join("\n\n");
 
 function toResult(payload: unknown, isError = false): PaseoToolResult {
@@ -88,41 +122,58 @@ async function realpathOrNull(target: string): Promise<string | null> {
   }
 }
 
-/** The caller's cwd, and its git worktree when that isn't the home directory or above it. */
-async function resolveAllowedRoots(input: {
-  cwd: string;
-  runGit: JevGitRunner;
-  platform: NodeJS.Platform;
-  homeDir: string;
-}): Promise<string[] | null> {
+const TOO_BROAD_REFUSAL =
+  "share_build does not share from your home directory, an ancestor of it, the filesystem root or the worktrees root; run it from the project that built the file.";
+
+/**
+ * Whether a directory is too broad to confine a share to: the filesystem root, the home directory
+ * or an ancestor of it, or the worktrees root, which holds every agent's worktree. The same
+ * directories JevFileScope.open refuses as a cwd.
+ */
+function isTooBroadRoot(
+  root: string,
+  broad: { realHome: string; homeDir: string; worktreeRoots: string[]; platform: NodeJS.Platform },
+): boolean {
+  const { platform } = broad;
+  const canonical = canonicalJevPath(root, platform);
+  return (
+    canonical === canonicalJevPath(path.parse(root).root, platform) ||
+    samePathOrBelow(root, broad.realHome, platform) ||
+    samePathOrBelow(root, broad.homeDir, platform) ||
+    broad.worktreeRoots.some((worktrees) => canonical === canonicalJevPath(worktrees, platform))
+  );
+}
+
+/** The caller's cwd, and its git worktree when that isn't too broad either. */
+async function resolveAllowedRoots(
+  input: RootContext & { cwd: string },
+): Promise<string[] | { refusal: string }> {
   const realCwd = await realpathOrNull(input.cwd);
-  if (!realCwd) return null;
+  if (!realCwd) return { refusal: "Your working directory does not exist." };
+  const broad = {
+    realHome: (await realpathOrNull(input.homeDir)) ?? input.homeDir,
+    homeDir: input.homeDir,
+    worktreeRoots: input.paseoHome
+      ? await resolveWorktreeRoots(input.paseoHome, input.worktreesRoot, input.platform)
+      : [],
+    platform: input.platform,
+  };
+  if (isTooBroadRoot(realCwd, broad)) return { refusal: TOO_BROAD_REFUSAL };
   const roots = [realCwd];
   const top = await input.runGit(["rev-parse", "--show-toplevel"], { cwd: realCwd });
   const realTop =
     top.code === 0 && top.stdout.trim() ? await realpathOrNull(top.stdout.trim()) : null;
-  const realHome = (await realpathOrNull(input.homeDir)) ?? input.homeDir;
-  if (
-    realTop &&
-    realTop !== path.parse(realTop).root &&
-    !samePathOrBelow(realTop, realHome, input.platform)
-  ) {
-    roots.push(realTop);
-  }
+  if (realTop && !isTooBroadRoot(realTop, broad)) roots.push(realTop);
   return roots;
 }
 
-async function validateBuildPath(input: {
-  requested: string;
-  cwd: string;
-  runGit: JevGitRunner;
-  platform: NodeJS.Platform;
-  homeDir: string;
-}): Promise<ValidatedBuild | { refusal: string }> {
+async function validateBuildPath(
+  input: RootContext & { requested: string; cwd: string },
+): Promise<ValidatedBuild | { refusal: string }> {
   const shown = input.requested.trim();
   if (!shown || shown.includes("\0")) return { refusal: "That is not a path." };
   const roots = await resolveAllowedRoots(input);
-  if (!roots) return { refusal: "Your working directory does not exist." };
+  if ("refusal" in roots) return roots;
   const realPath = await realpathOrNull(resolvePathFromBase(input.cwd, shown));
   if (!realPath) return { refusal: `${shown} was not found.` };
   if (!roots.some((root) => samePathOrBelow(root, realPath, input.platform))) {
@@ -166,11 +217,100 @@ export function buildShareBuildPush(input: {
   };
 }
 
+/** The notify policy's verdict, as the outcome the agent reports to Tyler. */
+function describePushOutcome(preview: NotifyDeliveryPreview | null): {
+  outcome: SharePushOutcome;
+  detail: string;
+} {
+  const tellTyler = "Give Tyler the link yourself.";
+  if (!preview) {
+    return {
+      outcome: "unconfirmed",
+      detail: "Handed to the push sender; whether it reached the phone is unknown.",
+    };
+  }
+  switch (preview.outcome) {
+    case "suppressed":
+      return {
+        outcome: "folded",
+        detail: `Not pushed again: this same build was pushed within the last hour, and the new link was not. ${tellTyler}`,
+      };
+    case "log":
+      return {
+        outcome: "logged",
+        detail: `Not pushed: the notification settings only record alerts. ${tellTyler}`,
+      };
+    case "digest":
+      return {
+        outcome: "digest",
+        detail: `Held for the next notice digest, not pushed now; a digest of several notices drops the tap-to-install link. ${tellTyler}`,
+      };
+    default:
+      if (preview.devices === 0) {
+        return {
+          outcome: "no-device",
+          detail: `Not pushed: no phone is registered for notifications. ${tellTyler}`,
+        };
+      }
+      return {
+        outcome: "sent",
+        detail:
+          preview.outcome === "notify"
+            ? "Pushed to Tyler's phone without a sound (his notifications are in focus or off mode)."
+            : "Pushed to Tyler's phone.",
+      };
+  }
+}
+
+/** Sends the push and says what became of it. */
+async function sendSharePush(input: {
+  deps: SharedBuildsToolDependencies;
+  payload: PushPayload;
+  sha256: string;
+  agentId: string;
+  logger: Logger;
+}): Promise<{ outcome: SharePushOutcome; detail: string }> {
+  const { deps } = input;
+  const sender = deps.getPushNotificationSender();
+  if (!sender) {
+    return {
+      outcome: "no-sender",
+      detail: "This daemon has no push sender. Give Tyler the link yourself.",
+    };
+  }
+  // Needs Tyler soon, and nothing is lost if he waits. One build pushed once an hour.
+  const meta = { level: "alert", dedupeKey: `shared-build:${input.sha256}` } as const;
+  // Asked before sending: after, the policy would see this push as its own repeat.
+  let preview: NotifyDeliveryPreview | null = null;
+  try {
+    preview = deps.previewPush?.(meta) ?? null;
+  } catch {
+    preview = null;
+  }
+  try {
+    await sender.send(input.payload, meta);
+  } catch (error) {
+    input.logger.warn({ err: error, agentId: input.agentId }, "Shared build push failed");
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      outcome: "failed",
+      detail: `The push failed: ${message}. Give Tyler the link yourself.`,
+    };
+  }
+  return describePushOutcome(preview);
+}
+
 export function registerShareBuildTools(options: RegisterShareBuildToolsOptions): void {
   const { deps, callerAgentId, logger } = options;
-  const runGit = options.runGit ?? runJevGit;
-  const platform = options.platform ?? process.platform;
-  const homeDir = options.homeDir ?? os.homedir();
+  // Every share is the caller's: without one there is no cwd to confine it to.
+  if (!callerAgentId) return;
+  const roots: RootContext = {
+    runGit: options.runGit ?? runJevGit,
+    platform: options.platform ?? process.platform,
+    homeDir: options.homeDir ?? os.homedir(),
+    ...(options.paseoHome ? { paseoHome: options.paseoHome } : {}),
+    ...(options.worktreesRoot ? { worktreesRoot: options.worktreesRoot } : {}),
+  };
 
   options.registerTool(
     "share_build",
@@ -204,23 +344,15 @@ export function registerShareBuildTools(options: RegisterShareBuildToolsOptions)
       },
     },
     async (input: { path: string; appName?: string; note?: string }) => {
-      if (!callerAgentId) {
-        return toResult(
-          { error: "share_build needs to know which agent is asking, and this session has none." },
-          true,
-        );
-      }
       const unavailable = deps.store.unavailableReason();
       if (unavailable) return toResult({ error: unavailable }, true);
       const caller = await options.readCaller();
       if (!caller) return toResult({ error: "Your agent record could not be read." }, true);
 
       const validated = await validateBuildPath({
+        ...roots,
         requested: input.path,
         cwd: caller.cwd,
-        runGit,
-        platform,
-        homeDir,
       });
       if ("refusal" in validated) return toResult({ error: validated.refusal }, true);
 
@@ -251,30 +383,21 @@ export function registerShareBuildTools(options: RegisterShareBuildToolsOptions)
         note: input.note,
         agentTitle: caller.title,
       });
-      let pushOutcome = "sent";
-      const sender = deps.getPushNotificationSender();
-      if (!sender) {
-        pushOutcome = "not sent: this daemon has no push sender";
-      } else {
-        try {
-          await sender.send(
-            {
-              ...push,
-              data: {
-                serverId: deps.serverId,
-                agentId: callerAgentId,
-                ...(caller.workspaceId ? { workspaceId: caller.workspaceId } : {}),
-                externalUrl: url,
-              },
-            },
-            // Needs Tyler soon, and nothing is lost if he waits. One build pushed once an hour.
-            { level: "alert", dedupeKey: `shared-build:${shared.record.sha256}` },
-          );
-        } catch (error) {
-          pushOutcome = `not sent: ${error instanceof Error ? error.message : String(error)}`;
-          logger.warn({ err: error, agentId: callerAgentId }, "Shared build push failed");
-        }
-      }
+      const pushOutcome = await sendSharePush({
+        deps,
+        payload: {
+          ...push,
+          data: {
+            serverId: deps.serverId,
+            agentId: callerAgentId,
+            ...(caller.workspaceId ? { workspaceId: caller.workspaceId } : {}),
+            externalUrl: url,
+          },
+        },
+        sha256: shared.record.sha256,
+        agentId: callerAgentId,
+        logger,
+      });
       logger.info(
         {
           agentId: callerAgentId,

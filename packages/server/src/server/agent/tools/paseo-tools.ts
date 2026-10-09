@@ -600,6 +600,8 @@ function registerSharedBuildTools(input: {
     registerTool: input.registerTool,
     deps: sharedBuilds,
     callerAgentId,
+    paseoHome: input.options.paseoHome,
+    worktreesRoot: input.options.worktreesRoot,
     // Read at each call, like the JEV tools' caller: the cwd is the live agent's, the title and
     // workspace are what the push names and opens.
     readCaller: async () => {

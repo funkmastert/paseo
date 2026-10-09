@@ -1,10 +1,15 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createTestLogger } from "../../../test-utils/test-logger.js";
-import type { PushPayload, PushSendMeta } from "../../push/index.js";
+import {
+  createPushNotifications,
+  type PushNotifications,
+  type PushPayload,
+  type PushSendMeta,
+} from "../../push/index.js";
 import {
   SharedBuildStore,
   type SharedBuildsLimits,
@@ -33,6 +38,7 @@ let caller: ShareBuildCaller | null;
 let gitTop: string | null;
 let hasSender: boolean;
 let homeDir: string;
+let worktreesRoot: string;
 
 const noGit: JevGitRunner = async () => ({
   code: gitTop ? 0 : 128,
@@ -40,7 +46,14 @@ const noGit: JevGitRunner = async () => ({
   stderr: "",
 });
 
-function setup(options: { callerAgentId?: string } = { callerAgentId: "agent-1" }): Handler {
+interface SetupOptions {
+  callerAgentId?: string;
+  /** A real push stack, so the notify policy decides what reaches the phone. */
+  push?: PushNotifications;
+}
+
+function setup(options: SetupOptions = { callerAgentId: "agent-1" }): Handler {
+  const realPush = options.push;
   const store = new SharedBuildStore({
     root,
     readLimits: () => limits,
@@ -54,25 +67,36 @@ function setup(options: { callerAgentId?: string } = { callerAgentId: "agent-1" 
     },
     deps: {
       store,
-      getPushNotificationSender: () =>
-        hasSender
+      getPushNotificationSender: () => {
+        if (realPush) return realPush;
+        return hasSender
           ? {
               send: async (payload, meta) => {
                 pushes.push({ payload, meta });
               },
             }
-          : null,
+          : null;
+      },
+      previewPush: (meta) =>
+        realPush ? realPush.policy.previewDelivery(meta) : { outcome: "interrupt", devices: 1 },
       serverId: "server-1",
     },
     callerAgentId: options.callerAgentId,
     readCaller: async () => caller,
     runGit: noGit,
     homeDir,
+    paseoHome: path.join(sandbox, "paseo-home"),
+    worktreesRoot,
     logger: createTestLogger(),
   });
   const handler = handlers.get("share_build");
   if (!handler) throw new Error("share_build was not registered");
   return handler;
+}
+
+/** What the store root holds; nothing when it was never created. */
+async function sharesOnDisk(): Promise<string[]> {
+  return fs.readdir(root).catch(() => []);
 }
 
 function parse(result: PaseoToolResult): Record<string, unknown> {
@@ -113,7 +137,33 @@ beforeEach(() => {
   gitTop = null;
   hasSender = true;
   homeDir = path.join(os.tmpdir(), "share-build-tool-no-such-home");
+  worktreesRoot = path.join(sandbox, "worktrees-root");
 });
+
+/** The daemon's own push stack over a temp directory, delivering to a list instead of Expo. */
+function realPushStack(input: { devices: number; settings?: Record<string, unknown> }): {
+  push: PushNotifications;
+  delivered: string[];
+} {
+  const directory = path.join(sandbox, "push");
+  mkdirSync(directory, { recursive: true });
+  if (input.settings) {
+    writeFileSync(
+      path.join(directory, "notify-policy.json"),
+      JSON.stringify({ settings: input.settings }),
+    );
+  }
+  const delivered: string[] = [];
+  const push = createPushNotifications({
+    logger: createTestLogger(),
+    filePath: path.join(directory, "push-tokens.json"),
+    deliver: async (_tokens, payload) => {
+      delivered.push(payload.title);
+    },
+  });
+  for (let i = 0; i < input.devices; i += 1) push.renew(`ExponentPushToken[fake-${i}]`);
+  return { push, delivered };
+}
 
 afterEach(() => {
   rmSync(sandbox, { recursive: true, force: true });
@@ -133,7 +183,7 @@ describe("share_build", () => {
     expect(url).toMatch(/^https:\/\/shares\.example\.com\/b\/[A-Za-z0-9_-]{22}\/app-debug\.apk$/);
     expect(payload).toMatchObject({
       platform: "android",
-      push: "sent",
+      push: { outcome: "sent" },
       app: { identifier: "com.example.fakecamp.debug", version: "2.3.0", build: "230" },
     });
 
@@ -296,11 +346,8 @@ describe("share_build", () => {
     expect(parse(result)["error"]).toMatch(/turned off/);
   });
 
-  test("refuses without a caller agent", async () => {
-    await writeFile("app-debug.apk", fakeApk());
-    const result = await setup({})({ path: "app-debug.apk" }, {});
-    expect(result.isError).toBe(true);
-    expect(parse(result)["error"]).toMatch(/which agent is asking/);
+  test("is not offered without a caller agent", () => {
+    expect(() => setup({})).toThrow(/not registered/);
   });
 
   test("still returns the link when there is no push sender", async () => {
@@ -308,6 +355,107 @@ describe("share_build", () => {
     await writeFile("app-debug.apk", fakeApk());
     const payload = parse(await setup()({ path: "app-debug.apk" }, {}));
     expect(payload["url"]).toMatch(/app-debug\.apk$/);
-    expect(payload["push"]).toBe("not sent: this daemon has no push sender");
+    expect(payload["push"]).toMatchObject({ outcome: "no-sender" });
+  });
+
+  describe("confinement root", () => {
+    test.each([
+      ["the home directory", () => homeDir],
+      ["an ancestor of the home directory", () => path.dirname(homeDir)],
+      ["the filesystem root", () => path.parse(sandbox).root],
+      ["the worktrees root", () => worktreesRoot],
+    ])("refuses a cwd that is %s", async (_label, cwdOf) => {
+      homeDir = path.join(sandbox, "home");
+      await fs.mkdir(homeDir, { recursive: true });
+      await fs.mkdir(worktreesRoot, { recursive: true });
+      const apk = path.join(homeDir, "app-debug.apk");
+      await fs.writeFile(apk, fakeApk());
+      await fs.writeFile(path.join(worktreesRoot, "app-debug.apk"), fakeApk());
+      caller = { cwd: cwdOf(), title: null, workspaceId: null };
+      const result = await setup()({ path: apk }, {});
+      expect(result.isError).toBe(true);
+      expect(parse(result)["error"]).toMatch(/run it from the project/);
+      expect(await sharesOnDisk()).toEqual([]);
+    });
+
+    test("a worktree under the worktrees root is a fine cwd", async () => {
+      cwd = path.join(worktreesRoot, "project", "branch");
+      caller = { cwd, title: null, workspaceId: null };
+      await writeFile("app-debug.apk", fakeApk());
+      const result = await setup()({ path: "app-debug.apk" }, {});
+      expect(result.isError).toBeUndefined();
+    });
+  });
+
+  describe("push outcome", () => {
+    test("sent when the push goes to a phone now", async () => {
+      const { push, delivered } = realPushStack({ devices: 1 });
+      await writeFile("app-debug.apk", fakeApk());
+      const payload = parse(
+        await setup({ callerAgentId: "agent-1", push })({ path: "app-debug.apk" }, {}),
+      );
+      expect(payload["push"]).toMatchObject({ outcome: "sent" });
+      expect(delivered).toEqual(["Android build ready"]);
+    });
+
+    test("folded when the same build was pushed within the hour", async () => {
+      const { push, delivered } = realPushStack({ devices: 1 });
+      await writeFile("app-debug.apk", fakeApk());
+      const tool = setup({ callerAgentId: "agent-1", push });
+      await tool({ path: "app-debug.apk" }, {});
+      const second = parse(await tool({ path: "app-debug.apk", note: "Again." }, {}));
+      expect(second["push"]).toMatchObject({ outcome: "folded" });
+      expect(second["url"]).toMatch(/app-debug\.apk$/);
+      expect(delivered).toEqual(["Android build ready"]);
+    });
+
+    test("no-device when no phone is registered", async () => {
+      const { push, delivered } = realPushStack({ devices: 0 });
+      await writeFile("app-debug.apk", fakeApk());
+      const payload = parse(
+        await setup({ callerAgentId: "agent-1", push })({ path: "app-debug.apk" }, {}),
+      );
+      expect(payload["push"]).toMatchObject({ outcome: "no-device" });
+      expect(delivered).toEqual([]);
+    });
+
+    test("digest when alerts wait for the digest", async () => {
+      const { push, delivered } = realPushStack({
+        devices: 1,
+        settings: { minInterruptLevel: "urgent" },
+      });
+      await writeFile("app-debug.apk", fakeApk());
+      const payload = parse(
+        await setup({ callerAgentId: "agent-1", push })({ path: "app-debug.apk" }, {}),
+      );
+      expect(payload["push"]).toMatchObject({ outcome: "digest" });
+      expect(delivered).toEqual([]);
+    });
+
+    test("logged when alerts are only recorded", async () => {
+      const { push, delivered } = realPushStack({
+        devices: 1,
+        settings: { minPostLevel: "urgent", minInterruptLevel: "urgent" },
+      });
+      await writeFile("app-debug.apk", fakeApk());
+      const payload = parse(
+        await setup({ callerAgentId: "agent-1", push })({ path: "app-debug.apk" }, {}),
+      );
+      expect(payload["push"]).toMatchObject({ outcome: "logged" });
+      expect(delivered).toEqual([]);
+    });
+
+    test("failed when the sender throws", async () => {
+      await writeFile("app-debug.apk", fakeApk());
+      const failing = {
+        send: async () => {
+          throw new Error("ledger is read-only");
+        },
+      } as unknown as PushNotifications;
+      const payload = parse(
+        await setup({ callerAgentId: "agent-1", push: failing })({ path: "app-debug.apk" }, {}),
+      );
+      expect(payload["push"]).toMatchObject({ outcome: "failed" });
+    });
   });
 });

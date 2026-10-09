@@ -2955,6 +2955,14 @@ export async function createPaseoDaemon(
     sharedBuilds: {
       store: sharedBuildStore,
       getPushNotificationSender: () => wsServer?.getPushNotificationSender() ?? null,
+      // As for the remediation ladder: the daemon's own sender carries the notify policy, so the
+      // tool can say whether a push reached the phone, was folded, digested or only recorded.
+      previewPush: (meta) => {
+        const sender: (PushNotificationSender & Partial<Pick<PushNotifications, "policy">>) | null =
+          wsServer?.getPushNotificationSender() ?? null;
+        if (!sender?.policy) throw new Error("the push sender has no notify policy");
+        return sender.policy.previewDelivery(meta);
+      },
       serverId,
     },
     paseoToolPolicy:
