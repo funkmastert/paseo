@@ -63,6 +63,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/token-audit.md](docs/token-audit.md)                           | Token audit — the 7 measured items, `claude -p /context` for exact tokens, the weekly job, what escalates, the advisory agent    |
 | [docs/catastrophe-gate.md](docs/catastrophe-gate.md)                 | Catastrophe gate — the only two things agents may not do (rewrite main, wipe a disk), the shell walker, gaps, kill switch        |
 | [docs/device-leases.md](docs/device-leases.md)                       | Device cap — simulator/emulator slots, the process scan as the count, checkout queueing, the launch gate                         |
+| [docs/shared-builds.md](docs/shared-builds.md)                       | Shared builds — `share_build`, the expiring `/b/<token>/` links, making a debug APK or ad-hoc IPA, caps, the disk-low refusal    |
 | [docs/artifact-janitor.md](docs/artifact-janitor.md)                 | Artifact janitor — orphaned Xcode test simulator clones, cleanup obligations, the unowned sweep, the disk guard                  |
 | [docs/account-failover.md](docs/account-failover.md)                 | Account failover — moving agents off a capped Claude account, dead-account signals, idempotency labels, config                   |
 | [docs/done-janitor.md](docs/done-janitor.md)                         | Done janitor — what counts as finished, the question and its strict parse, the worktree git gate, dry run                        |
