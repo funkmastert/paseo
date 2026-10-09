@@ -230,6 +230,10 @@ import { AutoPinExpiry } from "./workspace-auto-pin.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { AgentBudgetPacingMonitor } from "./agent-budget-pacing-monitor.js";
 import { AgentLeaderCompactionMonitor } from "./agent-leader-compaction-monitor.js";
+import {
+  COMPACTION_TIMING_READ_ROWS,
+  LeaderCompactionTimingAdvisor,
+} from "./agent/leader-compaction-timing.js";
 import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
 import { AgentModelDivergenceMonitor } from "./agent-model-divergence-monitor.js";
 import { AgentResourceMonitor } from "./agent-resource-monitor.js";
@@ -1719,6 +1723,7 @@ export async function createPaseoDaemon(
         jevKey,
       ),
     readAgentLabels: (agentId) => agentManager.getAgent(agentId)?.labels ?? null,
+    readLeaderCompactionEnabled: () => daemonConfigStore.get().leaderCompaction?.enabled === true,
     // "Where agents use it" on the JEV dashboard. The storage and the registry are built below;
     // the lookups only read them once a record asks.
     savingsLookups: createSavingsLookups({
@@ -2589,9 +2594,27 @@ export async function createPaseoDaemon(
     }),
     logger,
   });
+  // Feature 9 (docs/jev.md): after each leader turn over the consider line, JEV judges whether it
+  // is a clean point to compact. The leader-compaction monitor reads the verdict at its next sweep.
+  const compactionTiming = new LeaderCompactionTimingAdvisor({
+    jev,
+    readAgent: (agentId) =>
+      agentManager.listAgentsForLeaderCompaction().find((agent) => agent.id === agentId) ?? null,
+    readTimeline: (agentId) =>
+      agentManager.fetchTimeline(agentId, { direction: "tail", limit: COMPACTION_TIMING_READ_ROWS })
+        .rows,
+    readLeaderCompaction: () => daemonConfigStore.get().leaderCompaction,
+    readTimingConfig: () =>
+      resolveJevConfig(jevConfigSection(readRawConfig(config.paseoHome).rawConfig), {
+        homeDir: homedir(),
+      }).compactionTiming,
+    isEpisodeOpen: (agentId) => leaderCompactionMonitor?.isEpisodeOpen(agentId) ?? false,
+    logger: logger.child({ module: "leader-compaction-timing" }),
+  });
   handleAgentTurnFinished = (params) => {
     agentTitleTracker.scheduleRefresh(params);
     workspaceTitleTracker.recordAgentTurnFinished(params);
+    compactionTiming.onTurnFinished(params);
   };
   agentTitleTracker.start();
   workspaceTitleTracker.start();
@@ -3610,6 +3633,7 @@ export async function createPaseoDaemon(
               }),
               logger,
               sweepIntervalMs: config.leaderCompactionOverrides?.sweepIntervalMs,
+              timing: compactionTiming,
             });
             leaderCompactionMonitor.start();
             const leaderCompactionMonitorForModeLog = leaderCompactionMonitor;

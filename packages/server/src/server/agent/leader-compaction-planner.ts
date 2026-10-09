@@ -2,13 +2,20 @@
  * The state machine behind AgentLeaderCompactionMonitor, kept free of I/O so every transition can
  * be tested without a daemon. The monitor calls `planLeaderCompactionStep` once per agent per
  * sweep and `applyLeaderCompactionTurnOutcome` when a turn it started ends; this file decides,
- * the monitor acts. See docs/leader-compaction.md.
+ * the monitor acts. See docs/leader-compaction.md, and docs/jev.md "Feature 9: compaction timing"
+ * for the `timing` verdict.
  */
 import type { AgentLifecycleStatus } from "@getpaseo/protocol/agent-lifecycle";
 
 const DEFAULT_PREPARE_AT_TOKENS = 400_000;
 const DEFAULT_RETRY_AFTER_MINUTES = 30;
 const DEFAULT_MAX_ATTEMPTS = 3;
+
+/**
+ * How every message the monitor sends begins, inside its `<paseo-system>` envelope. The timing
+ * advisor reads it to tell the monitor's own turns from the work.
+ */
+export const LEADER_COMPACTION_MESSAGE_HEADER = "Bozeo leader compaction — step";
 
 /** `/compact` is a Claude Code command; no other transcript format has it. */
 const COMPACTABLE_SESSION_FAMILY = "claude";
@@ -56,9 +63,28 @@ export interface LeaderCompactionAgentInput {
 
 export type LeaderCompactionStep = "prepare" | "compact" | "restore";
 
+/**
+ * Feature 9's verdict from the agent's last turn (docs/jev.md, "Feature 9: compaction timing").
+ * `startEarly` starts an episode under the line at a clean break, against an earlier line of its
+ * own; `defer` holds one at or over the line while the leader is mid-way through a multi-step edit,
+ * never at or over the ceiling.
+ */
+export type LeaderCompactionTiming =
+  | { kind: "startEarly"; lineTokens: number; reason: string }
+  | { kind: "defer"; ceilingTokens: number; reason: string };
+
+/** Why an episode started: the line, or the clean break JEV saw before it. */
+export type LeaderCompactionTrigger = { kind: "line" } | { kind: "early"; reason: string };
+
 /** Everything one compaction carries from the crossing to the restore prompt. */
 export interface LeaderCompactionEpisode {
   triggeredAtTokens: number;
+  /**
+   * The context the compaction has to get under: `prepareAtTokens`, or the earlier line an early
+   * start began from. Under it before the note exists means something else compacted the agent.
+   */
+  lineTokens: number;
+  trigger: LeaderCompactionTrigger;
   /** Failed or cancelled tries of the current step. Reset when a step succeeds. */
   attempts: number;
   /** The agent's own restore note: the final text of the prepare turn. Null until it exists. */
@@ -86,7 +112,14 @@ export type LeaderCompactionState =
 
 export type LeaderCompactionAction =
   | { kind: "none" }
-  | { kind: "reportDryRun"; usedTokens: number; startsNow: boolean }
+  | {
+      kind: "reportDryRun";
+      usedTokens: number;
+      startsNow: boolean;
+      trigger: LeaderCompactionTrigger;
+    }
+  /** Over the line, held by a `defer` verdict. The agent stays armed. */
+  | { kind: "defer"; usedTokens: number; reason: string }
   | { kind: "startTurn"; step: LeaderCompactionStep; episode: LeaderCompactionEpisode };
 
 export interface LeaderCompactionPlan {
@@ -121,23 +154,23 @@ function isOverThreshold(agent: LeaderCompactionAgentInput, config: LeaderCompac
   );
 }
 
+function isUnder(agent: LeaderCompactionAgentInput, lineTokens: number) {
+  return agent.contextWindowUsedTokens !== undefined && agent.contextWindowUsedTokens < lineTokens;
+}
+
 function isUnderThreshold(agent: LeaderCompactionAgentInput, config: LeaderCompactionConfig) {
-  return (
-    agent.contextWindowUsedTokens !== undefined &&
-    agent.contextWindowUsedTokens < config.prepareAtTokens
-  );
+  return isUnder(agent, config.prepareAtTokens);
 }
 
 function planWaiting(
   step: LeaderCompactionStep,
   episode: LeaderCompactionEpisode,
   agent: LeaderCompactionAgentInput,
-  config: LeaderCompactionConfig,
 ): LeaderCompactionPlan {
   // Something else shrank the context before this episode did — the CLI's own auto-compact, or
   // someone typing /compact. Before the note exists there is nothing left to do. After it, the
   // compaction is done for us and the agent still gets its note back.
-  if (isUnderThreshold(agent, config)) {
+  if (isUnder(agent, episode.lineTokens)) {
     if (step === "prepare") return { state: ARMED, action: NO_ACTION };
     if (step === "compact") {
       return planWaiting(
@@ -148,7 +181,6 @@ function planWaiting(
           compactedToTokens: agent.contextWindowUsedTokens ?? null,
         },
         agent,
-        config,
       );
     }
   }
@@ -161,12 +193,38 @@ function planWaiting(
   };
 }
 
+/**
+ * Whether an armed agent starts an episode now, and why. A verdict comes from the agent's last
+ * turn, so one that is not idle has started another turn and moved past it; then the plan is
+ * today's.
+ */
+function armedTrigger(
+  agent: LeaderCompactionAgentInput,
+  config: LeaderCompactionConfig,
+  timing: LeaderCompactionTiming | null,
+): { trigger: LeaderCompactionTrigger; lineTokens: number } | { defer: string } | null {
+  const verdict = canStartTurn(agent) ? timing : null;
+  const used = agent.contextWindowUsedTokens;
+  if (isOverThreshold(agent, config)) {
+    if (verdict?.kind === "defer" && used !== undefined && used < verdict.ceilingTokens) {
+      return { defer: verdict.reason };
+    }
+    return { trigger: { kind: "line" }, lineTokens: config.prepareAtTokens };
+  }
+  if (verdict?.kind === "startEarly" && used !== undefined && used >= verdict.lineTokens) {
+    return { trigger: { kind: "early", reason: verdict.reason }, lineTokens: verdict.lineTokens };
+  }
+  return null;
+}
+
 /** One agent, one sweep. A state the monitor has no record of is `armed`. */
 export function planLeaderCompactionStep(input: {
   state: LeaderCompactionState | undefined;
   agent: LeaderCompactionAgentInput;
   config: LeaderCompactionConfig;
   nowMs: number;
+  /** Feature 9's verdict, read only in `armed`. Absent or null: today's plan. */
+  timing?: LeaderCompactionTiming | null;
 }): LeaderCompactionPlan {
   const { agent, config, nowMs } = input;
   const state = input.state ?? ARMED;
@@ -182,36 +240,46 @@ export function planLeaderCompactionStep(input: {
 
   switch (state.phase) {
     case "armed": {
-      if (!isOverThreshold(agent, config)) {
+      const start = armedTrigger(agent, config, input.timing ?? null);
+      if (!start) {
         return { state, action: NO_ACTION };
       }
       const usedTokens = agent.contextWindowUsedTokens ?? 0;
+      if ("defer" in start) {
+        return { state, action: { kind: "defer", usedTokens, reason: start.defer } };
+      }
       if (config.dryRun) {
         return {
           state: { phase: "settled", reason: "dryRun" },
-          action: { kind: "reportDryRun", usedTokens, startsNow: canStartTurn(agent) },
+          action: {
+            kind: "reportDryRun",
+            usedTokens,
+            startsNow: canStartTurn(agent),
+            trigger: start.trigger,
+          },
         };
       }
       return planWaiting(
         "prepare",
         {
           triggeredAtTokens: usedTokens,
+          lineTokens: start.lineTokens,
+          trigger: start.trigger,
           attempts: 0,
           note: null,
           compactedFromTokens: null,
           compactedToTokens: null,
         },
         agent,
-        config,
       );
     }
     case "waiting":
-      return planWaiting(state.step, state.episode, agent, config);
+      return planWaiting(state.step, state.episode, agent);
     case "backoff":
       if (nowMs < state.untilMs) {
         return { state, action: NO_ACTION };
       }
-      return planWaiting(state.step, state.episode, agent, config);
+      return planWaiting(state.step, state.episode, agent);
     case "settled":
       return isUnderThreshold(agent, config)
         ? { state: ARMED, action: NO_ACTION }
@@ -298,7 +366,7 @@ export function applyLeaderCompactionTurnOutcome(input: {
       // The turn completing proves nothing: an interrupted or refused compaction still ends the
       // turn. The context shrinking below the line is the only evidence it happened.
       const used = result.usedTokensAfter;
-      if (used === undefined || used >= config.prepareAtTokens) {
+      if (used === undefined || used >= episode.lineTokens) {
         return failStep(step, episode, { kind: "notCompacted", usedTokens: used }, config, nowMs);
       }
       return {
