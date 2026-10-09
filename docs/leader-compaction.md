@@ -28,9 +28,7 @@ The agent keeps its id. Parent → child finish notifications still route, and n
 
 ## JEV timing
 
-Feature 9 ([docs/jev.md](jev.md#feature-9-compaction-timing)) can move the start. After each leader turn over 200K it leaves a verdict that the next `armed` sweep reads. `startEarly` starts an episode under `prepareAtTokens` at a clean break, and that episode has to compact under the consider line instead. `defer` holds an idle leader at the line while it is mid-way through an edit, for at most three turns and never at or over 500K. When a prepare step ends, JEV also picks where the live work starts, and `/compact` gains a sentence saying so. A verdict changes only what an `armed` sweep plans, so [Never interrupt a turn](#never-interrupt-a-turn) still holds.
-
-A shadow verdict (the default) acts on nothing, but a dry run reads it: the would-start line carries `trigger: "early"` and the reason for an early start, and a deferral logs `Leader compaction would hold…` once per verdict in place of the would-start. With this monitor off, JEV asks nothing.
+JEV can move an episode's start and add a cut-point sentence to `/compact` ([Feature 9](jev.md#feature-9-compaction-timing)). A verdict changes only what an `armed` sweep plans, so [Never interrupt a turn](#never-interrupt-a-turn) still holds. An early episode that gives up sends no push: the leader is under the line, and the line starts the next episode.
 
 ## Never interrupt a turn
 

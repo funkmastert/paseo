@@ -336,19 +336,22 @@ export class AgentLeaderCompactionMonitor {
       case "none":
         return;
       case "reportDryRun":
-        if (action.trigger.kind === "early") this.options.timing?.noteEarlyStart(agent.id);
+        if (action.trigger.kind === "early") {
+          this.options.timing?.noteEarlyStart(agent.id, { dryRun: true });
+        }
         this.reportDryRun(agent, action.usedTokens, action.startsNow, action.trigger, config);
         return;
       case "defer":
         // The same verdict stands over every sweep until the next turn; say so once.
         if (timing && this.reportedDeferrals.get(agent.id) !== timing) {
           this.reportedDeferrals.set(agent.id, timing);
+          this.options.timing?.noteDefer(agent.id, { dryRun: config.dryRun });
           this.reportDefer(agent, action.usedTokens, action.reason, config);
         }
         return;
       case "startTurn":
         if (action.step === "prepare" && action.episode.trigger.kind === "early") {
-          this.options.timing?.noteEarlyStart(agent.id);
+          this.options.timing?.noteEarlyStart(agent.id, { dryRun: false });
         }
         this.startStep(agent, action.step, action.episode, config);
     }
@@ -537,6 +540,7 @@ export class AgentLeaderCompactionMonitor {
       {
         agentId: agent.id,
         step,
+        trigger: episode.trigger.kind,
         reason: describeFailure(applied.failure),
         gaveUp: applied.gaveUp,
         retryAt:
@@ -546,7 +550,9 @@ export class AgentLeaderCompactionMonitor {
         ? "Leader compaction gave up"
         : "Leader compaction step did not take; will retry",
     );
-    if (applied.gaveUp) {
+    // An early start was optional: the leader is under the line, and the line starts the next
+    // episode. Only the line's own give-up needs a person.
+    if (applied.gaveUp && episode.trigger.kind === "line") {
       void this.pushGaveUp(agent, step, applied.failure, config);
     }
   }

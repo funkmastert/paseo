@@ -57,7 +57,8 @@ function leader(overrides: Partial<LeaderCompactionAgentSummary> = {}) {
 class FakeTiming implements LeaderCompactionTimingPort {
   verdict: LeaderCompactionTimingVerdict | null = null;
   cutPoint: string | null = null;
-  earlyStarts: string[] = [];
+  earlyStarts: Array<{ agentId: string; dryRun: boolean }> = [];
+  defers: Array<{ agentId: string; dryRun: boolean }> = [];
   cutPointRequests: string[] = [];
 
   verdictFor(): LeaderCompactionTimingVerdict | null {
@@ -65,9 +66,13 @@ class FakeTiming implements LeaderCompactionTimingPort {
   }
 
   /** Like the advisor, an early start uses the verdict up. */
-  noteEarlyStart(agentId: string): void {
-    this.earlyStarts.push(agentId);
+  noteEarlyStart(agentId: string, options: { dryRun: boolean }): void {
+    this.earlyStarts.push({ agentId, ...options });
     this.verdict = null;
+  }
+
+  noteDefer(agentId: string, options: { dryRun: boolean }): void {
+    this.defers.push({ agentId, ...options });
   }
 
   requestCutPoint(agentId: string): void {
@@ -248,7 +253,7 @@ describe("AgentLeaderCompactionMonitor with compaction timing", () => {
       reason: EARLY_REASON,
       prepareMessage: expect.stringContaining(`under the 400K line, but ${EARLY_REASON}`),
     });
-    expect(timing.earlyStarts).toEqual(["leader-1"]);
+    expect(timing.earlyStarts).toEqual([{ agentId: "leader-1", dryRun: true }]);
   });
 
   test("dry run: a defer holds the would-start and says so once, then the line starts it", async () => {
@@ -263,6 +268,7 @@ describe("AgentLeaderCompactionMonitor with compaction timing", () => {
     const holds = logs.filter((log) => log.msg.startsWith("Leader compaction would hold"));
     expect(holds).toHaveLength(1);
     expect(holds[0]?.obj).toMatchObject({ agentId: "leader-1", usedTokens: 450_000 });
+    expect(timing.defers).toEqual([{ agentId: "leader-1", dryRun: true }]);
     expect(logs.some((log) => log.msg.startsWith("Leader compaction would start"))).toBe(false);
 
     timing.verdict = null;
@@ -302,7 +308,7 @@ describe("AgentLeaderCompactionMonitor with compaction timing", () => {
 
     await sweep(monitor);
     expect(monitor.isEpisodeOpen("leader-1")).toBe(true);
-    expect(timing.earlyStarts).toEqual(["leader-1"]);
+    expect(timing.earlyStarts).toEqual([{ agentId: "leader-1", dryRun: false }]);
     expect(timing.cutPointRequests).toEqual(["leader-1"]);
     timing.cutPoint = 'The live work starts at "Fix the login bug".';
     await sweep(monitor);
@@ -327,5 +333,31 @@ describe("AgentLeaderCompactionMonitor with compaction timing", () => {
 
     expect(fake.sent).toEqual([]);
     expect(logs.some((log) => log.msg.startsWith("Leader compaction held"))).toBe(true);
+    expect(timing.defers).toEqual([{ agentId: "leader-1", dryRun: false }]);
+  });
+
+  test("an early episode that gives up logs it and pushes nothing: the line starts the next", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 260_000 })];
+    const timing = new FakeTiming();
+    timing.verdict = startEarly(true);
+    const { monitor, pushes, logs } = createMonitor(
+      fake,
+      { enabled: true, maxAttempts: 2, retryAfterMinutes: 0 },
+      timing,
+    );
+
+    for (let i = 0; i < 4; i += 1) {
+      await sweep(monitor);
+    }
+
+    expect(fake.sent.map((turn) => turn.prompt.slice(0, 8))).toEqual([
+      "<paseo-s",
+      "/compact",
+      "/compact",
+    ]);
+    expect(pushes).toEqual([]);
+    const gaveUp = logs.find((log) => log.msg === "Leader compaction gave up");
+    expect(gaveUp?.obj).toMatchObject({ agentId: "leader-1", trigger: "early" });
   });
 });

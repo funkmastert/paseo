@@ -1,5 +1,5 @@
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { formatPrepareMessage, formatRestoreMessage } from "../agent-leader-compaction-monitor.js";
 import { createTestJevService, type JevScriptedAnswer } from "../jev/fake.js";
@@ -111,8 +111,6 @@ const TIMING: CompactionTimingSettings = {
   cutPoint: true,
 };
 
-const SILENT = { debug: () => undefined, warn: () => undefined };
-
 interface Harness {
   advisor: LeaderCompactionTimingAdvisor;
   jev: ReturnType<typeof createTestJevService>;
@@ -121,6 +119,9 @@ interface Harness {
   settings: LeaderCompactionSettings;
   episodeOpen: boolean;
   timing: CompactionTimingSettings;
+  timelineReads: number;
+  timelineThrows: boolean;
+  warnings: string[];
   /** One finished turn at `usedTokens`, awaited to its verdict. */
   turn: (usedTokens: number) => Promise<void>;
 }
@@ -158,6 +159,9 @@ async function createHarness(
     settings: { enabled: true, dryRun: true },
     episodeOpen: false,
     timing: { ...TIMING },
+    timelineReads: 0,
+    timelineThrows: false,
+    warnings: [],
     advisor: undefined as unknown as LeaderCompactionTimingAdvisor,
     turn: async (usedTokens) => {
       h.agent = { ...h.agent, contextWindowUsedTokens: usedTokens };
@@ -168,11 +172,15 @@ async function createHarness(
   h.advisor = new LeaderCompactionTimingAdvisor({
     jev,
     readAgent: (agentId) => (agentId === "leader-1" ? h.agent : null),
-    readTimeline: () => h.rows,
+    readTimeline: () => {
+      h.timelineReads += 1;
+      if (h.timelineThrows) throw new Error("agent closed");
+      return h.rows;
+    },
     readLeaderCompaction: () => h.settings,
     readTimingConfig: () => h.timing,
     isEpisodeOpen: () => h.episodeOpen,
-    logger: SILENT,
+    logger: { warn: (_obj, msg) => h.warnings.push(msg ?? "") },
   });
   harnesses.push(h);
   return h;
@@ -188,6 +196,19 @@ async function grownHarness(options: Parameters<typeof createHarness>[0] = {}): 
 function timingCalls(h: Harness) {
   return h.jev.transport.calls.filter((call) => "switched_gears" in call.questions);
 }
+
+function timingEvents(h: Harness) {
+  return h.jev.savings
+    .events({ range: "all" })
+    .events.filter((event) => event.feature === "compactionTiming");
+}
+
+function notAsked(h: Harness) {
+  return h.jev.savings.summary("today").features.find((f) => f.feature === "compactionTiming")
+    ?.notAsked;
+}
+
+const LIVE_JEV = { compactionTiming: { shadow: false } };
 
 describe("when the advisor asks", () => {
   test("no call while leader compaction is off, under the line, for a non-candidate, or while an episode is open", async () => {
@@ -213,6 +234,60 @@ describe("when the advisor asks", () => {
     await h.turn(260_000);
     await h.turn(270_000);
     expect(timingCalls(h)).toHaveLength(2);
+  });
+});
+
+describe("fail open", () => {
+  for (const behavior of [
+    { kind: "http", status: 500 },
+    { kind: "contract-violation" },
+    { kind: "network" },
+  ] as const) {
+    test(`a ${behavior.kind} failure leaves no verdict, throws nothing and is recorded`, async () => {
+      const h = await grownHarness();
+      h.jev.transport.setBehavior(behavior);
+      await h.turn(260_000);
+
+      expect(h.advisor.verdictFor("leader-1")).toBeNull();
+      expect(timingCalls(h)).toHaveLength(1);
+      expect(h.warnings).toEqual([]);
+      expect(timingEvents(h)).toMatchObject([
+        { outcome: "failed", decision: { did: "at-line", wouldBe: "at-line", changed: false } },
+      ]);
+    });
+  }
+
+  test("the feature off, or JEV off, makes no call and counts the turn as not asked", async () => {
+    const featureOff = await grownHarness({ jevConfig: { compactionTiming: { enabled: false } } });
+    await featureOff.turn(260_000);
+    expect(featureOff.jev.transport.calls).toEqual([]);
+    expect(featureOff.timelineReads).toBe(0);
+    expect(notAsked(featureOff)).toEqual({ inactive: 1 });
+
+    const jevOff = await grownHarness({ jevConfig: { enabled: false } });
+    await jevOff.turn(260_000);
+    expect(jevOff.jev.transport.calls).toEqual([]);
+    expect(jevOff.advisor.verdictFor("leader-1")).toBeNull();
+  });
+
+  test("a D7-excluded leader is counted, never read and never sent", async () => {
+    const h = await grownHarness({ jevConfig: { excludeCwds: [tmpdir()] } });
+    await h.turn(260_000);
+
+    expect(h.jev.transport.calls).toEqual([]);
+    expect(h.timelineReads).toBe(0);
+    expect(timingEvents(h)).toEqual([]);
+    expect(notAsked(h)).toEqual({ excluded: 1 });
+  });
+
+  test("a timeline that cannot be read logs a warning and leaves no verdict", async () => {
+    const h = await grownHarness();
+    h.timelineThrows = true;
+    await h.turn(260_000);
+
+    expect(h.advisor.verdictFor("leader-1")).toBeNull();
+    expect(h.jev.transport.calls).toEqual([]);
+    expect(h.warnings).toEqual(["Compaction timing: call failed"]);
   });
 });
 
@@ -315,6 +390,13 @@ describe("the verdict", () => {
     expect(h.advisor.verdictFor("leader-1")).toBeNull();
   });
 
+  test("asks from the lower line when prepareAtTokens is under considerAtTokens", async () => {
+    const h = await grownHarness({ answers: MID });
+    h.settings = { enabled: true, dryRun: true, prepareAtTokens: 150_000 };
+    await h.turn(170_000);
+    expect(h.advisor.verdictFor("leader-1")?.timing).toMatchObject({ kind: "defer" });
+  });
+
   test("a clean leader at the line gets no verdict: the line starts it", async () => {
     const h = await grownHarness();
     await h.turn(450_000);
@@ -324,11 +406,12 @@ describe("the verdict", () => {
   test("defers at most maxDeferrals consecutive turns, and a compaction resets the count", async () => {
     const h = await grownHarness({ answers: MID });
     const verdicts: Array<string | null> = [];
-    for (const used of [420_000, 430_000, 440_000, 450_000]) {
+    for (const used of [420_000, 430_000, 440_000, 450_000, 460_000]) {
       await h.turn(used);
       verdicts.push(h.advisor.verdictFor("leader-1")?.timing.kind ?? null);
     }
-    expect(verdicts).toEqual(["defer", "defer", "defer", null]);
+    // The capping turn keeps the count at the cap: no fresh run of three.
+    expect(verdicts).toEqual(["defer", "defer", "defer", null, null]);
 
     await h.turn(30_000);
     await h.turn(420_000);
@@ -354,6 +437,42 @@ describe("the verdict", () => {
     await h.advisor.settle();
 
     expect(h.advisor.verdictFor("leader-1")).toBeNull();
+  });
+});
+
+describe("a standing verdict", () => {
+  test("is dropped once the feature is off", async () => {
+    const h = await grownHarness({ jevConfig: LIVE_JEV });
+    await h.turn(260_000);
+    expect(h.advisor.verdictFor("leader-1")).not.toBeNull();
+
+    const isActive = vi.spyOn(h.jev, "isActive").mockReturnValue(false);
+    expect(h.advisor.verdictFor("leader-1")).toBeNull();
+    isActive.mockRestore();
+    expect(h.advisor.verdictFor("leader-1")).toBeNull();
+  });
+
+  test("from a live answer is dropped once the feature is back in shadow", async () => {
+    const h = await grownHarness({ jevConfig: LIVE_JEV });
+    await h.turn(260_000);
+    const status = h.jev.status();
+    vi.spyOn(h.jev, "status").mockReturnValue({
+      ...status,
+      features: { ...status.features, compactionTiming: { enabled: true, shadow: true } },
+    });
+    expect(h.advisor.verdictFor("leader-1")).toBeNull();
+  });
+
+  test("is dropped once its line or ceiling is no longer the configured one", async () => {
+    const early = await grownHarness();
+    await early.turn(260_000);
+    early.timing = { ...early.timing, considerAtTokens: 250_000 };
+    expect(early.advisor.verdictFor("leader-1")).toBeNull();
+
+    const held = await grownHarness({ answers: MID });
+    await held.turn(450_000);
+    held.timing = { ...held.timing, ceilingTokens: 480_000 };
+    expect(held.advisor.verdictFor("leader-1")).toBeNull();
   });
 });
 
@@ -385,7 +504,7 @@ describe("the startEarly guards", () => {
     const h = await grownHarness();
     await h.turn(260_000);
     expect(h.advisor.verdictFor("leader-1")?.timing.kind).toBe("startEarly");
-    h.advisor.noteEarlyStart("leader-1");
+    h.advisor.noteEarlyStart("leader-1", { dryRun: true });
     // The start used the verdict up.
     expect(h.advisor.verdictFor("leader-1")).toBeNull();
     await h.turn(320_000);
@@ -429,6 +548,51 @@ describe("the savings ledger", () => {
       decision: { did: "at-line", wouldBe: "start-early", changed: false },
       benefit: "none",
       tokensSavedEstimate: null,
+    });
+  });
+});
+
+describe("the savings record says what acted", () => {
+  test("a live answer in a dry run never claims it acted", async () => {
+    const h = await grownHarness({ jevConfig: LIVE_JEV });
+    await h.turn(260_000);
+    h.advisor.noteEarlyStart("leader-1", { dryRun: true });
+
+    expect(timingEvents(h)).toMatchObject([
+      { mode: "live", decision: { did: "at-line", wouldBe: "start-early", changed: false } },
+    ]);
+  });
+
+  test("a live verdict a live leg acted on records what it did, once", async () => {
+    const early = await grownHarness({ jevConfig: LIVE_JEV });
+    early.settings = { enabled: true };
+    await early.turn(260_000);
+    expect(timingEvents(early)).toEqual([]);
+    early.advisor.noteEarlyStart("leader-1", { dryRun: false });
+    expect(timingEvents(early)).toMatchObject([
+      { mode: "live", decision: { did: "start-early", wouldBe: "start-early", changed: true } },
+    ]);
+
+    const held = await grownHarness({ answers: MID, jevConfig: LIVE_JEV });
+    held.settings = { enabled: true };
+    await held.turn(450_000);
+    held.advisor.noteDefer("leader-1", { dryRun: false });
+    held.advisor.noteDefer("leader-1", { dryRun: false });
+    expect(timingEvents(held)).toMatchObject([
+      { decision: { did: "defer", wouldBe: "defer", changed: true } },
+    ]);
+  });
+
+  test("a live verdict nothing acted on records nothing changed when the next turn replaces it", async () => {
+    const h = await grownHarness({ jevConfig: LIVE_JEV });
+    h.settings = { enabled: true };
+    await h.turn(260_000);
+    await h.turn(270_000);
+
+    const events = timingEvents(h);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      decision: { did: "at-line", wouldBe: "start-early", changed: false },
     });
   });
 });

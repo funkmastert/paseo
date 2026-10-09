@@ -62,8 +62,6 @@ export type CompactionTimingSettings = Pick<
   "considerAtTokens" | "ceilingTokens" | "maxDeferrals" | "cutPoint"
 >;
 
-// ─── The questions ───────────────────────────────────────────────────────────────────────────
-
 /** Verbatim from the reference's level07/should-compact.ts. */
 export function compactionTimingQuestions(): JevQuestions {
   return {
@@ -123,8 +121,6 @@ export function cutPointQuestions(turns: readonly string[]): JevQuestions {
     },
   };
 }
-
-// ─── The state ───────────────────────────────────────────────────────────────────────────────
 
 export interface CompactionTimingState {
   current_request: string;
@@ -274,8 +270,6 @@ export function readCompactionTimingView(rows: readonly AgentTimelineRow[]): Com
   };
 }
 
-// ─── The decision ────────────────────────────────────────────────────────────────────────────
-
 export interface CompactionTimingAnswers {
   switchedGears: number;
   atBoundary: number;
@@ -287,10 +281,10 @@ export interface CompactionTimingAnswers {
 export function readCompactionTimingAnswers(
   answers: Record<string, JevAnswer>,
 ): CompactionTimingAnswers | null {
-  const noul = (id: string) => {
+  function noul(id: string): number | null {
     const answer = answers[id];
     return answer?.type === "noul" ? answer.noul : null;
-  };
+  }
   const needs = answers["needs_history"];
   const switchedGears = noul("switched_gears");
   const atBoundary = noul("at_boundary");
@@ -317,8 +311,13 @@ export interface CompactionTimingDecisionInput {
 
 export interface CompactionTimingDecision {
   timing: LeaderCompactionTiming | null;
-  /** Why, in a few words, for the savings record and the log. */
+  /** Why, in a few words, for the savings record. */
   note: string;
+  /**
+   * Consecutive deferrals after this verdict. The turn that reaches the cap keeps it there, so a
+   * leader still mid-edit is not held for another run; any other verdict resets it.
+   */
+  deferrals: number;
 }
 
 const SWITCHED_REASON = "your work has moved on to a different task";
@@ -330,31 +329,42 @@ const DEFER_REASON = "you are mid-way through a multi-step edit";
 export function decideCompactionTiming(
   input: CompactionTimingDecisionInput,
 ): CompactionTimingDecision {
-  const { answers, usedTokens, prepareAtTokens, settings, guards } = input;
+  const { answers, usedTokens, prepareAtTokens, settings } = input;
   const mid = answers.midOperation > MID_OPERATION_FLOOR;
   if (usedTokens >= prepareAtTokens) {
-    if (!mid) return { timing: null, note: "clean at the line" };
-    if (usedTokens >= settings.ceilingTokens) return { timing: null, note: "at the ceiling" };
+    if (!mid) return none("clean at the line");
+    if (usedTokens >= settings.ceilingTokens) return none("at the ceiling");
     if (input.deferrals >= settings.maxDeferrals) {
-      return { timing: null, note: "deferrals used up" };
+      return { timing: null, note: "deferrals used up", deferrals: input.deferrals };
     }
     return {
       timing: { kind: "defer", ceilingTokens: settings.ceilingTokens, reason: DEFER_REASON },
       note: "mid-operation",
+      deferrals: input.deferrals + 1,
     };
   }
-  if (usedTokens < settings.considerAtTokens) return { timing: null, note: "under the line" };
-  if (mid) return { timing: null, note: "mid-operation" };
+  if (usedTokens < settings.considerAtTokens) return none("under the line");
+  if (mid) return none("mid-operation");
+  return decideEarlyStart(input);
+}
+
+function none(note: string): CompactionTimingDecision {
+  return { timing: null, note, deferrals: 0 };
+}
+
+/** Between the consider line and the prepare line: a clean break, and every guard holds. */
+function decideEarlyStart(input: CompactionTimingDecisionInput): CompactionTimingDecision {
+  const { answers, settings, guards } = input;
   const switched = answers.switchedGears > SWITCHED_FLOOR;
   const boundary =
     answers.atBoundary > BOUNDARY_FLOOR && answers.needsHistory < NEEDS_HISTORY_CEILING;
-  if (!switched && !boundary) return { timing: null, note: "same work continuing" };
-  if (guards.unfinishedTool) return { timing: null, note: "guard: a tool call is unfinished" };
-  if (guards.startedChild) return { timing: null, note: "guard: a child was started" };
+  if (!switched && !boundary) return none("same work continuing");
+  if (guards.unfinishedTool) return none("guard: a tool call is unfinished");
+  if (guards.startedChild) return none("guard: a child was started");
   if (guards.grownTokens < MIN_GROWTH_FOR_EARLY_START) {
-    return { timing: null, note: "guard: under 50K of growth since the last compaction" };
+    return none("guard: under 50K of growth since the last compaction");
   }
-  if (guards.earlyStartUsed) return { timing: null, note: "guard: already started early" };
+  if (guards.earlyStartUsed) return none("guard: already started early");
   return {
     timing: {
       kind: "startEarly",
@@ -362,6 +372,7 @@ export function decideCompactionTiming(
       reason: switched ? SWITCHED_REASON : BOUNDARY_REASON,
     },
     note: switched ? "switched gears" : "at a boundary",
+    deferrals: 0,
   };
 }
 
@@ -377,8 +388,6 @@ export function formatCutPoint(turns: readonly string[], answer: JevAnswer | und
   );
 }
 
-// ─── The advisor ─────────────────────────────────────────────────────────────────────────────
-
 /** A verdict and whether it may act. A shadow answer only shapes a dry run's would-start. */
 export interface LeaderCompactionTimingVerdict {
   timing: LeaderCompactionTiming;
@@ -388,15 +397,20 @@ export interface LeaderCompactionTimingVerdict {
 /** What the monitor uses. */
 export type LeaderCompactionTimingPort = Pick<
   LeaderCompactionTimingAdvisor,
-  "verdictFor" | "noteEarlyStart" | "requestCutPoint" | "cutPointFor"
+  "verdictFor" | "noteEarlyStart" | "noteDefer" | "requestCutPoint" | "cutPointFor"
 >;
+
+/** Whether the leg the monitor acted on was a dry run: only a live leg changes anything. */
+export interface LeaderCompactionTimingAct {
+  dryRun: boolean;
+}
 
 interface LeaderCompactionTimingLogger {
   warn: (obj: object, msg?: string) => void;
 }
 
 export interface LeaderCompactionTimingOptions {
-  jev: Pick<JevService, "decide" | "isActive" | "checkScope" | "savings">;
+  jev: Pick<JevService, "decide" | "isActive" | "checkScope" | "status" | "savings">;
   readAgent: (agentId: string) => LeaderCompactionAgentInput | null;
   /** The tail of the agent's timeline, `COMPACTION_TIMING_READ_ROWS` rows. */
   readTimeline: (agentId: string) => readonly AgentTimelineRow[];
@@ -415,6 +429,11 @@ interface AgentMemory {
   /** Bumped on every finished turn; an answer for an older turn is dropped. */
   turn: number;
   verdict: LeaderCompactionTimingVerdict | null;
+  /**
+   * A live verdict's savings record, held until the monitor acts on the verdict or it is dropped,
+   * so the record says whether anything changed. Shadow verdicts are recorded at once.
+   */
+  unrecorded: TimingRecordInput | null;
   lastSeenTokens: number;
   /** The context at the start of this cycle, or when the advisor first saw the agent. */
   baselineTokens: number;
@@ -467,14 +486,14 @@ export class LeaderCompactionTimingAdvisor {
     try {
       const settings = this.options.readLeaderCompaction();
       if (settings?.enabled !== true) {
-        this.memory.delete(agentId);
+        this.forget(agentId);
         return;
       }
       const config = resolveLeaderCompactionConfig(settings);
       const agent = this.options.readAgent(agentId);
       const used = agent?.contextWindowUsedTokens;
       if (!agent || !isLeaderCompactionCandidate(agent, config) || used === undefined) {
-        this.memory.delete(agentId);
+        this.forget(agentId);
         return;
       }
       const memory = this.observe(agentId, used);
@@ -485,20 +504,41 @@ export class LeaderCompactionTimingAdvisor {
     }
   }
 
-  /** The verdict from the agent's last turn, or null. */
+  /**
+   * The verdict from the agent's last turn, or null. One that no longer holds is dropped: the feature
+   * was switched off, a live answer's feature went back to shadow, or its line or ceiling is no
+   * longer the configured one.
+   */
   verdictFor(agentId: string): LeaderCompactionTimingVerdict | null {
-    return this.memory.get(agentId)?.verdict ?? null;
+    const memory = this.memory.get(agentId);
+    const verdict = memory?.verdict;
+    if (!memory || !verdict) return null;
+    let holds = false;
+    try {
+      holds = this.stillHolds(verdict);
+    } catch (error) {
+      this.options.logger.warn({ err: error, agentId }, "Compaction timing: verdict not checked");
+    }
+    if (holds) return verdict;
+    this.dropVerdict(memory, { acted: false });
+    return null;
   }
 
   /**
    * The monitor started an episode early, or reported one in dry run. That uses the verdict up, and
    * the cycle's one early start.
    */
-  noteEarlyStart(agentId: string): void {
+  noteEarlyStart(agentId: string, act: LeaderCompactionTimingAct): void {
     const memory = this.memory.get(agentId);
     if (!memory) return;
     memory.earlyStartUsed = true;
-    memory.verdict = null;
+    this.dropVerdict(memory, { acted: !act.dryRun });
+  }
+
+  /** The monitor held a leader at the line on the verdict, or would have in dry run. */
+  noteDefer(agentId: string, act: LeaderCompactionTimingAct): void {
+    const memory = this.memory.get(agentId);
+    if (memory) this.flushRecord(memory, { acted: !act.dryRun });
   }
 
   /** A prepare step ended. The answer is used if it is ready by the sweep that sends `/compact`. */
@@ -535,6 +575,7 @@ export class LeaderCompactionTimingAdvisor {
       const memory: AgentMemory = {
         turn: 1,
         verdict: null,
+        unrecorded: null,
         lastSeenTokens: used,
         baselineTokens: used,
         earlyStartUsed: false,
@@ -544,7 +585,7 @@ export class LeaderCompactionTimingAdvisor {
       return memory;
     }
     existing.turn += 1;
-    existing.verdict = null;
+    this.dropVerdict(existing, { acted: false });
     if (used < existing.lastSeenTokens) {
       existing.baselineTokens = used;
       existing.earlyStartUsed = false;
@@ -552,6 +593,34 @@ export class LeaderCompactionTimingAdvisor {
     }
     existing.lastSeenTokens = used;
     return existing;
+  }
+
+  private forget(agentId: string): void {
+    const memory = this.memory.get(agentId);
+    if (memory) this.dropVerdict(memory, { acted: false });
+    this.memory.delete(agentId);
+  }
+
+  private stillHolds(verdict: LeaderCompactionTimingVerdict): boolean {
+    const { jev } = this.options;
+    if (!jev.isActive("compactionTiming")) return false;
+    if (verdict.live && jev.status().features.compactionTiming.shadow) return false;
+    const settings = this.options.readTimingConfig();
+    return verdict.timing.kind === "startEarly"
+      ? verdict.timing.lineTokens === settings.considerAtTokens
+      : verdict.timing.ceilingTokens === settings.ceilingTokens;
+  }
+
+  private dropVerdict(memory: AgentMemory, outcome: { acted: boolean }): void {
+    memory.verdict = null;
+    this.flushRecord(memory, outcome);
+  }
+
+  private flushRecord(memory: AgentMemory, outcome: { acted: boolean }): void {
+    const record = memory.unrecorded;
+    if (!record) return;
+    memory.unrecorded = null;
+    this.recordTiming(record, outcome);
   }
 
   private track(task: Promise<void>): void {
@@ -584,9 +653,13 @@ export class LeaderCompactionTimingAdvisor {
   ): Promise<void> {
     // The config and the JEV snapshot are read once the turn's own handling has returned.
     await Promise.resolve();
-    if (!this.options.jev.isActive("compactionTiming")) return;
     const settings = this.options.readTimingConfig();
-    if (usedTokens < settings.considerAtTokens) return;
+    // `defer` starts at the prepare line, which may be configured under the consider line.
+    if (usedTokens < Math.min(settings.considerAtTokens, prepareAtTokens)) return;
+    if (!this.options.jev.isActive("compactionTiming")) {
+      this.options.jev.savings.countNotAsked("compactionTiming", "inactive");
+      return;
+    }
     if (!(await this.inScope(agentId))) return;
     const view = readCompactionTimingView(this.options.readTimeline(agentId));
     const outcome = await this.options.jev.decide({
@@ -619,11 +692,7 @@ export class LeaderCompactionTimingAdvisor {
           })
         : null;
     const live = outcome.kind === "answered";
-    if (current && decision) {
-      current.verdict = decision.timing ? { timing: decision.timing, live } : null;
-      current.deferrals = decision.timing?.kind === "defer" ? current.deferrals + 1 : 0;
-    }
-    this.recordTiming({
+    const record: TimingRecordInput = {
       agentId,
       callId: outcome.callId,
       live,
@@ -633,15 +702,27 @@ export class LeaderCompactionTimingAdvisor {
       answers,
       decision,
       stale: current === null,
-    });
+    };
+    if (current && decision) {
+      current.verdict = decision.timing ? { timing: decision.timing, live } : null;
+      current.deferrals = decision.deferrals;
+      if (current.verdict && live) {
+        current.unrecorded = record;
+        return;
+      }
+    }
+    this.recordTiming(record, { acted: false });
   }
 
-  /** One involvement per call that reached JEV; the ledger drops one that never left. */
-  private recordTiming(input: TimingRecordInput): void {
+  /**
+   * One involvement per call that reached JEV; the ledger drops one that never left. `changed` only
+   * when a live answer's verdict was acted on by a live leg.
+   */
+  private recordTiming(input: TimingRecordInput, outcome: { acted: boolean }): void {
     const { answers, decision } = input;
     const timing = decision?.timing ?? null;
     const wouldBe = timing ? WOULD_BE[timing.kind] : "at-line";
-    const changed = input.live && timing !== null;
+    const changed = input.live && outcome.acted && timing !== null;
     this.options.jev.savings.record({
       feature: "compactionTiming",
       callSite: COMPACTION_TIMING_CALL_SITE,

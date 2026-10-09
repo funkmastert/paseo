@@ -229,6 +229,29 @@ describe("planLeaderCompactionStep with a compaction-timing verdict", () => {
     expect(planWith(null, leader({ contextWindowUsedTokens: 260_000 })).action).toEqual({
       kind: "none",
     });
+    const lineEpisode: LeaderCompactionEpisode = {
+      triggeredAtTokens: 450_000,
+      lineTokens: 400_000,
+      trigger: { kind: "line" },
+      attempts: 0,
+      note: null,
+      compactedFromTokens: null,
+      compactedToTokens: null,
+    };
+    expect(planWith(null, leader({ contextWindowUsedTokens: 450_000 }))).toEqual({
+      state: { phase: "inFlight", step: "prepare", episode: lineEpisode },
+      action: { kind: "startTurn", step: "prepare", episode: lineEpisode },
+    });
+    const dry = resolveLeaderCompactionConfig({ enabled: true, dryRun: true });
+    expect(planWith(null, leader({ contextWindowUsedTokens: 450_000 }), dry)).toEqual({
+      state: { phase: "settled", reason: "dryRun" },
+      action: {
+        kind: "reportDryRun",
+        usedTokens: 450_000,
+        startsNow: true,
+        trigger: { kind: "line" },
+      },
+    });
   });
 
   test("a verdict is ignored once the agent has started another turn", () => {
