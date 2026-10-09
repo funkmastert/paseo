@@ -702,16 +702,51 @@ describe("precedence", () => {
     expect(decideWith(input, hint).taskClass).toMatchObject({ taskClass: "mechanical", source: "classified" });
   });
 
-  it("5. a JEV standard or hard answer with deep reasoning lifts a task off the mechanical seed", async () => {
+  it("5. with applyHard on, a JEV standard or hard answer with deep reasoning lifts a task off the mechanical seed", async () => {
     const input = worker({ title: "rename the retry module and rework its callers" });
-    const standard = await hintFor(input, { answers: answers({ taskClass: ["standard", 0.41], reasoning: [1.87] }) });
-    const hardUnderFloor = await hintFor(input, { answers: answers({ taskClass: ["hard", 0.6], reasoning: [1.2] }) });
+    const on = { ...LIVE, applyHard: true };
+    const standard = await hintFor(input, { answers: answers({ taskClass: ["standard", 0.41], reasoning: [1.87] }) }, on);
+    const hardUnderFloor = await hintFor(input, { answers: answers({ taskClass: ["hard", 0.6], reasoning: [1.2] }) }, on);
 
     const decision = decideWith(input, standard);
     expect(decision.taskClass).toMatchObject({ taskClass: "standard", source: "jev" });
+    expect(decision.taskClass.reason).toContain("mechanical keyword was overruled");
     expect(decision.model.model).toBe("claude-sonnet-5");
     expect(decision.jev).toMatchObject({ applied: true, wouldBe: { taskClass: "standard", move: "up" } });
     expect(decideWith(input, hardUnderFloor).taskClass).toMatchObject({ taskClass: "standard", source: "jev" });
+  });
+
+  it("5. with applyHard off the lift is a raise like any other: recorded as wouldBe, the seed decides", async () => {
+    const input = worker({ title: "rename the retry module and rework its callers" });
+    const hint = await hintFor(input, { answers: answers({ taskClass: ["standard", 0.9], reasoning: [1.9] }) });
+
+    const decision = decideWith(input, hint);
+    expect(decision.taskClass).toMatchObject({ taskClass: "mechanical", source: "classified" });
+    expect(decision.jev).toMatchObject({ applied: false, wouldBe: { taskClass: "standard", move: "up" } });
+  });
+
+  it("5. a confident hard answer on a mechanical seed: wouldBe hard with applyHard off, hard with it on", async () => {
+    const input = worker({ title: "rename the retry module and rework its callers" });
+    const confidentHard = { answers: answers({ taskClass: ["hard", 0.9], reasoning: [1.7] }) };
+    const off = decideWith(input, await hintFor(input, confidentHard));
+    const on = decideWith(input, await hintFor(input, confidentHard, { ...LIVE, applyHard: true }));
+
+    expect(off.taskClass).toMatchObject({ taskClass: "mechanical", source: "classified" });
+    expect(off.jev).toMatchObject({ applied: false, wouldBe: { taskClass: "hard" } });
+    expect(on.taskClass).toMatchObject({ taskClass: "hard", source: "jev" });
+  });
+
+  it("5. no lift for other, for a mechanical answer, or for reasoning under 1.2", async () => {
+    const input = worker({ title: "rename the retry module" });
+    const on = { ...LIVE, applyHard: true };
+    for (const [choice, confidence, score] of [
+      ["other", 0.99, 2],
+      ["mechanical", 0.9, 1.5],
+      ["standard", 0.9, 1.19],
+    ] as const) {
+      const hint = await hintFor(input, { answers: answers({ taskClass: [choice, confidence], reasoning: [score] }) }, on);
+      expect(decideWith(input, hint).taskClass).toMatchObject({ taskClass: "mechanical", source: "classified" });
+    }
   });
 
   it("5. in shadow the lift is recorded as wouldBe and the mechanical seed still decides", async () => {

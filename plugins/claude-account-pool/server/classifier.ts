@@ -38,6 +38,7 @@ import {
   type ModelCatalog,
 } from "./role-availability";
 import {
+  MECHANICAL_SEED_LIFT_REASONING,
   placesRootAsChild,
   resolveDeclaredRootRole,
   resolveLeaderRole,
@@ -588,6 +589,10 @@ function describeTaskClass(decision: Omit<TaskClassDecision, "reason">): string 
     case "classified":
       return `${decision.taskClass}, guessed from keywords in the title/prompt.${ignored}`;
     case "jev":
+      // `standard` from JEV is reachable only through the mechanical-seed lift (role-resolve.ts).
+      if (decision.taskClass === "standard") {
+        return `standard, from JEV's spawn hint: the title's mechanical keyword was overruled because JEV judged the work standard or hard with a reasoning score of ${MECHANICAL_SEED_LIFT_REASONING} or more.${ignored}`;
+      }
       return `${decision.taskClass}, from JEV's spawn hint: no label declared a class and its answers cleared the floors.${ignored}`;
     case "default":
       return `none — nothing declared or recognized one, so the role's standard pool decides.${ignored}`;

@@ -280,6 +280,13 @@ const MECHANICAL_SEED_RE =
   /\btypo\b|\brenam(?:e|ing)\b|\bformatting\b|\bwhitespace\b|\bchangelog\b|\blint(?:ing)?\b|\bdead code\b|\bunused import\b|\bone[- ]liner\b|\btrivial\b|\bbump(?:ed|ing)? (?:the )?version\b/;
 
 /**
+ * `reasoning` at or over this, with a `standard` or `hard` class, lifts a
+ * mechanical keyword seed to `standard`: past "Some" (1), so more than
+ * following an existing pattern. A rename JEV scores at 1 stays mechanical.
+ */
+export const MECHANICAL_SEED_LIFT_REASONING = 1.2;
+
+/**
  * JEV's class proposal, already past its floors (server/jev-hint.ts). Each
  * `apply` flag false means that direction is recorded, not used: shadow mode
  * turns both off, and `spawnHint.applyHard` off keeps a hard answer a record.
@@ -289,7 +296,8 @@ export interface TaskClassJevInput {
   /**
    * JEV disagrees with a mechanical reading on both answers (server/jev-hint.ts
    * `proposeFromAnswers`), so a mechanical keyword seed becomes `standard`.
-   * Applied with `applyMechanical`: it is the same direction's evidence.
+   * That moves a task to a dearer model, so it rides `applyHard`, the switch
+   * every raise needs, not `applyMechanical`.
    */
   liftsMechanicalSeed?: boolean;
   applyMechanical: boolean;
@@ -323,7 +331,7 @@ function classifyTaskClass(
   }
   const mechanicalTrimmed = mechanicalText.trim();
   if (mechanicalTrimmed.length > 0 && MECHANICAL_SEED_RE.test(mechanicalTrimmed)) {
-    if (jev?.liftsMechanicalSeed && jev.applyMechanical) {
+    if (jev?.liftsMechanicalSeed && jev.applyHard) {
       return { taskClass: "standard", source: "jev" };
     }
     return { taskClass: "mechanical", source: "classified" };

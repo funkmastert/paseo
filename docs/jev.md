@@ -416,7 +416,7 @@ Decisions do not survive a restart. The ledger's daily totals and the audit file
 
 ## Feature 2: spawn hint
 
-When a child create has no `paseo.task-class` label, the classifier asks JEV what class of work the prompt is. In v1 JEV can move a task down to `mechanical` only; a `hard` answer and a role guess are recorded as `wouldBe` until the shadow day shows they pay (`spawnHint.applyHard`, `.applyRole`). It never outranks a label, and it cannot lower a task a hard-risk keyword already marked hard. When every child is labelled, as on this fleet, the hint has nothing unlabelled left to judge — [auditing a declared label](#auditing-a-declared-label) gives it one.
+When a child create has no `paseo.task-class` label, the classifier asks JEV what class of work the prompt is. On its own it can move a task down to `mechanical` only. A `hard` answer, a lift off the mechanical keyword seed (precedence step 5) and a role guess are recorded as `wouldBe` until `spawnHint.applyHard` / `.applyRole` turn them on. It never outranks a label, and it cannot lower a task a hard-risk keyword already marked hard. When every child is labelled, as on this fleet, the hint has nothing unlabelled left to judge — [auditing a declared label](#auditing-a-declared-label) gives it one.
 
 ### Seam
 
@@ -509,7 +509,7 @@ Task class, highest first:
 2. `hard` when `HARD_SEED_RE` matches title or prompt (`plugins/claude-account-pool/server/role-resolve.ts`). JEV cannot lower a risk keyword.
 3. JEV `mechanical` when `task_class` is `mechanical` at confidence ≥ 0.65 **and** `reasoning.score` ≤ 0.8. Two answers must agree.
 4. JEV `hard`, only with `spawnHint.applyHard`, when `task_class` is `hard` at confidence ≥ 0.85 **and** `reasoning.score` ≥ 1.6. Off, it is logged as `wouldBe`.
-5. `mechanical` when `MECHANICAL_SEED_RE` matches the title (the prompt only when there is no title). The seed skips the prompt because briefs carry boilerplate such as "run `npm run lint`", which sent real work to Haiku. When JEV answers `standard` or `hard` with `reasoning.score` ≥ 1.2 (`MECHANICAL_SEED_LIFT_REASONING`), the seed becomes `standard` instead (source `jev`). A rename JEV scores at 1 stays mechanical.
+5. `mechanical` when `MECHANICAL_SEED_RE` matches the title (the prompt only when there is no title). The seed skips the prompt because briefs carry boilerplate such as "run `npm run lint`", which sent real work to Haiku. When JEV answers `standard` or `hard` with `reasoning.score` ≥ 1.2 (`MECHANICAL_SEED_LIFT_REASONING`), the seed becomes `standard` instead (source `jev`). The lift moves a task to a dearer model, so it needs `spawnHint.applyHard` like the hard raise; off, it is logged as `wouldBe`. A rename JEV scores at 1 stays mechanical.
 6. Default (the role's standard pool).
 
 Otherwise a JEV `standard` answer changes nothing.
@@ -520,7 +520,7 @@ Role, for a child at tiers 3–4 only, and only with `spawnHint.applyRole`: JEV'
 
 Thinking follows the class through `policy.thinking.byTaskClass` (`classifier.ts:1027`), as it does now (D4).
 
-Hub-triggered creates carry untrusted text. v1 never raises a class, so JEV cannot push them to Opus at xhigh; see [Deferred](#deferred) for the rule `applyHard` needs first.
+Hub-triggered creates carry untrusted text. With `applyHard` off nothing raises a class, so JEV cannot push them to Opus at xhigh. `applyHard` turns on both raises, the hard answer and the mechanical-seed lift; see [Deferred](#deferred) for the rule Hub creates need before it is on where Hub triggers run.
 
 ### Auditing a declared label
 
@@ -1754,6 +1754,8 @@ The dashboard never flips a mode. The evidence is how Tyler decides; the switch 
 | 14 away reply         | dry run → live | 20 follow-ups, `sameChoice` in at least 90%                                                                                                                                          |
 | 16 read check         | shadow → live  | 200 would-skips of reads of 8,000 tokens or more, at most 30% false skips, a positive projected net                                                                                  |
 
+Spawn-hint records settled before 2026-10-09 priced `base` with the mechanical seed reading title and prompt; later ones read the title only. Count the spawn-hint flip evidence from that date.
+
 ### Links with feature 11
 
 - The budget strip's "TypeSafe (JEV)" row opens the dashboard for its host (F6: `account-budget-strip-view.tsx`'s row is pressable when `row.providerId === "jev"`, via an `onOpenJevDashboard` callback injected from `account-budget-strip.tsx` — not imported directly, for the same `expo-router` reason as the screen split above). The row's per-feature detail lines are gone from the strip; it keeps lane spend, calls and alerts only.
@@ -1866,7 +1868,7 @@ No key, the switch off, an outage, a low-confidence answer or D7 all land on the
 Each item is out of v1 on purpose, with the reason.
 
 - **`ask_jev`'s `command` on Windows.** The catastrophe gate resolves only POSIX cwds and parses POSIX shell; running Git Bash from the daemon needs locating it and gating Windows paths first. The tool refuses `command` there and still answers about files and state.
-- **Hub-triggered creates and `applyHard`.** v1 never raises a class, so untrusted Hub text cannot push an agent to Opus at xhigh. Before `applyHard` is turned on, Hub-created agents need a label that marks their origin, and the hint must never raise them.
+- **Hub-triggered creates and `applyHard`.** With `applyHard` off nothing raises a class, so untrusted Hub text cannot push an agent to a dearer model. Before `applyHard` is on where Hub triggers run, Hub-created agents need a label that marks their origin, and the hint must never raise them, by either the hard answer or the mechanical-seed lift.
 - **Read deny rules in user-level Claude settings files.** The daemon honours `denyRead` and the deny rules in the agent's stored config; rules only in `~/.claude/settings.json` are not loaded by the daemon.
 - **Routing a loop verdict through the existing nudge.** It would let the loop watch save tokens, and a nudge is D1-compatible, but it acts on running agents on a JEV answer; revisit after the shadow data.
 - **Decisions interleaved in the agent's stream, and kept across restarts.** The popover list serves the need without touching the timeline; the ledger totals and the audit already survive a restart.

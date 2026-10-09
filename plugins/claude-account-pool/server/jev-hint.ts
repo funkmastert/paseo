@@ -7,7 +7,7 @@ import {
   type TaskClassId,
 } from "../shared/role-policy-schema";
 import { classifyAgent, type ClassifierInput, type ClassifierWorld } from "./classifier";
-import { placesRootAsChild, resolveRole, resolveTaskClass } from "./role-resolve";
+import { MECHANICAL_SEED_LIFT_REASONING, placesRootAsChild, resolveRole, resolveTaskClass } from "./role-resolve";
 
 /**
  * JEV's spawn hint (docs/jev.md, "Feature 2"): one typed call, made by the
@@ -57,12 +57,6 @@ export const MECHANICAL_REASONING_CEILING = 0.8;
 export const HARD_CONFIDENCE_FLOOR = 0.85;
 /** `reasoning` at or over this agrees with a hard answer: most of the way to "Deep" (2). */
 export const HARD_REASONING_FLOOR = 1.6;
-/**
- * `reasoning` at or over this, with a `standard` or `hard` class, lifts a
- * mechanical keyword seed to `standard`: past "Some" (1), so more than
- * following an existing pattern. A rename JEV scores at 1 stays mechanical.
- */
-export const MECHANICAL_SEED_LIFT_REASONING = 1.2;
 export const ROLE_CONFIDENCE_FLOOR = 0.7;
 
 /** The question ids. JEV never sees them as meaning; it reads the instructions. */
@@ -387,7 +381,9 @@ export function readSpawnHintAnswers(
 /**
  * The answers past their floors. Pure. A mechanical class needs the class
  * answer and the reasoning score to agree; so does a hard one, at higher
- * floors. `standard`, `other` and anything under a floor propose nothing.
+ * floors. A `standard` or `hard` class at `MECHANICAL_SEED_LIFT_REASONING`
+ * or more also sets `liftsMechanicalSeed`. `other` and anything under every
+ * floor propose nothing.
  */
 export function proposeFromAnswers(answers: SpawnHintAnswers, policy: RoleModelPolicy): SpawnHintProposal {
   const proposal: SpawnHintProposal = {};

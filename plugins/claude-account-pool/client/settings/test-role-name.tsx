@@ -50,7 +50,7 @@ export function TestRoleName({ theme }: { theme: PluginSurfaceProps["theme"] }) 
       <SettingsInput label="Title text (optional)" onChangeText={setTitle} placeholder="used for automatic classification" testID="test-role-name-title" />
       <SettingsInput
         label="Initial prompt (optional)"
-        hint="The create hook classifies over the title AND the prompt. Leave this out and you are previewing a different question than the one the hook answers."
+        hint="The create hook reads the title and the prompt for risk keywords, and the title alone for mechanical ones. Leave this out and you are previewing a different question than the one the hook answers."
         onChangeText={setPrompt}
         placeholder="what the agent would be asked to do"
         testID="test-role-name-prompt"
