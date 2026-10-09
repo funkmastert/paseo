@@ -45,7 +45,7 @@ To try a change to `server.mjs` beside the live one, run it with `BOZEO_PUBLIC_W
 
 ## Limits
 
-`agents.sharedBuilds` in `config.json`, re-read on every share and sweep. The public URL is `app.baseUrl`, which must be https; without it every share is refused.
+`agents.sharedBuilds` in `config.json`, re-read on every share and sweep. The public URL is `PASEO_APP_BASE_URL`, else `app.baseUrl`, as for the daemon. It must be https and must not be the shipped default, `https://app.paseo.sh`, which serves no `/b/`; otherwise every share is refused and says why.
 
 | Key           | Default | What it does                                                 |
 | ------------- | ------- | ------------------------------------------------------------ |
@@ -56,14 +56,16 @@ To try a change to `server.mjs` beside the live one, run it with `BOZEO_PUBLIC_W
 
 A share is also refused while it would leave free disk under the disk-low line, `agents.remediation.disk.lowFreeGB` (20 GB by default, [disk-pressure.md](disk-pressure.md)). Free disk is read once per share by `shared-builds/free-disk.ts`.
 
-The daemon sweeps at startup, hourly, and before every share. A sweep deletes expired shares, temp directories and token directories without a readable `share.json` (what a crash leaves), then evicts oldest-first over the total cap. It leaves anything else in the root alone. Shares and sweeps run one at a time.
+The daemon sweeps at startup, hourly, and once a share's copy has passed its checks, just before it goes live. A sweep deletes expired shares, temp directories and token-shaped entries without a readable `share.json` (what a crash leaves), then evicts oldest-first over the total cap. A share refused after its copy evicts nothing. The sweep leaves anything else in the root alone. Shares and sweeps run one at a time, and the copy stops at the size the disk check allowed for, so a build still being written is refused.
 
 ## The path an agent may share
 
-The path is confined the way the JEV file tools confine theirs ([jev.md](jev.md)): resolved against the caller's cwd, realpathed, and inside that cwd or its git worktree. A worktree that is the home directory or above it does not count. It must be a regular `.apk` or `.ipa` with one link, judged on the real path, so a symlink out of the cwd or onto another file type is refused. The copy is streamed from a handle opened without following symlinks, and the file's identity is checked again at open.
+The path is confined the way the JEV file tools confine theirs ([jev.md](jev.md)): resolved against the caller's cwd, realpathed, and inside that cwd or its git worktree. A cwd that is the filesystem root, the home directory or an ancestor of it, or the worktrees root is refused, and a git worktree like that doesn't widen the cwd. Only agents get the tool: without a caller there is no cwd. It must be a regular `.apk` or `.ipa` with one link, judged on the real path, so a symlink out of the cwd or onto another file type is refused. The copy is streamed from a handle opened without following symlinks, and the file's identity is checked again at open.
 
 An APK must be a zip with a root `AndroidManifest.xml`; its package and version are read from the compiled manifest for the push. An IPA must carry `Payload/<App>.app/Info.plist` with a bundle identifier and a version, which the manifest needs.
 
 ## The push
 
 `alert`: it needs Tyler soon, and nothing is lost if he waits ([notification-policy.md](notification-policy.md)). The dedupe key is the build's SHA-256, so sharing the same bytes twice within an hour pushes once; the second share still gets its own link.
+
+The tool asks the notify policy what it will do before sending and reports it as `push.outcome`: `sent`, `folded` (the same build was pushed within the hour), `digest`, `logged`, `no-device`, `no-sender`, `failed`, or `unconfirmed` when the policy can't be asked. Anything but `sent` tells the agent to give Tyler the link itself.

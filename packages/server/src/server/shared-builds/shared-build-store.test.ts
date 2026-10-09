@@ -144,7 +144,7 @@ describe("SharedBuildStore.share", () => {
     limits = { ...limits, publicBaseUrl: null };
     await expect(
       createStore().share({ sourcePath: source, agentId: null, platform: "android" }),
-    ).rejects.toThrow(/no https app.baseUrl/);
+    ).rejects.toThrow(/no public site for shared builds/);
   });
 
   test("refuses when the file at the path is no longer the one validated", async () => {
@@ -271,6 +271,38 @@ describe("SharedBuildStore.sweep", () => {
     expect(await fs.readdir(root)).toEqual(["README.txt"]);
   });
 
+  test("a share refused after its copy evicts nothing", async () => {
+    const store = createStore();
+    const tokens: string[] = [];
+    for (const name of ["a.ipa", "b.ipa", "c.ipa"]) {
+      const shared = await store.share({
+        sourcePath: await writeBuild(name, 3000),
+        agentId: null,
+        platform: "ios",
+      });
+      tokens.push(shared.record.token);
+      nowMs += 1000;
+    }
+    await expect(
+      store.share({
+        sourcePath: await writeBuild("d.ipa", 3000),
+        agentId: null,
+        platform: "ios",
+        finish: async () => {
+          throw new SharedBuildRefusal("no Info.plist");
+        },
+      }),
+    ).rejects.toThrow(/no Info.plist/);
+    expect(await liveTokens()).toEqual([...tokens].sort());
+    expect((await fs.readdir(root)).filter((entry) => entry.startsWith("."))).toEqual([]);
+  });
+
+  test("a token-shaped file in the root is swept, not fatal", async () => {
+    await fs.writeFile(path.join(root, "FFFFFFFFFFFFFFFFFFFFFF"), "not a directory");
+    expect(await createStore().sweep()).toEqual({ expired: 0, evicted: 0, partial: 1 });
+    expect(await fs.readdir(root)).toEqual([]);
+  });
+
   test("a missing root is an empty sweep", async () => {
     root = path.join(workDir, "never-created");
     expect(await createStore().sweep()).toEqual({ expired: 0, evicted: 0, partial: 0 });
@@ -279,7 +311,9 @@ describe("SharedBuildStore.sweep", () => {
 
 describe("resolveSharedBuildsConfig", () => {
   test("defaults: on, 600 MB per file, 3 GB total, 3 days, app.baseUrl as the public site", () => {
-    expect(resolveSharedBuildsConfig({ app: { baseUrl: "https://shares.example.com/" } })).toEqual({
+    expect(
+      resolveSharedBuildsConfig({ app: { baseUrl: "https://shares.example.com/" } }, {}),
+    ).toEqual({
       enabled: true,
       maxFileBytes: 600 * 1024 * 1024,
       maxTotalBytes: 3072 * 1024 * 1024,
@@ -290,10 +324,15 @@ describe("resolveSharedBuildsConfig", () => {
 
   test("reads agents.sharedBuilds", () => {
     expect(
-      resolveSharedBuildsConfig({
-        app: { baseUrl: "https://shares.example.com" },
-        agents: { sharedBuilds: { enabled: false, maxFileMb: 10, maxTotalMb: 20, expiryHours: 1 } },
-      }),
+      resolveSharedBuildsConfig(
+        {
+          app: { baseUrl: "https://shares.example.com" },
+          agents: {
+            sharedBuilds: { enabled: false, maxFileMb: 10, maxTotalMb: 20, expiryHours: 1 },
+          },
+        },
+        {},
+      ),
     ).toEqual({
       enabled: false,
       maxFileBytes: 10 * 1024 * 1024,
@@ -304,10 +343,35 @@ describe("resolveSharedBuildsConfig", () => {
   });
 
   test("a missing or non-https app.baseUrl has no public site", () => {
-    expect(resolveSharedBuildsConfig(null).publicBaseUrl).toBeNull();
+    expect(resolveSharedBuildsConfig(null, {}).publicBaseUrl).toBeNull();
     expect(
-      resolveSharedBuildsConfig({ app: { baseUrl: "http://shares.example.com" } }).publicBaseUrl,
+      resolveSharedBuildsConfig({ app: { baseUrl: "http://shares.example.com" } }, {})
+        .publicBaseUrl,
     ).toBeNull();
-    expect(resolveSharedBuildsConfig({ app: { baseUrl: "not a url" } }).publicBaseUrl).toBeNull();
+    expect(
+      resolveSharedBuildsConfig({ app: { baseUrl: "not a url" } }, {}).publicBaseUrl,
+    ).toBeNull();
+  });
+
+  test("the shipped default app.baseUrl is no public site", () => {
+    for (const baseUrl of [
+      "https://app.paseo.sh",
+      "https://app.paseo.sh/",
+      "https://APP.paseo.sh",
+    ]) {
+      expect(resolveSharedBuildsConfig({ app: { baseUrl } }, {}).publicBaseUrl).toBeNull();
+    }
+    expect(
+      resolveSharedBuildsConfig(null, { PASEO_APP_BASE_URL: "https://app.paseo.sh" }).publicBaseUrl,
+    ).toBeNull();
+  });
+
+  test("PASEO_APP_BASE_URL wins over app.baseUrl, as it does for the daemon", () => {
+    expect(
+      resolveSharedBuildsConfig(
+        { app: { baseUrl: "https://config.example.com" } },
+        { PASEO_APP_BASE_URL: "https://env.example.com/" },
+      ).publicBaseUrl,
+    ).toBe("https://env.example.com");
   });
 });

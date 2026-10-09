@@ -132,7 +132,7 @@ export function buildSharedBuildUrls(input: {
   return { directory, file: `${directory}${encodeURIComponent(input.fileName)}` };
 }
 
-/** Counts the bytes through and fails the copy once they pass the cap; hashes what it passes. */
+/** Counts the bytes through and fails the copy once they pass `maxBytes`; hashes what it passes. */
 class CappedHashStream extends Transform {
   readonly hash = createHash("sha256");
   bytes = 0;
@@ -146,7 +146,7 @@ class CappedHashStream extends Transform {
     if (this.bytes > this.maxBytes) {
       callback(
         new SharedBuildRefusal(
-          `The build grew past the ${formatBytes(this.maxBytes)} cap while it was being copied.`,
+          `The build grew past ${formatBytes(this.maxBytes)} while it was being copied; share it once the build has finished.`,
         ),
       );
       return;
@@ -200,7 +200,7 @@ export class SharedBuildStore {
   }
 
   sweep(): Promise<SharedBuildSweepResult> {
-    return this.exclusive(() => this.sweepNow(0));
+    return this.exclusive(() => this.sweepNow({ reserveBytes: 0, inFlight: null }));
   }
 
   private exclusive<T>(task: () => Promise<T>): Promise<T> {
@@ -215,9 +215,11 @@ export class SharedBuildStore {
     if ("refusal" in availability) throw new SharedBuildRefusal(availability.refusal);
     const { publicBaseUrl } = availability;
 
+    // Non-blocking, so a path swapped for a FIFO after validation can't hang the queue on open;
+    // the fstat below refuses anything that isn't a regular file.
     const handle = await fs.open(
       request.sourcePath,
-      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
     );
     let tempDirectory: string | null = null;
     try {
@@ -252,16 +254,14 @@ export class SharedBuildStore {
           `Disk space is low (${formatBytes(freeBytes)} free, the floor is ${formatBytes(limits.lowFreeBytes)}), so no build is being shared. Try again once space is freed.`,
         );
       }
-      // Expired shares go, then the oldest, until this one fits under the total cap.
-      await this.sweepNow(stat.size);
-
       const token = randomBytes(16).toString("base64url");
       const fileName = storedFileName(request.sourcePath, request.platform);
       const urls = buildSharedBuildUrls({ publicBaseUrl, token, fileName });
       tempDirectory = path.join(this.root, `${TEMP_PREFIX}${token}`);
       await fs.mkdir(tempDirectory);
 
-      const counter = new CappedHashStream(maxBytes);
+      // Capped at the size the disk check allowed for: a file still growing is refused.
+      const counter = new CappedHashStream(stat.size);
       await pipeline(
         handle.createReadStream({ autoClose: false, start: 0 }),
         counter,
@@ -270,6 +270,12 @@ export class SharedBuildStore {
       const app = request.finish
         ? await request.finish({ directory: tempDirectory, fileName, urls })
         : NO_APP;
+      // Only a build that will go live makes room: expired shares go, then the oldest, until this
+      // one fits under the total cap. A refused build evicts nothing.
+      await this.sweepNow({
+        reserveBytes: counter.bytes,
+        inFlight: path.basename(tempDirectory),
+      });
 
       const createdAtMs = this.now();
       const record: SharedBuildRecord = {
@@ -300,9 +306,14 @@ export class SharedBuildStore {
 
   /**
    * Deletes expired shares and crash leftovers, then evicts the oldest until the live ones plus
-   * `reserveBytes` fit under the total cap.
+   * `reserveBytes` fit under the total cap. `inFlight` is the temp directory of the share being
+   * made, which is not a leftover.
    */
-  private async sweepNow(reserveBytes: number): Promise<SharedBuildSweepResult> {
+  private async sweepNow(input: {
+    reserveBytes: number;
+    inFlight: string | null;
+  }): Promise<SharedBuildSweepResult> {
+    const { reserveBytes, inFlight } = input;
     const result: SharedBuildSweepResult = { expired: 0, evicted: 0, partial: 0 };
     let entries: string[];
     try {
@@ -315,8 +326,9 @@ export class SharedBuildStore {
     const live: SharedBuildRecord[] = [];
     for (const entry of entries) {
       const directory = path.join(this.root, entry);
+      if (entry === inFlight) continue;
       if (entry.startsWith(TEMP_PREFIX)) {
-        // Shares run one at a time, so a temp directory seen here is from a crash.
+        // Shares run one at a time, so any other temp directory seen here is from a crash.
         await fs.rm(directory, { recursive: true, force: true });
         result.partial += 1;
         continue;
@@ -365,7 +377,7 @@ function checkAvailability(
   if (!limits.publicBaseUrl) {
     return {
       refusal:
-        "This daemon has no https app.baseUrl in config.json, so there is no public site to host the build.",
+        "This daemon has no public site for shared builds. Set app.baseUrl in config.json to the https origin that serves /b/ (docs/shared-builds.md); the default, https://app.paseo.sh, does not.",
     };
   }
   return { publicBaseUrl: limits.publicBaseUrl };
@@ -377,7 +389,9 @@ async function readShareRecord(directory: string): Promise<SharedBuildRecord | n
   try {
     text = await fs.readFile(path.join(directory, SHARE_RECORD_FILE), "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    // ENOTDIR: a token-shaped file, not a share directory.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
     throw error;
   }
   let parsed: unknown;
