@@ -280,24 +280,45 @@ const MECHANICAL_SEED_RE =
   /\btypo\b|\brenam(?:e|ing)\b|\bformatting\b|\bwhitespace\b|\bchangelog\b|\blint(?:ing)?\b|\bdead code\b|\bunused import\b|\bone[- ]liner\b|\btrivial\b|\bbump(?:ed|ing)? (?:the )?version\b/;
 
 /**
+ * `reasoning` at or over this, with a `standard` or `hard` class, lifts a
+ * mechanical keyword seed to `standard`: past "Some" (1), so more than
+ * following an existing pattern. A rename JEV scores at 1 stays mechanical.
+ */
+export const MECHANICAL_SEED_LIFT_REASONING = 1.2;
+
+/**
  * JEV's class proposal, already past its floors (server/jev-hint.ts). Each
  * `apply` flag false means that direction is recorded, not used: shadow mode
  * turns both off, and `spawnHint.applyHard` off keeps a hard answer a record.
  */
 export interface TaskClassJevInput {
   proposed: "mechanical" | "hard" | undefined;
+  /**
+   * JEV disagrees with a mechanical reading on both answers (server/jev-hint.ts
+   * `proposeFromAnswers`), so a mechanical keyword seed becomes `standard`.
+   * That moves a task to a dearer model, so it rides `applyHard`, the switch
+   * every raise needs, not `applyMechanical`.
+   */
+  liftsMechanicalSeed?: boolean;
   applyMechanical: boolean;
   applyHard: boolean;
 }
 
 /**
- * Tiers "jev"/"classified"/"default" over lowercase(title + " " + initialPrompt).
+ * Tiers "jev"/"classified"/"default". The hard seed reads `text` (title and
+ * prompt); the mechanical seed reads `mechanicalText` (the title, or the
+ * prompt when there is no title), because brief boilerplate such as
+ * "run `npm run lint`" would otherwise send real work to the mechanical pool.
  *
  * A risk keyword outranks JEV: JEV cannot lower a task the hard seed marked.
- * JEV outranks the mechanical seed, and a JEV `standard` is no proposal at
- * all, so it never lifts a task off that seed.
+ * JEV outranks the mechanical seed, and lifts it to `standard` when its
+ * answers disagree with a mechanical reading.
  */
-function classifyTaskClass(text: string, jev: TaskClassJevInput | undefined): ResolveTaskClassResult {
+function classifyTaskClass(
+  text: string,
+  mechanicalText: string,
+  jev: TaskClassJevInput | undefined,
+): ResolveTaskClassResult {
   const trimmed = text.trim();
   if (trimmed.length > 0 && HARD_SEED_RE.test(trimmed)) {
     return { taskClass: "hard", source: "classified" };
@@ -308,7 +329,11 @@ function classifyTaskClass(text: string, jev: TaskClassJevInput | undefined): Re
   if (jev?.proposed === "hard" && jev.applyHard) {
     return { taskClass: "hard", source: "jev" };
   }
-  if (trimmed.length > 0 && MECHANICAL_SEED_RE.test(trimmed)) {
+  const mechanicalTrimmed = mechanicalText.trim();
+  if (mechanicalTrimmed.length > 0 && MECHANICAL_SEED_RE.test(mechanicalTrimmed)) {
+    if (jev?.liftsMechanicalSeed && jev.applyHard) {
+      return { taskClass: "standard", source: "jev" };
+    }
     return { taskClass: "mechanical", source: "classified" };
   }
   return { taskClass: undefined, source: "default" };
@@ -330,8 +355,9 @@ function classifyTaskClass(text: string, jev: TaskClassJevInput | undefined): Re
  *   2. Unknown declared value: never blocks — falls through to
  *      classification/default, with `unknownDeclaredValue` set so the
  *      caller can be told once.
- *   3. Classified: seed-keyword text classification (title + initialPrompt),
- *      with JEV's spawn hint between the hard seed and the mechanical seed
+ *   3. Classified: seed-keyword text classification (the hard seed over
+ *      title + initialPrompt, the mechanical seed over the title alone), with
+ *      JEV's spawn hint between the hard seed and the mechanical seed
  *      (`classifyTaskClass`). A guess here may only ever pick a model;
  *      unlike the role guess it doesn't gate anything else, so there is no
  *      evidence-based/withheld split to make.
@@ -341,13 +367,15 @@ function classifyTaskClass(text: string, jev: TaskClassJevInput | undefined): Re
 export function resolveTaskClass(input: ResolveRoleInput, jev?: TaskClassJevInput): ResolveTaskClassResult {
   const declared = input.labels?.[TASK_CLASS_LABEL];
   const classificationText = `${input.title ?? ""} ${input.initialPrompt ?? ""}`.toLowerCase();
+  const title = input.title?.trim() ?? "";
+  const mechanicalText = (title.length > 0 ? title : (input.initialPrompt ?? "")).toLowerCase();
   if (declared !== undefined) {
     const lower = declared.trim().toLowerCase();
     const matched = (TASK_CLASS_IDS as readonly string[]).find((id) => id === lower);
     if (matched) {
       return { taskClass: matched as TaskClassId, source: "declared" };
     }
-    return { ...classifyTaskClass(classificationText, jev), unknownDeclaredValue: declared };
+    return { ...classifyTaskClass(classificationText, mechanicalText, jev), unknownDeclaredValue: declared };
   }
-  return classifyTaskClass(classificationText, jev);
+  return classifyTaskClass(classificationText, mechanicalText, jev);
 }

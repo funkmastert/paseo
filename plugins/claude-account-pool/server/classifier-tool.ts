@@ -76,7 +76,11 @@ const TOOL = {
         description: "The paseo.task-class label you would set: mechanical, standard, or hard.",
       },
       title: { type: "string", description: "The agent's title, as the create would carry it." },
-      prompt: { type: "string", description: "The initial prompt. Text classification reads the title AND this." },
+      prompt: {
+        type: "string",
+        description:
+          "The initial prompt. The hard-risk keywords read the title and this; the mechanical keywords read the title, and this only when there is no title.",
+      },
       requestedModel: {
         type: "string",
         description: "A model you would ask for explicitly. The answer says whether policy honors or overrides it.",
