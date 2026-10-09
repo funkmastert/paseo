@@ -330,7 +330,9 @@ import {
   sendPromptToAgent,
 } from "./agent/agent-prompt.js";
 import { WorktreeDiskMonitor } from "./worktree-disk-monitor.js";
-import { resolveWorkSnapshotsConfig } from "./remediation/config.js";
+import { resolveDiskRemediationConfig, resolveWorkSnapshotsConfig } from "./remediation/config.js";
+import { resolveSharedBuildsConfig } from "./shared-builds/config.js";
+import { SharedBuildStore } from "./shared-builds/shared-build-store.js";
 import { GitWorktreeSnapshotter } from "./agent/worktree-snapshot.js";
 import {
   AgentWorkSnapshotSweep,
@@ -2077,6 +2079,18 @@ export async function createPaseoDaemon(
   });
   deviceLeaseManager.reportMode();
 
+  // Builds agents share to Tyler's phone (docs/shared-builds.md), under the root the public static
+  // site serves as /b/. Both settings are read live: agents.sharedBuilds, and the disk-low line.
+  const sharedBuildStore = new SharedBuildStore({
+    root: path.join(config.paseoHome, "public-web-shares"),
+    readLimits: () => ({
+      ...resolveSharedBuildsConfig(readRawConfig(config.paseoHome).rawConfig),
+      lowFreeBytes: resolveDiskRemediationConfig(daemonConfigStore.get().remediation).lowFreeBytes,
+    }),
+    logger: logger.child({ module: "shared-builds" }),
+  });
+  sharedBuildStore.start();
+
   // The artifact janitor (docs/artifact-janitor.md). Built next to the cap and wrapped around
   // its launch gate, so one PreToolUse hook serves both: the janitor refuses a launch onto a
   // full volume and notes a test run's cleanup obligation, then the cap decides about slots.
@@ -2938,6 +2952,11 @@ export async function createPaseoDaemon(
     deviceLeaseManager,
     jevTools: jevToolsDependencies,
     physicalDeviceLeaseManager,
+    sharedBuilds: {
+      store: sharedBuildStore,
+      getPushNotificationSender: () => wsServer?.getPushNotificationSender() ?? null,
+      serverId,
+    },
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
@@ -3770,6 +3789,7 @@ export async function createPaseoDaemon(
     agentResourceMonitor?.stop();
     deviceLeaseManager.stop();
     physicalDeviceDetection.stop();
+    sharedBuildStore.stop();
     pluginConnectionMonitor?.stop();
     accountFailoverMonitor?.stop();
     budgetPacingMonitor?.stop();

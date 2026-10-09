@@ -136,3 +136,99 @@ export function buildFakeIpa(infoPlist: Buffer | string): Buffer {
     { name: "Payload/Fake.app/Fake", data: Buffer.alloc(256, 1), method: 0 },
   ]);
 }
+
+function stringPoolChunk(strings: string[], utf8: boolean): Buffer {
+  const encoded = strings.map((value) => {
+    if (utf8) {
+      const bytes = Buffer.from(value, "utf8");
+      return Buffer.concat([Buffer.from([value.length, bytes.length]), bytes, Buffer.from([0])]);
+    }
+    const length = Buffer.alloc(2);
+    length.writeUInt16LE(value.length);
+    return Buffer.concat([length, Buffer.from(value, "utf16le"), Buffer.alloc(2)]);
+  });
+  const headerSize = 28;
+  const offsets = Buffer.alloc(strings.length * 4);
+  let at = 0;
+  encoded.forEach((entry, index) => {
+    offsets.writeUInt32LE(at, index * 4);
+    at += entry.length;
+  });
+  let data = Buffer.concat(encoded);
+  if (data.length % 4 !== 0) data = Buffer.concat([data, Buffer.alloc(4 - (data.length % 4))]);
+  const header = Buffer.alloc(headerSize);
+  header.writeUInt16LE(0x0001, 0);
+  header.writeUInt16LE(headerSize, 2);
+  header.writeUInt32LE(headerSize + offsets.length + data.length, 4);
+  header.writeUInt32LE(strings.length, 8);
+  header.writeUInt32LE(utf8 ? 0x100 : 0, 16);
+  header.writeUInt32LE(headerSize + offsets.length, 20);
+  return Buffer.concat([header, offsets, data]);
+}
+
+/**
+ * A compiled (AXML) AndroidManifest.xml with a `<manifest>` element carrying package,
+ * versionCode and versionName, the way aapt2 writes them.
+ */
+export function buildAndroidManifest(input: {
+  packageName: string;
+  versionName: string;
+  versionCode: number;
+  utf8?: boolean;
+}): Buffer {
+  const strings = [
+    "versionCode",
+    "versionName",
+    "package",
+    "manifest",
+    input.packageName,
+    input.versionName,
+  ];
+  const pool = stringPoolChunk(strings, input.utf8 ?? false);
+  const resourceMap = Buffer.alloc(16);
+  resourceMap.writeUInt16LE(0x0180, 0);
+  resourceMap.writeUInt16LE(8, 2);
+  resourceMap.writeUInt32LE(16, 4);
+  resourceMap.writeUInt32LE(0x0101021b, 8);
+  resourceMap.writeUInt32LE(0x0101021c, 12);
+
+  const attributes = [
+    { name: 2, raw: 4, type: 0x03, data: 4 },
+    { name: 0, raw: 0xffffffff, type: 0x10, data: input.versionCode },
+    { name: 1, raw: 5, type: 0x03, data: 5 },
+  ];
+  const element = Buffer.alloc(16 + 20 + attributes.length * 20);
+  element.writeUInt16LE(0x0102, 0);
+  element.writeUInt16LE(16, 2);
+  element.writeUInt32LE(element.length, 4);
+  element.writeUInt32LE(1, 8);
+  element.writeUInt32LE(0xffffffff, 12);
+  element.writeUInt32LE(0xffffffff, 16);
+  element.writeUInt32LE(3, 20);
+  element.writeUInt16LE(20, 24);
+  element.writeUInt16LE(20, 26);
+  element.writeUInt16LE(attributes.length, 28);
+  attributes.forEach((attribute, index) => {
+    const at = 36 + index * 20;
+    element.writeUInt32LE(0xffffffff, at);
+    element.writeUInt32LE(attribute.name, at + 4);
+    element.writeUInt32LE(attribute.raw, at + 8);
+    element.writeUInt16LE(8, at + 12);
+    element.writeUInt8(attribute.type, at + 15);
+    element.writeUInt32LE(attribute.data, at + 16);
+  });
+
+  const header = Buffer.alloc(8);
+  header.writeUInt16LE(0x0003, 0);
+  header.writeUInt16LE(8, 2);
+  header.writeUInt32LE(8 + pool.length + resourceMap.length + element.length, 4);
+  return Buffer.concat([header, pool, resourceMap, element]);
+}
+
+/** A fake APK: a compiled manifest and a dex file. */
+export function buildFakeApk(manifest: Buffer): Buffer {
+  return buildZip([
+    { name: "AndroidManifest.xml", data: manifest },
+    { name: "classes.dex", data: Buffer.alloc(256, 2), method: 0 },
+  ]);
+}

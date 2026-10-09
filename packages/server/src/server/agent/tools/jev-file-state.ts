@@ -293,7 +293,11 @@ export function canonicalJevPath(value: string, platform: NodeJS.Platform): stri
   return foldsCase(platform) ? out.toLowerCase() : out;
 }
 
-function samePathOrBelow(base: string, candidate: string, platform: NodeJS.Platform): boolean {
+export function samePathOrBelow(
+  base: string,
+  candidate: string,
+  platform: NodeJS.Platform,
+): boolean {
   return isSameOrDescendantPath(
     canonicalJevPath(base, platform),
     canonicalJevPath(candidate, platform),

@@ -189,6 +189,12 @@ export class SharedBuildStore {
     this.timer = null;
   }
 
+  /** Why any share would be refused before a file is looked at, or null when sharing is on. */
+  unavailableReason(): string | null {
+    const availability = checkAvailability(this.options.readLimits());
+    return "refusal" in availability ? availability.refusal : null;
+  }
+
   share(request: ShareBuildRequest): Promise<SharedBuild> {
     return this.exclusive(() => this.shareNow(request));
   }
@@ -205,17 +211,9 @@ export class SharedBuildStore {
 
   private async shareNow(request: ShareBuildRequest): Promise<SharedBuild> {
     const limits = this.options.readLimits();
-    if (!limits.enabled) {
-      throw new SharedBuildRefusal(
-        "Sharing builds is turned off on this daemon (agents.sharedBuilds.enabled is false).",
-      );
-    }
-    const publicBaseUrl = limits.publicBaseUrl;
-    if (!publicBaseUrl) {
-      throw new SharedBuildRefusal(
-        "This daemon has no https app.baseUrl in config.json, so there is no public site to host the build.",
-      );
-    }
+    const availability = checkAvailability(limits);
+    if ("refusal" in availability) throw new SharedBuildRefusal(availability.refusal);
+    const { publicBaseUrl } = availability;
 
     const handle = await fs.open(
       request.sourcePath,
@@ -353,6 +351,24 @@ export class SharedBuildStore {
     }
     return result;
   }
+}
+
+function checkAvailability(
+  limits: SharedBuildsLimits,
+): { publicBaseUrl: string } | { refusal: string } {
+  if (!limits.enabled) {
+    return {
+      refusal:
+        "Sharing builds is turned off on this daemon (agents.sharedBuilds.enabled is false).",
+    };
+  }
+  if (!limits.publicBaseUrl) {
+    return {
+      refusal:
+        "This daemon has no https app.baseUrl in config.json, so there is no public site to host the build.",
+    };
+  }
+  return { publicBaseUrl: limits.publicBaseUrl };
 }
 
 /** The share's record, or null when it is missing or unreadable as one. Other read errors throw. */
