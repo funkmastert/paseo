@@ -439,6 +439,8 @@ describe("paseo daemon bootstrap", () => {
         "resource-monitor": { enabled: true, dryRun: undefined },
         reaper: { enabled: true, dryRun: true },
         "device-cap": { enabled: true, dryRun: true },
+        // On by default; it follows the cap's switch and dry run.
+        "simulator-teardown": { enabled: true, dryRun: true },
         "token-burn": { enabled: true, dryRun: undefined },
         "spend-governor": { enabled: true, dryRun: true },
         "account-pressure": { enabled: false, dryRun: undefined },
@@ -540,6 +542,7 @@ describe("paseo daemon bootstrap", () => {
       expect(monitorModes()).toMatchObject({
         reaper: { enabled: true, dryRun: false },
         "device-cap": { enabled: false, dryRun: false },
+        "simulator-teardown": { enabled: false, dryRun: false },
         "spend-governor": { enabled: true, dryRun: false },
         refocus: { enabled: true, dryRun: false },
         "catastrophe-gate": { enabled: true },

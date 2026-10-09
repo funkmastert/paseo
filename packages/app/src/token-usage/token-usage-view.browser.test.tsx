@@ -1,5 +1,6 @@
+import React from "react";
 import { page } from "vitest/browser";
-import { afterEach, describe, it } from "vitest";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
 // Side-effecting: creating the instance is what registers it with react-i18next.
 // eslint-disable-next-line import/no-unassigned-import
 import "@/i18n/i18next";
@@ -7,6 +8,14 @@ import { ContentHarness, mount, unmountAll } from "./test-support/content-harnes
 
 const PHONE_WIDTH = 390;
 const DESKTOP_WIDTH = 900;
+
+// TokenUsageContent's JSX compiles under the classic transform (expo/tsconfig.base's
+// `jsx: "react-native"`) but its own module never imports React by name, so its compiled
+// `React.createElement` calls resolve to the global instead (jev-dashboard-view.browser.test.tsx
+// uses the same stub). Without it, rendering it throws `ReferenceError: React is not defined`.
+beforeEach(() => {
+  vi.stubGlobal("React", React);
+});
 
 afterEach(() => {
   unmountAll();

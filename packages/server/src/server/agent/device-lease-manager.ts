@@ -14,16 +14,24 @@
  * The gate is only as strong as the provider allows: some providers can be refused, some only
  * asked, and one cannot be stopped at all (device-launch-enforcement.ts). A device that appears
  * with no lease still fills a slot — occupancy is the union of running devices and leases — and
- * is charged to the agent whose process tree owns it. Nothing is ever shut down.
+ * is charged to the agent whose process tree owns it. The gate itself never shuts anything down.
+ * The one exception, narrower than it sounds: an iOS simulator the daemon saw an agent boot
+ * (never one it reused, never a reserved one) is shut down at graceful daemon shutdown and by the
+ * idle sweep, so CoreSimulatorService is never left tearing one down live during OS shutdown
+ * (docs/device-leases.md#shutdown; `shutdownAgentHeldSimulatorsForDaemonShutdown`,
+ * `sweepIdleSimulators`).
  *
  * Off by default, with a dry run that reports what it would have refused, like the build-daemon
  * reaper it is modelled on.
  */
 
 import { randomUUID } from "node:crypto";
-import { attributeProcessTrees } from "./process-attribution.js";
+import { attributeProcessTrees, type AgentProcessTree } from "./process-attribution.js";
+import { findBackgroundShells } from "./background-wait.js";
 import {
+  collectDeviceIdReferences,
   detectRunningDevices,
+  type DeviceIdReference,
   type DevicePlatform,
   type RunningDevice,
 } from "./device-detection.js";
@@ -56,8 +64,9 @@ import {
   type DeviceLaunchEnforcementTier,
 } from "./device-launch-enforcement.js";
 import { deriveDeviceSlotDefaults, evaluateMemoryHeadroom } from "./device-slot-defaults.js";
-import type { ProcessSampler, SystemMemorySample } from "./process-sampler.js";
+import type { ProcessSampleRow, ProcessSampler, SystemMemorySample } from "./process-sampler.js";
 import { MonitorModeLog } from "../monitor-mode-log.js";
+import { withTimeout } from "../../utils/promise-timeout.js";
 
 const GIBIBYTE = 1024 ** 3;
 /**
@@ -85,6 +94,20 @@ const SAMPLE_MAX_AGE_MS = 5_000;
 const DRAIN_INTERVAL_MS = 5_000;
 /** Denials kept for the status readout, newest first. */
 const BLOCKED_HISTORY_LIMIT = 10;
+/**
+ * KTD-4 (docs/plans/2026-10-08-002-fix-resource-guards-plan.md): how long an agent-booted
+ * simulator may sit unused before the sweep tears it down itself, rather than leaving it booted
+ * for CoreSimulatorService to tear down later — the crash this guards against happened during
+ * OS shutdown, not while an agent was using the device. `simulatorTeardown.idleMinutes`.
+ */
+const DEFAULT_SIMULATOR_IDLE_MINUTES = 30;
+/**
+ * A per-device budget for the shutdown command itself, independent of `DeviceShutdownRunner`'s
+ * own (longer) exec timeout, so a wedged `simctl` cannot hold up the resource monitor's sweep.
+ * The command may still be running when this gives up on it; nothing here waits on it further.
+ * The daemon's stop() waits less still (shutdown-budget.ts's SIMULATOR_SHUTDOWN_WAIT_MS).
+ */
+const SIMULATOR_SHUTDOWN_TIMEOUT_MS = 5_000;
 
 export interface DeviceLeaseConfig {
   enabled?: boolean;
@@ -97,6 +120,12 @@ export interface DeviceLeaseConfig {
   pendingTtlMinutes?: number;
   maxLeaseHours?: number;
   queueTimeoutMinutes?: number;
+  /**
+   * The simulator teardown (docs/device-leases.md#shutdown). On unless `enabled` is false, but
+   * it only ever acts on a lease, so it does nothing while the cap itself is off. Honors the
+   * cap's `dryRun`.
+   */
+  simulatorTeardown?: { enabled?: boolean; idleMinutes?: number };
 }
 
 export type DeviceStatusAttribution = "lease" | "process" | "none";
@@ -314,6 +343,18 @@ interface ResolvedDeviceLeaseConfig {
   pendingTtlMs: number;
   maxLeaseMs: number;
   queueTimeoutMs: number;
+  simulatorTeardown: { enabled: boolean; idleMs: number };
+}
+
+/** The sweep's `ps` rows and agent trees, which the teardown reads to see a simulator in use. */
+interface SweepProcesses {
+  rows: readonly ProcessSampleRow[];
+  agentTrees: readonly AgentProcessTree[];
+}
+
+/** SweepProcesses plus every UDID its rows name (device-detection.ts). */
+interface SimulatorUseEvidence extends SweepProcesses {
+  references: ReadonlyMap<string, DeviceIdReference>;
 }
 
 interface DeviceSample {
@@ -396,6 +437,35 @@ function sameLeases(before: readonly DeviceLease[], after: readonly DeviceLease[
   });
 }
 
+function resolveSimulatorTeardown(
+  config: DeviceLeaseConfig["simulatorTeardown"],
+): ResolvedDeviceLeaseConfig["simulatorTeardown"] {
+  return {
+    enabled: config?.enabled ?? true,
+    idleMs: (config?.idleMinutes ?? DEFAULT_SIMULATOR_IDLE_MINUTES) * 60_000,
+  };
+}
+
+/** The teardown acts on leases, and only the cap binds them, so it needs both switches on. */
+function isSimulatorTeardownOn(config: ResolvedDeviceLeaseConfig): boolean {
+  return config.enabled && config.simulatorTeardown.enabled;
+}
+
+/**
+ * Whether the holder still has a command running: a live shell under one of its root processes.
+ * A command runs inside a shell that lives until it ends (background-wait.ts's
+ * `findBackgroundShells`), so an `xcodebuild test` the holder started as a background shell
+ * before ending its turn keeps one open, and so does any native build it runs. The roots are the
+ * tree's processes whose parent is outside it: the agent CLI, plus anything the daemon started
+ * on its behalf (process-attribution.ts's `extraRoots`).
+ */
+function hasLiveCommands(rows: readonly ProcessSampleRow[], tree: AgentProcessTree): boolean {
+  const treePids = new Set(tree.pids);
+  return rows
+    .filter((row) => treePids.has(row.pid) && !treePids.has(row.ppid))
+    .some((root) => findBackgroundShells(rows, root.pid).length > 0);
+}
+
 function resolveCaps(
   config: DeviceLeaseConfig | undefined,
   defaults: DeviceSlotCaps,
@@ -470,6 +540,13 @@ export class DeviceLeaseManager {
    * Pruned when the device goes, so booting a second one is a second message.
    */
   private readonly chargedUnleasedDevices = new Set<string>();
+  /**
+   * deviceId → when the simulator was last seen in use (or first observed, if never). Reset to
+   * `now()` on every sweep where something uses it (`isSimulatorInUse`); read, never reset, while
+   * nothing does. A lease that disappears (checked in, released, reassigned) drops its entry on
+   * the next sweep.
+   */
+  private readonly simulatorIdleSince = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
   private readonly modeLog: MonitorModeLog;
 
@@ -494,8 +571,16 @@ export class DeviceLeaseManager {
   /** Logs the mode the cap reads from its config, once per change (monitor-mode-log.ts). */
   reportMode(): void {
     const config = this.readDaemonConfig().deviceLeases;
+    const enabled = config?.enabled ?? false;
+    const dryRun = config?.dryRun ?? false;
     this.modeLog.report([
-      { monitor: "device-cap", enabled: config?.enabled ?? false, dryRun: config?.dryRun ?? false },
+      { monitor: "device-cap", enabled, dryRun },
+      // Reported off while the cap is off, which is what it is: it has no leases to act on.
+      {
+        monitor: "simulator-teardown",
+        enabled: enabled && resolveSimulatorTeardown(config?.simulatorTeardown).enabled,
+        dryRun,
+      },
     ]);
   }
 
@@ -523,13 +608,27 @@ export class DeviceLeaseManager {
   async reconcileFromSample(input: {
     devices: RunningDevice[];
     systemMemory: SystemMemorySample | undefined;
+    /** The sweep's `ps` rows. With these and `agentTrees` absent, the idle sweep shuts nothing
+     * down: nothing shows the simulator unused. */
+    rows?: readonly ProcessSampleRow[];
+    agentTrees?: readonly AgentProcessTree[];
   }): Promise<void> {
-    this.sample = { ...input, takenAtMs: this.now() };
+    this.sample = {
+      devices: input.devices,
+      systemMemory: input.systemMemory,
+      takenAtMs: this.now(),
+    };
     this.reportMode();
     const config = this.resolveConfig(await this.resolveCaps());
     this.reconcile(config);
     await this.chargeUnleasedDevices(config);
     if (config.enabled) this.adoptAttributedDevices();
+    await this.sweepIdleSimulators(
+      config,
+      input.rows && input.agentTrees
+        ? { rows: input.rows, agentTrees: input.agentTrees }
+        : undefined,
+    );
     await this.drainWaiters();
   }
 
@@ -960,6 +1059,153 @@ export class DeviceLeaseManager {
   }
 
   /**
+   * Shuts down every iOS simulator an agent booted and still holds, as the daemon stops — so
+   * CoreSimulatorService is never left tearing one down live during OS shutdown
+   * (docs/device-leases.md#shutdown; the 2026-10-08 crash this guards against). Reserved and
+   * reused simulators are untouched, same as the idle sweep below. Never throws: a wedged
+   * `simctl` is logged and skipped. The caller bounds how long it waits (bootstrap.ts's stop()).
+   */
+  async shutdownAgentHeldSimulatorsForDaemonShutdown(): Promise<void> {
+    const config = this.resolveConfig(await this.resolveCaps());
+    if (!isSimulatorTeardownOn(config)) return;
+    await Promise.allSettled(
+      this.leasedSimulators().map((lease) =>
+        this.shutdownLeasedSimulator(lease, "daemon-shutdown", config.dryRun),
+      ),
+    );
+  }
+
+  /**
+   * Leases on iOS simulators the daemon saw their agent boot, minus any Tyler has reserved since.
+   * A lease bound to a simulator that was already running is left out: it may be one Tyler booted
+   * by hand that an agent then reused (`DeviceLease.booted`).
+   */
+  private leasedSimulators(): Array<DeviceLease & { deviceId: string }> {
+    return this.leases.filter(
+      (lease): lease is DeviceLease & { deviceId: string } =>
+        lease.platform === "ios" &&
+        lease.booted === true &&
+        lease.deviceId !== undefined &&
+        !this.reservations.isReserved(lease.deviceId),
+    );
+  }
+
+  /**
+   * The sweep half of KTD-4: an agent-booted simulator nothing has used for
+   * `simulatorTeardown.idleMinutes` is shut down on its own, rather than waiting for a daemon
+   * restart or OS shutdown to find it still booted. A simulator in use (`isSimulatorInUse`), or
+   * one never observed before, resets the clock; it does not start pre-expired.
+   */
+  private async sweepIdleSimulators(
+    config: ResolvedDeviceLeaseConfig,
+    processes: SweepProcesses | undefined,
+  ): Promise<void> {
+    if (!isSimulatorTeardownOn(config)) {
+      this.simulatorIdleSince.clear();
+      return;
+    }
+    const agentsById = new Map(this.listAgents().map((agent) => [agent.agentId, agent]));
+    const devicesById = new Map(
+      (this.sample?.devices ?? []).map((device) => [device.deviceId, device] as const),
+    );
+    const evidence = processes
+      ? { ...processes, references: collectDeviceIdReferences(processes.rows) }
+      : undefined;
+    const seenDeviceIds = new Set<string>();
+    const idle: Array<DeviceLease & { deviceId: string }> = [];
+    for (const lease of this.leasedSimulators()) {
+      seenDeviceIds.add(lease.deviceId);
+      const since = this.simulatorIdleSince.get(lease.deviceId);
+      const inUse = this.isSimulatorInUse({
+        lease,
+        device: devicesById.get(lease.deviceId),
+        holder: agentsById.get(lease.agentId),
+        evidence,
+      });
+      if (inUse || since === undefined) {
+        this.simulatorIdleSince.set(lease.deviceId, this.now());
+        continue;
+      }
+      if (this.now() - since >= config.simulatorTeardown.idleMs) idle.push(lease);
+    }
+    // Deleting the current key mid-iteration is well-defined for a Map, so no copy (same as
+    // chargeUnleasedDevices's Set above).
+    for (const deviceId of this.simulatorIdleSince.keys()) {
+      if (!seenDeviceIds.has(deviceId)) this.simulatorIdleSince.delete(deviceId);
+    }
+    await Promise.allSettled(
+      idle.map((lease) => {
+        // In dry run the device stays up, so this restarts its clock: one "would" line per
+        // idle stretch, not one a minute.
+        this.simulatorIdleSince.delete(lease.deviceId);
+        return this.shutdownLeasedSimulator(lease, "idle-sweep", config.dryRun);
+      }),
+    );
+  }
+
+  /**
+   * Whether anything still uses a leased simulator. Lifecycle alone misses the case that matters:
+   * an agent that starts `xcodebuild test` as a background shell and ends its turn to wait for
+   * it is idle by lifecycle while the test runs for an hour. So the device is in use while its
+   * holder is mid-turn, while the holder still has a command running, or while any process
+   * outside the simulator's own tree names its UDID — another agent testing on it by id, a
+   * `simctl` subprocess, an `xcodebuild -destination id=…`. With no process sample, nothing
+   * shows it unused.
+   */
+  private isSimulatorInUse(input: {
+    lease: DeviceLease & { deviceId: string };
+    device: RunningDevice | undefined;
+    holder: DeviceLeaseAgentSummary | undefined;
+    evidence: SimulatorUseEvidence | undefined;
+  }): boolean {
+    const { evidence } = input;
+    if (input.holder?.isRunning || !evidence) return true;
+    const tree = evidence.agentTrees.find((entry) => entry.agentId === input.lease.agentId);
+    if (tree && hasLiveCommands(evidence.rows, tree)) return true;
+    // Every process inside a booted simulator names its UDID (its data directory is in the
+    // path), so those are the device itself, not something using it.
+    const ownPids = new Set(input.device?.pids ?? []);
+    const namingPids = evidence.references.get(input.lease.deviceId)?.pids ?? [];
+    return namingPids.some((pid) => !ownPids.has(pid));
+  }
+
+  /** Runs the shutdown command for one leased simulator and releases its lease on success. */
+  private async shutdownLeasedSimulator(
+    lease: DeviceLease & { deviceId: string },
+    trigger: "daemon-shutdown" | "idle-sweep",
+    dryRun: boolean,
+  ): Promise<void> {
+    const { deviceId } = lease;
+    if (dryRun) {
+      this.logger.info(
+        { dryRun: true, deviceId, agentId: lease.agentId, trigger },
+        "Would shut down an agent-held simulator",
+      );
+      return;
+    }
+    try {
+      await withTimeout(
+        runDeviceShutdown({ platform: "ios", deviceId }, this.shutdownRunner),
+        SIMULATOR_SHUTDOWN_TIMEOUT_MS,
+        `Timed out shutting down simulator ${deviceId}`,
+      );
+    } catch (error) {
+      this.logger.warn(
+        { err: error, deviceId, agentId: lease.agentId, trigger },
+        "Failed to shut down an agent-held simulator; leaving it for the OS to tear down",
+      );
+      return;
+    }
+    this.logger.info(
+      { deviceId, agentId: lease.agentId, trigger },
+      "Shut down an agent-held simulator",
+    );
+    this.leases = this.leases.filter((entry) => entry.id !== lease.id);
+    this.logRelease([{ lease, reason: "released" }]);
+    this.notify();
+  }
+
+  /**
    * The enforcement point. Called from the provider's PreToolUse hook before a shell command
    * runs. Only a command that would boot a NEW device can be refused, and only when the cap or
    * memory headroom has no room for it. A command that uses a device already running — a runner
@@ -1382,6 +1628,9 @@ export class DeviceLeaseManager {
       acquiredAtMs: this.now(),
       deviceId: input.device.deviceId,
       ...(input.reason ? { reason: input.reason } : {}),
+      // A device in the agent's own process tree is one it booted. Anything else was already
+      // running, maybe booted by Tyler, and the simulator teardown leaves it alone.
+      ...(input.device.agentId === input.agentId ? { booted: true as const } : {}),
     };
     this.leases.push(lease);
     this.logger.info(
@@ -1717,6 +1966,7 @@ export class DeviceLeaseManager {
       pendingTtlMs: (config?.pendingTtlMinutes ?? DEFAULT_PENDING_TTL_MINUTES) * 60_000,
       maxLeaseMs: (config?.maxLeaseHours ?? DEFAULT_MAX_LEASE_HOURS) * 3_600_000,
       queueTimeoutMs: (config?.queueTimeoutMinutes ?? DEFAULT_QUEUE_TIMEOUT_MINUTES) * 60_000,
+      simulatorTeardown: resolveSimulatorTeardown(config?.simulatorTeardown),
     };
   }
 

@@ -1,3 +1,5 @@
+import { advanceHoldClock } from "./brake-hold-clock.js";
+import { formatGigabytes, GIBIBYTE } from "./gigabytes.js";
 import type { SystemMemorySample } from "./process-sampler.js";
 
 /**
@@ -12,8 +14,6 @@ import type { SystemMemorySample } from "./process-sampler.js";
  *
  * The thresholds are fixed until agents.resourceMonitor grows a memory block.
  */
-
-const GIBIBYTE = 1024 ** 3;
 
 /** `kern.memorystatus_vm_pressure_level` values. */
 export const MEMORY_PRESSURE_NORMAL = 1;
@@ -72,10 +72,6 @@ export interface MemoryBrakeResult {
   heldForMs: number;
   /** Held, and settled for `MEMORY_HOLD_TRICKLE_AFTER_MS`: one queued child may go this sweep. */
   trickle: boolean;
-}
-
-function formatGigabytes(bytes: number): string {
-  return `${(bytes / GIBIBYTE).toFixed(1)} GB`;
 }
 
 export function describePressure(level: number): string {
@@ -182,13 +178,12 @@ function withHoldClock(
   nowMs: number,
   settled: boolean,
 ): MemoryBrakeResult {
-  if (!result.next.held) return { ...result, heldForMs: 0, trickle: false };
-  const heldSinceMs = prior.held ? (prior.heldSinceMs ?? nowMs) : nowMs;
-  const settledSinceMs = prior.held && settled ? (prior.settledSinceMs ?? nowMs) : nowMs;
-  return {
-    ...result,
-    next: { ...result.next, heldSinceMs, settledSinceMs },
-    heldForMs: nowMs - heldSinceMs,
-    trickle: settled && nowMs - settledSinceMs >= MEMORY_HOLD_TRICKLE_AFTER_MS,
-  };
+  const clock = advanceHoldClock({
+    next: result.next,
+    prior,
+    nowMs,
+    settled,
+    trickleAfterMs: MEMORY_HOLD_TRICKLE_AFTER_MS,
+  });
+  return { ...result, ...clock };
 }

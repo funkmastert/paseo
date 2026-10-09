@@ -289,6 +289,18 @@ const MutableResourceMonitorConfigSchema = z
       })
       .passthrough()
       .optional(),
+    // The disk brake: holds child admission while free disk is low or falling fast. On unless
+    // this says otherwise.
+    // COMPAT(diskBrake): additive optional config, nothing to remove.
+    disk: z
+      .object({
+        enabled: z.boolean().optional(),
+        fallGB: z.number().positive().optional(),
+        fallWindowMinutes: z.number().positive().optional(),
+        releaseMarginGB: z.number().nonnegative().optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 
@@ -320,6 +332,14 @@ const MutableDeviceLeasesConfigSchema = z
     pendingTtlMinutes: z.number().positive().optional(),
     maxLeaseHours: z.number().nonnegative().optional(),
     queueTimeoutMinutes: z.number().positive().optional(),
+    // COMPAT(simulatorTeardown): additive optional config, nothing to remove.
+    simulatorTeardown: z
+      .object({
+        enabled: z.boolean().optional(),
+        idleMinutes: z.number().positive().optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 
@@ -511,6 +531,19 @@ const MutableCatastropheGateConfigSchema = z
   .passthrough();
 
 const MutableCatastropheGatePatchSchema = MutableCatastropheGateConfigSchema;
+
+// Live-toggleable like catastropheGate above — same mutable/patch split, same reason. On unless
+// `enabled` is false. See docs/resource-monitor.md, "The native build gate".
+const MutableBuildGateConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    maxConcurrent: z.number().int().positive().optional(),
+    maxBuildMinutes: z.number().positive().optional(),
+  })
+  .passthrough();
+
+const MutableBuildGatePatchSchema = MutableBuildGateConfigSchema;
 
 // Live-toggleable like refocus above — same mutable/patch split, same reason. The remediation
 // ladder: deterministic remedy, then one bounded agent, then a person. Escalation is on unless
@@ -795,6 +828,8 @@ export const MutableDaemonConfigSchema = z
     refocus: MutableRefocusConfigSchema.optional(),
     // COMPAT(catastropheGate): additive optional config, nothing to remove.
     catastropheGate: MutableCatastropheGateConfigSchema.optional(),
+    // COMPAT(buildGate): additive optional config, nothing to remove.
+    buildGate: MutableBuildGateConfigSchema.optional(),
     // COMPAT(remediation): additive optional config, nothing to remove.
     remediation: MutableRemediationConfigSchema.optional(),
     diskSweeper: MutableDiskSweeperConfigSchema.optional(),
@@ -839,6 +874,7 @@ export const MutableDaemonConfigPatchSchema = z
     admission: MutableAdmissionPatchSchema.optional(),
     refocus: MutableRefocusPatchSchema.optional(),
     catastropheGate: MutableCatastropheGatePatchSchema.optional(),
+    buildGate: MutableBuildGatePatchSchema.optional(),
     remediation: MutableRemediationPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
     mcpGateway: MutableMcpGatewayPatchSchema.optional(),

@@ -1,15 +1,17 @@
 import { mkdir, open, readFile, rename, stat } from "node:fs/promises";
 import path from "node:path";
 import type { RemedyAttempt } from "../remediation/contract.js";
+import type { DiskCondition } from "./disk-brake.js";
 import type { SystemMemorySample } from "./process-sampler.js";
 import type { SaturationEvidence } from "./saturation-evidence.js";
 import type { SystemLoadReading, SystemLoadSample } from "./system-load.js";
 
 /**
- * The saturation incident ledger: `$PASEO_HOME/resource-monitor/incidents.jsonl`, one JSON record
- * per line. It exists so the evidence survives the reboot a saturated machine usually ends in,
- * which is why every record is its own open, write, fdatasync and close rather than a buffered
- * stream. Records are a few per incident, so that costs nothing. See docs/resource-monitor.md.
+ * The resource monitor's incident ledger: `$PASEO_HOME/resource-monitor/incidents.jsonl`, one JSON
+ * record per line, for CPU saturation and for the disk brake. It exists so the evidence survives
+ * the reboot a saturated machine usually ends in, which is why every record is its own open,
+ * write, fdatasync and close rather than a buffered stream. Records are a few per incident, so
+ * that costs nothing. See docs/resource-monitor.md.
  */
 
 export const SATURATION_LEDGER_DIR = "resource-monitor";
@@ -68,12 +70,75 @@ export function buildSaturationLedgerRecord(input: {
   };
 }
 
+/**
+ * A disk brake incident: open when the brake holds child admission, ongoing every five minutes
+ * and on a sweep it acted, clear when it lets go. Saturation records carry no `kind`; they were
+ * written before this one existed and the reader tells them apart by its absence.
+ */
+export interface DiskLedgerRecord {
+  version: 1;
+  kind: "disk";
+  at: string;
+  event: SaturationLedgerEvent;
+  openedAt: string;
+  /** Null on a sweep statfs could not read. */
+  freeBytes: number | null;
+  /** The highest reading in the fall window minus this one. */
+  fallBytes: number;
+  fallWindowMinutes: number;
+  lowFreeBytes: number;
+  criticalFreeBytes: number;
+  conditions: DiskCondition[];
+  /** What grew, from the disk monitor's last growth sample (docs/disk-pressure.md). */
+  growth: DiskLedgerGrowth | null;
+  actions?: RemedyAttempt[];
+}
+
+export interface DiskLedgerGrowth {
+  sampledAt: string;
+  /** The sample the deltas are measured from; null on the first sample. */
+  comparedWith: string | null;
+  growers: Array<{ path: string; bytes: number; deltaBytes: number }>;
+}
+
+export type ResourceLedgerRecord = SaturationLedgerRecord | DiskLedgerRecord;
+
+export function buildDiskLedgerRecord(input: {
+  event: SaturationLedgerEvent;
+  atMs: number;
+  openedAtMs: number;
+  freeBytes: number | undefined;
+  fallBytes: number;
+  fallWindowMinutes: number;
+  lowFreeBytes: number;
+  criticalFreeBytes: number;
+  conditions: readonly DiskCondition[];
+  growth: DiskLedgerGrowth | null;
+  actions?: readonly RemedyAttempt[];
+}): DiskLedgerRecord {
+  return {
+    version: 1,
+    kind: "disk",
+    at: new Date(input.atMs).toISOString(),
+    event: input.event,
+    openedAt: new Date(input.openedAtMs).toISOString(),
+    freeBytes: input.freeBytes ?? null,
+    fallBytes: input.fallBytes,
+    fallWindowMinutes: input.fallWindowMinutes,
+    lowFreeBytes: input.lowFreeBytes,
+    criticalFreeBytes: input.criticalFreeBytes,
+    conditions: [...input.conditions],
+    growth: input.growth,
+    ...(input.actions && input.actions.length > 0 ? { actions: [...input.actions] } : {}),
+  };
+}
+
 export function saturationLedgerPath(paseoHome: string): string {
   return path.join(paseoHome, SATURATION_LEDGER_DIR, SATURATION_LEDGER_FILE);
 }
 
 export interface SaturationLedger {
-  append(record: SaturationLedgerRecord): Promise<void>;
+  append(record: ResourceLedgerRecord): Promise<void>;
 }
 
 async function syncDirectory(dir: string): Promise<void> {
@@ -164,9 +229,11 @@ function parseRecords(content: string): SaturationLedgerRecord[] {
   for (const line of content.split("\n")) {
     if (!line.trim()) continue;
     try {
-      const parsed = JSON.parse(line) as Partial<SaturationLedgerRecord>;
-      // A power cut can leave a torn last line; anything without the core fields is skipped.
+      const parsed = JSON.parse(line) as Partial<SaturationLedgerRecord> & { kind?: unknown };
+      // A power cut can leave a torn last line; anything without the core fields is skipped, and
+      // so is any other kind of incident sharing the file.
       if (
+        parsed.kind === undefined &&
         parsed.version === 1 &&
         typeof parsed.openedAt === "string" &&
         typeof parsed.at === "string"
