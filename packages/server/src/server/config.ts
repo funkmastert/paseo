@@ -582,6 +582,7 @@ function resolveAgentMonitorConfig(
   | "daemonVitals"
   | "restartRecovery"
   | "catastropheGate"
+  | "buildGate"
   | "childEnvStrip"
 > {
   const agents = persisted.agents;
@@ -602,6 +603,7 @@ function resolveAgentMonitorConfig(
     daemonVitals: agents?.daemonVitals,
     restartRecovery: agents?.restartRecovery,
     catastropheGate: agents?.catastropheGate,
+    buildGate: agents?.buildGate,
     childEnvStrip: agents?.childEnv?.strip,
   };
 }

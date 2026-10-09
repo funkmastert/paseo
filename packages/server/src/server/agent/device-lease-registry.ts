@@ -42,6 +42,14 @@ export interface DeviceLease {
    * never have made. Absent means counted, which is every lease outside dry run.
    */
   counted?: boolean;
+  /**
+   * True when the daemon saw this lease's agent boot the device: the lease was pending and bound
+   * to a device that started after it, or the device sits in the agent's own process tree.
+   * Absent when the lease bound straight onto a device that was already running (a reuse at
+   * checkout, a launch naming a running simulator), which may be one Tyler booted by hand. The
+   * simulator teardown shuts down booted ones only (docs/device-leases.md#shutdown).
+   */
+  booted?: true;
 }
 
 export type DeviceLeaseReleaseReason =
@@ -286,7 +294,9 @@ export function reconcileDeviceLeases(
   const bind = (lease: DeviceLease, deviceId: string) => {
     claimedDeviceIds.add(deviceId);
     boundLeaseIds.add(lease.id);
-    leases.push({ ...lease, deviceId });
+    // A pending lease only binds to a device that started after it (`startedAfterLease`): the
+    // device it was waiting for, booted for it.
+    leases.push({ ...lease, deviceId, booted: true });
   };
 
   // Attribution first, across every device: an Android emulator stays inside the process tree

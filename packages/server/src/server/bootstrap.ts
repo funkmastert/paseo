@@ -2,7 +2,7 @@ import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
 import express from "express";
 import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "http";
 import { constants, existsSync, unlinkSync } from "fs";
-import { open, rm } from "fs/promises";
+import { open, rm, statfs } from "fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, hostname as getHostname } from "node:os";
 import path from "node:path";
@@ -254,6 +254,10 @@ import {
 } from "./agent/restart-recovery/service.js";
 import type { PreviousShutdownInfo } from "./daemon-vitals/shutdown-reason.js";
 import {
+  ADMISSION_QUEUE_FLUSH_TIMEOUT_MS,
+  SIMULATOR_SHUTDOWN_WAIT_MS,
+} from "./daemon-vitals/shutdown-budget.js";
+import {
   AgentDoneJanitor,
   askAgentWhetherDone,
   probeProjectRoot,
@@ -318,6 +322,7 @@ import { resolveProviderExtends } from "./agent/device-launch-enforcement.js";
 import { DeviceReservationStore } from "./agent/device-reservation-store.js";
 import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
 import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
+import { createNativeBuildGate } from "./agent/native-build-gate.js";
 import { PhysicalDeviceLeaseManager } from "./agent/physical-device-lease-manager.js";
 import { physicalDeviceMatches, type PhysicalDevice } from "./agent/physical-device-registry.js";
 import {
@@ -391,7 +396,6 @@ import { startSpawnHintSavings } from "./jev/savings-spawn.js";
 import { McpGatewayTokenStore } from "./mcp-gateway/token-store.js";
 
 const MCP_DEBUG_BATCH_LIMIT = 10;
-const ADMISSION_QUEUE_FLUSH_TIMEOUT_MS = 5_000;
 const MCP_DEBUG_SECRET = "[redacted]";
 const DOWNLOAD_OPEN_FLAGS =
   process.platform === "win32" ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW;
@@ -737,6 +741,8 @@ export interface PaseoDaemonConfig {
   refocus?: RefocusConfig;
   /** The catastrophe gate's kill switch (docs/catastrophe-gate.md). Absent means on. */
   catastropheGate?: MutableDaemonConfig["catastropheGate"];
+  /** The native build gate (docs/resource-monitor.md). Absent means on, one build at a time. */
+  buildGate?: MutableDaemonConfig["buildGate"];
   remediation?: RemediationConfig;
   daemonVitals?: DaemonVitalsConfig;
   /** Startup-only: read once at boot. See docs/restart-recovery.md. */
@@ -981,6 +987,12 @@ function withCatastropheGateConfig(
   return config.catastropheGate !== undefined
     ? { catastropheGate: { ...config.catastropheGate } }
     : {};
+}
+
+function withBuildGateConfig(
+  config: Pick<PaseoDaemonConfig, "buildGate">,
+): Pick<MutableDaemonConfig, "buildGate"> {
+  return config.buildGate !== undefined ? { buildGate: { ...config.buildGate } } : {};
 }
 
 function withRemediationConfig(
@@ -1496,6 +1508,7 @@ export function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): Mut
     ...withAdmissionConfig(config),
     ...withRefocusConfig(config),
     ...withCatastropheGateConfig(config),
+    ...withBuildGateConfig(config),
     ...withRemediationConfig(config),
     ...withDiskSweeperConfig(config),
     ...withMcpGatewayConfig(config),
@@ -2175,20 +2188,54 @@ export async function createPaseoDaemon(
   });
   daemonConfigStore.onChange(() => physicalDeviceDetection.sync());
 
-  // The gate a provider's PreToolUse hook actually calls: the emulator/simulator slot cap (plus
-  // the artifact janitor's disk guard) first, then the physical-device install gate — disjoint
-  // command shapes in practice (booting a device vs. installing on one that already exists), so
-  // order only matters for which denial wins when a chained command line hits both.
-  const deviceLaunchGate: DeviceLaunchGate = {
-    async gateLaunch(input) {
-      const capDecision = await emulatorLaunchGate.gateLaunch(input);
-      if (capDecision.decision === "deny") return capDecision;
-      return await physicalDeviceLeaseManager.gateInstall(input);
-    },
-    async explainRefusalToAgent(input) {
-      await deviceLeaseManager.explainRefusalToAgent(input);
-    },
+  // The gate a provider's PreToolUse hook actually calls. The native build gate first, so a build
+  // it refuses never takes a device slot; then the emulator/simulator slot cap (plus the artifact
+  // janitor's disk guard), then the physical-device install gate — disjoint command shapes in
+  // practice (booting a device vs. installing on one that already exists), so order only matters
+  // for which denial wins when a chained command line hits both.
+  // Free space on the volume PASEO_HOME, the worktrees and the build outputs live on. The build
+  // gate's disk line and the resource monitor's disk brake must read the same volume.
+  const readFreeDiskBytes = async (): Promise<number> => {
+    const stats = await statfs(config.paseoHome);
+    return stats.bavail * stats.bsize;
   };
+  // The resource monitor hands it each sweep's attributed `ps` (reportAttributedSample below).
+  const nativeBuildGate = createNativeBuildGate({
+    inner: {
+      async gateLaunch(input) {
+        const capDecision = await emulatorLaunchGate.gateLaunch(input);
+        if (capDecision.decision === "deny") return capDecision;
+        return await physicalDeviceLeaseManager.gateInstall(input);
+      },
+      async explainRefusalToAgent(input) {
+        await deviceLeaseManager.explainRefusalToAgent(input);
+      },
+    },
+    processSampler,
+    listAgents: () => listDeviceLeaseAgents(),
+    readAgentSideProcesses: () => agentSideProcesses.snapshot(),
+    readConfig: () => ({
+      buildGate: daemonConfigStore.get().buildGate,
+      remediation: daemonConfigStore.get().remediation,
+    }),
+    readFreeDiskBytes,
+    sendSystemMessageToAgent: (agentId, body) => sendDeviceLeaseMessageToAgent(agentId, body),
+    logger: logger.child({ module: "build-gate" }),
+  });
+  const deviceLaunchGate: DeviceLaunchGate = nativeBuildGate;
+  const buildGateMode = new MonitorModeLog(logger.child({ module: "build-gate" }));
+  const reportBuildGateMode = () => {
+    const buildGate = daemonConfigStore.get().buildGate;
+    buildGateMode.report([
+      {
+        monitor: "build-gate",
+        enabled: buildGate?.enabled !== false,
+        dryRun: buildGate?.dryRun === true,
+      },
+    ]);
+  };
+  reportBuildGateMode();
+  daemonConfigStore.onChange(reportBuildGateMode);
 
   // The catastrophe gate (docs/catastrophe-gate.md). Read on every gated call, so a reload of
   // `agents.catastropheGate.enabled` reaches running agents without restarting them.
@@ -3504,8 +3551,16 @@ export async function createPaseoDaemon(
                   logger,
                 });
               },
+              // The disk brake reads free space every sweep, on the volume the disk monitor
+              // watches, and names what that monitor's growth sample saw grow.
+              readFreeDiskBytes,
+              // The build gate counts builds from this sweep's `ps` rather than its own.
+              reportAttributedSample: (sample) => nativeBuildGate.observeSample(sample),
+              readDiskGrowth: () => worktreeDiskMonitor?.getLastGrowthReport() ?? null,
               readDaemonConfig: () => ({
                 resourceMonitor: daemonConfigStore.get().resourceMonitor,
+                remediation: daemonConfigStore.get().remediation,
+                diskSweeper: daemonConfigStore.get().diskSweeper,
               }),
               logger,
             });
@@ -3850,6 +3905,15 @@ export async function createPaseoDaemon(
     finishObligations.prepareForShutdown();
     // What is still queued stays on the agent records for the next daemon to deliver.
     promptQueue.stop();
+    // CoreSimulatorService must never be left tearing a booted simulator down live during OS
+    // shutdown (docs/device-leases.md#shutdown; the 2026-10-08 crash this guards against).
+    // Started here and awaited after the flushes below, so a wedged `simctl` runs beside them
+    // rather than spending the budget they need (daemon-vitals/shutdown-budget.ts).
+    const simulatorTeardown = deviceLeaseManager
+      .shutdownAgentHeldSimulatorsForDaemonShutdown()
+      .catch((error: unknown) => {
+        logger.warn({ err: error }, "Agent-held simulator teardown failed at shutdown");
+      });
     await closeAllAgents(logger, agentManager);
     await agentManager.flushForShutdown().catch(() => undefined);
     // Held child prompts must be on disk before exit; bounded, so a stuck disk can't hang it.
@@ -3863,6 +3927,13 @@ export async function createPaseoDaemon(
     await finishObligations.stop().catch(() => undefined);
     detachAgentStoragePersistence();
     await agentStorage.flush().catch(() => undefined);
+    await withTimeout(
+      simulatorTeardown,
+      SIMULATOR_SHUTDOWN_WAIT_MS,
+      "Timed out shutting down agent-held simulators",
+    ).catch((error: unknown) => {
+      logger.warn({ err: error }, "Agent-held simulators may still be running at shutdown");
+    });
     await agentProviderRuntime.shutdown();
     terminalManager.killAll();
     await speechService.stop();

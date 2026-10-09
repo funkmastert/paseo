@@ -368,9 +368,11 @@ describe("Claude read check: shadow adds nothing to a read", () => {
     expect(median(on) - median(off)).toBeLessThan(5);
     // The first reads started their 2-second judgments and none had an answer when the reads were
     // done: no read waited on one. Past the observer's three judgments in flight the rest are
-    // dropped as saturated before any git or JEV work.
-    expect(duringReads.started).toBe(3);
+    // dropped as saturated before any git or JEV work. A judgment runs git before it asks JEV, and
+    // on a slow runner (Windows CI) the reads can all end while the first three are still in git,
+    // so how many had reached JEV by then is a race; the count is taken once the observer is idle.
     expect(duringReads.finished).toBe(0);
+    expect(judging.started).toBe(3);
     expect(judging.finished).toBe(3);
   }, 60_000);
 });

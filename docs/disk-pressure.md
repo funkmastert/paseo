@@ -12,6 +12,8 @@ Free disk fell 31 GB in about an hour on Tyler's machine and nothing said why. T
 | `disk-low`      | Free space is below `agents.remediation.disk.lowFreeGB` (default 20)             | `alert`  | config |
 | `disk-falling`  | Free space fell by `fallGB` (default 20) within `fallWindowMinutes` (default 60) | `alert`  | config |
 
+The resource monitor's [disk brake](resource-monitor.md#the-disk-brake) holds child admission on the same low and critical lines, reading free space every minute with its own, faster fall line.
+
 All three can be active at once — a 3 GB-free machine is both critical and low. Each is reported through `sink.observe()` every tick while active, and once more when it clears; a condition that has never been active is never reported (nothing to say, and no point repeating a stale "still fine").
 
 The falling check needs a short history of free-space readings. Rather than run a second, faster timer, the monitor reuses the 10-minute tick: six readings land inside any one-hour `fallWindowMinutes`, which resolves a fall to within one tick, and a faster timer would only double the `statfs` calls for no earlier detection. The reading is the peak within the window minus the current reading, not oldest-minus-current, so a brief recovery partway through the window doesn't hide a fall that happened either side of it. History is capped by age (6 hours), not count, so it survives a live-toggled sweep interval without needing resizing logic.

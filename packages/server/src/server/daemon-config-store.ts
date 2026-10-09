@@ -36,6 +36,7 @@ interface SupportedMutableConfigPatch {
   admission?: MutableDaemonConfig["admission"];
   refocus?: MutableDaemonConfig["refocus"];
   catastropheGate?: MutableDaemonConfig["catastropheGate"];
+  buildGate?: MutableDaemonConfig["buildGate"];
   remediation?: MutableDaemonConfig["remediation"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
   // Unlike diskSweeper/tokenBurnMonitor, config and patch differ here: a per-server patch
@@ -225,6 +226,7 @@ const RELOADABLE_PATHS = [
   "agents.admission",
   "agents.refocus",
   "agents.catastropheGate",
+  "agents.buildGate",
   "agents.remediation",
   "agents.skills.selection",
   // Live, but not through the mutable config: the token audit job re-reads config.json on every
@@ -283,6 +285,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.admission", "admission"],
   ["agents.refocus", "refocus"],
   ["agents.catastropheGate", "catastropheGate"],
+  ["agents.buildGate", "buildGate"],
   ["agents.remediation", "remediation"],
   ["agents.skills.selection", "skills.selection"],
   ["worktrees.diskSweeper", "diskSweeper"],
@@ -428,6 +431,12 @@ function pickCatastropheGatePatch(
   return catastropheGate === undefined ? {} : { catastropheGate };
 }
 
+function pickBuildGatePatch(
+  buildGate: MutableDaemonConfigPatch["buildGate"],
+): Pick<SupportedMutableConfigPatch, "buildGate"> {
+  return buildGate === undefined ? {} : { buildGate };
+}
+
 function pickRemediationPatch(
   remediation: MutableDaemonConfigPatch["remediation"],
 ): Pick<SupportedMutableConfigPatch, "remediation"> {
@@ -471,6 +480,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickAdmissionPatch(patch.admission),
     ...pickRefocusPatch(patch.refocus),
     ...pickCatastropheGatePatch(patch.catastropheGate),
+    ...pickBuildGatePatch(patch.buildGate),
     ...pickRemediationPatch(patch.remediation),
     ...pickDiskSweeperPatch(patch.diskSweeper),
     ...pickMcpGatewayPatch(patch.mcpGateway),
@@ -910,7 +920,7 @@ function mergeResourceMonitorForPersist(
 
 type PersistedProcessPriority = NonNullable<PersistedConfig["agents"]>["processPriority"];
 
-// Flat like deviceLeases below: every key is a scalar, so a shallow merge keeps the rest.
+// Flat: every key is a scalar, so a shallow merge keeps the rest.
 function mergeProcessPriorityForPersist(
   persisted: PersistedProcessPriority,
   patch: SupportedMutableConfigPatch["processPriority"],
@@ -923,8 +933,8 @@ function mergeProcessPriorityForPersist(
 
 type PersistedDeviceLeases = NonNullable<PersistedConfig["agents"]>["deviceLeases"];
 
-// Flat, unlike resourceMonitor above: every key is a scalar, so a shallow merge keeps the rest
-// of the block on disk.
+// Deep, like resourceMonitor above: `simulatorTeardown` is a nested block, so a patch that
+// names one of its keys has to keep the other on disk.
 function mergeDeviceLeasesForPersist(
   persisted: PersistedDeviceLeases,
   patch: SupportedMutableConfigPatch["deviceLeases"],
@@ -932,7 +942,10 @@ function mergeDeviceLeasesForPersist(
   if (patch === undefined) {
     return persisted;
   }
-  return { ...persisted, ...patch };
+  return deepMerge(
+    (persisted ?? {}) as Record<string, unknown>,
+    patch as Record<string, unknown>,
+  ) as PersistedDeviceLeases;
 }
 
 type PersistedBudgetPacing = NonNullable<PersistedConfig["agents"]>["budgetPacing"];
@@ -954,7 +967,7 @@ function mergeBudgetPacingForPersist(
 
 type PersistedLeaderCompaction = NonNullable<PersistedConfig["agents"]>["leaderCompaction"];
 
-// Flat, like deviceLeases: no nested block for a shallow spread to drop.
+// Flat: no nested block for a shallow spread to drop.
 function mergeLeaderCompactionForPersist(
   persisted: PersistedLeaderCompaction,
   patch: SupportedMutableConfigPatch["leaderCompaction"],
@@ -968,7 +981,7 @@ function mergeLeaderCompactionForPersist(
 type PersistedArtifactJanitor = NonNullable<PersistedConfig["agents"]>["artifactJanitor"];
 
 // `diskGuard` is a nested block, so a shallow spread would drop the rest of it when a patch
-// names one of its keys — deepMerge, like resourceMonitor's `reaper`, not deviceLeases' flat one.
+// names one of its keys — deepMerge, like resourceMonitor's `reaper` and deviceLeases' `simulatorTeardown`.
 function mergeArtifactJanitorForPersist(
   persisted: PersistedArtifactJanitor,
   patch: SupportedMutableConfigPatch["artifactJanitor"],
@@ -1078,6 +1091,19 @@ function mergeCatastropheGateForPersist(
   return { ...persisted, ...patch } as PersistedCatastropheGate;
 }
 
+type PersistedBuildGate = NonNullable<PersistedConfig["agents"]>["buildGate"];
+
+// Flat, like catastropheGate: scalars only, so a shallow merge keeps the rest.
+function mergeBuildGateForPersist(
+  persisted: PersistedBuildGate,
+  patch: SupportedMutableConfigPatch["buildGate"],
+): PersistedBuildGate {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch } as PersistedBuildGate;
+}
+
 type PersistedDiskSweeper = NonNullable<PersistedConfig["worktrees"]>["diskSweeper"];
 
 function mergeDiskSweeperForPersist(
@@ -1146,6 +1172,7 @@ function touchesAgentConfig(
     patch.admission !== undefined ||
     patch.refocus !== undefined ||
     patch.catastropheGate !== undefined ||
+    patch.buildGate !== undefined ||
     patch.remediation !== undefined ||
     patch.skills !== undefined ||
     removeProviders.length > 0
@@ -1171,6 +1198,8 @@ function mergeProcessPolicySectionsForPersist(
     patch.catastropheGate,
   );
   if (catastropheGate !== undefined) next["catastropheGate"] = catastropheGate;
+  const buildGate = mergeBuildGateForPersist(persistedAgents?.buildGate, patch.buildGate);
+  if (buildGate !== undefined) next["buildGate"] = buildGate;
 }
 
 // The agents.* monitor sections, one merge each. Split out of mergeMutableAgentPatch so a new

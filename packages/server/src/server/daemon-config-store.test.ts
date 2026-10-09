@@ -1138,6 +1138,38 @@ describe("DaemonConfigStore", () => {
     expect(loadPersistedConfig(paseoHome).agents?.resourceMonitor).toEqual({ reaper: expected });
   });
 
+  test("patch turns the simulator teardown off without losing its idle window on disk", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const deviceLeases = { enabled: true, simulatorTeardown: { enabled: true, idleMinutes: 45 } };
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify({ version: 1, agents: { deviceLeases } }, null, 2)}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        deviceLeases,
+      },
+      undefined,
+    );
+
+    const next = store.patch({ deviceLeases: { simulatorTeardown: { enabled: false } } });
+
+    const expected = { enabled: true, simulatorTeardown: { enabled: false, idleMinutes: 45 } };
+    expect(next.deviceLeases).toEqual(expected);
+    expect(loadPersistedConfig(paseoHome).agents?.deviceLeases).toEqual(expected);
+  });
+
   test("patch tunes one saturation setting and keeps the rest, in memory and on disk", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);
@@ -1303,6 +1335,74 @@ describe("DaemonConfigStore", () => {
 
     expect(next.catastropheGate).toEqual({ enabled: false });
     expect(loadPersistedConfig(paseoHome).agents?.catastropheGate).toEqual({ enabled: false });
+  });
+
+  test("patch sets the disk brake live inside resourceMonitor, keeps its siblings, and persists it", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+    const resourceMonitor = { reaper: { enabled: true }, disk: { fallGB: 15 } };
+    writeFileSync(
+      path.join(paseoHome, "config.json"),
+      `${JSON.stringify({ version: 1, agents: { resourceMonitor } })}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        metadataGeneration: { providers: [] },
+        resourceMonitor,
+      },
+      undefined,
+    );
+
+    const next = store.patch({ resourceMonitor: { disk: { enabled: false } } });
+
+    expect(next.resourceMonitor).toEqual({
+      reaper: { enabled: true },
+      disk: { fallGB: 15, enabled: false },
+    });
+    expect(loadPersistedConfig(paseoHome).agents?.resourceMonitor).toEqual({
+      reaper: { enabled: true },
+      disk: { fallGB: 15, enabled: false },
+    });
+  });
+
+  test("patch sets the build gate live, keeps its other fields, and persists it", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+    writeFileSync(
+      path.join(paseoHome, "config.json"),
+      `${JSON.stringify({ version: 1, agents: { buildGate: { maxConcurrent: 2 } } })}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        metadataGeneration: { providers: [] },
+        buildGate: { maxConcurrent: 2 },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ buildGate: { dryRun: true } });
+
+    expect(next.buildGate).toEqual({ maxConcurrent: 2, dryRun: true });
+    expect(loadPersistedConfig(paseoHome).agents?.buildGate).toEqual({
+      maxConcurrent: 2,
+      dryRun: true,
+    });
   });
 
   test("patch live-toggles accountFailover.enabled without disturbing its other fields", () => {

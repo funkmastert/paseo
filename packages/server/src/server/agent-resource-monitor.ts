@@ -32,6 +32,12 @@ import {
   selectBuildDaemonPidsNeedingCwd,
 } from "./agent/build-daemon-reaper.js";
 import {
+  type DiskBrakeConfig,
+  type DiskBrakeResult,
+  type DiskBrakeState,
+  evaluateDiskBrake,
+} from "./agent/disk-brake.js";
+import {
   describePressure,
   evaluateMemoryBrake,
   MEMORY_HOLD_NOTICE_MS,
@@ -69,13 +75,21 @@ import {
   type SaturationEvidence,
 } from "./agent/saturation-evidence.js";
 import {
+  buildDiskLedgerRecord,
   buildSaturationLedgerRecord,
+  type DiskLedgerGrowth,
   type SaturationLedger,
   type SaturationLedgerEvent,
 } from "./agent/saturation-ledger.js";
 import type { SystemLoadReading, SystemLoadSample } from "./agent/system-load.js";
+import type { DiskGrowthReport } from "./disk-growth-sampler.js";
 import type { PushNotificationSender, PushSendMeta } from "./push/index.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
+import {
+  type RemediationConfig,
+  resolveCriticalFreeBytes,
+  resolveDiskRemediationConfig,
+} from "./remediation/config.js";
 import {
   NULL_REMEDIATION_SINK,
   type RemediationSink,
@@ -134,6 +148,16 @@ const DEFAULT_SATURATION_ATTRIBUTED_GRACE_MINUTES = 30;
 const DEFAULT_SATURATION_UNATTRIBUTED_GRACE_MINUTES = 5;
 // An episode's list of what was done to it is capped so a daemon-heavy day cannot grow it forever.
 const MAX_EPISODE_ATTEMPTS = 20;
+// The disk brake. "Falling fast" is 15 GB lost within 15 minutes: on 2026-10-08 an iOS and an
+// Android build together lost about 25 GB every 15 minutes, and a single Gradle build about 10.
+// The low and critical lines are the disk conditions' own (docs/disk-pressure.md).
+const DEFAULT_DISK_FALL_GB = 15;
+const DEFAULT_DISK_FALL_WINDOW_MINUTES = 15;
+const DEFAULT_DISK_RELEASE_MARGIN_GB = 5;
+// While the disk brake holds, the ledger gets a record this often, besides the open and the clear.
+const DISK_LEDGER_INTERVAL_MS = 5 * 60_000;
+// The growth sample's biggest growers named in a disk ledger record.
+const DISK_LEDGER_MAX_GROWERS = 5;
 
 // A critical-pressure push is announced once per spell; the key also rides the policy's cooldown.
 const MEMORY_PRESSURE_CRITICAL_DEDUPE_KEY = "resource-monitor:memory-pressure-critical";
@@ -191,6 +215,13 @@ export interface ResourceMonitorSaturationConfig {
   unattributedGraceMinutes?: number;
 }
 
+export interface ResourceMonitorDiskConfig {
+  enabled?: boolean;
+  fallGB?: number;
+  fallWindowMinutes?: number;
+  releaseMarginGB?: number;
+}
+
 export interface ResourceMonitorConfig {
   enabled?: boolean;
   memoryBytesPerAgent?: number;
@@ -201,6 +232,32 @@ export interface ResourceMonitorConfig {
   notifyAgent?: boolean;
   reaper?: ResourceMonitorReaperConfig;
   saturation?: ResourceMonitorSaturationConfig;
+  disk?: ResourceMonitorDiskConfig;
+}
+
+/** What the monitor reads from the daemon config each sweep. */
+export interface ResourceMonitorDaemonConfig {
+  resourceMonitor?: ResourceMonitorConfig;
+  /** `remediation.disk.lowFreeGB` is the disk brake's low line. */
+  remediation?: RemediationConfig;
+  /** `diskSweeper.minFreeGB` is its critical floor. */
+  diskSweeper?: { minFreeGB?: number };
+}
+
+/** Which condition holds child admission. holdChildAdmission hears their union. */
+type AdmissionHoldSource = "cpu" | "memory" | "disk";
+
+const ADMISSION_HOLD_NAMES: Record<AdmissionHoldSource, string> = {
+  cpu: "CPU saturation",
+  memory: "memory pressure",
+  disk: "disk pressure",
+};
+
+/** One sweep's disk brake, carried from the evaluation to the trickle and the ledger. */
+interface DiskBrakeSweep {
+  result: DiskBrakeResult;
+  config: DiskBrakeConfig;
+  attempts: RemedyAttempt[];
 }
 
 /**
@@ -276,7 +333,7 @@ export interface AgentResourceMonitorOptions {
    * bootstrap.ts closes over the real agentManager/agentStorage/logger to build it.
    */
   sendSystemMessageToAgent: (agentId: string, body: string) => Promise<void>;
-  readDaemonConfig: () => { resourceMonitor?: ResourceMonitorConfig };
+  readDaemonConfig: () => ResourceMonitorDaemonConfig;
   logger: AgentResourceMonitorLogger;
   sweepIntervalMs?: number;
   now?: () => number;
@@ -302,10 +359,13 @@ export interface AgentResourceMonitorOptions {
    * Hands the device cap (docs/device-leases.md) the simulators and emulators found in this
    * sweep's `ps` sample. It is a sibling of this monitor, not a leg of it: the cap decides
    * nothing here, it just gets the scan for free rather than running a second `ps` a minute.
+   * The rows and agent trees go too: the simulator teardown reads them to see a device in use.
    */
   reportDeviceSample?: (sample: {
     devices: RunningDevice[];
     systemMemory: SystemMemorySample | undefined;
+    rows: readonly ProcessSampleRow[];
+    agentTrees: readonly AgentProcessTree[];
   }) => Promise<void>;
   /**
    * Hands the artifact janitor (docs/artifact-janitor.md) this sweep's `ps` rows and returns
@@ -326,6 +386,25 @@ export interface AgentResourceMonitorOptions {
   holdChildAdmission?: (held: boolean, reason: string) => void;
   /** Injectable so tests never renice a real pid. Defaults to utils/process-priority.ts's. */
   lowerProcessPriority?: (pid: number, nice: number) => LowerPriorityResult;
+  /**
+   * Free bytes on the volume PASEO_HOME lives on, read every sweep for the disk brake (one
+   * `statfs`). Throws when it cannot read. Absent: the disk brake does not run.
+   */
+  readFreeDiskBytes?: () => Promise<number>;
+  /**
+   * The disk monitor's last growth sample (docs/disk-pressure.md), named in the disk brake's
+   * ledger records. Absent or null: the records carry no growth.
+   */
+  readDiskGrowth?: () => DiskGrowthReport | null;
+  /**
+   * Hands the native build gate (agent/native-build-gate.ts) this sweep's attributed `ps`, the
+   * way the device cap gets its scan: one `ps` a minute, not one per build decision. Only a sweep
+   * whose sample worked hands anything over.
+   */
+  reportAttributedSample?: (sample: {
+    rows: readonly ProcessSampleRow[];
+    agentTrees: readonly AgentProcessTree[];
+  }) => void;
   /**
    * Processes the daemon runs as an agent's own work (`ask_jev`'s command), by agent: extra roots
    * of each agent's tree (agent/agent-side-processes.ts). Absent: none.
@@ -654,7 +733,7 @@ export class AgentResourceMonitor {
   private readonly processSampler: ResourceMonitorSampler;
   private readonly saturationLedger: SaturationLedger | undefined;
   private readonly sendSystemMessageToAgent: AgentResourceMonitorOptions["sendSystemMessageToAgent"];
-  private readonly readDaemonConfig: () => { resourceMonitor?: ResourceMonitorConfig };
+  private readonly readDaemonConfig: () => ResourceMonitorDaemonConfig;
   private readonly logger: AgentResourceMonitorLogger;
   private readonly sweepIntervalMs: number;
   private readonly now: () => number;
@@ -670,6 +749,9 @@ export class AgentResourceMonitor {
   private readonly holdChildAdmission: AgentResourceMonitorOptions["holdChildAdmission"];
   private readonly lowerProcessPriority: (pid: number, nice: number) => LowerPriorityResult;
   private readonly readAgentSideProcesses: () => ReadonlyMap<string, readonly number[]>;
+  private readonly readFreeDiskBytes: AgentResourceMonitorOptions["readFreeDiskBytes"];
+  private readonly readDiskGrowth: () => DiskGrowthReport | null;
+  private readonly reportAttributedSample: AgentResourceMonitorOptions["reportAttributedSample"];
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Machine-level legs have no agent to attach state to, so this monitor instance — a
    * bootstrap-time singleton — owns it directly instead of round-tripping through AgentManager. */
@@ -688,13 +770,25 @@ export class AgentResourceMonitor {
   private orphanEpisode: RemedyAttempt[] | null = null;
   private systemMemoryEpisode: RemedyAttempt[] | null = null;
   private saturationEpisode: RemedyAttempt[] | null = null;
-  /** Which conditions hold child admission now; holdChildAdmission hears their union. */
-  private cpuHoldsAdmission = false;
-  private memoryHoldsAdmission = false;
-  /** Why each condition holding admission holds it, in the order they started. */
-  private readonly admissionHoldReasons = new Map<"cpu" | "memory", string>();
+  /**
+   * Which conditions hold child admission now, and why, in the order they started;
+   * holdChildAdmission hears their union.
+   */
+  private readonly admissionHoldReasons = new Map<AdmissionHoldSource, string>();
   /** The memory brake's state between sweeps (agent/memory-brake.ts). */
   private memoryBrake: MemoryBrakeState | undefined;
+  /** Whether the memory brake would let a child through this sweep, were it alone. */
+  private memoryTrickleReady = false;
+  /** The disk brake's state between sweeps (agent/disk-brake.ts). */
+  private diskBrake: DiskBrakeState | undefined;
+  /** Whether the disk brake would let a child through this sweep, were it alone. */
+  private diskTrickleReady = false;
+  /** The open disk incident in the ledger; null while the disk brake does not hold. */
+  private diskIncident: { openedAtMs: number; lastRecordAtMs: number } | null = null;
+  /** Whether the last disk read failed, so a run of failures is logged once. */
+  private diskReadFailing = false;
+  /** The sweep a queued child was last let through a hold, so no sweep lets two through. */
+  private lastTrickleAtMs: number | undefined;
   /** Whether this critical-pressure spell has been pushed. */
   private memoryCriticalAlerted = false;
   /** Whether this memory hold has been pushed for lasting MEMORY_HOLD_NOTICE_MS. */
@@ -736,6 +830,9 @@ export class AgentResourceMonitor {
     this.lowerProcessPriority =
       options.lowerProcessPriority ?? ((pid, nice) => lowerProcessPriorityDefault(pid, nice));
     this.readAgentSideProcesses = options.readAgentSideProcesses ?? (() => new Map());
+    this.readFreeDiskBytes = options.readFreeDiskBytes;
+    this.readDiskGrowth = options.readDiskGrowth ?? (() => null);
+    this.reportAttributedSample = options.reportAttributedSample;
   }
 
   start(): void {
@@ -760,9 +857,7 @@ export class AgentResourceMonitor {
     // Nothing will be watching load or memory to release it later. A restart starts the brake
     // over, so a condition still present holds again on its first sweep.
     this.releaseAdmission("resource monitor stopped");
-    this.memoryBrake = undefined;
-    this.memoryCriticalAlerted = false;
-    this.memoryHoldNoticed = false;
+    this.resetBrakes();
   }
 
   async tick(): Promise<void> {
@@ -843,6 +938,11 @@ export class AgentResourceMonitor {
       takenAtMs: nowMs,
     };
     this.lastProcessSample = sample;
+    try {
+      this.reportAttributedSample?.({ rows: cpu.rows, agentTrees: attribution.agentTrees });
+    } catch (error) {
+      this.logger.warn({ err: error }, "Failed to hand the build gate this sweep's sample");
+    }
 
     const agentBreaches = this.evaluateAgentBreaches(agents, attribution.agentTrees, config, nowMs);
     this.advanceMachineState(systemMemory, attribution.orphanBuildDaemons, config);
@@ -859,7 +959,9 @@ export class AgentResourceMonitor {
       nowMs,
     );
     const janitorAttempts = await this.reclaimTestArtifacts(cpu.rows, nowMs);
+    const diskSweep = await this.applyDiskBrake(nowMs);
     const brakeAttempts = await this.applyMemoryBrake(systemMemory, nowMs);
+    await this.finishDiskBrake(diskSweep, nowMs);
 
     // Last, so a reap or a reclaim in this very sweep is in what the ladder is told.
     await this.observeOrphanBuildDaemons({
@@ -912,8 +1014,11 @@ export class AgentResourceMonitor {
       config,
     );
     this.breakReaperIdleEvidence();
-    // Memory comes from sysctl, not ps, so the brake runs whatever happened to the process sample.
+    // Memory comes from sysctl and disk from statfs, not ps, so both brakes run whatever happened
+    // to the process sample.
+    const diskSweep = await this.applyDiskBrake(nowMs);
     const brakeAttempts = await this.applyMemoryBrake(systemMemory, nowMs);
+    await this.finishDiskBrake(diskSweep, nowMs);
     await this.observeSystemMemory({
       systemMemory,
       sample,
@@ -1029,8 +1134,7 @@ export class AgentResourceMonitor {
     const load = sweep.systemLoad.load;
     const attempts: RemedyAttempt[] = [];
     const hold = (held: boolean, detail: string): void => {
-      const said =
-        !held && this.memoryHoldsAdmission ? `${detail}; memory pressure still holds it` : detail;
+      const said = held ? detail : `${detail}${this.describeOtherHolds("cpu")}`;
       if (this.setAdmissionHold("cpu", held, `cpu-saturation: ${said}`)) {
         attempts.push({ remedy: "admission-hold", outcome: "acted", detail: said, at });
       }
@@ -1108,35 +1212,44 @@ export class AgentResourceMonitor {
    * Sets one condition's hold. Returns whether that condition's hold changed; holdChildAdmission
    * hears changes to the union, so a release while the other condition holds releases nothing.
    */
-  private setAdmissionHold(source: "cpu" | "memory", held: boolean, reason: string): boolean {
+  private setAdmissionHold(source: AdmissionHoldSource, held: boolean, reason: string): boolean {
     if (!this.holdChildAdmission) return false;
-    const current = source === "cpu" ? this.cpuHoldsAdmission : this.memoryHoldsAdmission;
-    if (current === held) return false;
-    const wasHeld = this.cpuHoldsAdmission || this.memoryHoldsAdmission;
-    if (source === "cpu") this.cpuHoldsAdmission = held;
-    else this.memoryHoldsAdmission = held;
+    if (this.holdsAdmission(source) === held) return false;
+    const wasHeld = this.admissionHoldReasons.size > 0;
     if (held) this.admissionHoldReasons.set(source, reason);
     else this.admissionHoldReasons.delete(source);
     this.applyAdmissionHold(wasHeld, reason, source);
     return true;
   }
 
+  private holdsAdmission(source: AdmissionHoldSource): boolean {
+    return this.admissionHoldReasons.has(source);
+  }
+
+  /** `; memory pressure still holds it` for a release that leaves admission held by another. */
+  private describeOtherHolds(releasing: AdmissionHoldSource): string {
+    const others = [...this.admissionHoldReasons.keys()].filter((source) => source !== releasing);
+    if (others.length === 0) return "";
+    const names = others.map((source) => ADMISSION_HOLD_NAMES[source]).join(" and ");
+    return `; ${names} still ${others.length === 1 ? "holds" : "hold"} it`;
+  }
+
   private releaseAdmission(reason: string): void {
-    const wasHeld = this.cpuHoldsAdmission || this.memoryHoldsAdmission;
-    this.cpuHoldsAdmission = false;
-    this.memoryHoldsAdmission = false;
+    const wasHeld = this.admissionHoldReasons.size > 0;
     this.admissionHoldReasons.clear();
     this.applyAdmissionHold(wasHeld, reason);
   }
 
-  private applyAdmissionHold(wasHeld: boolean, reason: string, source?: "cpu" | "memory"): void {
-    const held = this.cpuHoldsAdmission || this.memoryHoldsAdmission;
+  private applyAdmissionHold(wasHeld: boolean, reason: string, source?: AdmissionHoldSource): void {
+    const held = this.admissionHoldReasons.size > 0;
+    const holds = {
+      cpu: this.holdsAdmission("cpu"),
+      memory: this.holdsAdmission("memory"),
+      disk: this.holdsAdmission("disk"),
+    };
     if (held === wasHeld) {
       if (held) {
-        this.logger.info(
-          { source, reason, cpu: this.cpuHoldsAdmission, memory: this.memoryHoldsAdmission },
-          "Child admission stays held",
-        );
+        this.logger.info({ source, reason, ...holds }, "Child admission stays held");
         // What holds it changed, so admission hears the conditions that hold it now: bootstrap
         // wires both to one source, and its queue lines would otherwise name the first one.
         this.callHoldChildAdmission(true, [...this.admissionHoldReasons.values()].join("; "));
@@ -1144,7 +1257,7 @@ export class AgentResourceMonitor {
       return;
     }
     this.logger.info(
-      { held, reason, cpu: this.cpuHoldsAdmission, memory: this.memoryHoldsAdmission },
+      { held, reason, ...holds },
       held ? "Holding child admission" : "Releasing child admission",
     );
     this.callHoldChildAdmission(held, reason);
@@ -1171,13 +1284,13 @@ export class AgentResourceMonitor {
   ): Promise<RemedyAttempt[]> {
     const result = evaluateMemoryBrake(systemMemory, this.memoryBrake, nowMs);
     this.memoryBrake = result.next;
+    this.memoryTrickleReady = result.trickle;
     const attempts: RemedyAttempt[] = [];
     if (result.transition !== "none") {
       const held = result.transition === "held";
       const detail = held
         ? `Held new child-agent turns: ${result.detail}`
-        : `Released child admission: ${result.detail}` +
-          (this.cpuHoldsAdmission ? "; CPU saturation still holds it" : "");
+        : `Released child admission: ${result.detail}${this.describeOtherHolds("memory")}`;
       if (this.setAdmissionHold("memory", held, `memory-pressure: ${detail}`)) {
         attempts.push({
           remedy: "admission-hold",
@@ -1210,14 +1323,14 @@ export class AgentResourceMonitor {
    * then nothing else says children are stalled. Pushes once when it has held
    * MEMORY_HOLD_NOTICE_MS with a child waiting, and once it has been settled for
    * MEMORY_HOLD_TRICKLE_AFTER_MS lets one queued child through per sweep, unless CPU saturation
-   * holds admission too.
+   * holds admission too or the disk brake holds it and is not ready to let one through.
    */
   private async handleLongMemoryHold(
     result: ReturnType<typeof evaluateMemoryBrake>,
     systemMemory: SystemMemorySample | undefined,
     nowMs: number,
   ): Promise<RemedyAttempt[]> {
-    if (!this.memoryHoldsAdmission) {
+    if (!this.holdsAdmission("memory")) {
       this.memoryHoldNoticed = false;
       return [];
     }
@@ -1243,12 +1356,13 @@ export class AgentResourceMonitor {
         { level: "notice", dedupeKey: MEMORY_HOLD_NOTICE_DEDUPE_KEY },
       );
     }
-    if (!result.trickle || this.cpuHoldsAdmission || !admission) return [];
+    if (!result.trickle || !this.mayTrickle("memory", nowMs) || !admission) return [];
     const minutes = Math.round(result.heldForMs / 60_000);
     const agentId = admission.admitNextWhileHeld(
       `trickle: memory held ${minutes} min with swap not growing`,
     );
     if (!agentId) return [];
+    this.lastTrickleAtMs = nowMs;
     return [
       {
         remedy: "admission-hold",
@@ -1259,6 +1373,228 @@ export class AgentResourceMonitor {
         at: new Date(nowMs).toISOString(),
       },
     ];
+  }
+
+  /**
+   * Whether `source`'s brake may let one queued child through this sweep: CPU saturation does not
+   * hold admission, every other brake that holds it is ready to let one through too, and no child
+   * went through already this sweep.
+   */
+  private mayTrickle(source: "memory" | "disk", nowMs: number): boolean {
+    if (this.lastTrickleAtMs === nowMs) return false;
+    const ready: Record<AdmissionHoldSource, boolean> = {
+      cpu: false,
+      memory: this.memoryTrickleReady,
+      disk: this.diskTrickleReady,
+    };
+    return [...this.admissionHoldReasons.keys()].every(
+      (holder) => holder === source || ready[holder],
+    );
+  }
+
+  /** The disk brake's own block, and the disk conditions' low and critical lines. */
+  private resolveDiskBrakeConfig(): { enabled: boolean; brake: DiskBrakeConfig } {
+    const daemonConfig = this.readDaemonConfig();
+    const disk = daemonConfig.resourceMonitor?.disk;
+    return {
+      enabled: disk?.enabled ?? true,
+      brake: {
+        lowFreeBytes: resolveDiskRemediationConfig(daemonConfig.remediation).lowFreeBytes,
+        criticalFreeBytes: resolveCriticalFreeBytes(daemonConfig.diskSweeper),
+        releaseMarginBytes: (disk?.releaseMarginGB ?? DEFAULT_DISK_RELEASE_MARGIN_GB) * GIBIBYTE,
+        fallBytes: (disk?.fallGB ?? DEFAULT_DISK_FALL_GB) * GIBIBYTE,
+        fallWindowMs: (disk?.fallWindowMinutes ?? DEFAULT_DISK_FALL_WINDOW_MINUTES) * 60_000,
+      },
+    };
+  }
+
+  /** Free bytes, or undefined when they could not be read. A run of failures is logged once. */
+  private async readFreeDisk(read: () => Promise<number>): Promise<number | undefined> {
+    try {
+      const freeBytes = await read();
+      this.diskReadFailing = false;
+      return freeBytes;
+    } catch (error) {
+      if (!this.diskReadFailing) {
+        this.diskReadFailing = true;
+        this.logger.warn({ err: error }, "Resource monitor could not read free disk space");
+      }
+      return undefined;
+    }
+  }
+
+  /**
+   * The disk brake: holds child admission while free disk is low or falling fast. Like the memory
+   * brake it only ever holds new child turns; nothing running is touched. Runs before the memory
+   * brake, so that brake knows whether this one is ready to let a child through.
+   */
+  private async applyDiskBrake(nowMs: number): Promise<DiskBrakeSweep | undefined> {
+    if (!this.readFreeDiskBytes) return undefined;
+    const { enabled, brake: config } = this.resolveDiskBrakeConfig();
+    if (!enabled) {
+      await this.closeDiskIncident(nowMs, "disk monitoring turned off");
+      return undefined;
+    }
+    const result = evaluateDiskBrake({
+      freeBytes: await this.readFreeDisk(this.readFreeDiskBytes),
+      previous: this.diskBrake,
+      config,
+      nowMs,
+    });
+    this.diskBrake = result.next;
+    this.diskTrickleReady = result.trickle;
+    const attempts: RemedyAttempt[] = [];
+    if (result.transition !== "none") {
+      const held = result.transition === "held";
+      const detail = held
+        ? `Held new child-agent turns: ${result.detail}`
+        : `Released child admission: ${result.detail}${this.describeOtherHolds("disk")}`;
+      if (this.setAdmissionHold("disk", held, `disk-pressure: ${detail}`)) {
+        attempts.push({
+          remedy: "admission-hold",
+          outcome: "acted",
+          detail,
+          at: new Date(nowMs).toISOString(),
+        });
+      }
+    }
+    return { result, config, attempts };
+  }
+
+  /**
+   * After the memory brake: lets one queued child through a long disk hold when nothing else
+   * stands in the way, then writes the sweep to the ledger.
+   */
+  private async finishDiskBrake(sweep: DiskBrakeSweep | undefined, nowMs: number): Promise<void> {
+    if (!sweep) return;
+    const admission = this.agentManager.getChildAdmission();
+    if (
+      sweep.result.trickle &&
+      this.holdsAdmission("disk") &&
+      this.mayTrickle("disk", nowMs) &&
+      admission
+    ) {
+      const minutes = Math.round(sweep.result.heldForMs / 60_000);
+      const agentId = admission.admitNextWhileHeld(
+        `trickle: disk held ${minutes} min without falling`,
+      );
+      if (agentId) {
+        this.lastTrickleAtMs = nowMs;
+        sweep.attempts.push({
+          remedy: "admission-hold",
+          outcome: "acted",
+          detail:
+            `Let one queued child turn through (${agentId}): the disk has held admission for ` +
+            `${minutes} min without falling or turning critical`,
+          at: new Date(nowMs).toISOString(),
+        });
+      }
+    }
+    await this.recordDisk(sweep, nowMs);
+  }
+
+  /** The disk brake's ledger records: open, every five minutes or on an action, and clear. */
+  private async recordDisk(sweep: DiskBrakeSweep, nowMs: number): Promise<void> {
+    const { result, config, attempts } = sweep;
+    let event: SaturationLedgerEvent | undefined;
+    if (result.transition === "held") {
+      event = "open";
+      this.diskIncident = { openedAtMs: nowMs, lastRecordAtMs: nowMs };
+      this.logger.warn(
+        { freeBytes: result.freeBytes, fallBytes: result.fallBytes, conditions: result.conditions },
+        "Disk pressure: free disk is low or falling fast",
+      );
+    } else if (result.transition === "released") {
+      event = "clear";
+      this.logger.info(
+        { freeBytes: result.freeBytes, fallBytes: result.fallBytes },
+        "Disk pressure cleared",
+      );
+    } else if (
+      this.diskIncident &&
+      (attempts.length > 0 || nowMs - this.diskIncident.lastRecordAtMs >= DISK_LEDGER_INTERVAL_MS)
+    ) {
+      event = "ongoing";
+    }
+    const incident = this.diskIncident;
+    if (!event || !incident) return;
+    incident.lastRecordAtMs = nowMs;
+    if (event === "clear") this.diskIncident = null;
+    await this.saturationLedger?.append(
+      buildDiskLedgerRecord({
+        event,
+        atMs: nowMs,
+        openedAtMs: incident.openedAtMs,
+        freeBytes: result.freeBytes,
+        fallBytes: result.fallBytes,
+        fallWindowMinutes: Math.round(config.fallWindowMs / 60_000),
+        lowFreeBytes: config.lowFreeBytes,
+        criticalFreeBytes: config.criticalFreeBytes,
+        conditions: result.conditions,
+        growth: this.describeDiskGrowth(),
+        actions: attempts,
+      }),
+    );
+  }
+
+  private describeDiskGrowth(): DiskLedgerGrowth | null {
+    const report = this.readDiskGrowth();
+    if (!report) return null;
+    return {
+      sampledAt: report.sample.at,
+      comparedWith: report.previousAt,
+      growers: report.growers.slice(0, DISK_LEDGER_MAX_GROWERS).map((grower) => ({
+        path: grower.path,
+        bytes: grower.bytes,
+        deltaBytes: grower.deltaBytes,
+      })),
+    };
+  }
+
+  /**
+   * Releases a disk hold that nothing will watch any more, and closes its ledger incident so the
+   * record does not read as a daemon that went down mid-hold.
+   */
+  private async closeDiskIncident(nowMs: number, why: string): Promise<void> {
+    const detail = `Released child admission: ${why}`;
+    this.setAdmissionHold("disk", false, `disk-pressure: ${detail}`);
+    const incident = this.diskIncident;
+    const brake = this.diskBrake;
+    this.diskBrake = undefined;
+    this.diskTrickleReady = false;
+    this.diskIncident = null;
+    if (!incident || !brake) return;
+    const { brake: config } = this.resolveDiskBrakeConfig();
+    const last = brake.history[brake.history.length - 1];
+    this.logger.info({ why }, "Disk pressure no longer watched");
+    await this.saturationLedger?.append(
+      buildDiskLedgerRecord({
+        event: "clear",
+        atMs: nowMs,
+        openedAtMs: incident.openedAtMs,
+        freeBytes: last?.freeBytes,
+        fallBytes: 0,
+        fallWindowMinutes: Math.round(config.fallWindowMs / 60_000),
+        lowFreeBytes: config.lowFreeBytes,
+        criticalFreeBytes: config.criticalFreeBytes,
+        conditions: [],
+        growth: this.describeDiskGrowth(),
+        actions: [
+          { remedy: "admission-hold", outcome: "acted", detail, at: new Date(nowMs).toISOString() },
+        ],
+      }),
+    );
+  }
+
+  /** Forgets every brake's state, so a restart starts each over. */
+  private resetBrakes(): void {
+    this.memoryBrake = undefined;
+    this.memoryTrickleReady = false;
+    this.memoryCriticalAlerted = false;
+    this.memoryHoldNoticed = false;
+    this.diskBrake = undefined;
+    this.diskTrickleReady = false;
+    this.diskIncident = null;
   }
 
   /**
@@ -1442,6 +1778,8 @@ export class AgentResourceMonitor {
       await this.reportDeviceSample({
         devices: detectRunningDevices({ rows, agentTrees }),
         systemMemory,
+        rows,
+        agentTrees,
       });
     } catch (error) {
       this.logger.warn({ err: error }, "Failed to report running devices to the device cap");
@@ -1777,10 +2115,9 @@ export class AgentResourceMonitor {
 
   /** The monitor was switched off mid-condition: nothing is observing it any more. */
   private async closeMachineEpisodes(): Promise<void> {
+    await this.closeDiskIncident(this.now(), "resource monitor turned off");
     this.releaseAdmission("resource monitor turned off");
-    this.memoryBrake = undefined;
-    this.memoryCriticalAlerted = false;
-    this.memoryHoldNoticed = false;
+    this.resetBrakes();
     if (this.saturationEpisode) {
       const attempts = this.saturationEpisode;
       this.saturationEpisode = null;

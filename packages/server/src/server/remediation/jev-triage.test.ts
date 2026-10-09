@@ -466,7 +466,9 @@ describe("the savings ledger (docs/jev.md, Savings)", () => {
   });
 
   afterEach(async () => {
-    await rm(home, { recursive: true, force: true });
+    // The recorder appends its lines in the background, so one can still be landing in `jev/`
+    // when this runs; Windows then fails the rmdir with ENOTEMPTY. A retry walks it again.
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   });
 
   async function shadowSkip() {

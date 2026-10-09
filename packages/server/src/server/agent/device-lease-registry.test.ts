@@ -166,6 +166,21 @@ describe("reconcileDeviceLeases", () => {
     });
 
     expect(result.leases[0].deviceId).toBe("UDID-1");
+    // The simulator teardown reads this: the daemon saw the device boot for this lease.
+    expect(result.leases[0].booted).toBe(true);
+  });
+
+  test("a lease already bound to a running device is carried through without a booted mark", () => {
+    // Bound straight onto a device that was up (a reuse, a launch naming it), which may be one
+    // Tyler booted by hand. Reconciling must not promote it to one the agent booted.
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [lease({ id: "reuse", agentId: "a1", deviceId: "UDID-1" })],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 8040 })],
+    });
+
+    expect(result.leases[0]).toMatchObject({ id: "reuse", deviceId: "UDID-1" });
+    expect(result.leases[0].booted).toBeUndefined();
   });
 
   test("releases a bound lease as soon as its device stops", () => {

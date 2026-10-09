@@ -104,6 +104,8 @@ Neither Codex's approval response nor ACP's carries a sentence back to the model
 
 `agent/device-launch-commands.ts` decides what counts as a device launch, for every tier: `xcrun simctl boot`, `open -a Simulator`, `xcodebuild -destination 'platform=iOS Simulator…'`, `emulator -avd <name>` / `emulator @<name>`, and `expo run:*` / `react-native run-*` (their `--device`, `--udid`, `--simulator` or `--deviceId` value is the target). Matching is on argv tokens of the command actually being run, with quotes honoured, so `grep -rn 'simctl boot' docs/` is not a device launch. Commands that _use_ a device without booting one — `adb install`, `./gradlew installDebug`, `xcrun simctl launch` — are deliberately absent: they need a device that already exists, so gating them would refuse work that costs no slot.
 
+The same gate carries [the native build gate](resource-monitor.md#the-native-build-gate), which runs before the device cap.
+
 The gate refuses only a launch that boots a **new** device when the cap or headroom has no room for it. A false refusal costs more than a missed device: the agent stalls or works around the gate, while a missed device is still counted by the next scan.
 
 A target resolves against what is running by UDID, AVD name, simulator name (from `simctl list`) or adb serial. A target that names a connected physical device is left to [the install gate](#what-the-gate-checks): no simulator boots.
@@ -130,7 +132,7 @@ What the tier changes is who knows. Such a device is **charged** to its agent: t
 
 That message only reaches Android. `launchd_sim` is reparented to pid 1 the moment CoreSimulator boots it, so an unleased iOS simulator has no owner `ps` can name. It is not guessed at: it stays unattributed, keeps its slot, and appears in the status UI as pressure nobody is accountable for.
 
-**Nothing is ever reaped.** A booted device may have a build running against it. Refusing a new device and killing an existing one are different features with different risks, and only the first one is here.
+**An unleased device is never shut down.** A booted device may have a build running against it. Refusing a new device and killing an existing one are different features with different risks; the daemon shuts a device down on its own only in [two narrow cases](#shutdown), and only for a simulator an agent holds by lease.
 
 ## A lease cannot leak
 
@@ -166,24 +168,35 @@ A device Tyler booted by hand for himself needs to be protectable — checkout a
 
 ### Shutdown
 
-An explicit human action from the Devices section, never something the daemon does on its own: `xcrun simctl shutdown <udid>` or `adb -s <serial> emu kill`. The serial is re-resolved from `adb devices` and `emu avd name` on every shutdown, never taken from a cache: an emulator that restarted gets a new console port, and a stale serial would kill whichever emulator took the old one. `device.shutdown` refuses a device a mid-turn agent holds (by lease or by process tree) unless the request sets `confirmMidTurnHolder`, which is the UI's second confirm tap; an idle holder or no holder at all shuts down on the first. Nothing here reaps — see [why a lease does not own disk cleanup](#why-a-lease-does-not-own-disk-cleanup).
+An explicit human action from the Devices section: `xcrun simctl shutdown <udid>` or `adb -s <serial> emu kill`. The serial is re-resolved from `adb devices` and `emu avd name` on every shutdown, never taken from a cache: an emulator that restarted gets a new console port, and a stale serial would kill whichever emulator took the old one. `device.shutdown` refuses a device a mid-turn agent holds (by lease or by process tree) unless the request sets `confirmMidTurnHolder`, which is the UI's second confirm tap; an idle holder or no holder at all shuts down on the first. Nothing here reaps — see [why a lease does not own disk cleanup](#why-a-lease-does-not-own-disk-cleanup).
+
+Two cases are not human-only, and they are narrow: the daemon shuts down an **iOS simulator it saw an agent boot**, never one an agent reused, never a reserved one, and never an Android emulator (`device-lease-manager.ts`'s `shutdownAgentHeldSimulatorsForDaemonShutdown` / `sweepIdleSimulators`). The reason is the 2026-10-08 crash: CoreSimulatorService crashed while tearing down a still-booted simulator during OS shutdown, and macOS's shutdown stalled on it until a hard power-cycle. A simulator the daemon already shut down never reaches that path.
+
+- **Graceful daemon shutdown.** `stop()` starts `simctl shutdown` on each of them before agents close, lets it run beside the agent closures and the durability flushes, then waits at most what is left of the 10 s budget for it (`daemon-vitals/shutdown-budget.ts`). A wedged `simctl` is logged and left for the OS. Deploy restarts take this path too.
+- **The idle sweep.** The resource-monitor sweep shuts one down once nothing has used it for `simulatorTeardown.idleMinutes`. Use is: the holder is mid-turn, the holder still has a command running (a live shell under its root, which is where an `xcodebuild test` started as a background shell lives, and any native build), or any process outside the simulator's own tree names its UDID (another agent testing on it by id, a `simctl` subprocess). Lifecycle alone is not enough: an agent waiting on a background UI-test run is idle by lifecycle for the hour the run takes. Any use, or a device the sweep has not seen before, restarts the clock.
+
+"Saw an agent boot" is `DeviceLease.booted`: the lease was pending and bound to a device that started after it, or the device sits in the agent's process tree. A lease bound straight onto a running simulator (a reuse at checkout, a launch that names it) has no such mark, because that simulator may be one Tyler booted by hand. A simulator Tyler boots while an agent's lease is still pending can bind to that lease like any device does (see [Counting](#counting)); reserve it to protect it.
+
+The teardown reads leases, and only the cap binds them, so it does nothing while `enabled` is off; `simulatorTeardown.enabled` turns it off on its own. Under the cap's `dryRun` it logs `Would shut down an agent-held simulator` and releases nothing. Its mode is logged as the `simulator-teardown` line of `Monitor mode`, reported off whenever the cap is off. A shutdown that fails releases nothing: the lease stays, and the device is left for the next sweep, a human, or the OS.
 
 ## Config
 
 Under `agents.deviceLeases` (`persisted-config.ts`), live-toggleable like its siblings.
 
-| Key                   | Default | What it does                                        |
-| --------------------- | ------- | --------------------------------------------------- |
-| `enabled`             | `false` | Nothing is counted, refused or queued while off     |
-| `dryRun`              | `false` | Report what would have been refused; refuse nothing |
-| `totalSlots`          | derived | Devices at once, all platforms                      |
-| `slotsPerPlatform`    | derived | Per platform; clamped to `totalSlots`               |
-| `requireHeadroom`     | `true`  | Also refuse when memory is gone                     |
-| `minAvailableBytes`   | 0.5 GiB | Free-memory floor                                   |
-| `maxSwapUsedRatio`    | 0.85    | Swap ceiling                                        |
-| `pendingTtlMinutes`   | 25      | How long a lease may wait for its device to appear  |
-| `maxLeaseHours`       | 12      | Backstop; 0 disables                                |
-| `queueTimeoutMinutes` | 20      | How long `device_checkout` waits                    |
+| Key                             | Default | What it does                                                                                                |
+| ------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
+| `enabled`                       | `false` | Nothing is counted, refused or queued while off                                                             |
+| `dryRun`                        | `false` | Report what would have been refused; refuse nothing                                                         |
+| `totalSlots`                    | derived | Devices at once, all platforms                                                                              |
+| `slotsPerPlatform`              | derived | Per platform; clamped to `totalSlots`                                                                       |
+| `requireHeadroom`               | `true`  | Also refuse when memory is gone                                                                             |
+| `minAvailableBytes`             | 0.5 GiB | Free-memory floor                                                                                           |
+| `maxSwapUsedRatio`              | 0.85    | Swap ceiling                                                                                                |
+| `pendingTtlMinutes`             | 25      | How long a lease may wait for its device to appear                                                          |
+| `maxLeaseHours`                 | 12      | Backstop; 0 disables                                                                                        |
+| `queueTimeoutMinutes`           | 20      | How long `device_checkout` waits                                                                            |
+| `simulatorTeardown.enabled`     | `true`  | Shut down agent-booted simulators at daemon stop and when idle; needs `enabled` too ([Shutdown](#shutdown)) |
+| `simulatorTeardown.idleMinutes` | 30      | How long an agent-booted simulator may go unused before the sweep shuts it down                             |
 
 A dry-run `device_checkout` that the real cap would have made wait still hands back a lease, so the agent carries on, but that lease does not fill a slot — an agent waiting in a real run holds nothing. It shows in the status readout with its holder; only the count is the real cap's. Without that, a dry run inflates its own occupancy and reports refusals the real run would never have made, on the one readout a dry run exists to be trusted on.
 
