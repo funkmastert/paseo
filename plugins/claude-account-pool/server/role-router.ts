@@ -1,7 +1,8 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
-import { WORK_KINDS, type WorkKind } from "../shared/arena-aliases";
+import { WORK_KINDS, type ArenaRankingsFile, type WorkKind } from "../shared/arena-aliases";
 import {
   AGENT_TYPE_LABEL,
+  ARENA_PICK_LABEL,
   JEV_CALL_LABEL,
   JEV_SPAWN_LABEL,
   JEV_TOOLS_LABEL,
@@ -186,6 +187,12 @@ export interface RoleRouterOptions {
    * Optional: without it every agent keeps every server, as before scoping.
    */
   mcpGatewayCache?: Pick<McpGatewayCache, "get">;
+  /**
+   * U6's daily LMArena rankings cache. Optional: without it (or on a daemon
+   * that never started the poller), `decideModel`'s ranking always falls back
+   * to `"no-file"` — R8's intended behavior for a missing file, not an error.
+   */
+  arenaRankingCache?: { get(): ArenaRankingsFile | undefined };
   /** Called (deduplicated per caller+values) when labels[paseo.mcp] named something no gateway server is called. */
   onDeclaredMcpUnknown?: (episode: DeclaredMcpUnknownEpisode) => void;
   /**
@@ -546,7 +553,8 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
       );
       const scoped = applyMcpDecision(input.request, routed, decided.decision, options, declaredMcpUnknownSeen);
       const withWorkKind = applyWorkKindLabel(input.request, scoped, input.jevHint);
-      return applyJevLabels(input.request, withWorkKind, decided.decision);
+      const withArenaPick = applyArenaPickLabel(input.request, withWorkKind, decided.decision);
+      return applyJevLabels(input.request, withArenaPick, decided.decision);
     } catch (error) {
       // Defense-in-depth on the never-block contract: every code path below
       // is meant to fail open already, but a throw anywhere in classification
@@ -653,6 +661,35 @@ function applyWorkKindLabel(
   }
   const base = (routed ?? request) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
   return { ...base, labels: { ...base.labels, [WORK_KIND_LABEL]: choice as WorkKind } };
+}
+
+/**
+ * `v1;ref=<ref>;tier=<top|mid>;board=<board>;date=<publishDate>;applied=<0|1>;proxy=<0|1>`.
+ * `;` in a ref is impossible (`MODEL_REF_RE`), and the board id's own `/` never collides with the
+ * label's `;`-joined fields, so this needs no escaping.
+ */
+function formatArenaPickLabel(ranking: NonNullable<AgentDecision["model"]["ranking"]> & { outcome: "ranked" }): string {
+  return `v1;ref=${ranking.ref};tier=${ranking.tier};board=${ranking.board};date=${ranking.publishDate};applied=${ranking.applied ? 1 : 0};proxy=${ranking.pick.proxy ? 1 : 0}`;
+}
+
+/**
+ * U8's `paseo.arena-pick` label (KTD-1, KTD-2, KTD-11, KTD-13): written only
+ * for a `"ranked"` outcome, whether applied or shadowed — a fallback writes
+ * nothing here, since the decision log alone records its reason. A leader
+ * never reaches this: `decideModel` never evaluates ranking for one, so
+ * `decision.model.ranking` is undefined.
+ */
+function applyArenaPickLabel(
+  request: PluginBeforeRequests["agent.create"],
+  routed: PluginBeforeRequests["agent.create"] | void,
+  decision: AgentDecision | undefined,
+): PluginBeforeRequests["agent.create"] | void {
+  const ranking = decision?.model.ranking;
+  if (!ranking || ranking.outcome !== "ranked") {
+    return routed;
+  }
+  const base = (routed ?? request) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
+  return { ...base, labels: { ...base.labels, [ARENA_PICK_LABEL]: formatArenaPickLabel(ranking) } };
 }
 
 /**
@@ -792,6 +829,7 @@ function routeRoleForCreateUnguarded(
       health: options.health,
       callerDenials: callerDenialsFor(options, policy, callerAgentId),
       mcpGateway: options.mcpGatewayCache?.get(),
+      arenaRanking: options.arenaRankingCache?.get(),
       ...(input.jevTools ? { jevToolsAvailable: input.jevTools } : {}),
     },
   );

@@ -43,6 +43,13 @@ export const JEV_SPAWN_LABEL = "paseo.jev-spawn";
  * decision this label itself makes.
  */
 export const WORK_KIND_LABEL = "paseo.work-kind";
+/**
+ * U8's arena-ranked pick (KTD-1, KTD-2, KTD-11, KTD-13): written only when
+ * `decideModel`'s ranking outcome is `"ranked"` — never on a fallback, which
+ * the decision log alone records with its reason.
+ * `v1;ref=<ref>;tier=<top|mid>;board=<board>;date=<publishDate>;applied=<0|1>;proxy=<0|1>`.
+ */
+export const ARENA_PICK_LABEL = "paseo.arena-pick";
 
 /**
  * Asks for MCP gateway servers a child would not get by default: a
@@ -345,6 +352,38 @@ const AgentTypeMappingsSchema = z
 
 export const CURRENT_SCHEMA_VERSION = 4;
 
+/**
+ * KTD-13: an optional `arena` key on `agentModelPolicy`. Absent means exactly
+ * today's order (R8) — the field is `.optional()`, not `.default()`, so a
+ * config stored before this key existed parses to `arena: undefined`
+ * without every other `RoleModelPolicy` literal in the codebase needing one.
+ *
+ * - `enabled`: the master switch. Off is today's order.
+ * - `shadow`: default true (D6, "shadow first" — docs/jev.md). The decision
+ *   records the would-be pick without applying it.
+ * - `roles`: which policy role ids ranking applies to. Default `worker` and
+ *   `reviewer` (KTD-1). The classifier refuses `leader` even if it is listed
+ *   here — not a schema rule, because the refusal must survive an operator
+ *   putting it back.
+ * - `topTier`: refs named here are dropped from standard/mechanical
+ *   candidates entirely, and win a hard pick only by clearing
+ *   `topTierMarginCi` (KTD-2). A ref listed here that is in no pool is
+ *   ignored, not an error — pool membership is still the operator's call.
+ * - `topTierMarginCi`: extra CI widths a top-tier pick must clear beyond a
+ *   plain CI-non-overlap win. Default 0.
+ * - `maxAgeHours`: how stale `arena-rankings.json` may be before ranking
+ *   falls back to today's order. Default 72 (KTD-10).
+ */
+export const ArenaPolicySchema = z.object({
+  enabled: z.boolean().default(false),
+  shadow: z.boolean().default(true),
+  roles: z.array(z.string()).default(["worker", "reviewer"]),
+  topTier: z.array(z.string().max(MAX_MODEL_REF_LENGTH).regex(MODEL_REF_RE)).default([]),
+  topTierMarginCi: z.number().min(0).default(0),
+  maxAgeHours: z.number().positive().default(72),
+});
+export type ArenaPolicy = z.infer<typeof ArenaPolicySchema>;
+
 export const RoleModelPolicySchema = z
   .object({
     schemaVersion: z.literal(CURRENT_SCHEMA_VERSION),
@@ -408,6 +447,8 @@ export const RoleModelPolicySchema = z
      *   approval, it only stands in for catalog verification.
      */
     allowUnlistedModels: z.array(z.string().max(MAX_MODEL_REF_LENGTH).regex(MODEL_REF_RE)).max(MAX_MODELS_PER_ROLE).default([]),
+    /** Arena-ranked model selection (KTD-13). See `ArenaPolicySchema`'s own doc comment. */
+    arena: ArenaPolicySchema.optional(),
     /**
      * Which thinking-effort level each agent's model runs at. See
      * `ThinkingPolicySchema`'s own doc comment for the default/absent

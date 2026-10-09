@@ -318,4 +318,87 @@ describe("decision log", () => {
     log.finish(tokenOf(log, root), root, root);
     expect(parse(lines[0]).caller).toBe("root");
   });
+
+  describe("model.ranking (U8)", () => {
+    const arenaWorld: ClassifierWorld = {
+      ...world,
+      policy: {
+        ...world.policy,
+        roles: world.policy.roles.map((role) =>
+          role.id === "worker" ? { ...role, models: ["claude-haiku-4-5", "claude-sonnet-5"] } : role,
+        ),
+        arena: { enabled: true, shadow: false, roles: ["worker", "reviewer"], topTier: [], topTierMarginCi: 0, maxAgeHours: 72 },
+      },
+      arenaRanking: {
+        fetchedAt: Date.now(),
+        publishDate: "2026-10-08",
+        boards: {
+          "webdev/webdev-react": [
+            { arenaName: "claude-sonnet-5-high", ours: "claude-sonnet-5", effort: "high", rating: 1700, ratingLower: 1680, ratingUpper: 1720, votes: 500 },
+            { arenaName: "claude-haiku-4-5-high", ours: "claude-haiku-4-5", effort: "high", rating: 1400, ratingLower: 1380, ratingUpper: 1420, votes: 500 },
+          ],
+        },
+        unmatched: {},
+      },
+    };
+
+    function arenaDecisionFor(input: LoggedRequest) {
+      return classifyAgent(
+        {
+          labels: input.labels,
+          title: input.config.title,
+          initialPrompt: input.initialPrompt,
+          callerAgentId: input.callerAgentId,
+          requestedProvider: input.config.provider,
+          jevHint: {
+            status: "answered",
+            callId: "jev-call-arena",
+            answers: { workKind: { choice: "frontend", confidence: 0.9 } },
+            proposal: {},
+            applyHard: false,
+            applyRole: false,
+            declaredAudit: false,
+          },
+        },
+        arenaWorld,
+      );
+    }
+
+    it("records a ranked pick, with the board, the credit and whether it applied", () => {
+      const { lines, log } = harness();
+      const asked = request({
+        labels: { "paseo.agent-type": "worker" },
+        initialPrompt: "Add a hover state to the submit button.",
+        config: { provider: "claude", title: "button hover", cwd: "/repo", model: "claude-haiku-4-5" },
+      });
+      log.note(asked, arenaDecisionFor(asked));
+      log.finish(tokenOf(log, asked), asked, { ...asked, config: { ...asked.config, model: "claude-sonnet-5" } });
+
+      expect(parse(lines[0]).model.ranking).toMatchObject({
+        outcome: "ranked",
+        applied: true,
+        ref: "claude-sonnet-5",
+        board: "webdev/webdev-react",
+        credit: "LMArena leaderboard dataset (CC-BY-4.0)",
+      });
+    });
+
+    it("records a fallback reason when ranking does not apply, e.g. a declared class", () => {
+      const { lines, log } = harness();
+      const asked = request({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "standard" } });
+      log.note(asked, arenaDecisionFor(asked));
+      log.finish(tokenOf(log, asked), asked, asked);
+
+      expect(parse(lines[0]).model.ranking).toEqual({ outcome: "fallback", reason: "declared-class", applied: false });
+    });
+
+    it("carries no ranking field at all for a leader, even with arena.enabled true", () => {
+      const { lines, log } = harness();
+      const root = request({ callerAgentId: undefined, labels: undefined });
+      log.note(root, arenaDecisionFor(root));
+      log.finish(tokenOf(log, root), root, root);
+
+      expect(parse(lines[0]).model.ranking).toBeUndefined();
+    });
+  });
 });
