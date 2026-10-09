@@ -15,6 +15,7 @@ import type {
   AgentSlashCommand,
   AgentStreamEvent,
 } from "../agent-sdk-types.js";
+import type { DeviceLaunchGate } from "../device-lease-manager.js";
 import {
   buildCodexAppServerEnv,
   buildCodexTurnTokenDelta,
@@ -143,6 +144,182 @@ describe("Codex guarded mode preset", () => {
     const session = createSession();
     const modes = await session.getAvailableModes();
     expect(modes.some((mode) => mode.id === "guarded")).toBe(false);
+  });
+});
+
+describe("Codex guarded mode approval handling", () => {
+  async function startGuardedSession(
+    appServer: FakeCodexAppServer,
+    deps: { deviceLaunchGate?: DeviceLaunchGate; isCatastropheGateEnabled?: () => boolean } = {},
+  ): Promise<{ session: AgentSession; paseoTurnId: string }> {
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project", modeId: "guarded" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+      deps,
+      false,
+      false,
+      false,
+      "agent-guarded-1",
+    );
+    const started = await session.startTurn("first");
+    await appServer.waitForTurnStart();
+    appServer.startsTurn({ threadId: "thread-1", turnId: "native-A" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return { session, paseoTurnId: started.turnId };
+  }
+
+  test("declines git push --force origin main with the catastrophe reason, and the reason reaches the agent", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    appServer.requestCommandApproval({
+      itemId: "command-1",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "git push --force origin main",
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-1");
+
+    expect(result).toEqual({ decision: "decline" });
+    expect(session.getPendingPermissions()).toHaveLength(0);
+    const assistantMessages = events.filter(
+      (event) => event.type === "timeline" && event.item.type === "assistant_message",
+    );
+    expect(
+      assistantMessages.some(
+        (event) =>
+          event.type === "timeline" &&
+          event.item.type === "assistant_message" &&
+          event.item.text.includes("force-push-main"),
+      ),
+    ).toBe(true);
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("approves an ordinary command with no pending permission created", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.requestCommandApproval({
+      itemId: "command-2",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "npm test",
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-2");
+
+    expect(result).toEqual({ decision: "accept" });
+    expect(session.getPendingPermissions()).toHaveLength(0);
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("declines a build-gate refusal with the build-gate reason", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const deviceLaunchGate: DeviceLaunchGate = {
+      gateLaunch: async () => ({ decision: "deny", message: "No build slot available." }),
+    };
+    const { session } = await startGuardedSession(appServer, { deviceLaunchGate });
+
+    appServer.requestCommandApproval({
+      itemId: "command-3",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "./gradlew assembleDebug",
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-3");
+
+    expect(result).toEqual({ decision: "decline" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("declines when a gate throws", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const deviceLaunchGate: DeviceLaunchGate = {
+      gateLaunch: async () => {
+        throw new Error("device gate exploded");
+      },
+    };
+    const { session } = await startGuardedSession(appServer, { deviceLaunchGate });
+
+    appServer.requestCommandApproval({
+      itemId: "command-4",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "npm test",
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-4");
+
+    expect(result).toEqual({ decision: "decline" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("approves an apply_patch request outright", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.requestFileChangeApproval({
+      itemId: "file-1",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("file-1");
+
+    expect(result).toEqual({ decision: "accept" });
+    expect(session.getPendingPermissions()).toHaveLength(0);
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("auto mode still creates a pending permission for a clean command", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startPublicSteeringSession(appServer);
+
+    const commandPermission = waitForNextPermission(session);
+    appServer.requestCommandApproval({
+      itemId: "command-5",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "npm test",
+      cwd: "/workspace/project",
+    });
+    await commandPermission;
+
+    expect(session.getPendingPermissions()).toHaveLength(1);
+    await session.respondToPermission(session.getPendingPermissions()[0]!.id, {
+      behavior: "allow",
+    });
+    await session.close();
+    appServer.assertNoErrors();
   });
 });
 

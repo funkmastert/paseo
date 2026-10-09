@@ -55,6 +55,7 @@ import {
   explainDeviceLaunchRefusal,
 } from "../device-launch-approval.js";
 import type { DeviceLaunchGate } from "../device-lease-manager.js";
+import { decideCodexGuardedCommand } from "../codex-guard.js";
 import { renderPromptAttachmentAsText } from "../prompt-attachments.js";
 import { composeSystemPromptParts } from "../system-prompt.js";
 import { curateAgentActivity } from "../activity-curator.js";
@@ -265,6 +266,8 @@ interface CodexAppServerAgentDeps {
    * thing available is its own command-approval request — which Full Access never sends.
    */
   deviceLaunchGate?: DeviceLaunchGate;
+  /** Guarded mode's kill switch (docs/catastrophe-gate.md, "Turning it off"). Defaults to on. */
+  isCatastropheGateEnabled?: () => boolean;
   customProvider?: {
     id: string;
     label: string;
@@ -6852,6 +6855,37 @@ export class CodexAppServerAgentSession implements AgentSession {
       })
       .parse(params);
 
+    // Guarded mode (docs/catastrophe-gate.md, KTD-5): the daemon decides every approval itself,
+    // with no person and no pending permission. Catastrophe gate first, then the device gate;
+    // any uncertainty declines, the opposite of the fail-open check below.
+    if (this.currentMode === "guarded") {
+      const cwd = parsed.cwd ?? this.config.cwd ?? process.cwd();
+      const guardDecision =
+        typeof parsed.command === "string"
+          ? await decideCodexGuardedCommand({
+              command: parsed.command,
+              cwd,
+              agentId: this.agentId,
+              deviceLaunchGate: this.deps.deviceLaunchGate,
+              isCatastropheGateEnabled: this.deps.isCatastropheGateEnabled,
+              logger: this.logger,
+            })
+          : { decision: "decline" as const, reason: "Paseo guard saw no command to evaluate." };
+      if (guardDecision.decision === "decline") {
+        this.emitEvent({
+          type: "timeline",
+          provider: CODEX_PROVIDER,
+          item: {
+            type: "assistant_message",
+            text: formatOutOfBandStatusMessage(
+              guardDecision.reason ?? "Blocked by the Paseo guard.",
+            ),
+          },
+        });
+      }
+      return { decision: guardDecision.decision };
+    }
+
     // The device cap's only say over Codex. It answers before the request reaches a person or
     // an auto-approver, so a device launch with no slot is declined rather than queued behind
     // Tyler's attention (docs/device-leases.md).
@@ -6926,6 +6960,13 @@ export class CodexAppServerAgentSession implements AgentSession {
         reason: z.string().nullable().optional(),
       })
       .parse(params);
+
+    // Guarded mode approves file changes outright, matching Claude: the catastrophe gate covers
+    // shell commands only (docs/catastrophe-gate.md).
+    if (this.currentMode === "guarded") {
+      return Promise.resolve({ decision: "accept" });
+    }
+
     const requestId = `permission-${parsed.itemId}`;
     const request: AgentPermissionRequest = {
       id: requestId,

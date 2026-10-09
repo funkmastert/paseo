@@ -39,11 +39,12 @@ The walker reads the command the way a shell would: it splits `&&`, `||`, `;`, `
 ## Where it runs
 
 - **Claude's `PreToolUse` hook**, one matcher each for `Bash` and `Monitor`, next to the device gate in `providers/claude/agent.ts`. It fires under `bypassPermissions` and inside subagents; see [gating a tool call](providers.md#gating-a-tool-call) for why a hook and never `canUseTool`. It uses the `cwd` the hook reports, which follows the Bash tool's shell.
+- **A guarded-mode Codex child's command-approval request.** Codex has no hook, so a daemon-launched child runs in a `guarded` mode preset (`workspace-write` sandbox, `on-request` approvals) whose `item/commandExecution/requestApproval` requests the daemon answers itself — `codex-guard.ts`'s `decideCodexGuardedCommand`, called from `handleCommandApprovalRequest` in `providers/codex-app-server-agent.ts`. `apply_patch` requests are approved outright, matching Claude: this gate covers shell commands only. Unlike the hook below, **this path fails closed**: any error declines, because a guarded child has no other layer (docs/codex-workers.md). Only guarded mode is covered — Tyler's own Codex sessions, and any other Codex mode, are not.
 - **`send_terminal_keys`**, in `agent/tools/paseo-tools.ts`. `TypedTerminalLines` (`agent/typed-terminal-lines.ts`) rebuilds each line the agent submits from the keys it sends: Enter submits, Ctrl-C and Ctrl-U clear, a heredoc typed line by line is checked whole when its delimiter (or Ctrl-D) arrives. A line edited by a key only the shell understands (Tab, an arrow, history) is dropped rather than guessed at. A refused call sends nothing.
 
-Only Claude is gated. Another provider would call `checkCatastrophe` from its own interception point, listed per provider in [device-leases.md](device-leases.md#enforcement) and described in [gating a tool call](providers.md#gating-a-tool-call).
+Outside guarded-mode Codex, only Claude is gated. Another provider would call `checkCatastrophe` from its own interception point, listed per provider in [device-leases.md](device-leases.md#enforcement) and described in [gating a tool call](providers.md#gating-a-tool-call).
 
-Any error inside the gate allows the command, and the hook's own 10-second timeout does too.
+Any error inside Claude's hook allows the command, and the hook's own 10-second timeout does too. The guarded-mode Codex path is the one exception: it declines on error instead (above).
 
 ## What the agent sees
 
@@ -74,7 +75,7 @@ The key needs a daemon built from adc4e7001 (the gate's merge) or later. An olde
 - **The remote's side:** the gate decides from local refs, never the remote's. `--mirror` and `--prune` with `--all`/`--branches`/a wildcard refspec are covered (rules table above); a `--prune`d push whose destination comes from `push.default` or `remote.<name>.push` instead of an explicit `--all`/`--branches`/wildcard refspec is not checked — see the push config gap above.
 - **Other ways to move a ref:** `gh api` or `curl` against the forge's refs API, GitHub MCP tools, `tea`.
 - **Other routes to a shell:** `paseo terminal send-keys` arrives as terminal input over the WebSocket, the same path as a person typing in the app, so it is not gated. `start_workspace_script` runs scripts from `paseo.json`, which an agent can edit. Terminal lines are checked from the terminal's starting cwd; a `cd` typed on an earlier line is not carried over.
-- **Other providers:** Codex, OpenCode, Copilot and the ACP providers, Pi and OMP.
+- **Other providers:** OpenCode, Copilot and the ACP providers, Pi and OMP. Codex is gated only in guarded mode (above) — a Codex child in any other mode, including Tyler's own sessions, is ungated.
 - **Parser limits:** globs other than a trailing `*` (`/U*`), brace expansion, `find` expressions whose `-o` changes what `-delete` applies to, `case` patterns inside a subshell.
 - **Windows:** PowerShell and `cmd` syntax (the gate reads POSIX shell, so a PowerShell terminal driven through `send_terminal_keys` is read as bash), and a program spelled with `.exe` (`rm.exe`, `git.exe`).
 - **Known false positives, all rare:**
