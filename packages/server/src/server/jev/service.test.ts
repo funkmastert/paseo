@@ -889,6 +889,20 @@ describe("JevService: ledger, audit, status", () => {
     );
   });
 
+  it("shows compaction timing dormant while leader compaction is off, and shadow while it is on", async () => {
+    let leaderCompaction = false;
+    const { service } = makeHarness({
+      extra: { readLeaderCompactionEnabled: () => leaderCompaction },
+    });
+    const state = () =>
+      service.savings
+        .summary("today")
+        .features.find((feature) => feature.feature === "compactionTiming")?.state;
+    expect(state()).toBe("dormant");
+    leaderCompaction = true;
+    expect(state()).toBe("shadow");
+  });
+
   it("infers the provider from the key's prefix through the real config reader, never leaking the key", async () => {
     // Unlike makeHarness, this builds the service with no injected configReader, so it exercises
     // the real createJevConfigReader + keyResolver wiring that provider inference depends on.
