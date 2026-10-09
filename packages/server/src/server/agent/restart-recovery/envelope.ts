@@ -32,10 +32,12 @@ export function buildRecoveryResumePrompt(input: {
       "the files you were changing, the state of anything you were waiting on.",
     "2. Then carry on with the task. If it was already done or is waiting on a person, report " +
       "and stop.",
+    "3. Don't mention this restart to the user unless work was lost or something now needs " +
+      "their attention. Otherwise carry on quietly, the same as you would after any other pause.",
   ];
   if (input.recoveringChildren.length > 0) {
     lines.push(
-      `3. Recovery is also resuming these subagents of yours, which were mid-turn: ` +
+      `4. Recovery is also resuming these subagents of yours, which were mid-turn: ` +
         `${input.recoveringChildren.map(formatPeer).join(", ")}. Do not relaunch or re-prompt ` +
         "them. A finish report armed before the restart survives it, so you hear from each " +
         "as usual.",
@@ -43,7 +45,7 @@ export function buildRecoveryResumePrompt(input: {
   }
   if (input.recoveringParent) {
     lines.push(
-      `${input.recoveringChildren.length > 0 ? "4" : "3"}. Your parent ` +
+      `${input.recoveringChildren.length > 0 ? "5" : "4"}. Your parent ` +
         `${formatPeer(input.recoveringParent)} was resumed before you and knows you are coming ` +
         "back. Report to it as you normally would when you finish.",
     );

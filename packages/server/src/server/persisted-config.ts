@@ -351,6 +351,17 @@ const AgentResourceMonitorSchema = z
       })
       .strict()
       .optional(),
+    // The disk brake: holds child admission while free disk is low or falling fast. On unless
+    // this says otherwise; its low and critical lines are the disk conditions' own.
+    disk: z
+      .object({
+        enabled: z.boolean().optional(),
+        fallGB: z.number().positive().optional(),
+        fallWindowMinutes: z.number().positive().optional(),
+        releaseMarginGB: z.number().nonnegative().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -381,6 +392,15 @@ const AgentDeviceLeasesSchema = z
     // 0 disables the backstop.
     maxLeaseHours: z.number().nonnegative().optional(),
     queueTimeoutMinutes: z.number().positive().optional(),
+    // On unless `enabled` is false, but it acts on leases, so it needs the cap on too. Honors
+    // `dryRun` above. See docs/device-leases.md#shutdown.
+    simulatorTeardown: z
+      .object({
+        enabled: z.boolean().optional(),
+        idleMinutes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -554,6 +574,18 @@ const AgentRefocusSchema = z
 const AgentCatastropheGateSchema = z
   .object({
     enabled: z.boolean().optional(),
+  })
+  .strict();
+
+// Live-toggleable, and on unless `enabled` is false: the native build gate. See
+// docs/resource-monitor.md, "The native build gate".
+const AgentBuildGateSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    maxConcurrent: z.number().int().positive().optional(),
+    // A counted build older than this stops holding a slot: a hung build never blocks forever.
+    maxBuildMinutes: z.number().positive().optional(),
   })
   .strict();
 
@@ -1018,6 +1050,7 @@ export const PersistedConfigSchema = z
         admission: AgentAdmissionSchema.optional(),
         refocus: AgentRefocusSchema.optional(),
         catastropheGate: AgentCatastropheGateSchema.optional(),
+        buildGate: AgentBuildGateSchema.optional(),
         childEnv: AgentChildEnvSchema.optional(),
         remediation: AgentRemediationSchema.optional(),
         daemonVitals: AgentDaemonVitalsSchema.optional(),

@@ -93,6 +93,17 @@ export function resolveStalledAgentSweepConfig(
   };
 }
 
+/** The disk sweeper's critical floor when `diskSweeper.minFreeGB` is unset. */
+export const DEFAULT_MIN_FREE_GB = 5;
+
+/**
+ * The critical free-space floor in bytes: `diskSweeper.minFreeGB`, the line the `disk-critical`
+ * condition uses. The resource monitor's disk brake reads it from here.
+ */
+export function resolveCriticalFreeBytes(diskSweeper: { minFreeGB?: number } | undefined): number {
+  return (diskSweeper?.minFreeGB ?? DEFAULT_MIN_FREE_GB) * GIBIBYTE;
+}
+
 export interface ResolvedDiskRemediationConfig {
   enabled: boolean;
   /** Free space below this is low. The disk sweeper's `minFreeGB` stays the critical floor. */

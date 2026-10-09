@@ -2,8 +2,8 @@
 
 The daemon keeps the machine responsive while agents build, and watches what they use. This doc covers both halves:
 
-- **Before load happens:** every agent runs at low priority, and a machine-wide cap limits how many child turns run at once.
-- **While it happens:** a 60-second sweep attributes memory and CPU to each agent's process tree, warns when one runs away, and reports three machine-level conditions to the [remediation ladder](remediation.md): swap pressure, orphaned build daemons and CPU saturation. Saturation has its own remedies and an incident ledger that survives a forced reboot. [The memory brake](#the-memory-brake) holds new child turns while macOS reports memory pressure. An opt-in reaper stops abandoned build daemons instead of only reporting them.
+- **Before load happens:** every agent runs at low priority, a machine-wide cap limits how many child turns run at once, and [the native build gate](#the-native-build-gate) limits how many native builds run at once.
+- **While it happens:** a 60-second sweep attributes memory and CPU to each agent's process tree, warns when one runs away, and reports three machine-level conditions to the [remediation ladder](remediation.md): swap pressure, orphaned build daemons and CPU saturation. Saturation has its own remedies and an incident ledger that survives a forced reboot. [The memory brake](#the-memory-brake) holds new child turns while macOS reports memory pressure, and [the disk brake](#the-disk-brake) while free disk is low or falling fast. An opt-in reaper stops abandoned build daemons instead of only reporting them.
 
 It's the process-tree counterpart to [docs/token-burn.md](token-burn.md), which watches provider-reported token usage.
 
@@ -55,7 +55,7 @@ A queued child shows `running` with an additive `turnQueued: { queuedAt }` on it
 
 A running child whose own children are running or queued does not occupy a slot. A sub-leader that delegates waits on its workers; if waiting sub-leaders held every slot, their workers could never run.
 
-`setHold(source, held, reason?)` holds admission for a named source, such as the resource monitor's [saturation rung](#the-saturation-rung) and [memory brake](#the-memory-brake). Several sources may hold at once, and admission resumes only when none does. While held, new child turns queue and queued ones stay queued; running turns and roots are untouched.
+`setHold(source, held, reason?)` holds admission for a named source, such as the resource monitor's [saturation rung](#the-saturation-rung), [memory brake](#the-memory-brake) and [disk brake](#the-disk-brake). Several sources may hold at once, and admission resumes only when none does. While held, new child turns queue and queued ones stay queued; running turns and roots are untouched.
 
 When the last hold ends, the children waiting at that moment drain one at a time: the first at once, then one every `60 / bulkResumesPerMinute` seconds or 60 seconds, whichever is longer, never past the cap. Filling every free slot at once is what went wrong on 2026-09-28: the CPU hold released at 05:23:05Z with six children waiting and eight slots free, all six started in the same millisecond into 0.2 GB of free memory, and the daemon went dark an hour later. The floor is one resource-monitor sweep, because the [memory brake](#the-memory-brake) reads once a sweep: at 15 seconds a release with eight waiting started all eight before it had read the effect of the first.
 
@@ -162,7 +162,7 @@ Each sweep of an open incident builds evidence (`agent/saturation-evidence.ts`):
 Rung 1 for `cpu-saturation`, run every sweep of an open incident:
 
 - **The reaper.** It already runs every sweep on its own criteria, and saturation doesn't loosen them. Its reaps and the summary of what it spared go into the episode's attempts, as they do for `system-memory`.
-- **Hold child admission.** Held when the load is at the threshold and released under `releaseLoadPerCore` × cores (`releaseBusyFraction` on Windows), so a load hovering at the threshold doesn't flap it. Released too on the clear, on `stop()`, and when the monitor or saturation is turned off. It holds for every cause: fewer new builds and installs helps I/O too. The rung shares one hold with [the memory brake](#the-memory-brake): `holdChildAdmission` on `AgentResourceMonitorOptions` hears the union of the two, so a CPU release while memory still holds releases nothing. It is wired in `bootstrap.ts` to [child admission](#child-admission-and-resume-pacing) as the source `cpu-saturation` for both, so the reason is what tells them apart: it starts `memory-pressure:` or `cpu-saturation:`, and when the conditions behind a hold change without the union changing, the monitor sends the hold again with the reasons of every condition that holds it now. Admission's `Child turn queued` and `Child admission held` lines print those reasons under `holds`. Unwired, nothing is held.
+- **Hold child admission.** Held when the load is at the threshold and released under `releaseLoadPerCore` × cores (`releaseBusyFraction` on Windows), so a load hovering at the threshold doesn't flap it. Released too on the clear, on `stop()`, and when the monitor or saturation is turned off. It holds for every cause: fewer new builds and installs helps I/O too. The rung shares one hold with [the memory brake](#the-memory-brake) and [the disk brake](#the-disk-brake): `holdChildAdmission` on `AgentResourceMonitorOptions` hears the union of the three, so a CPU release while memory or disk still holds releases nothing. It is wired in `bootstrap.ts` to [child admission](#child-admission-and-resume-pacing) as the source `cpu-saturation` for all three, so the reason is what tells them apart: it starts `cpu-saturation:`, `memory-pressure:` or `disk-pressure:`, and when the conditions behind a hold change without the union changing, the monitor sends the hold again with the reasons of every condition that holds it now. Admission's `Child turn queued` and `Child admission held` lines print those reasons under `holds`. Unwired, nothing is held.
 - **Lower the heaviest child agent trees.** The top `reniceTopTrees` [child](#child-admission-and-resume-pacing) trees by CPU rate that use at least one core have every pid lowered to `reniceNice`. Roots, the daemon and processes outside an agent tree are never touched. This runs only on a fresh sample with a `cpu` cause: a lower priority does nothing for tasks waiting on disk. It is re-applied every sweep so pids that join those trees later are covered, and a pid already there is skipped. Agents already run at `agentNice` 10, so on macOS and Linux 15 is a real step down; on Windows 10 to 18 are all `BELOW_NORMAL` ([the priority table](#agents-run-at-low-priority)), so the only step further is 19, `IDLE`. The daemon never raises a priority, so these processes stay lowered for their lifetime, after the incident too.
 
 Every action is a `RemedyAttempt` the ladder records at `record`, is logged at info, and is written into [the ledger](#the-incident-ledger). The remedy state reads `live` when any remedy can act (admission wired, `reniceTopTrees` above 0, or a live reaper) and `none` otherwise.
@@ -191,10 +191,65 @@ It is macOS only. Every leg, swap growth included, needs the kernel's pressure l
 - **Never holds on how much swap is used.** macOS swap is sticky: on 2026-09-28 it still held 42.7 of 44 GB at 05:23Z, an hour after the jetsam storm, so a hold on the total would have re-armed every sweep until a reboot.
 - **At level 4 it pushes at once,** at `alert`, once per critical spell. The [ladder](#the-machine-level-conditions-ride-the-remediation-ladder)'s `system-memory` condition waits 10 minutes before it tells anyone, and by the time pressure is critical jetsam is about to start killing processes.
 - **A hold that has lasted 15 minutes with a child waiting pushes once,** at `notice`, per hold. The ladder hears the brake only while its swap alarm is open, and warn from a full compressor with little swap never opens it: on 2026-09-28 the compressor held about 32 GB of this 64 GB Mac until a reboot. The push gives the pressure, swap, how many children wait, and the override: `agents.admission.enabled: false` admits everything at once and lifts the cap, without a restart.
-- **After 30 minutes it lets one queued child through per sweep,** oldest first and never past the cap, as long as every sweep read a pressure level, none was critical, and swap grew less than 1 GiB per sweep. A sweep that breaks any of those goes back to a full hold for another 30 minutes. While CPU saturation holds admission too, nothing trickles. Without it a warn spell stalls every child turn for as long as it lasts; one new turn a minute is a pace the brake sees the effect of before the next.
+- **After 30 minutes it lets one queued child through per sweep,** oldest first and never past the cap, as long as every sweep read a pressure level, none was critical, and swap grew less than 1 GiB per sweep. A sweep that breaks any of those goes back to a full hold for another 30 minutes. While CPU saturation holds admission too, or the disk brake holds it and is not ready to let one through, nothing trickles, and no sweep lets two through whichever brake opens it. Without it a warn spell stalls every child turn for as long as it lasts; one new turn a minute is a pace the brake sees the effect of before the next.
 - **It never acts on a running process.** No signal, no `SIGSTOP`, no renice. Stopping a tree frees no memory, and a Bash tool timeout's `SIGTERM` stays pending on a stopped tree, which can hang the turn. Running turns and roots go on as before.
 
 Its hold, its release and each child it lets through are `admission-hold` attempts on the `system-memory` episode when one is open. The thresholds are fixed; there is no config for them yet.
+
+## The disk brake
+
+The disk brake holds new child turns while free disk is low or falling fast, through the same hold as [the saturation rung](#the-saturation-rung) and [the memory brake](#the-memory-brake). The logic is `agent/disk-brake.ts`.
+
+It exists because of 2026-10-08: an iOS build with UI tests and an Android Gradle build ran together for an hour, free disk fell to 32 GB, and the machine had to be forced off. The memory brake held for five minutes; nothing read the disk, and the disk conditions in [docs/disk-pressure.md](disk-pressure.md) tick every 10 minutes and only report.
+
+Every sweep reads free space on the `PASEO_HOME` volume with one `statfs`, the same reading the disk monitor takes, at the monitor's 60-second cadence. Ten minutes is too coarse for a 15-minute window.
+
+- **Holds** when free space is under the `disk-low` line (`agents.remediation.disk.lowFreeGB`, default 20) or the `disk-critical` floor (`diskSweeper.minFreeGB`, default 5), or fell `fallGB` within `fallWindowMinutes`, measured peak-in-window to now as the disk monitor measures it. The two builds on 10-08 lost about 25 GB every 15 minutes and a single Gradle build about 10, so 15 GB in 15 minutes catches the pile-up and not one build. At 13:19 that day the machine still had 32 GB, above any low line; the fall holds ten minutes before that.
+- **Releases** when free space is back past the low line plus `releaseMarginGB` and the fall in the window is under half of `fallGB`, so a disk hovering at either line does not flap the hold. A fall that stops releases once its peak leaves the window.
+- **A sweep with no reading** keeps the hold, and a run of failed reads is logged once.
+- **After 30 minutes held with the disk not falling** (under 1 GiB lost in the window) and not critical, it lets one queued child through per sweep, under the same rules as the memory brake's trickle. A low disk that sits still is not getting worse, and a hold that never lets go stalls every child until someone frees space.
+- **It never acts on a running process** and never deletes anything. The disk conditions' rung-1 remedies do the reclaiming.
+
+Its open, a record every five minutes while it holds, any sweep that let a child through, and its release go to [the ledger](#the-incident-ledger) with free space, the fall, both lines, and the biggest growers from the disk monitor's last [growth sample](disk-pressure.md#growth-evidence). It reports nothing to the remediation ladder: the disk monitor's three conditions already do.
+
+| Key (`agents.resourceMonitor.disk`) | Default | What it does                                                   |
+| ----------------------------------- | ------- | -------------------------------------------------------------- |
+| `enabled`                           | `true`  | Off releases the hold and closes the ledger incident           |
+| `fallGB`                            | 15      | Free space lost within the window that holds                   |
+| `fallWindowMinutes`                 | 15      | The window                                                     |
+| `releaseMarginGB`                   | 5       | How far past the low line free space must come back to release |
+
+`grep '"Disk pressure' daemon.log` shows each open, clear and switch-off.
+
+## The native build gate
+
+At most `maxConcurrent` native builds run at once across the machine, one by default, and none start while free disk is under the `disk-low` line. On 2026-10-08 an iOS build with UI tests and an Android Gradle build ran together for an hour; Gradle alone wrote 34 GB and the machine went down. Either build alone had not done that.
+
+It follows [the device cap's layers](device-leases.md#three-layers-three-jobs), with no checkout:
+
+- **The process scan is the count** (`agent/native-build-detection.ts`). A Gradle client JVM running a build task (`gradlew`'s `-jar gradle-wrapper.jar`, the distribution's `gradle-gradle-cli-main` jar, or the older `GradleWrapperMain`/`GradleMain`), `xcodebuild` running a build action, SwiftPM's `swift build|test`, and `swift-frontend` compile jobs under none of those, one build per parent (an Xcode IDE build; indexing and `-interpret` jobs don't count). A build under another counted build counts once. The Gradle daemon never counts: it stays resident between builds and `ps` cannot tell idle from busy. A build you started by hand holds a slot like an agent's. The scan also reports runners, `expo run:*`, `react-native run-*|build-*` and `eas build --local`, apart from builds, with whether a counted build runs under each; the gate decides when one holds a slot (below). Windows rows are Win32 command lines with quoted paths, and are tokenized quote-aware.
+- **The gate refuses the command** (`agent/native-build-gate.ts`), through the same launch gate the device cap uses, so it binds each provider [as far as the device cap does](device-leases.md#enforcement). It wraps that gate and runs first, so a build it refuses never takes a device slot. `agent/native-build-commands.ts` decides what is a build: Gradle `assemble*`, `build`, `bundle*`, `install*`, `test*`, `connected*`, `compile*`, `lint*`, `package*`, `check` and Roborazzi tasks; `xcodebuild` with a build action or none (its default is `build`), and wrapper scripts named for it; `swift build|test`; `expo run:ios|android`; `react-native run-*|build-*`; `eas build --local`; and package scripts named `android`, `ios`, `android:*`, `ios:*` or `build:android|ios` run through npm, yarn, pnpm or bun (this repo's own `npm run android`). It sees through `nice`, `timeout`, `caffeinate`, `heavy.sh`, `xcrun`, env prefixes, shell keywords, `bash ./gradlew`, `sh -c '...'`, `cmd /c` and PowerShell's `.\gradlew.bat`. Inspection never counts: `gradlew tasks`, `--stop`, `--dry-run`, `xcodebuild -list`, `-showBuildSettings`, `-license`, `-find`, `clean`, `swift build --show-bin-path`. Neither do commands that run until killed: Gradle `--continuous` and `swift run`.
+
+The count comes from the resource monitor's attributed sample, handed over every sweep, so `ask_jev`'s commands count against the agent that asked. A decision takes its own `ps` only when that sample is older than 5 seconds, the device cap's bound: one `ps` shared by every decision waiting on it, bounded at 8 seconds so the answer lands inside the provider hook's 20. When it is late, the monitor's last sample decides if it is under 2 minutes old. The decision itself has no await in it, so two builds asking together are decided one after the other.
+
+What holds a slot:
+
+- **A running build,** until it has run `maxBuildMinutes`. A hung `xcodebuild test` then stops blocking everyone, and the log says so once.
+- **A runner setting up:** an `expo run`, `react-native run|build` or `eas build --local` whose native build has not appeared yet, for up to 30 minutes. Once its build has been seen, the build holds the slot, and the runner holds nothing after it: `expo run` stays up serving Metro and builds nothing.
+- **An allowance the scan has not seen start.** Each allowance names its launcher, the program and task the command runs (`gradlew` and `:app:assembleDebug`). It holds while a process in the agent's tree still carries both: the shell running the command, `heavy.sh` waiting for one of its slots, `npm run android`. It ends when the agent's build appears (the build holds the slot from then), when nothing in the agent's tree runs the command any more (it finished between scans, failed or never started), or after an hour. A sample taken less than 5 seconds after the allowance does not judge it: the provider has not started the command yet, and two builds asked for in one message must not both pass. A build the device cap then refuses gives its slot back.
+
+The refusal names everything holding a slot, by command, agent title and running time, or says it is outside every agent's process tree. It tells the agent to run `sleep 120` on its own and retry: chained in front of the build, the sleep would not help, because the gate reads the whole command line before anything runs. A refusal for disk tells it to wait for space with `sleep 300` and never to delete DerivedData, caches or simulators to get past it, since other agents may be using them; the disk conditions' remedies do the reclaiming. Codex and the ACP providers get the reason over the steer path, as the device cap's do.
+
+It fails open: a free-space read that throws skips the disk check, and with no sample in time and none recent the build is allowed, logged once per run of failures.
+
+| Key (`agents.buildGate`) | Default | What it does                                         |
+| ------------------------ | ------- | ---------------------------------------------------- |
+| `enabled`                | `true`  | Off allows every build without a scan                |
+| `dryRun`                 | `false` | Log what would have been refused; refuse nothing     |
+| `maxConcurrent`          | 1       | Native builds at once, counting ones started by hand |
+| `maxBuildMinutes`        | 120     | A build older than this stops holding a slot         |
+
+The disk line is `agents.remediation.disk.lowFreeGB` (default 20), the [disk brake](#the-disk-brake)'s low line, not the 5 GB critical floor: one build writes 10 to 34 GB, so a build started at 6 GB free fills the volume ([docs/disk-pressure.md](disk-pressure.md)). `grep '"module":"build-gate"' daemon.log` shows each build allowed or refused with what was running.
 
 ## Reaping abandoned build daemons
 
@@ -258,11 +313,11 @@ Fifteen minutes of idle is the default because it is long enough that you have p
 
 ## The incident ledger
 
-Saturation incidents go to `$PASEO_HOME/resource-monitor/incidents.jsonl`, one JSON record per line: when an incident opens, every five minutes while it holds, on any sweep where the rung acted, and when it clears. A record carries the event, cores, the load reading, free, available and swap memory, the process sample's freshness and age, the cause, [the evidence](#evidence-and-cause), and `actions`: what the rung did that sweep.
+Saturation incidents go to `$PASEO_HOME/resource-monitor/incidents.jsonl`, one JSON record per line: when an incident opens, every five minutes while it holds, on any sweep where the rung acted, and when it clears. [Disk brake](#the-disk-brake) incidents share the file on the same schedule, marked `kind: "disk"`; saturation records carry no `kind`, and the readers below skip anything that has one. A saturation record carries the event, cores, the load reading, free, available and swap memory, the process sample's freshness and age, the cause, [the evidence](#evidence-and-cause), and `actions`: what the rung did that sweep.
 
 A saturated machine usually ends in a forced reboot, and the evidence has to outlive it. Every record is its own open, append, `fdatasync` and close, never a buffered stream. An incident with no `clear` record is one the daemon or the machine did not survive. The file rotates to `incidents.1.jsonl` at 1 MiB, keeping one previous file. A write failure is logged once per run of failures and never fails the sweep.
 
-`paseo doctor` reads it: `resource.saturation` reports the latest incident within 7 days (see [docs/doctor.md](doctor.md)).
+`paseo doctor` reads it: `resource.saturation` reports the latest saturation incident within 7 days (see [docs/doctor.md](doctor.md)).
 
 ## Why this is a separate monitor from token burn
 

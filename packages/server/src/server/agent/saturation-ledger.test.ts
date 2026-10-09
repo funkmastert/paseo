@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
+  buildDiskLedgerRecord,
   createSaturationLedger,
   readLatestSaturationIncident,
   type SaturationLedgerEvent,
@@ -111,6 +112,35 @@ describe("saturation ledger", () => {
       peakLoad1: 38,
     });
     expect(incident?.peak.evidence.agentTrees[0]?.agentId).toBe("android");
+  });
+
+  test("disk records share the file and never read back as a saturation incident", async () => {
+    const ledger = createSaturationLedger({ paseoHome: home, logger });
+    await ledger.append(record({ event: "open", atMs: T0, load1: 34 }));
+    await ledger.append(record({ event: "clear", atMs: T0 + 300_000, load1: 8 }));
+    const disk = buildDiskLedgerRecord({
+      event: "open",
+      atMs: T0 + 600_000,
+      openedAtMs: T0 + 600_000,
+      freeBytes: 32 * 1024 ** 3,
+      fallBytes: 24 * 1024 ** 3,
+      fallWindowMinutes: 15,
+      lowFreeBytes: 20 * 1024 ** 3,
+      criticalFreeBytes: 5 * 1024 ** 3,
+      conditions: ["falling"],
+      growth: null,
+    });
+    await ledger.append(disk);
+
+    const lines = (await readFile(saturationLedgerPath(home), "utf8")).trim().split("\n");
+    expect(JSON.parse(lines[2] ?? "{}")).toMatchObject({ kind: "disk", event: "open" });
+    const incident = await readLatestSaturationIncident({
+      paseoHome: home,
+      nowMs: T0 + DAY_MS,
+      windowMs: 7 * DAY_MS,
+    });
+    expect(incident?.openedAt).toBe(new Date(T0).toISOString());
+    expect(incident?.clearedAt).toBe(new Date(T0 + 300_000).toISOString());
   });
 
   test("an incident the machine went down in has no clear record, and reads as never cleared", async () => {

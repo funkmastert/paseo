@@ -15,7 +15,12 @@ import type {
   ProcessTableSample,
   SystemMemorySample,
 } from "./agent/process-sampler.js";
-import type { SaturationLedgerRecord } from "./agent/saturation-ledger.js";
+import type {
+  DiskLedgerRecord,
+  ResourceLedgerRecord,
+  SaturationLedgerRecord,
+} from "./agent/saturation-ledger.js";
+import type { DiskGrowthReport } from "./disk-growth-sampler.js";
 import type { SystemLoadReading, SystemLoadSample } from "./agent/system-load.js";
 import { AgentSideProcesses } from "./agent/agent-side-processes.js";
 import {
@@ -235,6 +240,14 @@ function createMonitor(params: {
   worktreeRootDirs?: readonly string[];
   cwdResolver?: BuildDaemonCwdResolver;
   connectionChecker?: BuildDaemonConnectionChecker;
+  readFreeDiskBytes?: AgentResourceMonitorOptions["readFreeDiskBytes"];
+  readDiskGrowth?: AgentResourceMonitorOptions["readDiskGrowth"];
+  reportAttributedSample?: AgentResourceMonitorOptions["reportAttributedSample"];
+  /** The rest of the daemon config the monitor reads, beside `resourceMonitor`. */
+  daemonConfig?: Omit<
+    ReturnType<AgentResourceMonitorOptions["readDaemonConfig"]>,
+    "resourceMonitor"
+  >;
 }) {
   const agentManager = createFakeAgentManager(
     params.agents ?? [summary({})],
@@ -264,6 +277,11 @@ function createMonitor(params: {
       ? { readAgentSideProcesses: params.readAgentSideProcesses }
       : {}),
     ...(params.worktreeRootDirs ? { worktreeRootDirs: params.worktreeRootDirs } : {}),
+    ...(params.readFreeDiskBytes ? { readFreeDiskBytes: params.readFreeDiskBytes } : {}),
+    ...(params.readDiskGrowth ? { readDiskGrowth: params.readDiskGrowth } : {}),
+    ...(params.reportAttributedSample
+      ? { reportAttributedSample: params.reportAttributedSample }
+      : {}),
     // Never shells out to a real lsof in a test unless a test explicitly injects one.
     cwdResolver: params.cwdResolver ?? { resolve: async () => new Map() },
     // No test reaches a real lsof: by default every Metro is checked and has no client.
@@ -274,7 +292,10 @@ function createMonitor(params: {
     serverId: "server-1",
     processSampler: sampler,
     sendSystemMessageToAgent: steer.fn,
-    readDaemonConfig: () => ({ resourceMonitor: { ...SUSTAINED_ONE, ...params.config } }),
+    readDaemonConfig: () => ({
+      resourceMonitor: { ...SUSTAINED_ONE, ...params.config },
+      ...params.daemonConfig,
+    }),
     logger,
     ownerUid: "ownerUid" in params ? params.ownerUid : OWNER_UID,
     sleep: async () => {},
@@ -1456,6 +1477,34 @@ function loadavg(load1: number): SystemLoadReading {
   return { kind: "loadavg", cores: 16, load1, load5: load1, load15: load1 };
 }
 
+describe("AgentResourceMonitor hands its sample to the build gate", () => {
+  test("each sweep's attributed sample goes to the gate, with ask_jev's processes in the agent's tree", async () => {
+    const report = vi.fn();
+    const rows = [agentProcessRow("agent-1", 100, 0), row({ pid: 700, ppid: 1, command: "jev" })];
+    const { monitor } = createMonitor({
+      processRows: rows,
+      reportAttributedSample: report,
+      readAgentSideProcesses: () => new Map([["agent-1", [700]]]),
+    });
+    await monitor.tick();
+    expect(report).toHaveBeenCalledTimes(1);
+    const [sample] = report.mock.calls[0] ?? [];
+    expect(sample.rows.map((entry: ProcessSampleRow) => entry.pid)).toEqual([200, 700]);
+    expect(sample.agentTrees).toEqual([
+      expect.objectContaining({ agentId: "agent-1", pids: expect.arrayContaining([200, 700]) }),
+    ]);
+  });
+
+  test("a sweep whose ps failed hands over nothing", async () => {
+    const report = vi.fn();
+    const sampler = createFakeSampler();
+    failProcessSamples(sampler);
+    const { monitor } = createMonitor({ sampler, reportAttributedSample: report });
+    await monitor.tick();
+    expect(report).not.toHaveBeenCalled();
+  });
+});
+
 describe("AgentResourceMonitor when process sampling fails", () => {
   test("stale rows never reach the reaper, the artifact janitor or the device cap", async () => {
     const clock = { ms: 1_000_000 };
@@ -2349,5 +2398,317 @@ describe("AgentResourceMonitor admission hold reasons", () => {
     await sweep(monitor, 5, clock);
     expect(admission.held()).toEqual([true]);
     expect(admission.lastReason()).toMatch(/^cpu-saturation: /);
+  });
+});
+
+const GIB = 1024 ** 3;
+
+/** Free disk the monitor reads each sweep, in GiB; `fail` makes statfs throw. */
+function createFakeDisk(initialGiB: number) {
+  const disk = { gib: initialGiB, fail: false };
+  const read = vi.fn(async () => {
+    if (disk.fail) throw new Error("statfs: EIO");
+    return disk.gib * GIB;
+  });
+  return { disk, read };
+}
+
+function createDiskLedger() {
+  const records: ResourceLedgerRecord[] = [];
+  return {
+    ledger: { append: vi.fn(async (record: ResourceLedgerRecord) => void records.push(record)) },
+    disk: () => records.filter((record): record is DiskLedgerRecord => "kind" in record),
+  };
+}
+
+const GROWTH: DiskGrowthReport = {
+  sample: { at: "2026-10-08T20:38:50.132Z", roots: [], unmeasured: [] },
+  previousAt: "2026-10-08T19:26:53.455Z",
+  roots: [],
+  growers: [
+    { path: "/Users/t/Library/Developer/XCTestDevices", bytes: 518 * GIB, deltaBytes: 43.5 * GIB },
+    { path: "/Users/t/paseo-worktrees", bytes: 31.9 * GIB, deltaBytes: 6.8 * GIB },
+  ],
+};
+
+describe("AgentResourceMonitor disk brake", () => {
+  function setup(
+    overrides: {
+      freeGiB?: number;
+      config?: ResourceMonitorConfig;
+      daemonConfig?: Parameters<typeof createMonitor>[0]["daemonConfig"];
+      load?: number;
+    } = {},
+  ) {
+    const clock = { ms: 1_000_000 };
+    const { disk, read } = createFakeDisk(overrides.freeGiB ?? 200);
+    const sampler = createFakeSampler({
+      systemMemory: macMemory(1, 0),
+      load: loadavg(overrides.load ?? 4),
+    });
+    const admission = createAdmissionRecorder();
+    const { ledger, disk: diskRecords } = createDiskLedger();
+    const created = createMonitor({
+      agents: [],
+      sampler,
+      config: overrides.config,
+      daemonConfig: overrides.daemonConfig,
+      holdChildAdmission: admission.fn,
+      saturationLedger: ledger,
+      readFreeDiskBytes: read,
+      readDiskGrowth: () => GROWTH,
+      now: () => clock.ms,
+    });
+    return { ...created, clock, disk, sampler, admission, diskRecords };
+  }
+
+  test("free disk under the low line holds child admission; past the line plus the margin releases it", async () => {
+    const { monitor, disk, admission, clock } = setup({ freeGiB: 30 });
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([]);
+
+    disk.gib = 19;
+    await sweep(monitor, 1, clock);
+    expect(admission.calls).toEqual([
+      { held: true, reason: expect.stringMatching(/^disk-pressure: .*disk low: 19\.0 GB free/) },
+    ]);
+
+    disk.gib = 24;
+    await sweep(monitor, 20, clock);
+    expect(admission.held()).toEqual([true]);
+    disk.gib = 25;
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true, false]);
+  });
+
+  test("the 10-08 numbers hold admission: 32 GB free and falling, far above the low line", async () => {
+    // 27.5 MB/s, the `cp` and GradleWorkerMain write rates macOS flagged at 13:19 PDT, ending at
+    // the 31.88 GB free it read then (crash-2026-10-08.md).
+    const perMinuteGiB = (27.5 * 1e6 * 60) / GIB;
+    const { monitor, disk, admission, clock } = setup({ freeGiB: 31.88 + 15 * perMinuteGiB });
+    for (let minute = 0; minute <= 15; minute += 1) {
+      disk.gib = 31.88 + (15 - minute) * perMinuteGiB;
+      await sweep(monitor, 1, clock);
+    }
+    // Held ten minutes in, at about 40 GB free, and still held at 13:19's 32 GB.
+    expect(admission.held()).toEqual([true]);
+    expect(admission.lastReason()).toMatch(/disk falling fast: fell 1\d\.\d GB in the last 15 min/);
+  });
+
+  test("a flat disk never holds, even one lower than it should be", async () => {
+    const { monitor, admission, diskRecords, clock } = setup({ freeGiB: 26 });
+    await sweep(monitor, 60, clock);
+    expect(admission.held()).toEqual([]);
+    expect(diskRecords()).toEqual([]);
+  });
+
+  test("the low and critical lines are the disk conditions' own: remediation.disk.lowFreeGB and diskSweeper.minFreeGB", async () => {
+    const { monitor, admission, diskRecords, clock } = setup({
+      freeGiB: 35,
+      daemonConfig: { remediation: { disk: { lowFreeGB: 40 } }, diskSweeper: { minFreeGB: 36 } },
+    });
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true]);
+    expect(diskRecords()[0]).toMatchObject({
+      lowFreeBytes: 40 * GIB,
+      criticalFreeBytes: 36 * GIB,
+      conditions: ["critical", "low"],
+    });
+  });
+
+  test("config off holds nothing, and turning it off mid-hold releases and closes the incident", async () => {
+    const config: ResourceMonitorConfig = { disk: { enabled: false } };
+    const { monitor, disk, admission, diskRecords, clock } = setup({ freeGiB: 10, config });
+    await sweep(monitor, 3, clock);
+    expect(admission.held()).toEqual([]);
+
+    config.disk = { enabled: true };
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true]);
+    config.disk = { enabled: false };
+    disk.gib = 9;
+    await sweep(monitor, 2, clock);
+    expect(admission.held()).toEqual([true, false]);
+    expect(diskRecords().map((record) => record.event)).toEqual(["open", "clear"]);
+  });
+
+  test("turning the whole monitor off releases a disk hold", async () => {
+    const config: ResourceMonitorConfig = {};
+    const { monitor, admission, clock } = setup({ freeGiB: 10, config });
+    await sweep(monitor, 1, clock);
+    config.enabled = false;
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true, false]);
+  });
+
+  test("the ledger records open, ongoing every five minutes, and clear, with free space, the fall and what grew", async () => {
+    const { monitor, disk, diskRecords, clock } = setup({ freeGiB: 60 });
+    await sweep(monitor, 1, clock);
+    disk.gib = 40;
+    await sweep(monitor, 1, clock);
+    await sweep(monitor, 10, clock);
+    disk.gib = 60;
+    await sweep(monitor, 20, clock);
+
+    const records = diskRecords();
+    expect(records.map((record) => record.event)).toEqual(["open", "ongoing", "ongoing", "clear"]);
+    const [open] = records;
+    expect(open).toMatchObject({
+      version: 1,
+      kind: "disk",
+      freeBytes: 40 * GIB,
+      fallBytes: 20 * GIB,
+      fallWindowMinutes: 15,
+      conditions: ["falling"],
+      growth: {
+        sampledAt: "2026-10-08T20:38:50.132Z",
+        comparedWith: "2026-10-08T19:26:53.455Z",
+        growers: [
+          { path: "/Users/t/Library/Developer/XCTestDevices", deltaBytes: 43.5 * GIB },
+          { path: "/Users/t/paseo-worktrees", deltaBytes: 6.8 * GIB },
+        ],
+      },
+    });
+    expect(open?.actions?.[0]).toMatchObject({ remedy: "admission-hold", outcome: "acted" });
+    expect(new Set(records.map((record) => record.openedAt)).size).toBe(1);
+    expect(records.at(-1)?.actions?.[0]?.detail).toMatch(
+      /^Released child admission: disk recovered/,
+    );
+  });
+
+  test("a disk that cannot be read keeps the hold, and says so once", async () => {
+    const { monitor, disk, admission, logger, clock } = setup({ freeGiB: 10 });
+    await sweep(monitor, 1, clock);
+    disk.fail = true;
+    await sweep(monitor, 5, clock);
+    expect(admission.held()).toEqual([true]);
+    const failures = logger.warn.mock.calls.filter(
+      ([, message]) => message === "Resource monitor could not read free disk space",
+    );
+    expect(failures).toHaveLength(1);
+  });
+
+  test("disk, memory and CPU share one hold: released only once none holds it", async () => {
+    const { monitor, disk, sampler, admission, clock } = setup({ freeGiB: 10 });
+    setMemory(sampler, 2, 0);
+    await sweep(monitor, 1, clock);
+    expect(admission.lastReason()).toMatch(/^disk-pressure: .*; memory-pressure: /);
+
+    disk.gib = 100;
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true]);
+    expect(admission.lastReason()).toMatch(/^memory-pressure: /);
+
+    setMemory(sampler, 1, 0);
+    await sweep(monitor, 5, clock);
+    expect(admission.held()).toEqual([true, false]);
+  });
+});
+
+describe("AgentResourceMonitor long disk hold", () => {
+  function setup(overrides: { load?: number } = {}) {
+    const clock = { ms: 1_000_000 };
+    const fleet = new Map<string, AdmissionAgentView>();
+    const childAdmission = new ChildAdmissionController({
+      readConfig: () => ({ maxConcurrentChildTurns: 8 }),
+      listAgents: () => [...fleet.values()],
+      logger: createTestLogger(),
+      now: () => new Date(clock.ms),
+    });
+    const { disk, read } = createFakeDisk(18);
+    const sampler = createFakeSampler({
+      systemMemory: macMemory(1, 5),
+      load: loadavg(overrides.load ?? 4),
+    });
+    const created = createMonitor({
+      agents: [],
+      sampler,
+      holdChildAdmission: (held, reason) => childAdmission.setHold("cpu-saturation", held, reason),
+      childAdmission,
+      readFreeDiskBytes: read,
+      now: () => clock.ms,
+    });
+    const started: string[] = [];
+    const ask = (id: string) => {
+      const result = childAdmission.request({ agentId: id, parentAgentId: "leader-1", prompt: id });
+      fleet.set(id, { id, parentAgentId: "leader-1", lifecycle: "running" });
+      if (result.status === "admitted") started.push(id);
+      else void result.result.then((outcome) => outcome.outcome === "admitted" && started.push(id));
+    };
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+    return { ...created, clock, disk, sampler, childAdmission, ask, started, flush };
+  }
+
+  test("a low disk that holds still lets one child through per sweep from half an hour", async () => {
+    const { monitor, childAdmission, ask, started, flush, clock } = setup();
+    await sweep(monitor, 1, clock);
+    expect(childAdmission.isHeld()).toBe(true);
+    for (const id of ["w1", "w2", "w3"]) ask(id);
+
+    await sweep(monitor, 29, clock);
+    await flush();
+    expect(started).toEqual([]);
+    await sweep(monitor, 1, clock);
+    await flush();
+    expect(started).toEqual(["w1"]);
+    await sweep(monitor, 1, clock);
+    await flush();
+    expect(started).toEqual(["w1", "w2"]);
+  });
+
+  test("one child per sweep at most when memory and disk are both settled", async () => {
+    const { monitor, sampler, ask, started, flush, clock } = setup();
+    setMemory(sampler, 2, 5);
+    await sweep(monitor, 1, clock);
+    for (const id of ["w1", "w2", "w3", "w4"]) ask(id);
+    await sweep(monitor, 30, clock);
+    await flush();
+    expect(started).toEqual(["w1"]);
+  });
+
+  test("never trickles while the memory brake holds without settling, or CPU saturation holds", async () => {
+    const memory = setup();
+    setMemory(memory.sampler, 2, 5);
+    await sweep(memory.monitor, 1, memory.clock);
+    for (const id of ["w1", "w2"]) memory.ask(id);
+    for (let minute = 0; minute < 40; minute += 1) {
+      // Swap grows by a gibibyte every sweep: the memory brake never settles.
+      setMemory(memory.sampler, 2, 6 + minute);
+      await sweep(memory.monitor, 1, memory.clock);
+    }
+    await memory.flush();
+    expect(memory.started).toEqual([]);
+
+    const cpu = setup({ load: 40 });
+    await sweep(cpu.monitor, 1, cpu.clock);
+    cpu.ask("w1");
+    await sweep(cpu.monitor, 40, cpu.clock);
+    await cpu.flush();
+    expect(cpu.started).toEqual([]);
+  });
+
+  test("a settled memory hold lets nothing through while the disk is still falling", async () => {
+    const { monitor, sampler, disk, ask, started, flush, clock } = setup();
+    setMemory(sampler, 2, 5);
+    await sweep(monitor, 1, clock);
+    ask("w1");
+    for (let minute = 0; minute < 40; minute += 1) {
+      disk.gib -= 0.2;
+      await sweep(monitor, 1, clock);
+    }
+    await flush();
+    expect(started).toEqual([]);
+  });
+
+  test("a disk still falling never trickles", async () => {
+    const { monitor, disk, ask, started, flush, clock } = setup();
+    await sweep(monitor, 1, clock);
+    ask("w1");
+    for (let minute = 0; minute < 40; minute += 1) {
+      disk.gib -= 0.2;
+      await sweep(monitor, 1, clock);
+    }
+    await flush();
+    expect(started).toEqual([]);
   });
 });

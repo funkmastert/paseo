@@ -17,7 +17,11 @@ import {
 import { type DiskRemedyReport } from "./disk-remedies.js";
 import type { WorkspaceDiskUsage } from "./messages.js";
 import type { PushNotificationSender, PushSendMeta } from "./push/index.js";
-import { resolveDiskRemediationConfig, type RemediationConfig } from "./remediation/config.js";
+import {
+  DEFAULT_MIN_FREE_GB,
+  resolveDiskRemediationConfig,
+  type RemediationConfig,
+} from "./remediation/config.js";
 import {
   NULL_REMEDIATION_SINK,
   type RemediationConditionKind,
@@ -37,7 +41,6 @@ import type { PersistedProjectRecord, PersistedWorkspaceRecord } from "./workspa
 const DEFAULT_SWEEP_INTERVAL_MS = 600_000; // 10 minutes
 const DEFAULT_RETENTION_DAYS = 7;
 const DEFAULT_MAX_DELETIONS_PER_TICK = 5;
-const DEFAULT_MIN_FREE_GB = 5;
 const DEFAULT_SAMPLE_TIMEOUT_MS = 30_000;
 // Once/day per path — an unsafe orphan usually stays unsafe for a while (see
 // disk-sweep-notification.ts), so a repeated push every tick would just be noise.
@@ -226,6 +229,14 @@ export class WorktreeDiskMonitor {
       clearInterval(this.timer);
       this.timer = null;
     }
+  }
+
+  /**
+   * What the last growth sample found, for the resource monitor's disk brake to name in its
+   * ledger. Null until the first sample of this run.
+   */
+  getLastGrowthReport(): DiskGrowthReport | null {
+    return this.lastGrowthReport;
   }
 
   /** Read by WorkspaceDirectoryDeps.getDiskUsage — see workspace-directory.ts. */

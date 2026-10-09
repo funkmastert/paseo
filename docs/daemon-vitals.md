@@ -45,4 +45,6 @@ The tests prove it against a real process, not a simulation: `event-loop.process
 
 It defaults on, unlike everything else here. It writes one small file as the process exits and observes nothing, and its absence only means "it died" if it is written on every run, not only runs where someone opted in. Set `shutdownReceipt: false` to turn it off.
 
+The bounded waits inside `stop()` live in `shutdown-budget.ts`, and its test fails when their sum no longer leaves the unbounded steps their reserve inside the budget. A slow step that is not on the durability path (the simulator teardown) starts early and is waited on last, with what is left.
+
 Supervisor-loss exits and a failed `createPaseoDaemon` leave no receipt. Both are abnormal, and a missing receipt reads that way.

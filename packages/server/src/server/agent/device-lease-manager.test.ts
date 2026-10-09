@@ -4,6 +4,8 @@ import {
   type DeviceLeaseAgentSummary,
   type DeviceLeaseConfig,
 } from "./device-lease-manager.js";
+import { detectRunningDevices } from "./device-detection.js";
+import { attributeProcessTrees } from "./process-attribution.js";
 import type { ProcessSampleRow, SystemMemorySample } from "./process-sampler.js";
 
 const GIBIBYTE = 1024 ** 3;
@@ -73,6 +75,8 @@ function createManager(
     physicalTargets?: string[];
     /** Makes every identity lookup take a turn of the event loop, like the real adb call. */
     slowIdentityLookup?: boolean;
+    /** Replaces the fake shutdown command, e.g. with one that never settles (a wedged simctl). */
+    shutdownExec?: () => Promise<void>;
   } = {},
 ) {
   const state = {
@@ -91,7 +95,7 @@ function createManager(
   let leaseCounter = 0;
   const logger = { info: vi.fn(), warn: vi.fn() };
   const sendSystemMessageToAgent = vi.fn(async () => undefined);
-  const shutdownExec = vi.fn(async () => undefined);
+  const shutdownExec = vi.fn(options.shutdownExec ?? (async () => undefined));
   const androidSerial = vi.fn(async (avd: string, _options?: { fresh?: boolean }) => {
     if (options.slowIdentityLookup) await new Promise((resolve) => setTimeout(resolve, 5));
     return options.androidSerials?.[avd];
@@ -1080,6 +1084,328 @@ describe("DeviceLeaseManager shutdownDevice", () => {
 
     expect(await manager.shutdownDevice({ deviceId: UDID_A })).toEqual({ status: "shut-down" });
     expect(shutdownExec).toHaveBeenCalled();
+  });
+});
+
+/** A row under some parent: a shell, the command it runs, or a process inside a simulator. */
+function childRow(pid: number, ppid: number, command: string): ProcessSampleRow {
+  return { pid, ppid, uid: 501, rssKb: 10_000, cpuPercent: 0, etime: "05:00", command };
+}
+
+/** One resource-monitor sweep over the harness's `ps` rows, handed over the way the monitor does. */
+async function sweepRows(harness: ReturnType<typeof createManager>): Promise<void> {
+  const { manager, state } = harness;
+  const { agentTrees } = attributeProcessTrees(
+    state.rows,
+    state.agents.map((agent) => agent.agentId),
+  );
+  await manager.reconcileFromSample({
+    devices: detectRunningDevices({ rows: state.rows, agentTrees }),
+    systemMemory: state.memory,
+    rows: state.rows,
+    agentTrees,
+  });
+}
+
+/**
+ * A simulator the daemon saw the agent boot: a checkout with nothing running, then the device
+ * appears a minute later (up 30 s, so after the lease) and the sweep binds the lease to it.
+ */
+async function checkOutAndBoot(
+  harness: ReturnType<typeof createManager>,
+  input: { agentId: string; udid: string; pid: number },
+): Promise<void> {
+  const { manager, state } = harness;
+  const result = await manager.checkout({ agentId: input.agentId, platform: "ios" });
+  expect(result.status).toBe("granted");
+  state.nowMs += 60_000;
+  state.rows = [...state.rows, simulatorRow(input.pid, input.udid, "00:30")];
+  await sweepRows(harness);
+}
+
+const IDLE_HOLDER: DeviceLeaseAgentSummary = {
+  agentId: "agent-1",
+  provider: "claude",
+  isRunning: false,
+};
+
+describe("DeviceLeaseManager agent-held simulator shutdown", () => {
+  test("daemon shutdown shuts down a simulator an agent booted, leaving reserved and unleased ones alone", async () => {
+    const harness = createManager();
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    // Booted after, so the checkout above could not reuse either. UDID_C stays unleased.
+    harness.state.rows.push(simulatorRow(2, UDID_B), simulatorRow(3, UDID_C));
+    harness.manager.reserveDevice(UDID_B);
+    await sweepRows(harness);
+
+    await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
+
+    expect(harness.shutdownExec).toHaveBeenCalledTimes(1);
+    expect(harness.shutdownExec).toHaveBeenCalledWith("xcrun", ["simctl", "shutdown", UDID_A]);
+  });
+
+  test("a hand-booted simulator an agent reused is never shut down, at daemon shutdown or idle", async () => {
+    const harness = createManager({ rows: [simulatorRow(1, UDID_A)], agents: [IDLE_HOLDER] });
+    // Tyler booted UDID_A two hours ago; the agent checks it out by name and gets it reused.
+    const result = await harness.manager.checkout({
+      agentId: "agent-1",
+      platform: "ios",
+      device: UDID_A,
+    });
+    expect(result.status === "granted" && result.device?.deviceId).toBe(UDID_A);
+
+    await sweepRows(harness);
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+    await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("a launch that names an already-running simulator binds a lease the teardown leaves alone", async () => {
+    const harness = createManager({ rows: [simulatorRow(1, UDID_A)] });
+
+    await harness.manager.gateLaunch({
+      agentId: "agent-1",
+      command: `npx expo run:ios --device ${UDID_A}`,
+    });
+    expect((await harness.manager.getSnapshot()).devices[0]).toMatchObject({
+      deviceId: UDID_A,
+      agentId: "agent-1",
+      attribution: "lease",
+    });
+    await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("daemon shutdown releases the lease once the simulator is down", async () => {
+    const harness = createManager();
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+
+    await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
+    expect(harness.shutdownExec).toHaveBeenCalledTimes(1);
+
+    // The lease is gone, so calling it again (e.g. a retried shutdown) finds nothing left to do.
+    await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
+    expect(harness.shutdownExec).toHaveBeenCalledTimes(1);
+  });
+
+  test("a wedged simctl at daemon shutdown does not block past its own timeout, and leaves the lease alone", async () => {
+    // Never settles: exactly a wedged `simctl`. The teardown must give up on it rather than
+    // wait, and stop() bounds its own wait further (shutdown-budget.ts).
+    const harness = createManager({ shutdownExec: () => new Promise<void>(() => undefined) });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const call = harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown().then(() => {
+        settled = true;
+        return undefined;
+      });
+      // device-lease-manager.ts's SIMULATOR_SHUTDOWN_TIMEOUT_MS.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await call;
+
+      expect(settled).toBe(true);
+      expect(harness.logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ deviceId: UDID_A }),
+        "Failed to shut down an agent-held simulator; leaving it for the OS to tear down",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("the idle sweep shuts down a simulator nothing has used for 30 minutes", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    // The agent CLI and one of the simulator's own processes, which names its UDID in its path.
+    // Neither is use: the root is no command, and the device's own tree is the device.
+    harness.state.rows.push(
+      agentRootRow(500, "agent-1"),
+      childRow(
+        901,
+        900,
+        `/usr/libexec/testmanagerd --device /CoreSimulator/Devices/${UDID_A}/data`,
+      ),
+    );
+    await sweepRows(harness);
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).toHaveBeenCalledTimes(1);
+    expect(harness.shutdownExec).toHaveBeenCalledWith("xcrun", ["simctl", "shutdown", UDID_A]);
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: UDID_A, trigger: "idle-sweep" }),
+      "Shut down an agent-held simulator",
+    );
+  });
+
+  test("a holder idle only 10 minutes keeps its simulator", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+
+    harness.state.nowMs += 10 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("a holder going back to running resets the idle clock", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+
+    harness.state.nowMs += 20 * 60_000;
+    harness.state.agents = [{ ...IDLE_HOLDER, isRunning: true }];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 20 * 60_000;
+    harness.state.agents = [IDLE_HOLDER];
+    await sweepRows(harness);
+
+    // 40 minutes since the lease was bound, but only 20 since the holder was last running.
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("an idle holder's background xcodebuild test keeps its simulator until the run ends", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    // The agent started UI tests as a background shell and ended its turn to wait for them.
+    const testRun = [
+      agentRootRow(500, "agent-1"),
+      childRow(501, 500, "/bin/zsh -c xcodebuild test -scheme App -destination 'name=iPhone 17'"),
+      childRow(502, 501, "/usr/bin/xcodebuild test -scheme App -destination name=iPhone 17"),
+    ];
+    harness.state.rows.push(...testRun);
+    await sweepRows(harness);
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+
+    // The run ends; the clock runs from the last sweep that saw it.
+    harness.state.rows = harness.state.rows.filter((row) => row.pid !== 501 && row.pid !== 502);
+    harness.state.nowMs += 29 * 60_000;
+    await sweepRows(harness);
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+    harness.state.nowMs += 2 * 60_000;
+    await sweepRows(harness);
+    expect(harness.shutdownExec).toHaveBeenCalledTimes(1);
+  });
+
+  test("another process naming the simulator's UDID keeps it, whoever runs it", async () => {
+    // A child agent testing on its idle leader's simulator by id.
+    const harness = createManager({
+      agents: [IDLE_HOLDER, { agentId: "agent-2", provider: "claude", isRunning: false }],
+    });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    harness.state.rows.push(
+      agentRootRow(700, "agent-2"),
+      childRow(701, 700, `/bin/zsh -c xcrun simctl spawn ${UDID_A} log stream`),
+      childRow(702, 701, `xcrun simctl spawn ${UDID_A} log stream`),
+    );
+    await sweepRows(harness);
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("without the sweep's process rows the idle sweep shuts nothing down", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+
+    harness.state.nowMs += 31 * 60_000;
+    await harness.manager.reconcileFromSample({
+      devices: [runningSimulator(UDID_A, 60 + 31 * 60)],
+      systemMemory: harness.state.memory,
+    });
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("a reserved simulator is never shut down by the idle sweep even if somehow leased", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    harness.manager.reserveDevice(UDID_A);
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+});
+
+describe("DeviceLeaseManager simulator teardown config", () => {
+  test("simulatorTeardown.enabled false leaves agent-booted simulators up at shutdown and idle", async () => {
+    const harness = createManager({
+      config: { enabled: true, simulatorTeardown: { enabled: false } },
+      agents: [IDLE_HOLDER],
+    });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+    await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("simulatorTeardown.idleMinutes sets the idle window", async () => {
+    const harness = createManager({
+      config: { enabled: true, simulatorTeardown: { idleMinutes: 5 } },
+      agents: [IDLE_HOLDER],
+    });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+
+    harness.state.nowMs += 6 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).toHaveBeenCalledTimes(1);
+  });
+
+  test("the cap's dry run says what it would shut down and releases nothing", async () => {
+    const harness = createManager({
+      config: { enabled: true, dryRun: true },
+      agents: [IDLE_HOLDER],
+    });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+    await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+    const wouldLines = harness.logger.info.mock.calls.filter(
+      ([, msg]) => msg === "Would shut down an agent-held simulator",
+    );
+    expect(wouldLines.map(([fields]) => fields)).toEqual([
+      expect.objectContaining({ dryRun: true, deviceId: UDID_A, trigger: "idle-sweep" }),
+      expect.objectContaining({ dryRun: true, deviceId: UDID_A, trigger: "daemon-shutdown" }),
+    ]);
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("the mode line reports the teardown, and reports it off while the cap is off", () => {
+    const harness = createManager({ config: { enabled: true, dryRun: true } });
+    harness.manager.reportMode();
+    harness.state.config = { enabled: false };
+    harness.manager.reportMode();
+
+    const modes = harness.logger.info.mock.calls
+      .filter(([fields, msg]) => msg === "Monitor mode" && fields.monitor === "simulator-teardown")
+      .map(([fields]) => fields);
+    expect(modes).toEqual([
+      { monitor: "simulator-teardown", enabled: true, dryRun: true },
+      { monitor: "simulator-teardown", enabled: false, dryRun: false },
+    ]);
   });
 });
 
