@@ -1,5 +1,8 @@
 import type { PluginBeforeRequests, PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { createAccountIdentity } from "./server/account-identity";
+import { startArenaRankingsPoller } from "./server/arena-rankings";
+import type { IntervalPoller } from "./server/interval-poller";
+import { resolvePaseoHome } from "./server/paseo-home";
 import { startClassifierToolServer, type ClassifierToolServer } from "./server/classifier-tool";
 import { echoed, echoedList } from "./server/echo";
 import { CE_PLUGIN_ID, createCompoundPolicyRouter, type CompoundPolicyEpisode, type ProviderEntryShape } from "./server/compound-policy";
@@ -64,6 +67,7 @@ export default function contribute(server: PluginServerContext) {
   let recentAgentTypes: RecentAgentTypes | null = null;
   let roleRouter: RoleCreateRouter | null = null;
   let jevAvailability: JevAvailability | null = null;
+  let arenaRankingsPoller: IntervalPoller<void> | null = null;
   // stdout, not console.error: this is a record of every create, not a problem report.
   const decisionLog = createDecisionLog({ write: (line) => console.log(line) });
   let roleModelPolicyRpcHandlers: ReturnType<typeof createRoleModelPolicyRpcHandlers> | null = null;
@@ -110,6 +114,11 @@ export default function contribute(server: PluginServerContext) {
     // empty and nothing JEV runs.
     jevAvailability = createJevAvailability(paseo);
     const startedJevAvailability = jevAvailability;
+    // Daily LMArena refresh (U6, KTD-10). Started once per plugin process,
+    // fire-and-forget like jevAvailability's first poll: a slow or failing
+    // fetch must never delay a create, and the classifier treats a missing
+    // or stale file as today's order regardless of why.
+    arenaRankingsPoller = startArenaRankingsPoller(resolvePaseoHome());
 
     // Both caches start empty/fail-open and otherwise wait for their 60s
     // interval tick. Without this, every create in the window after a
@@ -606,6 +615,7 @@ export default function contribute(server: PluginServerContext) {
     catalogCache?.stop();
     parentProfiles?.stop();
     jevAvailability?.stop();
+    arenaRankingsPoller?.stop();
     classifierTool?.close();
   };
 }
