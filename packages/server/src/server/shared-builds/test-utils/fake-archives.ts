@@ -137,7 +137,7 @@ export function buildFakeIpa(infoPlist: Buffer | string): Buffer {
   ]);
 }
 
-function stringPoolChunk(strings: string[], utf8: boolean): Buffer {
+export function stringPoolChunk(strings: string[], utf8: boolean): Buffer {
   const encoded = strings.map((value) => {
     if (utf8) {
       const bytes = Buffer.from(value, "utf8");
@@ -175,6 +175,8 @@ export function buildAndroidManifest(input: {
   versionName: string;
   versionCode: number;
   utf8?: boolean;
+  /** Replaces the string pool chunk, for hostile manifests. */
+  pool?: Buffer;
 }): Buffer {
   const strings = [
     "versionCode",
@@ -184,7 +186,7 @@ export function buildAndroidManifest(input: {
     input.packageName,
     input.versionName,
   ];
-  const pool = stringPoolChunk(strings, input.utf8 ?? false);
+  const pool = input.pool ?? stringPoolChunk(strings, input.utf8 ?? false);
   const resourceMap = Buffer.alloc(16);
   resourceMap.writeUInt16LE(0x0180, 0);
   resourceMap.writeUInt16LE(8, 2);

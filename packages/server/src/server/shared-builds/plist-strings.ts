@@ -12,6 +12,11 @@ export class PlistReadError extends Error {
 }
 
 const BINARY_MAGIC = "bplist00";
+// The plist comes from whatever the agent built, so its counts are not trusted. A real Info.plist
+// has a few dozen top-level keys and short values; past these a dict is refused and a string is
+// skipped, so a crafted one can't make the parse run long.
+const MAX_DICT_ENTRIES = 4096;
+const MAX_STRING_CHARS = 4096;
 
 export function readPlistStrings(data: Buffer): Record<string, string> {
   if (data.toString("latin1", 0, BINARY_MAGIC.length) === BINARY_MAGIC) {
@@ -58,11 +63,11 @@ function readBinaryPlistStrings(data: Buffer): Record<string, string> {
     const size = 1 << (marker & 0x0f);
     return { length: readUInt(at + 2, size), start: at + 2 + size };
   };
-  const readString = (ref: number): string | null => {
-    const at = objectOffset(ref);
+  const decodeString = (at: number): string | null => {
     const type = data[at] >> 4;
     if (type !== 0x5 && type !== 0x6) return null;
     const { length, start } = lengthAt(at);
+    if (length > MAX_STRING_CHARS) return null;
     if (type === 0x5) {
       if (start + length > data.length) throw new PlistReadError("binary plist string past end");
       return data.toString("latin1", start, start + length);
@@ -72,10 +77,24 @@ function readBinaryPlistStrings(data: Buffer): Record<string, string> {
       .swap16()
       .toString("utf16le");
   };
+  // By offset, not ref: many refs, or many objects, can name the same bytes.
+  const decoded = new Map<number, string | null>();
+  const readString = (ref: number): string | null => {
+    const at = objectOffset(ref);
+    let value = decoded.get(at);
+    if (value === undefined) {
+      value = decodeString(at);
+      decoded.set(at, value);
+    }
+    return value;
+  };
 
   const top = objectOffset(topObject);
   if (data[top] >> 4 !== 0xd) throw new PlistReadError("binary plist top object is not a dict");
   const { length, start } = lengthAt(top);
+  if (length > objectCount || length > MAX_DICT_ENTRIES) {
+    throw new PlistReadError("binary plist dict is too large");
+  }
   const strings: Record<string, string> = {};
   for (let i = 0; i < length; i += 1) {
     const key = readString(readUInt(start + i * refSize, refSize));
@@ -95,8 +114,13 @@ const XML_ENTITIES: Record<string, string> = {
 
 function decodeXmlText(text: string): string {
   return text.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|[a-z]+);/g, (whole, entity: string) => {
-    if (entity.startsWith("#x")) return String.fromCodePoint(Number.parseInt(entity.slice(2), 16));
-    if (entity.startsWith("#")) return String.fromCodePoint(Number.parseInt(entity.slice(1), 10));
+    if (entity.startsWith("#")) {
+      const code = entity.startsWith("#x")
+        ? Number.parseInt(entity.slice(2), 16)
+        : Number.parseInt(entity.slice(1), 10);
+      // Past U+10FFFF is no character; leave the text as written rather than throw.
+      return code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+    }
     return XML_ENTITIES[entity] ?? whole;
   });
 }

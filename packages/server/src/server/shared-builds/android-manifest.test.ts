@@ -5,7 +5,12 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { readAndroidManifestInfo, readApkInfo } from "./android-manifest.js";
 import { SharedBuildRefusal } from "./shared-build-store.js";
-import { buildAndroidManifest, buildFakeApk, buildZip } from "./test-utils/fake-archives.js";
+import {
+  buildAndroidManifest,
+  buildFakeApk,
+  buildZip,
+  stringPoolChunk,
+} from "./test-utils/fake-archives.js";
 
 let workDir: string;
 
@@ -58,6 +63,76 @@ describe("readAndroidManifestInfo", () => {
       versionCode: 1,
     });
     expect(() => readAndroidManifestInfo(manifest.subarray(0, 60))).toThrow();
+  });
+});
+
+const POOL_STRINGS = [
+  "versionCode",
+  "versionName",
+  "package",
+  "manifest",
+  "com.example.fake",
+  "1.0",
+];
+
+/** The standard pool with one field patched, the way a hostile build would. */
+function patchedPool(patch: (pool: Buffer) => void): Buffer {
+  const pool = stringPoolChunk(POOL_STRINGS, false);
+  patch(pool);
+  return pool;
+}
+
+function manifestWithPool(pool: Buffer): Buffer {
+  return buildAndroidManifest({
+    packageName: "com.example.fake",
+    versionName: "1.0",
+    versionCode: 1,
+    pool,
+  });
+}
+
+describe("readAndroidManifestInfo on hostile manifests", () => {
+  test("refuses a string pool whose offset table runs past its chunk", () => {
+    const pool = patchedPool((bytes) => bytes.writeUInt32LE(100_000, 8));
+    expect(() => readAndroidManifestInfo(manifestWithPool(pool))).toThrow(/string pool/);
+  });
+
+  test("does not read a string that runs past its chunk", () => {
+    const pool = patchedPool((bytes) => {
+      const stringsStart = bytes.readUInt32LE(20);
+      const versionNameOffset = bytes.readUInt32LE(28 + 5 * 4);
+      bytes.writeUInt16LE(0x7000, stringsStart + versionNameOffset);
+    });
+    expect(readAndroidManifestInfo(manifestWithPool(pool))).toEqual({
+      packageName: "com.example.fake",
+      versionName: null,
+      versionCode: "1",
+    });
+  });
+
+  test("does not read an absurdly long value", () => {
+    const manifest = buildAndroidManifest({
+      packageName: "com.example.fake",
+      versionName: "1.".padEnd(5000, "0"),
+      versionCode: 1,
+    });
+    expect(readAndroidManifestInfo(manifest).versionName).toBeNull();
+  });
+
+  test("a pool of a million entries pointing at one huge string is refused at once", () => {
+    const count = 1_000_000;
+    const headerSize = 32;
+    const pool = Buffer.alloc(headerSize + count * 4 + 64);
+    pool.writeUInt16LE(0x0001, 0);
+    pool.writeUInt16LE(headerSize, 2);
+    pool.writeUInt32LE(pool.length, 4);
+    pool.writeUInt32LE(count, 8);
+    // Every offset is 0, at the header's last 4 bytes: a UTF-16 length of 2^31 - 1 characters.
+    pool.writeUInt32LE(28, 20);
+    pool.writeUInt32LE(0xffffffff, 28);
+    const started = performance.now();
+    expect(() => readAndroidManifestInfo(manifestWithPool(pool))).toThrow(/not <manifest>/);
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 });
 

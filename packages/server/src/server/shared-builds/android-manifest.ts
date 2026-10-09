@@ -35,52 +35,85 @@ export interface ApkInfo {
 
 class AxmlReadError extends Error {}
 
-function readStringPool(data: Buffer, start: number): string[] {
+// The manifest comes from whatever the agent built, so nothing it declares is trusted: a string is
+// decoded only when an attribute asks for it, only inside its own chunk, and only if it is short.
+// A pool that declares a million strings costs nothing until one is read.
+const MAX_ATTRIBUTES = 1024;
+/** Longer than any attribute name the reader compares against. */
+const MAX_NAME_CHARS = 64;
+/** Longer than any package name or version a real manifest carries. */
+const MAX_VALUE_CHARS = 1024;
+
+interface StringPool {
+  /** The string at `index`, or null when it is missing, outside its chunk or over `maxChars`. */
+  get(index: number, maxChars: number): string | null;
+}
+
+const EMPTY_POOL: StringPool = { get: () => null };
+
+interface Length {
+  value: number;
+  next: number;
+}
+
+/** A UTF-8 pool length: one byte, or two when the high bit is set. Null past `end`. */
+function utf8Length(data: Buffer, at: number, end: number): Length | null {
+  if (at + 1 > end) return null;
+  if (!(data[at] & 0x80)) return { value: data[at], next: at + 1 };
+  if (at + 2 > end) return null;
+  return { value: ((data[at] & 0x7f) << 8) | data[at + 1], next: at + 2 };
+}
+
+/** A UTF-16 pool length: one word, or two when the high bit is set. Null past `end`. */
+function utf16Length(data: Buffer, at: number, end: number): Length | null {
+  if (at + 2 > end) return null;
+  const word = data.readUInt16LE(at);
+  if (!(word & 0x8000)) return { value: word, next: at + 2 };
+  if (at + 4 > end) return null;
+  return { value: ((word & 0x7fff) << 16) | data.readUInt16LE(at + 2), next: at + 4 };
+}
+
+function readStringPool(data: Buffer, start: number, end: number): StringPool {
   const headerSize = data.readUInt16LE(start + 2);
   const count = data.readUInt32LE(start + 8);
-  const flags = data.readUInt32LE(start + 16);
+  const utf8 = (data.readUInt32LE(start + 16) & UTF8_FLAG) !== 0;
   const stringsStart = start + data.readUInt32LE(start + 20);
-  const utf8 = (flags & UTF8_FLAG) !== 0;
-  const strings: string[] = [];
-  for (let i = 0; i < count; i += 1) {
-    let at = stringsStart + data.readUInt32LE(start + headerSize + i * 4);
-    if (utf8) {
-      // UTF-16 length, then UTF-8 byte length; each one or two bytes.
-      at += data[at] & 0x80 ? 2 : 1;
-      let length = data[at];
-      if (length & 0x80) {
-        length = ((length & 0x7f) << 8) | data[at + 1];
-        at += 2;
-      } else {
-        at += 1;
-      }
-      strings.push(data.toString("utf8", at, at + length));
-    } else {
-      let length = data.readUInt16LE(at);
-      if (length & 0x8000) {
-        length = ((length & 0x7fff) << 16) | data.readUInt16LE(at + 2);
-        at += 4;
-      } else {
-        at += 2;
-      }
-      strings.push(data.toString("utf16le", at, at + length * 2));
-    }
+  if (headerSize < 28 || start + headerSize + count * 4 > end || stringsStart > end) {
+    throw new AxmlReadError("the string pool is out of bounds");
   }
-  return strings;
+  return {
+    get(index, maxChars) {
+      if (index >= count) return null;
+      const at = stringsStart + data.readUInt32LE(start + headerSize + index * 4);
+      if (utf8) {
+        // The character count, then the UTF-8 byte count.
+        const chars = utf8Length(data, at, end);
+        const bytes = chars && utf8Length(data, chars.next, end);
+        if (!chars || !bytes || chars.value > maxChars || bytes.next + bytes.value > end) {
+          return null;
+        }
+        return data.toString("utf8", bytes.next, bytes.next + bytes.value);
+      }
+      const chars = utf16Length(data, at, end);
+      if (!chars || chars.value > maxChars || chars.next + chars.value * 2 > end) return null;
+      return data.toString("utf16le", chars.next, chars.next + chars.value * 2);
+    },
+  };
 }
 
 interface StringTables {
-  strings: string[];
-  resourceIds: number[];
+  pool: StringPool;
+  /** The resource map: the android: attribute id for each low string index. */
+  resourceId: (index: number) => number | undefined;
 }
 
 /** One attribute's value as text: its raw string, or its typed string or integer. */
 function attributeText(data: Buffer, attr: number, tables: StringTables): string | null {
   const rawValue = data.readUInt32LE(attr + 8);
-  if (rawValue !== NO_INDEX) return tables.strings[rawValue] ?? null;
+  if (rawValue !== NO_INDEX) return tables.pool.get(rawValue, MAX_VALUE_CHARS);
   const dataType = data[attr + 15];
   const value = data.readUInt32LE(attr + 16);
-  if (dataType === TYPE_STRING) return tables.strings[value] ?? null;
+  if (dataType === TYPE_STRING) return tables.pool.get(value, MAX_VALUE_CHARS);
   if (dataType === TYPE_INT_DEC || dataType === TYPE_INT_HEX) return String(value);
   return null;
 }
@@ -88,23 +121,27 @@ function attributeText(data: Buffer, attr: number, tables: StringTables): string
 /** The attributes of the start-element chunk at `at`, which must be `<manifest>`. */
 function readManifestElement(data: Buffer, at: number, tables: StringTables): ApkInfo {
   const ext = at + data.readUInt16LE(at + 2);
-  if (tables.strings[data.readUInt32LE(ext + 4)] !== "manifest") {
+  if (tables.pool.get(data.readUInt32LE(ext + 4), MAX_NAME_CHARS) !== "manifest") {
     throw new AxmlReadError("the first element is not <manifest>");
   }
   const attributeStart = ext + data.readUInt16LE(ext + 8);
   const attributeSize = data.readUInt16LE(ext + 10);
   const attributeCount = data.readUInt16LE(ext + 12);
+  if (attributeCount > MAX_ATTRIBUTES)
+    throw new AxmlReadError("<manifest> has too many attributes");
   const info: ApkInfo = { packageName: null, versionName: null, versionCode: null };
   for (let i = 0; i < attributeCount; i += 1) {
     const attr = attributeStart + i * attributeSize;
     const nameIndex = data.readUInt32LE(attr + 4);
     // aapt2 can strip attribute names; the resource map still names the android: ones.
-    const name = tables.strings[nameIndex] ?? "";
-    const resourceId = tables.resourceIds[nameIndex];
-    const text = attributeText(data, attr, tables);
-    if (name === "package") info.packageName = text;
-    else if (name === "versionName" || resourceId === ATTR_VERSION_NAME) info.versionName = text;
-    else if (name === "versionCode" || resourceId === ATTR_VERSION_CODE) info.versionCode = text;
+    const name = tables.pool.get(nameIndex, MAX_NAME_CHARS) ?? "";
+    const resourceId = tables.resourceId(nameIndex);
+    if (name === "package") info.packageName = attributeText(data, attr, tables);
+    else if (name === "versionName" || resourceId === ATTR_VERSION_NAME) {
+      info.versionName = attributeText(data, attr, tables);
+    } else if (name === "versionCode" || resourceId === ATTR_VERSION_CODE) {
+      info.versionCode = attributeText(data, attr, tables);
+    }
   }
   return info;
 }
@@ -113,17 +150,18 @@ function readManifestChunks(data: Buffer): ApkInfo {
   if (data.length < 8 || data.readUInt16LE(0) !== RES_XML_TYPE) {
     throw new AxmlReadError("not a compiled Android XML file");
   }
-  const tables: StringTables = { strings: [], resourceIds: [] };
+  const tables: StringTables = { pool: EMPTY_POOL, resourceId: () => undefined };
   let at = data.readUInt16LE(2);
   while (at + 8 <= data.length) {
     const type = data.readUInt16LE(at);
     const size = data.readUInt32LE(at + 4);
     if (size < 8 || at + size > data.length) throw new AxmlReadError("chunk out of bounds");
-    if (type === RES_STRING_POOL_TYPE) tables.strings = readStringPool(data, at);
+    if (type === RES_STRING_POOL_TYPE) tables.pool = readStringPool(data, at, at + size);
     if (type === RES_XML_RESOURCE_MAP_TYPE) {
-      tables.resourceIds = [];
-      for (let i = at + 8; i + 4 <= at + size; i += 4)
-        tables.resourceIds.push(data.readUInt32LE(i));
+      const mapStart = at + 8;
+      const mapCount = Math.floor((size - 8) / 4);
+      tables.resourceId = (index) =>
+        index < mapCount ? data.readUInt32LE(mapStart + index * 4) : undefined;
     }
     if (type === RES_XML_START_ELEMENT_TYPE) return readManifestElement(data, at, tables);
     at += size;
