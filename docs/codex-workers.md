@@ -31,9 +31,15 @@ If the ChatGPT desktop app bundles Codex on Windows, that path will be added; th
 
 ## Codex guard health
 
-Before any worker child is routed to Codex, a self-test proves the guard works: one ordinary command must run, and one canary command must be denied. The test runs at daemon startup, daily, and whenever the Codex binary version changes.
+Codex refs are usable for children only while a self-test has recently proved the guard works (`agent/codex-guard-health.ts`). Three states: `unknown` (no self-test has run, or it errored/timed out), `green`, `red`. Both `unknown` and `red` make every `codex/` ref unusable.
 
-If the guard health is `red` or `unknown`, Codex refs are unusable for children.
+**Self-test:** a scratch guarded Codex child, in a throwaway temp directory, asked to `touch` an ok file and a canary file. The self-test supplies its own `DeviceLaunchGate` for the one session — it never reuses the real device cap, since the canary must be denied regardless of the cap's state — that allows the ok path and denies the canary path. Green requires all of: an approval request arrived for the ok command, it was approved, the ok file exists; an approval request arrived for the canary command, it was declined, and the canary file does not exist. Anything else is red. A self-test that errors or times out leaves health exactly where it was — an infrastructure failure is not proof the guard is broken, so it does not get to claim one either way.
+
+**When it runs:** at daemon start, and hourly after that (`bootstrap.ts`'s `checkCodexGuardSelfTest`), which checks `shouldRunCodexGuardSelfTest` and only actually runs the test when a day has passed or the Codex binary's `--version` output has changed since the last run.
+
+**Live detection:** every top-level shell command item a guarded child completes is re-checked after the fact against the real catastrophe and device gates (`recheckCodexGuardCommandItem`, reusing `codex-guard.ts`'s `decideCodexGuardedCommand`). A command one of those gates would refuse, that ran with no approval request ever having been seen for it, turns health red immediately and cancels the agent's turn. A command on Codex's safe list (one that never needs to escalate, so never raises an approval request) is not a violation either way.
+
+**Not yet wired: the classifier can't see this.** `isCodexGuardHealthy()` is exported and correct on the daemon side, but nothing yet carries it across the daemon/plugin boundary into `plugins/claude-account-pool/server/role-availability.ts`'s `isRefUsable`. Plugins don't import daemon modules directly — they call a `paseo.<namespace>` RPC action exposed through `PluginHookContext`, the same way `jev-availability.ts` polls `paseo.jev.status()`. A `paseo.codexGuard.status()`-shaped action (and its daemon-side handler) needs to exist before ranking can safely treat a `codex/` ref as usable. Until that lands, a `codex/` ref is not actually gated by guard health at the classifier level — don't put one in a live pool regardless of what this file's health state says.
 
 ## Guarded mode: the daemon answers Codex's own approval requests
 

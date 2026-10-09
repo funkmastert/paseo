@@ -56,6 +56,11 @@ import {
 } from "../device-launch-approval.js";
 import type { DeviceLaunchGate } from "../device-lease-manager.js";
 import { decideCodexGuardedCommand } from "../codex-guard.js";
+import {
+  getCodexGuardHealthState,
+  recheckCodexGuardCommandItem,
+  setCodexGuardHealthState,
+} from "../codex-guard-health.js";
 import { renderPromptAttachmentAsText } from "../prompt-attachments.js";
 import { composeSystemPromptParts } from "../system-prompt.js";
 import { curateAgentActivity } from "../activity-curator.js";
@@ -3428,6 +3433,10 @@ export class CodexAppServerAgentSession implements AgentSession {
   private emittedTerminalInteractionKeys = new Set<string>();
   private emittedExecCommandStartedCallIds = new Set<string>();
   private emittedExecCommandCompletedCallIds = new Set<string>();
+  /** Guard health's live detection (docs/catastrophe-gate.md, KTD-6): item ids that raised
+   * item/commandExecution/requestApproval in guarded mode, so a completed item with none can be
+   * told apart from one the real-time gate already answered. */
+  private guardedApprovalSeenItemIds = new Set<string>();
   private emittedItemStartedIds = new Set<string>();
   private emittedItemCompletedIds = new Set<string>();
   private emittedProviderSubagentUserMessageKeys = new Set<string>();
@@ -6278,6 +6287,9 @@ export class CodexAppServerAgentSession implements AgentSession {
     parsed: Extract<ParsedCodexNotification, { kind: "exec_command_completed" }>,
     subAgentCallId: string | null = null,
   ): void {
+    if (this.currentMode === "guarded" && !subAgentCallId && typeof parsed.command === "string") {
+      void this.recheckGuardedCommandCompletion(parsed.callId, parsed.command, parsed.cwd ?? null);
+    }
     const outputDeltas = subAgentCallId
       ? this.subAgentCallsByCallId.get(subAgentCallId)?.pendingCommandOutputDeltas
       : this.pendingCommandOutputDeltas;
@@ -6304,6 +6316,73 @@ export class CodexAppServerAgentSession implements AgentSession {
         this.emittedExecCommandCompletedCallIds.add(timelineItem.callId);
       }
       this.emitCodexToolTimelineItem(timelineItem, subAgentCallId, parsed.threadId);
+    }
+  }
+
+  /** Guard health's live detection, for a completed item from the canonical `item/*` channel. */
+  private maybeRecheckGuardedShellItem(
+    timelineItem: AgentTimelineItem,
+    itemId: string | undefined,
+  ): void {
+    if (
+      this.currentMode === "guarded" &&
+      timelineItem.type === "tool_call" &&
+      timelineItem.detail.type === "shell"
+    ) {
+      void this.recheckGuardedCommandCompletion(
+        itemId ?? null,
+        timelineItem.detail.command,
+        timelineItem.detail.cwd ?? null,
+      );
+    }
+  }
+
+  /**
+   * Guard health's live detection (docs/catastrophe-gate.md, KTD-6): re-checks a completed
+   * top-level command item against the real gates. A command a gate would have refused that ran
+   * with no approval request turns health red and cancels the turn -- the one case the real-time
+   * gate above never had a chance to answer.
+   */
+  private async recheckGuardedCommandCompletion(
+    callId: string | null,
+    command: string,
+    cwd: string | null,
+  ): Promise<void> {
+    if (!callId) return;
+    try {
+      const result = await recheckCodexGuardCommandItem(
+        {
+          command,
+          cwd: cwd ?? this.config.cwd ?? process.cwd(),
+          agentId: this.agentId,
+          deviceLaunchGate: this.deps.deviceLaunchGate,
+          isCatastropheGateEnabled: this.deps.isCatastropheGateEnabled,
+          approvalRequestSeen: this.guardedApprovalSeenItemIds.has(callId),
+        },
+        this.logger,
+      );
+      if (!result.violation) return;
+      setCodexGuardHealthState(
+        {
+          status: "red",
+          reason: result.reason ?? "A guarded command ran without an approval request.",
+          codexVersion: getCodexGuardHealthState().codexVersion,
+        },
+        this.logger,
+      );
+      this.emitEvent({
+        type: "timeline",
+        provider: CODEX_PROVIDER,
+        item: {
+          type: "assistant_message",
+          text: formatOutOfBandStatusMessage(
+            "Paseo guard health just turned red: a command ran with no approval request. Stopping this turn.",
+          ),
+        },
+      });
+      await this.interrupt();
+    } catch (error) {
+      this.logger.warn({ err: error }, "Codex guard live re-check failed");
     }
   }
 
@@ -6475,6 +6554,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       typeof parsed.item.type === "string" ? parsed.item.type : undefined,
     );
     const itemId = parsed.item.id;
+    this.maybeRecheckGuardedShellItem(timelineItem, itemId);
     if (this.shouldSkipCompletedThreadItem(timelineItem, normalizedItemType, itemId)) {
       this.replayPendingSubAgentNotifications(registeredChildThreadIds);
       return;
@@ -6859,6 +6939,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     // with no person and no pending permission. Catastrophe gate first, then the device gate;
     // any uncertainty declines, the opposite of the fail-open check below.
     if (this.currentMode === "guarded") {
+      this.guardedApprovalSeenItemIds.add(parsed.itemId);
       const cwd = parsed.cwd ?? this.config.cwd ?? process.cwd();
       const guardDecision =
         typeof parsed.command === "string"

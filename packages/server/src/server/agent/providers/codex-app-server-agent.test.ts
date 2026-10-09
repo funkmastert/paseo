@@ -33,6 +33,10 @@ import {
   toAgentUsage,
 } from "./codex-app-server-agent.js";
 import { CodexProviderOptionsSchema } from "./codex/options.js";
+import {
+  getCodexGuardHealthState,
+  resetCodexGuardHealthStateForTests,
+} from "../codex-guard-health.js";
 
 describe("mapCodexPlanUpdateToTodo", () => {
   test("preserves checklist progress without creating a plan card", () => {
@@ -318,6 +322,53 @@ describe("Codex guarded mode approval handling", () => {
     await session.respondToPermission(session.getPendingPermissions()[0]!.id, {
       behavior: "allow",
     });
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("turns health red and cancels the turn when a command a gate refuses ran with no approval request", async () => {
+    resetCodexGuardHealthStateForTests();
+    let interrupted = false;
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+      "turn/interrupt": () => {
+        interrupted = true;
+        return {};
+      },
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.completesCommand({
+      threadId: "thread-1",
+      callId: "unapproved-1",
+      command: "git push --force origin main",
+      output: "",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getCodexGuardHealthState().status).toBe("red");
+    expect(interrupted).toBe(true);
+
+    await session.close();
+  });
+
+  test("leaves health alone when a safe-list command ran with no approval request", async () => {
+    resetCodexGuardHealthStateForTests();
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.completesCommand({
+      threadId: "thread-1",
+      callId: "safe-1",
+      command: "ls",
+      output: "",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getCodexGuardHealthState().status).toBe("unknown");
+
     await session.close();
     appServer.assertNoErrors();
   });
