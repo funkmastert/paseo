@@ -27,9 +27,11 @@ import {
   mapCodexPatchNotificationToToolCall,
   mapCodexPlanUpdateToTodo,
   mapCodexPlanToToolCall,
+  MODE_PRESETS,
   normalizeCodexOutputSchema,
   toAgentUsage,
 } from "./codex-app-server-agent.js";
+import { CodexProviderOptionsSchema } from "./codex/options.js";
 
 describe("mapCodexPlanUpdateToTodo", () => {
   test("preserves checklist progress without creating a plan card", () => {
@@ -120,6 +122,27 @@ describe("Codex executable discovery", () => {
         configurable: true,
       });
     }
+  });
+});
+
+describe("Codex guarded mode preset", () => {
+  test("maps to workspace-write plus on-request", () => {
+    expect(MODE_PRESETS.guarded).toEqual({
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
+    });
+  });
+
+  test("the sandbox value is a legal CodexProviderOptionsSchema sandbox_mode", () => {
+    expect(() =>
+      CodexProviderOptionsSchema.parse({ sandbox_mode: MODE_PRESETS.guarded.sandbox }),
+    ).not.toThrow();
+  });
+
+  test("is not offered as a user-facing mode", async () => {
+    const session = createSession();
+    const modes = await session.getAvailableModes();
+    expect(modes.some((mode) => mode.id === "guarded")).toBe(false);
   });
 });
 

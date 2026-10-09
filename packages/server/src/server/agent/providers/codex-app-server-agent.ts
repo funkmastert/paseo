@@ -281,18 +281,27 @@ interface CodexAppServerAgentDeps {
   ) => Promise<{ commandName: string; args?: string } | null>;
 }
 
-interface CodexModePreset {
+export interface CodexModePreset {
   approvalPolicy: string;
   sandbox: string;
   approvalsReviewer?: "auto_review";
 }
 
-const MODE_PRESETS: Record<string, CodexModePreset> = {
+export const MODE_PRESETS: Record<string, CodexModePreset> = {
   "read-only": {
     approvalPolicy: "on-request",
     sandbox: "read-only",
   },
   auto: {
+    approvalPolicy: "on-request",
+    sandbox: "workspace-write",
+  },
+  // Daemon-launched Codex children only (never offered in CODEX_MODES). Same values as `auto` --
+  // `danger-full-access` never needs escalation so nothing is ever asked, and `untrusted` was
+  // removed in Codex 0.160 ("no longer supported"). `workspace-write` + `on-request` is the one
+  // combination proven to still raise item/commandExecution/requestApproval, which the guarded
+  // approval handler answers in-process instead of surfacing it to a person (docs/codex-workers.md).
+  guarded: {
     approvalPolicy: "on-request",
     sandbox: "workspace-write",
   },
