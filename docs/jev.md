@@ -416,7 +416,7 @@ Decisions do not survive a restart. The ledger's daily totals and the audit file
 
 ## Feature 2: spawn hint
 
-When a child create has no `paseo.task-class` label, the classifier asks JEV what class of work the prompt is. In v1 JEV can move a task down to `mechanical` only; a `hard` answer and a role guess are recorded as `wouldBe` until the shadow day shows they pay (`spawnHint.applyHard`, `.applyRole`). It never outranks a label, and it cannot lower a task a hard-risk keyword already marked hard. When every child is labelled, as on this fleet, the hint has nothing unlabelled left to judge — [auditing a declared label](#auditing-a-declared-label) gives it one.
+When a child create has no `paseo.task-class` label, the classifier asks JEV what class of work the prompt is. On its own it can move a task down to `mechanical` only. A `hard` answer, a lift off the mechanical keyword seed (precedence step 5) and a role guess are recorded as `wouldBe` until `spawnHint.applyHard` / `.applyRole` turn them on. It never outranks a label, and it cannot lower a task a hard-risk keyword already marked hard. When every child is labelled, as on this fleet, the hint has nothing unlabelled left to judge — [auditing a declared label](#auditing-a-declared-label) gives it one.
 
 ### Seam
 
@@ -529,13 +529,13 @@ The floors bias down. A move to a cheaper model needs less agreement than a move
 Task class, highest first:
 
 1. A declared `paseo.task-class` label.
-2. `hard` when `HARD_SEED_RE` matches (`role-resolve.ts:198-199`). JEV cannot lower a risk keyword.
+2. `hard` when `HARD_SEED_RE` matches title or prompt (`plugins/claude-account-pool/server/role-resolve.ts`). JEV cannot lower a risk keyword.
 3. JEV `mechanical` when `task_class` is `mechanical` at confidence ≥ 0.65 **and** `reasoning.score` ≤ 0.8. Two answers must agree.
 4. JEV `hard`, only with `spawnHint.applyHard`, when `task_class` is `hard` at confidence ≥ 0.85 **and** `reasoning.score` ≥ 1.6. Off, it is logged as `wouldBe`.
-5. `mechanical` when `MECHANICAL_SEED_RE` matches.
+5. `mechanical` when `MECHANICAL_SEED_RE` matches the title (the prompt only when there is no title). The seed skips the prompt because briefs carry boilerplate such as "run `npm run lint`", which sent real work to Haiku. When JEV answers `standard` or `hard` with `reasoning.score` ≥ 1.2 (`MECHANICAL_SEED_LIFT_REASONING`), the seed becomes `standard` instead (source `jev`). The lift moves a task to a dearer model, so it needs `spawnHint.applyHard` like the hard raise; off, it is logged as `wouldBe`. A rename JEV scores at 1 stays mechanical.
 6. Default (the role's standard pool).
 
-A JEV `standard` answer changes nothing: it never lifts a task off the mechanical seed.
+Otherwise a JEV `standard` answer changes nothing.
 
 Role, for a child at tiers 3–4 only, and only with `spawnHint.applyRole`: JEV's `role` at confidence ≥ 0.70 and not `other` replaces the keyword tier. Off, it is logged as `wouldBe`. A role can move cost up (`advisor`'s standard pool is Opus 5.5), which is why it waits for the shadow numbers.
 
@@ -543,7 +543,7 @@ Role, for a child at tiers 3–4 only, and only with `spawnHint.applyRole`: JEV'
 
 Thinking follows the class through `policy.thinking.byTaskClass` (`classifier.ts:1027`), as it does now (D4).
 
-Hub-triggered creates carry untrusted text. v1 never raises a class, so JEV cannot push them to Opus at xhigh; see [Deferred](#deferred) for the rule `applyHard` needs first.
+Hub-triggered creates carry untrusted text. With `applyHard` off nothing raises a class, so JEV cannot push them to Opus at xhigh. `applyHard` turns on both raises, the hard answer and the mechanical-seed lift; see [Deferred](#deferred) for the rule Hub creates need before it is on where Hub triggers run.
 
 ### Auditing a declared label
 
@@ -578,7 +578,7 @@ Any outcome other than `answered` leaves `jevHint` as `{ status: "unavailable" |
 
 ### Tests and verification
 
-- `jev-hint.test.ts`: every precedence step with scripted answers; the `HARD_SEED_RE` override; the two-answer rule for `mechanical`; `hard` and `role` logged as `wouldBe` with the apply switches off; `standard` never lifting the mechanical seed; `other` and low confidence falling through; each `not-needed` reason, including a root create; the request's scope, deadlines and clipped prompt; no call when `paseo.jev` is absent, before a poll has answered, or when the status says off; `unavailable` when the RPC rejects and when it never resolves (the create proceeds within 2 s); a D7 exclusion changing nothing; a malformed answer, a non-string `callId` and a non-object response failing `contract`; shadow logs `wouldBe` and changes nothing; the preview. The declared-label audit: a declared child asked only when `auditDeclared` is on, never a root or schedule-run create; the request carries `shadow: true` and `declared_task_class`; the switch off restores today's skip; the preview says nothing for it. `work_kind` (KTD-12): rides alone when ranking is on and the resolved class has two-plus candidates, even with no other reason to ask; today's `no-effect` skip is unchanged with ranking off; it rides beside the task-class question when both matter; a declared child still gets it, in shadow, with `auditDeclared` off; a leader or no-text create never asks it either; the question and answer round-trip through `buildSpawnHintQuestions`/`readSpawnHintAnswers`.
+- `jev-hint.test.ts`: every precedence step with scripted answers; the `HARD_SEED_RE` override; the two-answer rule for `mechanical`; `hard` and `role` logged as `wouldBe` with the apply switches off; `standard` lifting the mechanical seed only at `reasoning.score` ≥ 1.2, and only when live; prompt boilerplate never seeding mechanical; `other` and low confidence falling through; each `not-needed` reason, including a root create; the request's scope, deadlines and clipped prompt; no call when `paseo.jev` is absent, before a poll has answered, or when the status says off; `unavailable` when the RPC rejects and when it never resolves (the create proceeds within 2 s); a D7 exclusion changing nothing; a malformed answer, a non-string `callId` and a non-object response failing `contract`; shadow logs `wouldBe` and changes nothing; the preview. The declared-label audit: a declared child asked only when `auditDeclared` is on, never a root or schedule-run create; the request carries `shadow: true` and `declared_task_class`; the switch off restores today's skip; the preview says nothing for it. `work_kind` (KTD-12): rides alone when ranking is on and the resolved class has two-plus candidates, even with no other reason to ask; today's `no-effect` skip is unchanged with ranking off; it rides beside the task-class question when both matter; a declared child still gets it, in shadow, with `auditDeclared` off; a leader or no-text create never asks it either; the question and answer round-trip through `buildSpawnHintQuestions`/`readSpawnHintAnswers`.
 - `classifier.test.ts`: a `classified-jev` role leaves tools and MCP servers as the role resolved without JEV gets them, with `enforceToolsOnClassifiedRoles` both off and on, and never cancels the flag's enforcement of a keyword guess; `classified-jev` and the `jev` source reach the decision and the reasons; a non-answer is today's decision; the tools' arm and eligibility. A declared `hard` child with a shadow hint proposing `mechanical`: the real class, model and thinking stay `hard`; `wouldBe` reads `mechanical` (the label stripped before the would-be resolve) rather than echoing the declared value back; `applied` is false.
 - `role-router.test.ts`: the new labels are written; a hint that makes classification throw passes the request through; the drawn arm replaces a caller's, an ineligible create loses a caller's, and an unevaluated arm leaves the labels alone. A declared `hard` child with an audit hint: the config, labels and model are unchanged from a plain declared create, and `paseo.jev-call`/`paseo.jev-spawn` record JEV's class with `applied=0;audit=1`. A role-only ask on the same declared child instead writes `audit=0`, even though its class source is still `declared`. `paseo.work-kind`: an unlabelled worker's answer lands in the label; a declared child's kind is recorded with its model unchanged; no answer and an unrecognized choice both leave the label unwritten rather than inventing one.
 - `jev-availability.test.ts`: reading a status, forgetting it on a failed poll, the 10-minute pause on `unknown_schema`, no arm until the daemon serves the tools, and the scope check failing closed. `auditDeclared` read off the status, defaulting off when an older daemon omits it.
@@ -1778,6 +1778,8 @@ The dashboard never flips a mode. The evidence is how Tyler decides; the switch 
 | 14 away reply         | dry run → live | 20 follow-ups, `sameChoice` in at least 90%                                                                                                                                          |
 | 16 read check         | shadow → live  | 200 would-skips of reads of 8,000 tokens or more, at most 30% false skips, a positive projected net                                                                                  |
 
+Spawn-hint records settled before 2026-10-09 priced `base` with the mechanical seed reading title and prompt; later ones read the title only. Count the spawn-hint flip evidence from that date.
+
 ### Links with feature 11
 
 - The budget strip's "TypeSafe (JEV)" row opens the dashboard for its host (F6: `account-budget-strip-view.tsx`'s row is pressable when `row.providerId === "jev"`, via an `onOpenJevDashboard` callback injected from `account-budget-strip.tsx` — not imported directly, for the same `expo-router` reason as the screen split above). The row's per-feature detail lines are gone from the strip; it keeps lane spend, calls and alerts only.
@@ -1890,7 +1892,7 @@ No key, the switch off, an outage, a low-confidence answer or D7 all land on the
 Each item is out of v1 on purpose, with the reason.
 
 - **`ask_jev`'s `command` on Windows.** The catastrophe gate resolves only POSIX cwds and parses POSIX shell; running Git Bash from the daemon needs locating it and gating Windows paths first. The tool refuses `command` there and still answers about files and state.
-- **Hub-triggered creates and `applyHard`.** v1 never raises a class, so untrusted Hub text cannot push an agent to Opus at xhigh. Before `applyHard` is turned on, Hub-created agents need a label that marks their origin, and the hint must never raise them.
+- **Hub-triggered creates and `applyHard`.** With `applyHard` off nothing raises a class, so untrusted Hub text cannot push an agent to a dearer model. Before `applyHard` is on where Hub triggers run, Hub-created agents need a label that marks their origin, and the hint must never raise them, by either the hard answer or the mechanical-seed lift.
 - **Read deny rules in user-level Claude settings files.** The daemon honours `denyRead` and the deny rules in the agent's stored config; rules only in `~/.claude/settings.json` are not loaded by the daemon.
 - **Routing a loop verdict through the existing nudge.** It would let the loop watch save tokens, and a nudge is D1-compatible, but it acts on running agents on a JEV answer; revisit after the shadow data.
 - **Decisions interleaved in the agent's stream, and kept across restarts.** The popover list serves the need without touching the timeline; the ledger totals and the audit already survive a restart.

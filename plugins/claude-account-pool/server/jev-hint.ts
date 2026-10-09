@@ -9,7 +9,7 @@ import {
   type TaskClassId,
 } from "../shared/role-policy-schema";
 import { classifyAgent, type ClassifierInput, type ClassifierWorld } from "./classifier";
-import { placesRootAsChild, resolveRole, resolveTaskClass } from "./role-resolve";
+import { MECHANICAL_SEED_LIFT_REASONING, placesRootAsChild, resolveRole, resolveTaskClass } from "./role-resolve";
 
 /**
  * JEV's spawn hint (docs/jev.md, "Feature 2"): one typed call, made by the
@@ -85,6 +85,8 @@ export interface SpawnHintAnswers {
 /** What the answers propose once past their floors. Precedence against labels and seeds is the classifier's. */
 export interface SpawnHintProposal {
   taskClass?: "mechanical" | "hard";
+  /** The answers disagree with a mechanical reading: see `MECHANICAL_SEED_LIFT_REASONING`. */
+  liftsMechanicalSeed?: boolean;
   /** A policy role id, never the leader. */
   roleId?: string;
 }
@@ -453,7 +455,9 @@ export function readSpawnHintAnswers(
 /**
  * The answers past their floors. Pure. A mechanical class needs the class
  * answer and the reasoning score to agree; so does a hard one, at higher
- * floors. `standard`, `other` and anything under a floor propose nothing.
+ * floors. A `standard` or `hard` class at `MECHANICAL_SEED_LIFT_REASONING`
+ * or more also sets `liftsMechanicalSeed`. `other` and anything under every
+ * floor propose nothing.
  */
 export function proposeFromAnswers(answers: SpawnHintAnswers, policy: RoleModelPolicy): SpawnHintProposal {
   const proposal: SpawnHintProposal = {};
@@ -471,6 +475,12 @@ export function proposeFromAnswers(answers: SpawnHintAnswers, policy: RoleModelP
       reasoning.score >= HARD_REASONING_FLOOR
     ) {
       proposal.taskClass = "hard";
+    }
+    if (
+      (taskClass.choice === "standard" || taskClass.choice === "hard") &&
+      reasoning.score >= MECHANICAL_SEED_LIFT_REASONING
+    ) {
+      proposal.liftsMechanicalSeed = true;
     }
   }
   if (

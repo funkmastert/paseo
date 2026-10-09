@@ -38,6 +38,7 @@ import {
   type ModelCatalog,
 } from "./role-availability";
 import {
+  MECHANICAL_SEED_LIFT_REASONING,
   placesRootAsChild,
   resolveDeclaredRootRole,
   resolveLeaderRole,
@@ -588,6 +589,10 @@ function describeTaskClass(decision: Omit<TaskClassDecision, "reason">): string 
     case "classified":
       return `${decision.taskClass}, guessed from keywords in the title/prompt.${ignored}`;
     case "jev":
+      // `standard` from JEV is reachable only through the mechanical-seed lift (role-resolve.ts).
+      if (decision.taskClass === "standard") {
+        return `standard, from JEV's spawn hint: the title's mechanical keyword was overruled because JEV judged the work standard or hard with a reasoning score of ${MECHANICAL_SEED_LIFT_REASONING} or more.${ignored}`;
+      }
       return `${decision.taskClass}, from JEV's spawn hint: no label declared a class and its answers cleared the floors.${ignored}`;
     case "default":
       return `none — nothing declared or recognized one, so the role's standard pool decides.${ignored}`;
@@ -1404,6 +1409,7 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
   const live = hint?.status === "answered";
   const proposedRole = hint?.proposal.roleId;
   const proposedClass = hint?.proposal.taskClass;
+  const liftsMechanicalSeed = hint?.proposal.liftsMechanicalSeed === true;
 
   // A create with no caller is the leader unless its labels say otherwise. One that declares a
   // non-leader role (a daemon job's worker) is configured, and placed, like the child it says it
@@ -1451,7 +1457,9 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
   // it is worth. It only ever influences model selection — never tools.
   const classResolution = resolveTaskClass(
     textInput,
-    hint ? { proposed: proposedClass, applyMechanical: live, applyHard: live && hint.applyHard } : undefined,
+    hint
+      ? { proposed: proposedClass, liftsMechanicalSeed, applyMechanical: live, applyHard: live && hint.applyHard }
+      : undefined,
   );
   // What JEV would make it with every switch on, for `wouldBe`. For a declared child (the
   // declared-label audit, docs/jev.md "Auditing a declared label") that is JEV's own answer, read
@@ -1460,7 +1468,8 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     ? classResolution.taskClass
     : classResolution.source === "declared"
       ? declaredAuditWouldBe(hint, classResolution.taskClass)
-      : resolveTaskClass(textInput, { proposed: proposedClass, applyMechanical: true, applyHard: true }).taskClass;
+      : resolveTaskClass(textInput, { proposed: proposedClass, liftsMechanicalSeed, applyMechanical: true, applyHard: true })
+          .taskClass;
   const classPartial = {
     taskClass: classResolution.taskClass,
     source: classResolution.source,
