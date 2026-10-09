@@ -6,15 +6,27 @@
 //   *:80            308 to https, so Tyler's own `ngrok http 80 --url http://bozeo.ngrok.app` works
 //
 // Publish a new build with ./publish.sh; this server picks it up without a restart.
+//
+// /b/<token>/<file> serves builds agents shared to Tyler's phone (the daemon's share_build tool,
+// docs/shared-builds.md in the Bozeo repo) from a second root, ~/.paseo/public-web-shares. It sits
+// outside the root publish.sh swaps, so a UI publish never wipes it. The daemon owns that root and
+// deletes expired shares; this server only refuses to serve one whose share.json has expired.
+//
+// For a test run beside the live one: BOZEO_PUBLIC_WEB_PORT, BOZEO_PUBLIC_WEB_ROOT and
+// BOZEO_PUBLIC_WEB_SHARES move the port and roots, and BOZEO_PUBLIC_WEB_TUNNEL=0 skips the
+// tunnel and the :80 redirect.
 import { spawn } from "node:child_process";
-import { createReadStream, existsSync, realpathSync, statSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
 const PUBLIC_URL = "https://bozeo.ngrok.app";
-const STATIC_PORT = 6780;
-const ROOT = path.join(os.homedir(), ".paseo", "public-web-ui");
+const STATIC_PORT = Number(process.env.BOZEO_PUBLIC_WEB_PORT ?? 6780);
+const ROOT = process.env.BOZEO_PUBLIC_WEB_ROOT ?? path.join(os.homedir(), ".paseo", "public-web-ui");
+const SHARES_ROOT =
+  process.env.BOZEO_PUBLIC_WEB_SHARES ?? path.join(os.homedir(), ".paseo", "public-web-shares");
+const TUNNEL = process.env.BOZEO_PUBLIC_WEB_TUNNEL !== "0";
 const NGROK = process.env.NGROK_BIN ?? "/opt/homebrew/bin/ngrok";
 
 const TYPES = {
@@ -87,12 +99,93 @@ function resolveFile(urlPath) {
   return null;
 }
 
+// A shared build's files. share.json is never served; nothing else lives in a share.
+const SHARE_TYPES = {
+  ".apk": "application/vnd.android.package-archive",
+  ".ipa": "application/octet-stream",
+  ".plist": "application/xml",
+  ".html": "text/html; charset=utf-8",
+};
+// 128 random bits, base64url: the daemon's SHARE_TOKEN_PATTERN.
+const SHARE_PATH = /^\/b\/([A-Za-z0-9_-]{22})(?:\/([^/]*))?$/;
+
+/** Whether the share in `dir` has a readable share.json for `token` that hasn't expired. */
+function shareIsLive(dir, token) {
+  try {
+    const record = JSON.parse(readFileSync(path.join(dir, "share.json"), "utf8"));
+    return record.token === token && Date.parse(record.expiresAt) > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The file for /b/<token>/<name>, or null. The share's own directory is the root a name must stay
+ * in, checked after realpath like resolveFile's. `/b/<token>/` is the share's index.html (the iOS
+ * install page); nothing is ever listed.
+ */
+function resolveShareFile(pathname) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  if (decoded.includes("\0")) return null;
+  const match = SHARE_PATH.exec(decoded);
+  if (!match) return null;
+  const token = match[1];
+  const name = match[2] || "index.html";
+  if (!Object.hasOwn(SHARE_TYPES, path.extname(name).toLowerCase())) return null;
+  let dir;
+  try {
+    const root = realpathSync(SHARES_ROOT);
+    dir = realpathSync(path.join(root, token));
+    if (dir !== path.join(root, token)) return null;
+  } catch {
+    return null;
+  }
+  if (!shareIsLive(dir, token)) return null;
+  let target;
+  try {
+    target = realpathSync(path.join(dir, name));
+  } catch {
+    return null;
+  }
+  if (!target.startsWith(dir + path.sep) || !isFile(target)) return null;
+  return target;
+}
+
+function serveShare(req, res, pathname) {
+  const file = resolveShareFile(pathname);
+  if (!file) {
+    res.writeHead(404, { "Content-Type": "text/plain", ...SECURITY_HEADERS }).end("Not found");
+    return;
+  }
+  const ext = path.extname(file).toLowerCase();
+  const headers = {
+    "Content-Type": SHARE_TYPES[ext],
+    "Content-Length": statSync(file).size,
+    "Cache-Control": "no-store",
+    "X-Robots-Tag": "noindex",
+    ...SECURITY_HEADERS,
+  };
+  if (ext === ".apk") headers["Content-Disposition"] = `attachment; filename="${path.basename(file)}"`;
+  res.writeHead(200, headers);
+  if (req.method === "HEAD") return res.end();
+  createReadStream(file).on("error", () => res.destroy()).pipe(res);
+}
+
 function serveStatic(req, res) {
   if (req.method !== "GET" && req.method !== "HEAD") {
     res.writeHead(405, { Allow: "GET, HEAD", ...SECURITY_HEADERS }).end();
     return;
   }
   const { pathname } = new URL(req.url ?? "/", "http://x");
+  if (pathname === "/b" || pathname.startsWith("/b/")) {
+    serveShare(req, res, pathname);
+    return;
+  }
   const file = resolveFile(pathname);
   if (!file) {
     res.writeHead(404, { "Content-Type": "text/plain", ...SECURITY_HEADERS }).end("Not found");
@@ -141,11 +234,11 @@ staticServer.once("error", (err) => {
   log("static web UI can't bind; exiting so launchd retries", { port: STATIC_PORT, code: err.code });
   process.exit(1);
 });
-listen(staticServer, STATIC_PORT, "127.0.0.1", "static web UI", startTunnel);
+listen(staticServer, STATIC_PORT, "127.0.0.1", "static web UI", TUNNEL ? startTunnel : undefined);
 // macOS lets an unprivileged process bind a port below 1024 only on the wildcard address. The
 // listener only ever answers with a redirect, so being reachable on the LAN exposes nothing, and
 // the dual-stack wildcard catches `ngrok http 80` dialling localhost as either family.
-listen(http.createServer(redirectToHttps), 80, "::", "https redirect");
+if (TUNNEL) listen(http.createServer(redirectToHttps), 80, "::", "https redirect");
 
 // The tunnel. No endpoint pooling: with pooling, anyone holding the authtoken could join
 // bozeo.ngrok.app and serve a share of its requests. A leftover agent from an earlier run makes
