@@ -30,7 +30,7 @@ The push reads `Android build ready` or `iPhone build ready`, then the app, its 
 
 The public site is `~/bozeo-ops/public-web/server.mjs`, a static file server behind the ngrok tunnel run by the `sh.bozeo.public-web` LaunchAgent. `ops/public-web/server.mjs` is its vendored copy: edit the live file, then copy it back ([ops/README.md](../ops/README.md)). It serves `/b/<token>/<file>` from `~/.paseo/public-web-shares`, a sibling of the web UI root, because `publish.sh` replaces the UI root on every publish. The daemon exposes nothing through the tunnel; it writes files and the site reads them.
 
-`share.json` is the contract between the two. The site serves a file only when the share's `share.json` names the same token and its `expiresAt` is in the future, so an expired link is a 404 before the daemon's sweep deletes it. It never serves `share.json` itself, never lists a directory, and confines every file to the share's own directory after realpath, as it does for the UI root. A token is 128 random bits in base64url, 22 characters, and is the only thing between a build and anyone who sees the link.
+`share.json` is the contract between the two. The site serves a file only when the share's `share.json` names the same token and its `expiresAt` is in the future, so an expired link is a 404 before the daemon's sweep deletes it. It never serves `share.json` or a dotfile, never lists a directory, sends share responses with a CSP that allows only the install page's inline style, and confines every file to the share's own directory after realpath, as it does for the UI root. A token is 128 random bits in base64url, 22 characters, and is the only thing between a build and anyone who sees the link.
 
 | File             | Content type                                                     |
 | ---------------- | ---------------------------------------------------------------- |
@@ -41,7 +41,7 @@ The public site is `~/bozeo-ops/public-web/server.mjs`, a static file server beh
 
 A share goes live in one rename of its temp directory (`.tmp-<token>`), so the site never sees one without its record.
 
-To try a change to `server.mjs` beside the live one, run it with `BOZEO_PUBLIC_WEB_PORT`, `BOZEO_PUBLIC_WEB_ROOT` and `BOZEO_PUBLIC_WEB_SHARES` pointed at a spare port and temp roots, and `BOZEO_PUBLIC_WEB_TUNNEL=0`. Without them a second copy exits on the busy port 6780.
+`ops/public-web/server.test.mjs` pins this contract and runs in CI: it starts the server with `BOZEO_PUBLIC_WEB_PORT=0`, `BOZEO_PUBLIC_WEB_ROOT` and `BOZEO_PUBLIC_WEB_SHARES` pointed at temp roots, and `BOZEO_PUBLIC_WEB_TUNNEL=0` (no tunnel, no :80 redirect). Run a manual copy the same way; without them a second copy exits on the busy port 6780. A request to port 0 goes to port 80, the live redirect, so read the bound port from the `listening` log line.
 
 ## Limits
 

@@ -106,6 +106,13 @@ const SHARE_TYPES = {
   ".plist": "application/xml",
   ".html": "text/html; charset=utf-8",
 };
+// The install page is static and needs nothing but its inline style, so a share's responses allow
+// nothing else: they come from the web UI's origin, which holds the relay pairing.
+const SHARE_SECURITY_HEADERS = {
+  ...SECURITY_HEADERS,
+  "Content-Security-Policy":
+    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+};
 // 128 random bits, base64url: the daemon's SHARE_TOKEN_PATTERN.
 const SHARE_PATH = /^\/b\/([A-Za-z0-9_-]{22})(?:\/([^/]*))?$/;
 
@@ -136,6 +143,8 @@ function resolveShareFile(pathname) {
   if (!match) return null;
   const token = match[1];
   const name = match[2] || "index.html";
+  // The daemon never writes a dotfile into a share.
+  if (name.startsWith(".")) return null;
   if (!Object.hasOwn(SHARE_TYPES, path.extname(name).toLowerCase())) return null;
   let dir;
   try {
@@ -156,19 +165,29 @@ function resolveShareFile(pathname) {
   return target;
 }
 
+/** The file's size, or null when it went away since it was resolved (a sweep, a publish). */
+function sizeOrNull(file) {
+  try {
+    return statSync(file).size;
+  } catch {
+    return null;
+  }
+}
+
 function serveShare(req, res, pathname) {
   const file = resolveShareFile(pathname);
-  if (!file) {
-    res.writeHead(404, { "Content-Type": "text/plain", ...SECURITY_HEADERS }).end("Not found");
+  const size = file ? sizeOrNull(file) : null;
+  if (!file || size === null) {
+    res.writeHead(404, { "Content-Type": "text/plain", ...SHARE_SECURITY_HEADERS }).end("Not found");
     return;
   }
   const ext = path.extname(file).toLowerCase();
   const headers = {
     "Content-Type": SHARE_TYPES[ext],
-    "Content-Length": statSync(file).size,
+    "Content-Length": size,
     "Cache-Control": "no-store",
     "X-Robots-Tag": "noindex",
-    ...SECURITY_HEADERS,
+    ...SHARE_SECURITY_HEADERS,
   };
   if (ext === ".apk") headers["Content-Disposition"] = `attachment; filename="${path.basename(file)}"`;
   res.writeHead(200, headers);
@@ -198,11 +217,16 @@ function serveStatic(req, res) {
   if (/\bbr\b/.test(accept) && isFile(file + ".br")) [body, encoding] = [file + ".br", "br"];
   else if (/\bgzip\b/.test(accept) && isFile(file + ".gz")) [body, encoding] = [file + ".gz", "gzip"];
 
+  const size = sizeOrNull(body);
+  if (size === null) {
+    res.writeHead(404, { "Content-Type": "text/plain", ...SECURITY_HEADERS }).end("Not found");
+    return;
+  }
   const isIndex = path.basename(file) === "index.html";
   const immutable = pathname.startsWith("/_expo/static/");
   const headers = {
     "Content-Type": TYPES[ext] ?? "application/octet-stream",
-    "Content-Length": statSync(body).size,
+    "Content-Length": size,
     "Cache-Control": isIndex ? "no-cache" : immutable ? "public, max-age=31536000, immutable" : "public, max-age=3600",
     Vary: "Accept-Encoding",
     ...SECURITY_HEADERS,
@@ -221,7 +245,8 @@ function redirectToHttps(req, res) {
 function listen(server, port, host, label, onListening = () => {}) {
   server.on("error", (err) => log(`${label} not listening`, { host, port, code: err.code }));
   server.listen(port, host, () => {
-    log(`${label} listening`, { host, port });
+    // The bound port, so a test run on port 0 can find it.
+    log(`${label} listening`, { host, port: server.address()?.port ?? port });
     onListening();
   });
 }
