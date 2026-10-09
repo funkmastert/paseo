@@ -519,9 +519,35 @@ export async function findCodexMicrosoftStoreBinary(): Promise<string | null> {
   return null;
 }
 
+export function codexChatGptBundleCandidates(): string[] {
+  const candidates: string[] = [];
+
+  if (process.platform === "darwin") {
+    const binaryPath = "Contents/Resources/codex-cli/bin/codex";
+    candidates.push(path.join("/Applications", "ChatGPT.app", binaryPath));
+    candidates.push(path.join(os.homedir(), "Applications", "ChatGPT.app", binaryPath));
+  }
+
+  return candidates;
+}
+
+export async function findCodexChatGptBundleBinary(): Promise<string | null> {
+  for (const candidate of codexChatGptBundleCandidates()) {
+    if (await probeExecutable(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 export async function findDefaultCodexBinary(): Promise<string | null> {
   const pathBinary = await findExecutable("codex");
   if (pathBinary) return pathBinary;
+
+  const bundleBinary = await findCodexChatGptBundleBinary();
+  if (bundleBinary) return bundleBinary;
+
   return await findCodexMicrosoftStoreBinary();
 }
 
@@ -532,8 +558,14 @@ async function resolveCodexLaunchPrefix(runtimeSettings?: ProviderRuntimeSetting
   const launch = await resolveCodexLaunch(runtimeSettings);
   const availability = await checkCodexLaunchAvailable(launch);
   if (!availability.available) {
+    const locations = [
+      "your shell PATH",
+      "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+      "~/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+      "Microsoft Store (Windows only)",
+    ];
     throw new Error(
-      "Codex binary not found. Install the Codex CLI (https://github.com/openai/codex) and ensure it is available in your shell PATH.",
+      `Codex binary not found. Searched: ${locations.join("; ")}. Configure agents.providers.codex.command in your config or install the ChatGPT app.`,
     );
   }
   return {

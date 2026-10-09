@@ -21,6 +21,7 @@ import {
   CodexAppServerAgentClient,
   CodexAppServerAgentSession,
   codexMicrosoftStoreBinaryCandidates,
+  codexChatGptBundleCandidates,
   codexAppServerTurnInputFromPrompt,
   listCodexSkills,
   mapCodexPatchNotificationToToolCall,
@@ -80,6 +81,45 @@ describe("Codex executable discovery", () => {
         "codex.exe",
       ),
     ]);
+  });
+
+  test("generates ChatGPT bundle candidates on macOS", () => {
+    const platformBackup = process.platform;
+    Object.defineProperty(process, "platform", {
+      value: "darwin",
+      configurable: true,
+    });
+
+    try {
+      const candidates = codexChatGptBundleCandidates();
+      expect(candidates).toContain(
+        path.join("/Applications", "ChatGPT.app", "Contents/Resources/codex-cli/bin/codex"),
+      );
+      expect(candidates.some((c) => c.includes("Applications/ChatGPT.app"))).toBe(true);
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: platformBackup,
+        configurable: true,
+      });
+    }
+  });
+
+  test("returns empty candidates on non-macOS", () => {
+    const platformBackup = process.platform;
+    Object.defineProperty(process, "platform", {
+      value: "win32",
+      configurable: true,
+    });
+
+    try {
+      const candidates = codexChatGptBundleCandidates();
+      expect(candidates).toEqual([]);
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: platformBackup,
+        configurable: true,
+      });
+    }
   });
 });
 
