@@ -175,6 +175,41 @@ describe("resolveTaskClass", () => {
     expect(resolveTaskClass({})).toEqual({ taskClass: undefined, source: "default" });
   });
 
+  it("reads the mechanical seed from the title only: rules boilerplate in the prompt does not seed it", () => {
+    const result = resolveTaskClass({
+      title: "Codex guards",
+      initialPrompt: "Build the guard, then run `npm run lint -- <files>` and fix any formatting.",
+    });
+    expect(result).toEqual({ taskClass: undefined, source: "default" });
+  });
+
+  it("reads the prompt for the mechanical seed when there is no title", () => {
+    expect(resolveTaskClass({ initialPrompt: "fix a typo in the readme" })).toMatchObject({
+      taskClass: "mechanical",
+      source: "classified",
+    });
+  });
+
+  it("a live JEV lift turns a mechanical seed into standard; not live, the seed stands", () => {
+    const lift = { proposed: undefined, liftsMechanicalSeed: true, applyHard: false };
+    expect(resolveTaskClass({ title: "rename this variable" }, { ...lift, applyMechanical: true })).toEqual({
+      taskClass: "standard",
+      source: "jev",
+    });
+    expect(resolveTaskClass({ title: "rename this variable" }, { ...lift, applyMechanical: false })).toMatchObject({
+      taskClass: "mechanical",
+      source: "classified",
+    });
+  });
+
+  it("a JEV lift never lowers the hard seed", () => {
+    const lift = { proposed: undefined, liftsMechanicalSeed: true, applyMechanical: true, applyHard: false };
+    expect(resolveTaskClass({ title: "fix the typo causing the race condition" }, lift)).toMatchObject({
+      taskClass: "hard",
+      source: "classified",
+    });
+  });
+
   it("considers both title and initialPrompt together, like resolveRole", () => {
     const result = resolveTaskClass({ title: "untitled", initialPrompt: "watch out for the deadlock here" });
     expect(result).toMatchObject({ taskClass: "hard", source: "classified" });

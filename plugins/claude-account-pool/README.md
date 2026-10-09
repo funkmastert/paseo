@@ -862,7 +862,9 @@ plugin does:
   at 0.65 or more **and** a reasoning score of 0.8 or less. `hard` (0.85 and
   1.6) and a role (0.70) apply only with `agents.jev.spawnHint.applyHard` /
   `.applyRole`, both off. A declared label and the hard risk keywords outrank
-  JEV; a JEV `standard` never lifts a task off the mechanical seed.
+  JEV. A JEV `standard` or `hard` answer with a reasoning score of 1.2 or more
+  lifts a task off the mechanical seed to `standard`; the mechanical seed reads
+  the title only, so brief boilerplate ("run `npm run lint`") never trips it.
 - **Shadow first.** `agents.jev.spawnHint.shadow` defaults on: the answer is
   logged and applies nothing.
 - **Never fails or slows a create.** It asks only after a `jev.status` poll

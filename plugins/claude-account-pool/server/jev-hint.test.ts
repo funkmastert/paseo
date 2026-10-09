@@ -695,11 +695,45 @@ describe("precedence", () => {
     expect(decideWith(worker(), lowReasoning).taskClass.source).toBe("default");
   });
 
-  it("5. a JEV standard never lifts a task off the mechanical seed", async () => {
-    const input = worker({ initialPrompt: "Rename the helper to fetchWithRetry." });
+  it("5. a JEV standard with shallow reasoning keeps the mechanical seed", async () => {
+    const input = worker({ title: "rename the helper", initialPrompt: "Rename the helper to fetchWithRetry." });
     const hint = await hintFor(input, { answers: answers({ taskClass: ["standard", 0.99], reasoning: [1] }) });
 
     expect(decideWith(input, hint).taskClass).toMatchObject({ taskClass: "mechanical", source: "classified" });
+  });
+
+  it("5. a JEV standard or hard answer with deep reasoning lifts a task off the mechanical seed", async () => {
+    const input = worker({ title: "rename the retry module and rework its callers" });
+    const standard = await hintFor(input, { answers: answers({ taskClass: ["standard", 0.41], reasoning: [1.87] }) });
+    const hardUnderFloor = await hintFor(input, { answers: answers({ taskClass: ["hard", 0.6], reasoning: [1.2] }) });
+
+    const decision = decideWith(input, standard);
+    expect(decision.taskClass).toMatchObject({ taskClass: "standard", source: "jev" });
+    expect(decision.model.model).toBe("claude-sonnet-5");
+    expect(decision.jev).toMatchObject({ applied: true, wouldBe: { taskClass: "standard", move: "up" } });
+    expect(decideWith(input, hardUnderFloor).taskClass).toMatchObject({ taskClass: "standard", source: "jev" });
+  });
+
+  it("5. in shadow the lift is recorded as wouldBe and the mechanical seed still decides", async () => {
+    const input = worker({ title: "rename the retry module and rework its callers" });
+    const hint = await hintFor(input, {
+      outcome: "shadow",
+      answers: answers({ taskClass: ["standard", 0.9], reasoning: [1.9] }),
+    });
+
+    const decision = decideWith(input, hint);
+    expect(decision.taskClass).toMatchObject({ taskClass: "mechanical", source: "classified" });
+    expect(decision.jev).toMatchObject({ applied: false, wouldBe: { taskClass: "standard", move: "up" } });
+  });
+
+  it("5. rules boilerplate in the prompt does not seed mechanical", async () => {
+    const input = worker({
+      title: "Codex guards",
+      initialPrompt: "Build the guard. Then run `npm run typecheck` and `npm run lint -- <files>`.",
+    });
+    const hint = await hintFor(input, { answers: answers({ taskClass: ["standard", 0.8], reasoning: [1.5] }) });
+
+    expect(decideWith(input, hint).taskClass).toMatchObject({ taskClass: undefined, source: "default" });
   });
 
   it("6. `other` and a low-confidence answer fall through to the default", async () => {

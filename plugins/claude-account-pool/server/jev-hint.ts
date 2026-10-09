@@ -57,6 +57,12 @@ export const MECHANICAL_REASONING_CEILING = 0.8;
 export const HARD_CONFIDENCE_FLOOR = 0.85;
 /** `reasoning` at or over this agrees with a hard answer: most of the way to "Deep" (2). */
 export const HARD_REASONING_FLOOR = 1.6;
+/**
+ * `reasoning` at or over this, with a `standard` or `hard` class, lifts a
+ * mechanical keyword seed to `standard`: past "Some" (1), so more than
+ * following an existing pattern. A rename JEV scores at 1 stays mechanical.
+ */
+export const MECHANICAL_SEED_LIFT_REASONING = 1.2;
 export const ROLE_CONFIDENCE_FLOOR = 0.7;
 
 /** The question ids. JEV never sees them as meaning; it reads the instructions. */
@@ -75,6 +81,8 @@ export interface SpawnHintAnswers {
 /** What the answers propose once past their floors. Precedence against labels and seeds is the classifier's. */
 export interface SpawnHintProposal {
   taskClass?: "mechanical" | "hard";
+  /** The answers disagree with a mechanical reading: see `MECHANICAL_SEED_LIFT_REASONING`. */
+  liftsMechanicalSeed?: boolean;
   /** A policy role id, never the leader. */
   roleId?: string;
 }
@@ -397,6 +405,12 @@ export function proposeFromAnswers(answers: SpawnHintAnswers, policy: RoleModelP
       reasoning.score >= HARD_REASONING_FLOOR
     ) {
       proposal.taskClass = "hard";
+    }
+    if (
+      (taskClass.choice === "standard" || taskClass.choice === "hard") &&
+      reasoning.score >= MECHANICAL_SEED_LIFT_REASONING
+    ) {
+      proposal.liftsMechanicalSeed = true;
     }
   }
   if (

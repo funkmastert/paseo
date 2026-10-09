@@ -1404,6 +1404,7 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
   const live = hint?.status === "answered";
   const proposedRole = hint?.proposal.roleId;
   const proposedClass = hint?.proposal.taskClass;
+  const liftsMechanicalSeed = hint?.proposal.liftsMechanicalSeed === true;
 
   // A create with no caller is the leader unless its labels say otherwise. One that declares a
   // non-leader role (a daemon job's worker) is configured, and placed, like the child it says it
@@ -1451,7 +1452,9 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
   // it is worth. It only ever influences model selection — never tools.
   const classResolution = resolveTaskClass(
     textInput,
-    hint ? { proposed: proposedClass, applyMechanical: live, applyHard: live && hint.applyHard } : undefined,
+    hint
+      ? { proposed: proposedClass, liftsMechanicalSeed, applyMechanical: live, applyHard: live && hint.applyHard }
+      : undefined,
   );
   // What JEV would make it with every switch on, for `wouldBe`. For a declared child (the
   // declared-label audit, docs/jev.md "Auditing a declared label") that is JEV's own answer, read
@@ -1460,7 +1463,8 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     ? classResolution.taskClass
     : classResolution.source === "declared"
       ? declaredAuditWouldBe(hint, classResolution.taskClass)
-      : resolveTaskClass(textInput, { proposed: proposedClass, applyMechanical: true, applyHard: true }).taskClass;
+      : resolveTaskClass(textInput, { proposed: proposedClass, liftsMechanicalSeed, applyMechanical: true, applyHard: true })
+          .taskClass;
   const classPartial = {
     taskClass: classResolution.taskClass,
     source: classResolution.source,
