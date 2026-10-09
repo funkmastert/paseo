@@ -115,6 +115,20 @@ describe("PersistedConfigSchema agents.providerUsage", () => {
   });
 });
 
+describe("PersistedConfigSchema shared builds", () => {
+  test("accepts agents.sharedBuilds and rejects unknown keys", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        sharedBuilds: { enabled: true, maxFileMb: 600, maxTotalMb: 3072, expiryHours: 72 },
+      },
+    });
+    expect(parsed.agents?.sharedBuilds?.maxTotalMb).toBe(3072);
+    expect(
+      PersistedConfigSchema.safeParse({ agents: { sharedBuilds: { root: "/tmp/x" } } }).success,
+    ).toBe(false);
+  });
+});
+
 describe("PersistedConfigSchema daemon auth config", () => {
   test("accepts optional daemon password hash", () => {
     const hash = "$2b$12$OLxyuuP9uLK30Uzc4wQX0O6liuU/Q1t5P2b0Ebf36mULvpVK3DRZW";

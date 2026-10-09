@@ -739,6 +739,17 @@ const AgentTokenAuditSchema = z
   })
   .strict();
 
+// Read from config.json on every share and sweep, so every key is live. On unless `enabled` is
+// false; the public URL is `app.baseUrl`. See docs/shared-builds.md.
+const AgentSharedBuildsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    maxFileMb: z.number().positive().optional(),
+    maxTotalMb: z.number().positive().optional(),
+    expiryHours: z.number().positive().optional(),
+  })
+  .strict();
+
 // `agents.jev`: JEV, the hosted decision model between deterministic code and an LLM agent
 // (docs/jev.md). Read through its own 5-second cache (`jev/config.ts`), not the mutable config.
 // Shapes and types only: the resolver there clamps or ignores a value out of range. A section this
@@ -1056,6 +1067,7 @@ export const PersistedConfigSchema = z
         daemonVitals: AgentDaemonVitalsSchema.optional(),
         restartRecovery: AgentRestartRecoverySchema.optional(),
         tokenAudit: AgentTokenAuditSchema.optional(),
+        sharedBuilds: AgentSharedBuildsSchema.optional(),
         // Token usage by model and role, read from transcripts. On unless `enabled` is false; off
         // means no transcript reads. See docs/token-usage.md.
         tokenUsage: z.object({ enabled: z.boolean().optional() }).strict().optional(),

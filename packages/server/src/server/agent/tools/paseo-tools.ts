@@ -91,6 +91,11 @@ import {
 } from "../../worktree/commands.js";
 import { registerBrowserTools } from "../../browser-tools/tools.js";
 import { registerDeviceLeaseTools } from "./device-lease-tools.js";
+import {
+  registerShareBuildTools,
+  type RegisterShareBuildToolsOptions,
+  type SharedBuildsToolDependencies,
+} from "./share-build-tools.js";
 import { registerJevTools, type JevToolsDependencies } from "./jev-tools.js";
 import { isDefaultAgentCreateConfigUnattended } from "../create-agent-mode.js";
 import { resolveProviderExtends } from "../device-launch-enforcement.js";
@@ -164,6 +169,8 @@ export interface PaseoToolHostDependencies {
   deviceLeaseManager?: Pick<DeviceLeaseManager, "checkout" | "checkin" | "getSnapshot"> | null;
   /** The JEV agent tools (docs/jev.md, "Features 4–6"). Absent means no JEV tools are offered. */
   jevTools?: JevToolsDependencies | null;
+  /** `share_build` (docs/shared-builds.md). Absent means the tool is not offered. */
+  sharedBuilds?: SharedBuildsToolDependencies | null;
   /** Physical devices (docs/device-leases.md, Physical devices). Absent means `device_checkout`
    * only offers simulators/emulators. */
   physicalDeviceLeaseManager?: Pick<
@@ -579,6 +586,37 @@ function resolveTerminalKeyToken(key: string, literal: boolean): string {
     default:
       return key;
   }
+}
+
+/** `share_build`, when the daemon wired shared builds in (docs/shared-builds.md). */
+function registerSharedBuildTools(input: {
+  options: PaseoToolHostDependencies;
+  registerTool: RegisterShareBuildToolsOptions["registerTool"];
+  logger: Logger;
+}): void {
+  const { agentManager, agentStorage, callerAgentId, sharedBuilds } = input.options;
+  if (!sharedBuilds) return;
+  registerShareBuildTools({
+    registerTool: input.registerTool,
+    deps: sharedBuilds,
+    callerAgentId,
+    paseoHome: input.options.paseoHome,
+    worktreesRoot: input.options.worktreesRoot,
+    // Read at each call, like the JEV tools' caller: the cwd is the live agent's, the title and
+    // workspace are what the push names and opens.
+    readCaller: async () => {
+      if (!callerAgentId) return null;
+      const agent = agentManager.getAgent(callerAgentId);
+      if (!agent) return null;
+      const stored = await agentStorage.get(callerAgentId);
+      return {
+        cwd: agent.cwd,
+        title: stored?.title ?? null,
+        workspaceId: stored?.workspaceId ?? null,
+      };
+    },
+    logger: input.logger,
+  });
 }
 
 export function createPaseoToolCatalog(options: PaseoToolHostDependencies): PaseoToolCatalog {
@@ -1319,6 +1357,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         resolveProviderExtends(resolveCallerAgent()?.provider, daemonConfigStore?.get().providers),
     });
   }
+
+  registerSharedBuildTools({ options, registerTool, logger: childLogger });
 
   // Only for callers `JevToolsEligibility` decided at first sight (labelled `on`, Read allowed,
   // D7 ok), primed before this build, so a reload, resume or relabel lists the same tools. The
