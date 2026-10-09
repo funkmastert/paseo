@@ -662,8 +662,16 @@ type CounterAdder = (key: string, value?: number) => void;
 type CounterRule = (record: JevEvidenceRecordView, add: CounterAdder) => void;
 
 const EVIDENCE_COUNTERS: Partial<Record<JevSavingsFeature, CounterRule>> = {
-  spawnHint: ({ mode, price }, add) => {
+  spawnHint: ({ mode, price, facts }, add) => {
     if (mode !== "shadow" || price.pending) return;
+    // The declared-label audit (docs/jev.md, "Auditing a declared label") measures a different
+    // counterfactual, over- or under-labelling, from "this child's class was never declared", so
+    // it gets its own bucket rather than inflating the unlabelled-child count the go-live rule reads.
+    if (facts["declaredAudit"] === true) {
+      add("declaredAuditSettled");
+      add("declaredAuditSettledTokens", price.tokens ?? 0);
+      return;
+    }
     add("settledShadow");
     add("settledShadowTokens", price.tokens ?? 0);
   },
@@ -748,6 +756,16 @@ function pct(part: number, whole: number): string {
   return whole === 0 ? "0%" : `${Math.round((part / whole) * 100)}%`;
 }
 
+/**
+ * The declared-label audit's figure (docs/jev.md, "Auditing a declared label"), appended to
+ * spawnHint's `observed` string beside the go-live rule, never inside it.
+ */
+function declaredAuditNote(auditN: number, auditSum: number): string {
+  return auditN === 0
+    ? ""
+    : `; declared-label audit: ${auditN} settled, would-have sum ${Math.round(auditSum)}`;
+}
+
 /** Each feature's rule against its summed counters. `jevUsd` is the feature's JEV spend in range. */
 export function evaluateEvidence(
   feature: JevSavingsFeature,
@@ -761,7 +779,7 @@ export function evaluateEvidence(
       const sum = c("settledShadowTokens");
       return {
         rule: "shadow -> live: 50 settled unlabelled children, and a positive would-have sum after upward moves",
-        observed: `${n} settled, would-have sum ${Math.round(sum)}`,
+        observed: `${n} settled, would-have sum ${Math.round(sum)}${declaredAuditNote(c("declaredAuditSettled"), c("declaredAuditSettledTokens"))}`,
         met: n < 50 ? null : sum > 0,
       };
     }

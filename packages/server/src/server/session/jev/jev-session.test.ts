@@ -204,6 +204,53 @@ describe("JevSession.handleDecide", () => {
     expect(seenInput?.subject).toEqual({ callerAgentId: "agent-parent" });
   });
 
+  it("forwards shadow: true so a declared-label audit call never counts as live", async () => {
+    let seenInput: JevDecideInput | undefined;
+    const { service } = createFakeJevService({
+      decide: (input) => {
+        seenInput = input;
+        return { kind: "unavailable", callId: "call-shadow", reason: "excluded" };
+      },
+    });
+    const { host } = createFakeHost();
+    const session = new JevSession({ host, service, logger: { warn: vi.fn() } });
+
+    await session.handleDecide({
+      type: "jev.decide.request",
+      requestId: "req-1",
+      feature: "spawnHint",
+      callSite: "classifier.spawn-hint",
+      state: {},
+      questions: {},
+      shadow: true,
+    } as Extract<SessionInboundMessage, { type: "jev.decide.request" }>);
+
+    expect(seenInput?.shadow).toBe(true);
+  });
+
+  it("omits shadow entirely when the request carries none", async () => {
+    let seenInput: JevDecideInput | undefined;
+    const { service } = createFakeJevService({
+      decide: (input) => {
+        seenInput = input;
+        return { kind: "unavailable", callId: "call-no-shadow", reason: "excluded" };
+      },
+    });
+    const { host } = createFakeHost();
+    const session = new JevSession({ host, service, logger: { warn: vi.fn() } });
+
+    await session.handleDecide({
+      type: "jev.decide.request",
+      requestId: "req-1",
+      feature: "spawnHint",
+      callSite: "classifier.spawn-hint",
+      state: {},
+      questions: {},
+    } as Extract<SessionInboundMessage, { type: "jev.decide.request" }>);
+
+    expect(seenInput?.shadow).toBeUndefined();
+  });
+
   it("records a decision note and responds with the answers on an answered outcome", async () => {
     const { service, recorded } = createFakeJevService({ decide: () => answeredOutcome });
     const { host, emitted } = createFakeHost();

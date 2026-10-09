@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   resolveExistingRunWorkspace,
   resolveRunCallerAgentId,
+  resolveRunWorkspace,
   runRunCommand,
   type AgentRunOptions,
 } from "./run";
@@ -45,6 +46,50 @@ describe("existing run workspace resolution", () => {
         message: "Workspace not found: missing",
       },
     );
+  });
+});
+
+describe("resolveRunWorkspace minting a new workspace", () => {
+  const originalAgentId = process.env.PASEO_AGENT_ID;
+
+  afterEach(() => {
+    if (originalAgentId === undefined) {
+      delete process.env.PASEO_AGENT_ID;
+    } else {
+      process.env.PASEO_AGENT_ID = originalAgentId;
+    }
+  });
+
+  function fakeClient(createWorkspace: ReturnType<typeof vi.fn>) {
+    return { fetchWorkspaces: vi.fn(), createWorkspace };
+  }
+
+  // paseo run --new-workspace <kind> inside an agent (PASEO_AGENT_ID set) must tell the daemon
+  // who is creating the workspace, or the daemon's workspace-create RPC auto-pins it — a pin
+  // Tyler never made, that then shows in his sidebar's Pinned section.
+  it("passes PASEO_AGENT_ID as callerAgentId when minting a new workspace", async () => {
+    process.env.PASEO_AGENT_ID = "parent-agent";
+    const createWorkspace = vi
+      .fn()
+      .mockResolvedValue({ workspace: { id: "ws-new", name: "New workspace" } });
+
+    await resolveRunWorkspace(fakeClient(createWorkspace), { newWorkspace: "worktree" }, "/cwd");
+
+    expect(createWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ callerAgentId: "parent-agent" }),
+    );
+  });
+
+  it("omits callerAgentId when PASEO_AGENT_ID is not set", async () => {
+    delete process.env.PASEO_AGENT_ID;
+    const createWorkspace = vi
+      .fn()
+      .mockResolvedValue({ workspace: { id: "ws-new", name: "New workspace" } });
+
+    await resolveRunWorkspace(fakeClient(createWorkspace), { newWorkspace: "worktree" }, "/cwd");
+
+    const callArgs = createWorkspace.mock.calls[0]?.[0];
+    expect(callArgs).not.toHaveProperty("callerAgentId");
   });
 });
 

@@ -1,17 +1,27 @@
 import type { PluginHookContext } from "@getpaseo/plugin/server";
-import { LEADER_ROLE_ID, TASK_CLASS_IDS, TASK_CLASS_LABEL, type RoleModelPolicy } from "../shared/role-policy-schema";
+import {
+  LEADER_ROLE_ID,
+  TASK_CLASS_IDS,
+  TASK_CLASS_LABEL,
+  type RoleModelPolicy,
+  type TaskClassId,
+} from "../shared/role-policy-schema";
 import { classifyAgent, type ClassifierInput, type ClassifierWorld } from "./classifier";
 import { placesRootAsChild, resolveRole, resolveTaskClass } from "./role-resolve";
 
 /**
  * JEV's spawn hint (docs/jev.md, "Feature 2"): one typed call, made by the
  * role hook before the classifier runs, asking what class of work an
- * unlabelled create is. The classifier takes the answer as one input
- * (`ClassifierInput.jevHint`); this file only asks and reads.
+ * unlabelled create is — or, while `spawnHint.auditDeclared` is on, what
+ * class a declared child's own label should have been, asked in shadow and
+ * never applied ("Auditing a declared label"). The classifier takes the
+ * answer as one input (`ClassifierInput.jevHint`); this file only asks and
+ * reads.
  *
  * Nothing here can fail or slow a create beyond its bound. `fetchSpawnHint`
- * never throws, answers within `SPAWN_HINT_PLUGIN_TIMEOUT_MS` whatever the
- * daemon does, and every outcome but an answer is today's classifier.
+ * never throws, answers within its plugin timeout (tighter for the
+ * declared-label audit than for an ordinary ask) whatever the daemon does,
+ * and every outcome but an answer is today's classifier.
  */
 
 /** The feature id `jev.decide` serves to a client. */
@@ -24,6 +34,14 @@ export const SPAWN_HINT_DEADLINE_MS = 1_500;
 export const SPAWN_HINT_RPC_TIMEOUT_MS = SPAWN_HINT_DEADLINE_MS + 250;
 /** The plugin's own bound, whatever the RPC does. The role hook's whole budget is 30 s. */
 export const SPAWN_HINT_PLUGIN_TIMEOUT_MS = 2_000;
+/**
+ * The declared-label audit's own, tighter bound: its answer is never applied, so a slow or
+ * browned-out JEV should cost the audit a record, not the create extra latency on top of what an
+ * ordinary unlabelled ask already pays.
+ */
+export const SPAWN_HINT_DECLARED_AUDIT_DEADLINE_MS = 750;
+export const SPAWN_HINT_DECLARED_AUDIT_RPC_TIMEOUT_MS = SPAWN_HINT_DECLARED_AUDIT_DEADLINE_MS + 250;
+export const SPAWN_HINT_DECLARED_AUDIT_PLUGIN_TIMEOUT_MS = 1_000;
 /** How much of the prompt goes in the state. */
 export const SPAWN_HINT_PROMPT_CHARS = 6_000;
 
@@ -89,6 +107,14 @@ export type SpawnHint =
       applyHard: boolean;
       /** `spawnHint.applyRole` as the last `jev.status` poll read it. */
       applyRole: boolean;
+      /**
+       * Carries `SpawnHintPlan.declaredAudit` through to the classifier and the labels it writes.
+       * A declared child's class source is `declared` whether this call was the declared-label
+       * audit or an ordinary role-only ask on the same child (`applyRole` winning over the audit,
+       * see `planSpawnHint`) — the label alone cannot tell those apart, so the savings track reads
+       * this flag instead of re-deriving it from the class source.
+       */
+      declaredAudit: boolean;
     };
 
 /** The daemon's spawn-hint switches, from the last `jev.status` poll (server/jev-availability.ts). */
@@ -100,9 +126,26 @@ export interface SpawnHintAvailability {
   shadow: boolean;
   applyHard: boolean;
   applyRole: boolean;
+  /** `agents.jev.spawnHint.auditDeclared`: ask a declared child too, always in shadow. */
+  auditDeclared: boolean;
 }
 
-export type SpawnHintPlan = { ask: false; skip: SpawnHintSkip } | { ask: true; taskClass: boolean; role: boolean };
+export type SpawnHintPlan =
+  | { ask: false; skip: SpawnHintSkip }
+  | {
+      ask: true;
+      taskClass: boolean;
+      role: boolean;
+      /**
+       * A declared `paseo.task-class` label decided this create already; the answer is asked only
+       * to measure it (`agents.jev.spawnHint.auditDeclared`, docs/jev.md "Feature 2") and must
+       * never move the label, model or thinking. `fetchSpawnHint` sends it as `shadow: true` so
+       * the call can never count as a live answer, whatever `spawnHint.shadow` says.
+       */
+      declaredAudit: boolean;
+      /** The declared class, normalized, present only when `declaredAudit` is true. */
+      declaredTaskClass?: TaskClassId;
+    };
 
 /** The model and thinking a class would give this create. Two classes that agree cannot be told apart by an answer. */
 function outcomeKey(input: ClassifierInput, world: ClassifierWorld, taskClass: string): string {
@@ -124,11 +167,18 @@ function outcomeKey(input: ClassifierInput, world: ClassifierWorld, taskClass: s
  * the leader's thinking comes from the leader rule and its pools do not
  * change with the class, and even where a policy made them, a person started
  * it and chose what it runs.
+ *
+ * With `auditDeclared` on, a child with a caller and a valid `paseo.task-class`
+ * label is asked the class alone, in shadow (`declaredAudit: true`) — unless a
+ * live `applyRole` ask on the same child's guessed role would also apply, which
+ * wins instead, since one call cannot serve both. A schedule-run root create,
+ * placed like a child only for role resolution, stays unasked like any other
+ * root create.
  */
 export function planSpawnHint(
   input: ClassifierInput,
   world: ClassifierWorld,
-  options: { applyRole: boolean },
+  options: { applyRole: boolean; auditDeclared: boolean },
 ): SpawnHintPlan {
   const hasCaller = input.callerAgentId !== undefined && input.callerAgentId !== "";
   if (!hasCaller && !placesRootAsChild(world.policy, input.labels)) {
@@ -145,14 +195,22 @@ export function planSpawnHint(
       : baseline.source === "classified" && baseline.taskClass === "hard"
         ? "hard-seed"
         : null;
+  const roleGuessed = hasCaller && resolveRole(world.policy, textInput).tier >= 3;
+  // The audit only measures a genuine child's own declared label: a schedule-run root create is
+  // placed like a child for role resolution, but it is a person's or a daemon job's own call, not
+  // another agent's, and stays unasked like any other root create. A live role ask wins over it
+  // when both apply — `shadow: true` covers the whole call, so one ask cannot serve both, and the
+  // plan's stop condition forbids the audit silently stopping today's `applyRole` from working.
+  if (fixed === "declared" && options.auditDeclared && hasCaller && !(roleGuessed && options.applyRole)) {
+    return { ask: true, taskClass: true, role: false, declaredAudit: true, declaredTaskClass: baseline.taskClass };
+  }
   const classMatters =
     fixed === null && new Set(TASK_CLASS_IDS.map((taskClass) => outcomeKey(input, world, taskClass))).size > 1;
-  const roleGuessed = hasCaller && resolveRole(world.policy, textInput).tier >= 3;
   if (classMatters) {
-    return { ask: true, taskClass: true, role: roleGuessed };
+    return { ask: true, taskClass: true, role: roleGuessed, declaredAudit: false };
   }
   if (roleGuessed && options.applyRole) {
-    return { ask: true, taskClass: false, role: true };
+    return { ask: true, taskClass: false, role: true, declaredAudit: false };
   }
   return { ask: false, skip: fixed ?? "no-effect" };
 }
@@ -170,20 +228,34 @@ export function spawnHintPreview(
   if (!availability?.active || availability.shadow) {
     return undefined;
   }
-  const plan = planSpawnHint(input, world, { applyRole: availability.applyRole });
-  if (!plan.ask) {
+  const plan = planSpawnHint(input, world, {
+    applyRole: availability.applyRole,
+    auditDeclared: availability.auditDeclared,
+  });
+  // A declared-audit ask never decides anything — the label already did — so the preview says
+  // nothing, the same as any other declared create.
+  if (!plan.ask || plan.declaredAudit) {
     return undefined;
   }
   return { status: "decided-at-create", role: plan.role && availability.applyRole };
 }
 
-/** The state sent: title, the start of the prompt, and who spawned it. */
-export function buildSpawnHintState(input: ClassifierInput): Record<string, string> {
+/**
+ * The state sent: title, the start of the prompt, who spawned it, and the normalized declared
+ * class for the declared-label audit (docs/jev.md, "Auditing a declared label") — never a raw
+ * label value, and never for any other ask: an unrecognized `paseo.task-class` value falls
+ * through to an ordinary live ask, which must not leak the label into its state.
+ */
+export function buildSpawnHintState(
+  input: ClassifierInput,
+  declaredTaskClass?: TaskClassId,
+): Record<string, string> {
   const hasCaller = input.callerAgentId !== undefined && input.callerAgentId !== "";
   return {
     title: input.title ?? "",
     prompt: (input.initialPrompt ?? "").slice(0, SPAWN_HINT_PROMPT_CHARS),
     spawned_by: hasCaller ? "another agent" : "a person or a daemon job",
+    ...(declaredTaskClass !== undefined ? { declared_task_class: declaredTaskClass } : {}),
   };
 }
 
@@ -388,7 +460,10 @@ async function withinBound<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 export async function fetchSpawnHint(options: FetchSpawnHintOptions): Promise<SpawnHint> {
   try {
     const { input, world, availability, paseo } = options;
-    const plan = planSpawnHint(input, world, { applyRole: availability?.applyRole ?? false });
+    const plan = planSpawnHint(input, world, {
+      applyRole: availability?.applyRole ?? false,
+      auditDeclared: availability?.auditDeclared ?? false,
+    });
     if (!plan.ask) {
       return { status: "not-needed", reason: plan.skip };
     }
@@ -412,14 +487,21 @@ export async function fetchSpawnHint(options: FetchSpawnHintOptions): Promise<Sp
         {
           feature: SPAWN_HINT_FEATURE,
           callSite: SPAWN_HINT_CALL_SITE,
-          state: buildSpawnHintState(input),
+          state: buildSpawnHintState(input, plan.declaredTaskClass),
           questions: buildSpawnHintQuestions(world.policy, plan),
           scope: { cwd: options.cwd, ...(hasCaller ? { parentAgentId: input.callerAgentId } : {}) },
-          deadlineMs: SPAWN_HINT_DEADLINE_MS,
+          // The declared-label audit's answer is never applied, so it gets its own tighter bound:
+          // a timeout there should cost the audit a record, not the create extra latency on top
+          // of what an ordinary unlabelled ask already pays.
+          deadlineMs: plan.declaredAudit ? SPAWN_HINT_DECLARED_AUDIT_DEADLINE_MS : SPAWN_HINT_DEADLINE_MS,
+          // The declared-label audit must never count as a live answer, whatever
+          // `spawnHint.shadow` says: it can only make the call shadow, never live.
+          ...(plan.declaredAudit ? { shadow: true as const } : {}),
         },
-        { timeout: SPAWN_HINT_RPC_TIMEOUT_MS },
+        { timeout: plan.declaredAudit ? SPAWN_HINT_DECLARED_AUDIT_RPC_TIMEOUT_MS : SPAWN_HINT_RPC_TIMEOUT_MS },
       ),
-      options.timeoutMs ?? SPAWN_HINT_PLUGIN_TIMEOUT_MS,
+      options.timeoutMs ??
+        (plan.declaredAudit ? SPAWN_HINT_DECLARED_AUDIT_PLUGIN_TIMEOUT_MS : SPAWN_HINT_PLUGIN_TIMEOUT_MS),
     );
     if (response === TIMED_OUT) {
       return { status: "unavailable", reason: "plugin-timeout" };
@@ -436,12 +518,16 @@ export async function fetchSpawnHint(options: FetchSpawnHintOptions): Promise<Sp
         return { status: "failed", reason: "contract", ...(callId !== undefined ? { callId } : {}) };
       }
       return {
-        status: response.outcome,
+        // Defense in depth: the declared-label audit requested `shadow: true`, which the daemon
+        // enforces (service.ts), but a daemon that ignored the flag must still never read here as
+        // a live answer.
+        status: plan.declaredAudit ? "shadow" : response.outcome,
         callId,
         answers,
         proposal: proposeFromAnswers(answers, world.policy),
         applyHard: availability.applyHard,
         applyRole: availability.applyRole,
+        declaredAudit: plan.declaredAudit,
       };
     }
     return {

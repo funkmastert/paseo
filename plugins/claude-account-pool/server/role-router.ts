@@ -13,6 +13,7 @@ import {
   type TaskClassId,
 } from "../shared/role-policy-schema";
 import { restrictionNotice } from "../shared/restriction-notice";
+import { JEV_TOOLS_DISCOVERY_HINT } from "../shared/jev-tools-hint";
 import { ULTRACODE_OPTION_ID } from "../shared/thinking-levels";
 import { applyToolProfile, profileDeniedTools, serializeDeniedTools, type ToolProfile } from "../shared/tool-profiles";
 import {
@@ -296,6 +297,12 @@ interface ToolEnforcement {
  * is denied (profile, withholding, inheritance — see server/classifier.ts);
  * this only writes it down.
  *
+ * `jevTools` carries the D8 arm (server/classifier.ts's `decideJevTools`):
+ * the "on" arm gets the agent-tools discovery line appended beside whatever
+ * restriction notice already runs, so the two never fight over the same
+ * `appendSystemPrompt` slot (`shared/jev-tools-hint.ts`). The control arm,
+ * and a create the arm was never evaluated for, get nothing.
+ *
  * The cast is the same structural read the rest of this file uses: the wire
  * schema for `providerOptions` is free-form JSON, and the profile merge only
  * ever produces string arrays and nested objects.
@@ -304,9 +311,12 @@ function enforceToolDecision(
   request: PluginBeforeRequests["agent.create"],
   tools: AgentDecision["tools"],
   outputStyle: AgentDecision["outputStyle"],
+  jevTools: AgentDecision["jevTools"],
 ): ToolEnforcement {
   const extended = request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
-  const notice = restrictionNotice(tools.deniedTools, { inherited: tools.inheritedTools.length > 0 });
+  const restriction = restrictionNotice(tools.deniedTools, { inherited: tools.inheritedTools.length > 0 });
+  const hint = jevTools?.arm === "on" ? JEV_TOOLS_DISCOVERY_HINT : undefined;
+  const notice = restriction && hint ? `${restriction}\n\n${hint}` : restriction ?? hint;
   return {
     providerOptions: applyToolProfile(request.config.providerOptions, tools.profile, tools.inheritedTools, notice) as
       | ProviderOptionsValue
@@ -666,9 +676,14 @@ function applyJevLabels(
 }
 
 /**
- * `v1;base=standard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0`.
+ * `v1;base=standard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0;audit=0`.
  * A missing class or model is `-`; each part is URI-encoded so a `;`, `/` or `=` in a model id
  * cannot shift the fields. Null when the decision carries no would-be.
+ *
+ * `audit` is `decision.jev.declaredAudit`: true only for the declared-label audit's own call,
+ * never for an ordinary ask on the same child (a role-only ask on a declared class still has
+ * `base.taskClass` declared, but is not the audit). `savings-spawn.ts` reads this field rather
+ * than re-deriving it from the class source, which cannot tell the two apart.
  */
 export function formatJevSpawnLabel(jev: NonNullable<AgentDecision["jev"]>): string | null {
   if (!jev.wouldBe || !jev.base) {
@@ -682,6 +697,7 @@ export function formatJevSpawnLabel(jev: NonNullable<AgentDecision["jev"]>): str
     `would=${part(jev.wouldBe.taskClass, jev.wouldBe.model)}`,
     `move=${jev.wouldBe.move}`,
     `applied=${jev.applied ? 1 : 0}`,
+    `audit=${jev.declaredAudit ? 1 : 0}`,
   ].join(";");
 }
 
@@ -831,7 +847,7 @@ function routeRoleForCreateUnguarded(
     });
   };
 
-  const enforcement = enforceToolDecision(request, decision.tools, decision.outputStyle);
+  const enforcement = enforceToolDecision(request, decision.tools, decision.outputStyle, decision.jevTools);
 
   // Tool enforcement is independent of model selection: a role can have no
   // configured models (so no rewrite) and still be restricted to reading, or

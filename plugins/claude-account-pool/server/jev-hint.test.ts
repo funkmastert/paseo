@@ -5,6 +5,9 @@ import { classifyAgent, type ClassifierInput, type ClassifierWorld } from "./cla
 import type { ModelThinkingOptions, ThinkingCatalog } from "./model-catalog";
 import {
   SPAWN_HINT_DEADLINE_MS,
+  SPAWN_HINT_DECLARED_AUDIT_DEADLINE_MS,
+  SPAWN_HINT_DECLARED_AUDIT_PLUGIN_TIMEOUT_MS,
+  SPAWN_HINT_DECLARED_AUDIT_RPC_TIMEOUT_MS,
   SPAWN_HINT_PLUGIN_TIMEOUT_MS,
   SPAWN_HINT_PROMPT_CHARS,
   SPAWN_HINT_RPC_TIMEOUT_MS,
@@ -126,7 +129,14 @@ function worker(overrides: Partial<ClassifierInput> = {}): ClassifierInput {
   return child({ labels: { "paseo.agent-role": "worker" }, ...overrides });
 }
 
-const LIVE: SpawnHintAvailability = { active: true, reason: null, shadow: false, applyHard: false, applyRole: false };
+const LIVE: SpawnHintAvailability = {
+  active: true,
+  reason: null,
+  shadow: false,
+  applyHard: false,
+  applyRole: false,
+  auditDeclared: false,
+};
 
 type DecidePayload = JevDecideResponse["payload"];
 
@@ -195,7 +205,12 @@ afterEach(() => {
 
 describe("when the spawn hint is asked", () => {
   it("asks for an unlabelled child whose class changes its model, with the role when the role is a guess", () => {
-    expect(planSpawnHint(child(), world(), { applyRole: false })).toEqual({ ask: true, taskClass: true, role: true });
+    expect(planSpawnHint(child(), world(), { applyRole: false, auditDeclared: false })).toEqual({
+      ask: true,
+      taskClass: true,
+      role: true,
+      declaredAudit: false,
+    });
   });
 
   it("does not ask when a label declares the class", async () => {
@@ -221,17 +236,27 @@ describe("when the spawn hint is asked", () => {
   it("asks for a caller-less create that declares a worker role, which is placed like a child", () => {
     const input = child({ callerAgentId: undefined, labels: { "paseo.agent-type": "worker" } });
 
-    expect(planSpawnHint(input, world(), { applyRole: false })).toEqual({ ask: true, taskClass: true, role: false });
+    expect(planSpawnHint(input, world(), { applyRole: false, auditDeclared: false })).toEqual({
+      ask: true,
+      taskClass: true,
+      role: false,
+      declaredAudit: false,
+    });
   });
 
   it("does not ask when a risk keyword already made it hard, which JEV cannot lower", () => {
     const input = child({ initialPrompt: "Plan the database migration for the orders table." });
 
-    expect(planSpawnHint(input, world(), { applyRole: false })).toEqual({ ask: false, skip: "hard-seed" });
+    expect(planSpawnHint(input, world(), { applyRole: false, auditDeclared: false })).toEqual({
+      ask: false,
+      skip: "hard-seed",
+    });
   });
 
   it("does not ask with no title or prompt", () => {
-    expect(planSpawnHint(child({ title: "", initialPrompt: "" }), world(), { applyRole: false })).toEqual({
+    expect(
+      planSpawnHint(child({ title: "", initialPrompt: "" }), world(), { applyRole: false, auditDeclared: false }),
+    ).toEqual({
       ask: false,
       skip: "no-text",
     });
@@ -240,15 +265,77 @@ describe("when the spawn hint is asked", () => {
   it("does not ask when every class runs the same model at the same level for the role", () => {
     const input = child({ labels: { "paseo.agent-role": "Scribe" } });
 
-    expect(planSpawnHint(input, world(), { applyRole: true })).toEqual({ ask: false, skip: "no-effect" });
+    expect(planSpawnHint(input, world(), { applyRole: true, auditDeclared: false })).toEqual({
+      ask: false,
+      skip: "no-effect",
+    });
   });
 
   it("asks the role alone only with applyRole on", () => {
     // A declared class, but the role is still a keyword guess.
     const input = child({ labels: { "paseo.task-class": "standard" } });
 
-    expect(planSpawnHint(input, world(), { applyRole: false })).toEqual({ ask: false, skip: "declared" });
-    expect(planSpawnHint(input, world(), { applyRole: true })).toEqual({ ask: true, taskClass: false, role: true });
+    expect(planSpawnHint(input, world(), { applyRole: false, auditDeclared: false })).toEqual({
+      ask: false,
+      skip: "declared",
+    });
+    expect(planSpawnHint(input, world(), { applyRole: true, auditDeclared: false })).toEqual({
+      ask: true,
+      taskClass: false,
+      role: true,
+      declaredAudit: false,
+    });
+  });
+
+  describe("the declared-label audit", () => {
+    it("asks a declared child in shadow when auditDeclared is on, and never a root create", () => {
+      // Its role ("worker") is declared too, so no live role ask can compete with the audit.
+      const declared = child({ labels: { "paseo.task-class": "hard", "paseo.agent-role": "worker" } });
+
+      expect(planSpawnHint(declared, world(), { applyRole: false, auditDeclared: true })).toEqual({
+        ask: true,
+        taskClass: true,
+        role: false,
+        declaredAudit: true,
+        declaredTaskClass: "hard",
+      });
+      expect(planSpawnHint(declared, world(), { applyRole: true, auditDeclared: true })).toEqual({
+        ask: true,
+        taskClass: true,
+        role: false,
+        declaredAudit: true,
+        declaredTaskClass: "hard",
+      });
+
+      const scheduleRoot = child({ callerAgentId: undefined, labels: { "paseo.task-class": "hard", "paseo.agent-type": "worker" } });
+      expect(planSpawnHint(scheduleRoot, world(), { applyRole: false, auditDeclared: true })).toEqual({
+        ask: false,
+        skip: "declared",
+      });
+    });
+
+    it("restores today's skip when the switch is off", () => {
+      const declared = child({ labels: { "paseo.task-class": "hard" } });
+
+      expect(planSpawnHint(declared, world(), { applyRole: false, auditDeclared: false })).toEqual({
+        ask: false,
+        skip: "declared",
+      });
+    });
+
+    it("lets today's live role ask win over the audit when both apply: one call cannot serve both", () => {
+      // A declared class, but its role ("worker" by default in `child()`) is still a keyword
+      // guess, per the sibling "asks the role alone only with applyRole on" test above.
+      const declaredClassGuessedRole = child({ labels: { "paseo.task-class": "hard" } });
+
+      expect(
+        planSpawnHint(declaredClassGuessedRole, world(), { applyRole: true, auditDeclared: true }),
+      ).toEqual({ ask: true, taskClass: false, role: true, declaredAudit: false });
+      // With applyRole off there is no live role ask to compete with, so the audit runs.
+      expect(
+        planSpawnHint(declaredClassGuessedRole, world(), { applyRole: false, auditDeclared: true }),
+      ).toEqual({ ask: true, taskClass: true, role: false, declaredAudit: true, declaredTaskClass: "hard" });
+    });
   });
 });
 
@@ -297,6 +384,91 @@ describe("the request it sends", () => {
     expect((request.questions.role.criteria as Record<string, string>).scribe).toBe(
       "An operator-defined role named Scribe, also called notetaker",
     );
+  });
+
+  it("sends shadow: true and the declared class in state for the declared-label audit", async () => {
+    const { paseo, decide } = stubPaseo(async () =>
+      payload({ answers: answers({ taskClass: ["standard", 0.9], reasoning: [1] }) }),
+    );
+    const input = child({ labels: { "paseo.task-class": "hard" } });
+
+    await fetchSpawnHint({
+      input,
+      cwd: "/Users/t/code/app",
+      world: world(),
+      availability: { ...LIVE, auditDeclared: true },
+      paseo,
+    });
+
+    expect(decide).toHaveBeenCalledTimes(1);
+    const [request, options] = decide.mock.calls[0] as unknown as [
+      { shadow?: true; state: Record<string, string>; questions: Record<string, unknown>; deadlineMs: number },
+      { timeout: number },
+    ];
+    expect(request.shadow).toBe(true);
+    expect(request.state.declared_task_class).toBe("hard");
+    expect(Object.keys(request.questions).sort()).toEqual(["reasoning", "task_class"]);
+    // Its own tighter bound: the answer is never applied, so a timeout should cost the audit a
+    // record, not the create extra latency on top of an ordinary unlabelled ask.
+    expect(request.deadlineMs).toBe(SPAWN_HINT_DECLARED_AUDIT_DEADLINE_MS);
+    expect(options.timeout).toBe(SPAWN_HINT_DECLARED_AUDIT_RPC_TIMEOUT_MS);
+  });
+
+  it("answers within 1 s when the declared-label audit's RPC never resolves", async () => {
+    vi.useFakeTimers();
+    const { paseo } = stubPaseo(() => new Promise<DecidePayload>(() => {}));
+    const input = child({ labels: { "paseo.task-class": "hard" } });
+    let settled: SpawnHint | undefined;
+
+    void fetchSpawnHint({
+      input,
+      cwd: "/w",
+      world: world(),
+      availability: { ...LIVE, auditDeclared: true },
+      paseo,
+    }).then((hint) => {
+      settled = hint;
+    });
+    await vi.advanceTimersByTimeAsync(SPAWN_HINT_DECLARED_AUDIT_PLUGIN_TIMEOUT_MS - 1);
+    expect(settled).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(settled).toEqual({ status: "unavailable", reason: "plugin-timeout" });
+  });
+
+  it("coerces a declared-label audit's answer back to shadow even if a daemon ignored the flag", async () => {
+    const input = child({ labels: { "paseo.task-class": "hard" } });
+
+    const hint = await hintFor(
+      input,
+      { outcome: "answered", answers: answers({ taskClass: ["standard", 0.9], reasoning: [1] }) },
+      { ...LIVE, auditDeclared: true },
+    );
+
+    expect(hint.status).toBe("shadow");
+  });
+
+  it("never sends shadow for an ordinary unlabelled ask", async () => {
+    const { paseo, decide } = stubPaseo(async () =>
+      payload({ answers: answers({ taskClass: ["standard", 0.9], reasoning: [1], role: ["worker", 0.9] }) }),
+    );
+
+    await fetchSpawnHint({ input: child(), cwd: "/w", world: world(), availability: LIVE, paseo });
+
+    const [request] = decide.mock.calls[0] as unknown as [{ shadow?: true }];
+    expect(request.shadow).toBeUndefined();
+  });
+
+  it("never sends declared_task_class for a live ask, even one an unrecognized label value fell through to", async () => {
+    const { paseo, decide } = stubPaseo(async () =>
+      payload({ answers: answers({ taskClass: ["standard", 0.9], reasoning: [1], role: ["worker", 0.9] }) }),
+    );
+    const input = child({ labels: { "paseo.task-class": "medium" } });
+
+    await fetchSpawnHint({ input, cwd: "/w", world: world(), availability: LIVE, paseo });
+
+    const [request] = decide.mock.calls[0] as unknown as [{ state: Record<string, string> }];
+    expect(request.state.declared_task_class).toBeUndefined();
   });
 
   it("sends no role question for a child whose role is declared", async () => {
@@ -352,7 +524,12 @@ describe("failing open", () => {
       const hint = await hintFor(child(), { callId: callId as string, answers: mechanical });
 
       expect(hint).toEqual({ status: "failed", reason: "contract" });
-      expect(decideWith(child(), hint).jev).toEqual({ status: "failed", reason: "contract", applied: false });
+      expect(decideWith(child(), hint).jev).toEqual({
+        status: "failed",
+        reason: "contract",
+        applied: false,
+        declaredAudit: false,
+      });
     }
     const failed = await hintFor(child(), { outcome: "failed", reason: "timeout", callId: 7 as unknown as string });
     expect(failed).toEqual({ status: "failed", reason: "timeout" });
@@ -403,7 +580,13 @@ describe("failing open", () => {
     const without = decideWith(child(), undefined);
     expect(withHint.taskClass).toEqual(without.taskClass);
     expect(withHint.model).toEqual(without.model);
-    expect(withHint.jev).toEqual({ status: "unavailable", reason: "excluded", callId: "c-x", applied: false });
+    expect(withHint.jev).toEqual({
+      status: "unavailable",
+      reason: "excluded",
+      callId: "c-x",
+      applied: false,
+      declaredAudit: false,
+    });
   });
 
   it("fails a malformed answer rather than reading it", async () => {
@@ -431,6 +614,7 @@ describe("precedence", () => {
       proposal: { taskClass: "mechanical" },
       applyHard: true,
       applyRole: true,
+      declaredAudit: false,
     };
 
     const decision = decideWith(child({ labels: { "paseo.task-class": "standard" } }), hint);
@@ -447,6 +631,7 @@ describe("precedence", () => {
       proposal: { taskClass: "mechanical" },
       applyHard: false,
       applyRole: false,
+      declaredAudit: false,
     };
 
     const decision = decideWith(child({ initialPrompt: "Fix the race condition in the queue." }), hint);

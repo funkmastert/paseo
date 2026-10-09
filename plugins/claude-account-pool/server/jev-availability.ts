@@ -96,6 +96,7 @@ export function snapshotOf(status: JevStatus): JevAvailabilitySnapshot {
       shadow: status.features.spawnHint?.shadow !== false,
       applyHard: status.spawnHint?.applyHard === true,
       applyRole: status.spawnHint?.applyRole === true,
+      auditDeclared: status.spawnHint?.auditDeclared === true,
     },
     agentTools: {
       active: agentTools.active,

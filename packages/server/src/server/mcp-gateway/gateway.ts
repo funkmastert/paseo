@@ -645,6 +645,12 @@ export class McpGateway {
    * invalidate a sign-in someone started from the strip a moment earlier and overwrite its
    * verifier, so their callback fails as an expired link. Nobody is waiting on a browser here,
    * so this one keeps both stores untouched and lets `auth()` end in `UnauthorizedError`.
+   *
+   * `invalidateCredentials` is no-op'd for the same reason: a dead refresh token here still
+   * ends this connection attempt in `UnauthorizedError` → needs-auth (`isAuthFailure`) without
+   * it, and clearing the store from a background attempt would delete the tokens, PKCE
+   * verifier, and client registration out from under an interactive sign-in a person is
+   * mid-redirect on from the strip.
    */
   private buildConnectionOAuthProvider(name: string): OAuthClientProvider {
     return {
@@ -652,6 +658,7 @@ export class McpGateway {
       state: () => randomUUID(),
       saveCodeVerifier: () => undefined,
       redirectToAuthorization: () => undefined,
+      invalidateCredentials: () => undefined,
     };
   }
 

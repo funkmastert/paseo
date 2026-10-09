@@ -250,7 +250,7 @@ const TITLE_REFRESH_FILE_MAX_BYTES = 1_000_000;
  * "generation calls avoided" gets counted later by the savings ledger.
  */
 export function createTitleRefreshRecorder(options: {
-  jev: Pick<JevService, "decisions"> | null;
+  jev: Pick<JevService, "decisions" | "savings"> | null;
   filePath: string;
   logger: Logger;
 }): (
@@ -284,6 +284,29 @@ export function createTitleRefreshRecorder(options: {
           applied: fits,
           mode: "live",
           wouldBe: "regenerate title",
+        });
+      }
+      // Every answered call is an involvement (R1), not only the ones confident enough to gate:
+      // a low-confidence answer still cost JEV a call, and the cadence decided the look instead.
+      if (options.jev && event.outcome === "answered" && context.agentId && event.callId) {
+        const generate = event.gatedByJev
+          ? event.action === "jev-stale"
+          : event.action === "cadence";
+        options.jev.savings.record({
+          feature: "titleRefresh",
+          callSite: TITLE_REFRESH_CALL_SITE,
+          callId: event.callId,
+          agentId: context.agentId,
+          involvement: `Does "${context.currentTitle}" still describe what this session is doing?`,
+          decision: {
+            did: generate ? "generate" : "no-generate",
+            wouldBe: generate ? "generate" : "no-generate",
+            // titleRefresh has no shadow mode (docs/jev.md, "Config"): a "fits" answer changed
+            // what code did (it skipped a generation); every other outcome ran as it would have.
+            changed: event.gatedByJev && event.action === "jev-fits",
+          },
+          facts: { action: event.action, score: event.score, confidence: event.confidence },
+          pending: false,
         });
       }
     } catch {
