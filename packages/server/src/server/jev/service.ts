@@ -119,6 +119,8 @@ export interface JevServiceOptions {
   readSecretValues?: (jevKey: string | null) => readonly JevSecretValue[];
   /** The agent's labels, for attaching its spawn hint in `listDecisions`. */
   readAgentLabels?: (agentId: string) => Readonly<Record<string, string>> | null;
+  /** `agents.leaderCompaction.enabled`: feature 9 asks nothing while it is off. Unset reads as off. */
+  readLeaderCompactionEnabled?: () => boolean;
   /** The savings ledger's lookups (docs/jev.md, "Savings"). Each may throw; the ledger falls back. */
   savingsLookups?: {
     agentTitle?: (agentId: string) => string | null;
@@ -265,13 +267,27 @@ function newLedgerEntry(
   };
 }
 
-/** What the dashboard shows for a feature: off, shadow (dry run for feature 14), live or dormant. */
-function savingsFeatureState(status: JevStatus, feature: JevSavingsFeature): JevFeatureState {
+/**
+ * What the dashboard shows for a feature: off, shadow (dry run for feature 14), live or dormant.
+ * Feature 9 asks only while leader compaction is on, so with it off the feature is dormant.
+ */
+function savingsFeatureState(
+  status: JevStatus,
+  feature: JevSavingsFeature,
+  leaderCompactionEnabled: boolean,
+): JevFeatureState {
   const own = status.features[feature as JevFeatureId];
   if (!own?.enabled) return "off";
-  // Feature 9 runs only while leader compaction is on, which it is not in v1.
-  if (feature === "compactionTiming") return "dormant";
+  if (feature === "compactionTiming" && !leaderCompactionEnabled) return "dormant";
   return own.shadow ? "shadow" : "live";
+}
+
+function isLeaderCompactionOn(options: JevServiceOptions): boolean {
+  try {
+    return options.readLeaderCompactionEnabled?.() === true;
+  } catch {
+    return false;
+  }
 }
 
 function featureConfig(
@@ -382,7 +398,8 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     platform: options.platform,
     findCall: (callId) => ledger.find(callId),
     daySpends: () => ledger.daySpends(),
-    featureState: (feature) => savingsFeatureState(status(), feature),
+    featureState: (feature) =>
+      savingsFeatureState(status(), feature, isLeaderCompactionOn(options)),
     featureShadow: (feature) => {
       const own = status().features[feature as JevFeatureId];
       return own ? own.shadow : true;

@@ -26,6 +26,10 @@ A completed `/compact` turn proves nothing. A refused or interrupted compaction 
 
 The agent keeps its id. Parent → child finish notifications still route, and nothing needs re-parenting. Account failover's import path is different: it mints a successor ([docs/account-failover.md](account-failover.md)).
 
+## JEV timing
+
+JEV can move an episode's start and add a cut-point sentence to `/compact` ([Feature 9](jev.md#feature-9-compaction-timing)). A verdict changes only what an `armed` sweep plans, so [Never interrupt a turn](#never-interrupt-a-turn) still holds. An early episode that gives up sends no push: the leader is under the line, and the line starts the next episode.
+
 ## Never interrupt a turn
 
 Every step starts through `AgentManager.startTurnIfIdle`. It returns null and does nothing unless the agent is `idle`, owns no foreground turn, autonomous turn, pending run or replacement, and has no pending permission. The check and the start happen in one synchronous stretch.
@@ -41,7 +45,7 @@ A step that finds the agent busy waits for its next idle sweep, and that does no
 
 ## Hysteresis
 
-After an episode ends (`done`, `gaveUp` or a dry-run report), nothing fires for that agent until its context has been seen under `prepareAtTokens`. A compaction that did not shrink the context cannot loop, and a dry run reports each crossing once. If the context shrinks for any other reason, the CLI's own auto-compact or someone typing `/compact`, a pending `prepare` is dropped. A pending `compact` skips to `restore`, so the note still comes back.
+After an episode ends (`done`, `gaveUp` or a dry-run report), nothing fires for that agent until its context has been seen under `prepareAtTokens`. A compaction that did not shrink the context cannot loop, and a dry run reports each crossing once. An early episode ends under that line and re-arms at once; the one-early-start-per-cycle rule keeps it from starting again. If the context shrinks under the episode's line for any other reason, the CLI's own auto-compact or someone typing `/compact`, a pending `prepare` is dropped. A pending `compact` skips to `restore`, so the note still comes back.
 
 State is in memory. After a daemon restart, a leader still over the line starts again from `prepare`. One that was compacted but not yet restored does not get its note back. The summary still carries it, because the compact instructions say to keep it.
 
@@ -64,4 +68,4 @@ Opus 5.5 ties each thinking block to the exact history before it. Accounts creat
 
 Only Claude-family agents are candidates, because `/compact` is a Claude Code command. Workers are out of scope by default: they are short-lived, and a restart costs them little.
 
-Run `dryRun` first. Its log line, `Leader compaction would start…`, carries the agent, its context size, whether it is idle right now, and the full prepare message.
+Run `dryRun` first. Its log line, `Leader compaction would start…`, carries the agent, its context size, whether it is idle right now, what triggered it (`line` or `early`), and the full prepare message.
