@@ -14,6 +14,7 @@ import {
   THINKING_OVERRIDDEN_LABEL,
   TOOLS_DENIED_LABEL,
   UNADVERTISED_MODEL_LABEL,
+  WORK_KIND_LABEL,
   type RoleModelPolicy,
 } from "../shared/role-policy-schema";
 import { createHealthTracker } from "./health";
@@ -2587,6 +2588,66 @@ describe("JEV's labels", () => {
 
       expect(notice).toContain("[tool profile: read-only]");
       expect(notice).toContain("ask_jev");
+    });
+  });
+
+  describe("paseo.work-kind (U7, KTD-12)", () => {
+    const workKindHint = (status: "answered" | "shadow", choice: string): SpawnHint => ({
+      status,
+      callId: "jev-call-kind",
+      answers: { workKind: { choice, confidence: 0.9 } },
+      proposal: {},
+      applyHard: false,
+      applyRole: false,
+      declaredAudit: status === "shadow",
+    });
+
+    it("an unlabelled worker's call includes work_kind, and the answer lands in the label", () => {
+      const result = createRoleRouter(jevOptions())({ ...unlabelled(), jevHint: workKindHint("answered", "coding") }, fakeContext);
+
+      expect(result?.labels?.[WORK_KIND_LABEL]).toBe("coding");
+    });
+
+    it("a declared child: the kind is recorded, and the model is unchanged", () => {
+      const declaredHard = request({
+        callerAgentId: "c1",
+        labels: { [AGENT_ROLE_LABEL]: "worker", [TASK_CLASS_LABEL]: "hard" },
+        initialPrompt: "Implement the retry helper.",
+        config: { provider: "claude", cwd: "/tmp/work" },
+      });
+      const withoutHint = createRoleRouter(jevOptions())(declaredHard, fakeContext);
+
+      const result = createRoleRouter(jevOptions())(
+        { ...declaredHard, jevHint: workKindHint("shadow", "frontend") },
+        fakeContext,
+      );
+
+      expect(result?.config.model).toBe(withoutHint?.config.model);
+      expect(result?.labels?.[WORK_KIND_LABEL]).toBe("frontend");
+    });
+
+    it("a reviewer with no answer gets no label invented", () => {
+      const result = createRoleRouter(jevOptions())(unlabelled(), fakeContext);
+
+      expect(result?.labels?.[WORK_KIND_LABEL]).toBeUndefined();
+    });
+
+    it("JEV unavailable: no label value is invented", () => {
+      const result = createRoleRouter(jevOptions())(
+        { ...unlabelled(), jevHint: { status: "unavailable", reason: "no-status" } },
+        fakeContext,
+      );
+
+      expect(result?.labels?.[WORK_KIND_LABEL]).toBeUndefined();
+    });
+
+    it("writes nothing for an unrecognized kind value, rather than passing it through", () => {
+      const result = createRoleRouter(jevOptions())(
+        { ...unlabelled(), jevHint: workKindHint("answered", "not-a-real-kind") },
+        fakeContext,
+      );
+
+      expect(result?.labels?.[WORK_KIND_LABEL]).toBeUndefined();
     });
   });
 });

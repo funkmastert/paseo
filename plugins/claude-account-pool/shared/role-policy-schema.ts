@@ -35,6 +35,14 @@ export const TASK_CLASS_SOURCE_LABEL = "paseo.task-class-source";
 export const JEV_CALL_LABEL = "paseo.jev-call";
 export const JEV_TOOLS_LABEL = "paseo.jev-tools";
 export const JEV_SPAWN_LABEL = "paseo.jev-spawn";
+/**
+ * The kind of work JEV named for this child (KTD-12): `coding`, `frontend`,
+ * `research`, `review`, `writing`, `ops` or `other`. Written whenever
+ * `work_kind` was answered or shadowed, even on a declared child whose class
+ * it never moves — U8's ranking and decision log read it as data, not a
+ * decision this label itself makes.
+ */
+export const WORK_KIND_LABEL = "paseo.work-kind";
 
 /**
  * Asks for MCP gateway servers a child would not get by default: a

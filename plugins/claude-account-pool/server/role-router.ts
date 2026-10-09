@@ -1,4 +1,5 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
+import { WORK_KINDS, type WorkKind } from "../shared/arena-aliases";
 import {
   AGENT_TYPE_LABEL,
   JEV_CALL_LABEL,
@@ -9,6 +10,7 @@ import {
   THINKING_OVERRIDDEN_LABEL,
   TOOLS_DENIED_LABEL,
   UNADVERTISED_MODEL_LABEL,
+  WORK_KIND_LABEL,
   type RoleModelPolicy,
   type TaskClassId,
 } from "../shared/role-policy-schema";
@@ -543,7 +545,8 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
         parentUnresolvedSeen,
       );
       const scoped = applyMcpDecision(input.request, routed, decided.decision, options, declaredMcpUnknownSeen);
-      return applyJevLabels(input.request, scoped, decided.decision);
+      const withWorkKind = applyWorkKindLabel(input.request, scoped, input.jevHint);
+      return applyJevLabels(input.request, withWorkKind, decided.decision);
     } catch (error) {
       // Defense-in-depth on the never-block contract: every code path below
       // is meant to fail open already, but a throw anywhere in classification
@@ -624,6 +627,32 @@ function applyMcpDecision(
   }
   const base = routed ?? request;
   return withMcpScope(base, decision.mcp) ?? routed;
+}
+
+/**
+ * Records the kind of work JEV named for this child (KTD-12), straight off
+ * the request's own `jevHint` rather than the classifier's decision: U8 adds
+ * no `workKind` field to `AgentDecision`, since ranking reads the raw answer
+ * as world data, not a classification output. Written whenever `work_kind`
+ * was answered or shadowed — including on a declared child, where the label
+ * already fixed the model and this is purely a record of what the kind would
+ * have reordered. An unknown or malformed choice writes nothing: never
+ * invented, never guessed (KTD-12, "no keyword guessing").
+ */
+function applyWorkKindLabel(
+  request: PluginBeforeRequests["agent.create"],
+  routed: PluginBeforeRequests["agent.create"] | void,
+  jevHint: SpawnHint | undefined,
+): PluginBeforeRequests["agent.create"] | void {
+  if (!jevHint || (jevHint.status !== "answered" && jevHint.status !== "shadow")) {
+    return routed;
+  }
+  const choice = jevHint.answers.workKind?.choice;
+  if (!choice || !(WORK_KINDS as readonly string[]).includes(choice)) {
+    return routed;
+  }
+  const base = (routed ?? request) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
+  return { ...base, labels: { ...base.labels, [WORK_KIND_LABEL]: choice as WorkKind } };
 }
 
 /**

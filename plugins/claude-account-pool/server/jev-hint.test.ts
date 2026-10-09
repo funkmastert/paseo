@@ -11,8 +11,10 @@ import {
   SPAWN_HINT_PLUGIN_TIMEOUT_MS,
   SPAWN_HINT_PROMPT_CHARS,
   SPAWN_HINT_RPC_TIMEOUT_MS,
+  buildSpawnHintQuestions,
   fetchSpawnHint,
   planSpawnHint,
+  readSpawnHintAnswers,
   spawnHintPreview,
   type SpawnHint,
   type SpawnHintAvailability,
@@ -205,10 +207,11 @@ afterEach(() => {
 
 describe("when the spawn hint is asked", () => {
   it("asks for an unlabelled child whose class changes its model, with the role when the role is a guess", () => {
-    expect(planSpawnHint(child(), world(), { applyRole: false, auditDeclared: false })).toEqual({
+    expect(planSpawnHint(child(), world(), { applyRole: false, auditDeclared: false, rankingActive: false })).toEqual({
       ask: true,
       taskClass: true,
       role: true,
+      workKind: false,
       declaredAudit: false,
     });
   });
@@ -236,10 +239,11 @@ describe("when the spawn hint is asked", () => {
   it("asks for a caller-less create that declares a worker role, which is placed like a child", () => {
     const input = child({ callerAgentId: undefined, labels: { "paseo.agent-type": "worker" } });
 
-    expect(planSpawnHint(input, world(), { applyRole: false, auditDeclared: false })).toEqual({
+    expect(planSpawnHint(input, world(), { applyRole: false, auditDeclared: false, rankingActive: false })).toEqual({
       ask: true,
       taskClass: true,
       role: false,
+      workKind: false,
       declaredAudit: false,
     });
   });
@@ -247,7 +251,7 @@ describe("when the spawn hint is asked", () => {
   it("does not ask when a risk keyword already made it hard, which JEV cannot lower", () => {
     const input = child({ initialPrompt: "Plan the database migration for the orders table." });
 
-    expect(planSpawnHint(input, world(), { applyRole: false, auditDeclared: false })).toEqual({
+    expect(planSpawnHint(input, world(), { applyRole: false, auditDeclared: false, rankingActive: false })).toEqual({
       ask: false,
       skip: "hard-seed",
     });
@@ -255,7 +259,7 @@ describe("when the spawn hint is asked", () => {
 
   it("does not ask with no title or prompt", () => {
     expect(
-      planSpawnHint(child({ title: "", initialPrompt: "" }), world(), { applyRole: false, auditDeclared: false }),
+      planSpawnHint(child({ title: "", initialPrompt: "" }), world(), { applyRole: false, auditDeclared: false, rankingActive: false }),
     ).toEqual({
       ask: false,
       skip: "no-text",
@@ -265,7 +269,7 @@ describe("when the spawn hint is asked", () => {
   it("does not ask when every class runs the same model at the same level for the role", () => {
     const input = child({ labels: { "paseo.agent-role": "Scribe" } });
 
-    expect(planSpawnHint(input, world(), { applyRole: true, auditDeclared: false })).toEqual({
+    expect(planSpawnHint(input, world(), { applyRole: true, auditDeclared: false, rankingActive: false })).toEqual({
       ask: false,
       skip: "no-effect",
     });
@@ -275,14 +279,15 @@ describe("when the spawn hint is asked", () => {
     // A declared class, but the role is still a keyword guess.
     const input = child({ labels: { "paseo.task-class": "standard" } });
 
-    expect(planSpawnHint(input, world(), { applyRole: false, auditDeclared: false })).toEqual({
+    expect(planSpawnHint(input, world(), { applyRole: false, auditDeclared: false, rankingActive: false })).toEqual({
       ask: false,
       skip: "declared",
     });
-    expect(planSpawnHint(input, world(), { applyRole: true, auditDeclared: false })).toEqual({
+    expect(planSpawnHint(input, world(), { applyRole: true, auditDeclared: false, rankingActive: false })).toEqual({
       ask: true,
       taskClass: false,
       role: true,
+      workKind: false,
       declaredAudit: false,
     });
   });
@@ -292,23 +297,25 @@ describe("when the spawn hint is asked", () => {
       // Its role ("worker") is declared too, so no live role ask can compete with the audit.
       const declared = child({ labels: { "paseo.task-class": "hard", "paseo.agent-role": "worker" } });
 
-      expect(planSpawnHint(declared, world(), { applyRole: false, auditDeclared: true })).toEqual({
+      expect(planSpawnHint(declared, world(), { applyRole: false, auditDeclared: true, rankingActive: false })).toEqual({
         ask: true,
         taskClass: true,
         role: false,
+        workKind: false,
         declaredAudit: true,
         declaredTaskClass: "hard",
       });
-      expect(planSpawnHint(declared, world(), { applyRole: true, auditDeclared: true })).toEqual({
+      expect(planSpawnHint(declared, world(), { applyRole: true, auditDeclared: true, rankingActive: false })).toEqual({
         ask: true,
         taskClass: true,
         role: false,
+        workKind: false,
         declaredAudit: true,
         declaredTaskClass: "hard",
       });
 
       const scheduleRoot = child({ callerAgentId: undefined, labels: { "paseo.task-class": "hard", "paseo.agent-type": "worker" } });
-      expect(planSpawnHint(scheduleRoot, world(), { applyRole: false, auditDeclared: true })).toEqual({
+      expect(planSpawnHint(scheduleRoot, world(), { applyRole: false, auditDeclared: true, rankingActive: false })).toEqual({
         ask: false,
         skip: "declared",
       });
@@ -317,7 +324,7 @@ describe("when the spawn hint is asked", () => {
     it("restores today's skip when the switch is off", () => {
       const declared = child({ labels: { "paseo.task-class": "hard" } });
 
-      expect(planSpawnHint(declared, world(), { applyRole: false, auditDeclared: false })).toEqual({
+      expect(planSpawnHint(declared, world(), { applyRole: false, auditDeclared: false, rankingActive: false })).toEqual({
         ask: false,
         skip: "declared",
       });
@@ -329,13 +336,117 @@ describe("when the spawn hint is asked", () => {
       const declaredClassGuessedRole = child({ labels: { "paseo.task-class": "hard" } });
 
       expect(
-        planSpawnHint(declaredClassGuessedRole, world(), { applyRole: true, auditDeclared: true }),
-      ).toEqual({ ask: true, taskClass: false, role: true, declaredAudit: false });
+        planSpawnHint(declaredClassGuessedRole, world(), { applyRole: true, auditDeclared: true, rankingActive: false }),
+      ).toEqual({ ask: true, taskClass: false, role: true, workKind: false, declaredAudit: false });
       // With applyRole off there is no live role ask to compete with, so the audit runs.
       expect(
-        planSpawnHint(declaredClassGuessedRole, world(), { applyRole: false, auditDeclared: true }),
-      ).toEqual({ ask: true, taskClass: true, role: false, declaredAudit: true, declaredTaskClass: "hard" });
+        planSpawnHint(declaredClassGuessedRole, world(), { applyRole: false, auditDeclared: true, rankingActive: false }),
+      ).toEqual({ ask: true, taskClass: true, role: false, workKind: false, declaredAudit: true, declaredTaskClass: "hard" });
     });
+  });
+});
+
+describe("work_kind (KTD-12)", () => {
+  /** "scribe" with two same-shaped candidates in every pool: no class changes the model (no-effect), but ranking has something to reorder. */
+  function policyWithTwoCandidateScribe(): RoleModelPolicy {
+    return {
+      ...POLICY,
+      roles: POLICY.roles.map((role) =>
+        role.id === "scribe"
+          ? { ...role, models: ["claude-sonnet-5", "claude-haiku-4-5-20251001"], mechanicalModels: [], hardModels: [] }
+          : role,
+      ),
+      // Flatten thinking by class too: otherwise mechanical/hard would still differ from standard
+      // on thinking level alone, even with every class resolving to the same model pool above.
+      thinking: { leader: null, byTaskClass: { mechanical: "high", standard: "high", hard: "high" } },
+    };
+  }
+
+  it("asks work_kind alone when ranking is on and the resolved class has two or more candidates, with no other reason to ask", () => {
+    const input = child({ labels: { "paseo.agent-role": "Scribe" } });
+    const twoCandidatePolicy = policyWithTwoCandidateScribe();
+
+    expect(
+      planSpawnHint(input, world(twoCandidatePolicy), { applyRole: false, auditDeclared: false, rankingActive: true }),
+    ).toEqual({ ask: true, taskClass: false, role: false, workKind: true, declaredAudit: false });
+  });
+
+  it("leaves today's no-effect skip unchanged when ranking is off", () => {
+    const input = child({ labels: { "paseo.agent-role": "Scribe" } });
+    const twoCandidatePolicy = policyWithTwoCandidateScribe();
+
+    expect(
+      planSpawnHint(input, world(twoCandidatePolicy), { applyRole: false, auditDeclared: false, rankingActive: false }),
+    ).toEqual({ ask: false, skip: "no-effect" });
+  });
+
+  it("still skips no-effect when ranking is on but the resolved class has fewer than two candidates", () => {
+    // The default "scribe" role: haiku only, in every pool.
+    const input = child({ labels: { "paseo.agent-role": "Scribe" } });
+
+    expect(planSpawnHint(input, world(), { applyRole: false, auditDeclared: false, rankingActive: true })).toEqual({
+      ask: false,
+      skip: "no-effect",
+    });
+  });
+
+  it("rides the same call as the task-class question when both matter", () => {
+    expect(planSpawnHint(child(), world(), { applyRole: false, auditDeclared: false, rankingActive: true })).toEqual({
+      ask: true,
+      taskClass: true,
+      role: true,
+      workKind: true,
+      declaredAudit: false,
+    });
+  });
+
+  it("asks work_kind in shadow on a declared child even with auditDeclared off, when ranking could reorder its fixed class", () => {
+    const twoCandidatePolicy = policyWithTwoCandidateScribe();
+    const declared = child({ labels: { "paseo.task-class": "standard", "paseo.agent-role": "Scribe" } });
+
+    expect(
+      planSpawnHint(declared, world(twoCandidatePolicy), { applyRole: false, auditDeclared: false, rankingActive: true }),
+    ).toEqual({ ask: true, taskClass: false, role: false, workKind: true, declaredAudit: true, declaredTaskClass: "standard" });
+  });
+
+  it("never asks it for a root create (leader) or with no text, ranking on or not", () => {
+    expect(
+      planSpawnHint(child({ callerAgentId: undefined }), world(), {
+        applyRole: false,
+        auditDeclared: false,
+        rankingActive: true,
+      }),
+    ).toEqual({ ask: false, skip: "leader" });
+    expect(
+      planSpawnHint(child({ title: "", initialPrompt: "" }), world(), {
+        applyRole: false,
+        auditDeclared: false,
+        rankingActive: true,
+      }),
+    ).toEqual({ ask: false, skip: "no-text" });
+  });
+
+  it("adds the work_kind question with the KTD-11 kind options when the plan asks for it", () => {
+    const questions = buildSpawnHintQuestions(POLICY, { taskClass: false, role: false, workKind: true });
+    expect(Object.keys(questions)).toEqual(["work_kind"]);
+    const workKindQuestion = questions.work_kind as { type: string; criteria: Record<string, string> };
+    expect(workKindQuestion.type).toBe("choice");
+    expect(Object.keys(workKindQuestion.criteria)).toEqual(
+      expect.arrayContaining(["coding", "frontend", "research", "review", "writing", "ops", "other"]),
+    );
+  });
+
+  it("does not add the work_kind question when the plan does not ask for it", () => {
+    const questions = buildSpawnHintQuestions(POLICY, { taskClass: true, role: false, workKind: false });
+    expect(questions.work_kind).toBeUndefined();
+  });
+
+  it("reads the work_kind answer back, and fails the whole batch when it is missing", () => {
+    const raw = { work_kind: { type: "choice", choice: "frontend", confidence: 0.8 } };
+    expect(readSpawnHintAnswers(raw, { taskClass: false, role: false, workKind: true })).toEqual({
+      workKind: { choice: "frontend", confidence: 0.8 },
+    });
+    expect(readSpawnHintAnswers({}, { taskClass: false, role: false, workKind: true })).toBeNull();
   });
 });
 
