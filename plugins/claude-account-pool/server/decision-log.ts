@@ -242,7 +242,9 @@ function describe(decision: AgentDecision, result: LoggedRequest | undefined): R
       ...(model.requestedRef !== undefined ? { requested: model.requestedRef } : {}),
       ...(model.override ? { overridden: true } : {}),
       ...(model.unadvertised ? { unadvertised: model.unadvertised.ref } : {}),
-      ...(model.ranking ? { ranking: describeRanking(model.ranking) } : {}),
+      // Second layer, belt-and-suspenders: never report a ranking against an honored explicit
+      // request, even if a future regression lets `ranking` leak through onto that outcome again.
+      ...(model.ranking && model.outcome !== "honored-request" ? { ranking: describeRanking(model.ranking) } : {}),
       // What the request actually carries after every hook ran, for the case a hook skipped the rewrite.
       ...finalModel(result),
     },

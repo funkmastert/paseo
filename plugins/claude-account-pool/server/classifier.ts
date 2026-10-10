@@ -686,6 +686,18 @@ function decideModel(
   world: ClassifierWorld,
   role: RoleRecord,
   taskClass: TaskClassId | undefined,
+  /**
+   * Whether a `paseo.task-class` label decided THIS create's real class —
+   * a fact about the create, not about whichever hypothetical (role,
+   * taskClass) this particular call is evaluating, so it is the same value
+   * across all of `classifyAgent`'s real/wouldBe/base calls for one create.
+   * Passed in rather than re-derived from `input` here: `classifyAgent`
+   * already computed it once (`classResolution.source === "declared"`),
+   * and re-deriving it a second, narrower way only agreed by construction
+   * (`resolveTaskClass` happening to check the declared label before its
+   * `jev` argument) rather than by an enforced contract.
+   */
+  taskClassDeclared: boolean,
 ): ModelDecision {
   const pool = classModels(role, taskClass);
   const { slot, fellBack } = resolvePoolSlot(role, taskClass);
@@ -713,8 +725,6 @@ function decideModel(
   let selectionRole = role;
   if (world.policy.arena && role.id !== LEADER_ROLE_ID) {
     const arena = world.policy.arena;
-    const taskClassDeclared =
-      resolveTaskClass({ labels: input.labels, title: input.title, initialPrompt: input.initialPrompt }).source === "declared";
     const decision = decideArenaPick({
       isLeader: false,
       roleId: role.id,
@@ -772,8 +782,13 @@ function decideModel(
     );
     if (evaluation.eligible) {
       const unverified = evaluation.unadvertised === true;
+      // An honored explicit request never carries a ranking: explicit beats inferred, and `base`'s
+      // `ranking` (if any) was computed for the ordered-selection path, not this one. Spreading it
+      // in unconditionally would let the decision claim a ranked model "applied" while a different,
+      // explicitly-requested model actually runs.
+      const { ranking: _ignoredForHonoredRequest, ...baseWithoutRanking } = base;
       return {
-        ...base,
+        ...baseWithoutRanking,
         outcome: "honored-request",
         provider: input.requestedProvider ?? null,
         model: input.requestedModel,
@@ -1574,7 +1589,7 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     reason: describeTaskClass(classPartial) + hintNote(input.jevHint, classResolution.taskClass, wouldBeClass),
   };
 
-  const model = decideModel(input, world, roleDecision.role, taskClass.taskClass);
+  const model = decideModel(input, world, roleDecision.role, taskClass.taskClass, classResolution.source === "declared");
   const tools = decideTools(world, toolRole, hasCaller);
   const account = decideAccount(input, world, model, asChild, hasCaller);
   const thinking = decideThinking(input, world, model, taskClass.taskClass, roleDecision, asChild);
@@ -1634,8 +1649,13 @@ function decideJevRecord(
     resolved.hasCaller && hint.proposal.roleId !== undefined
       ? resolveRole(world.policy, textInput, { roleId: hint.proposal.roleId, apply: true }).role
       : resolved.role.role;
-  const wouldBeModel = decideModel(input, world, wouldBeRole, resolved.wouldBeClass);
-  const baseModel = decideModel(input, world, resolved.baseRole, baselineClass);
+  // `resolved.source === "declared"` is the same "a label decided the real class" fact
+  // `classifyAgent` computed once — true/false identically for every hypothetical (role,
+  // taskClass) pair on this create, since whether a label was declared never depends on which
+  // class/role is being evaluated.
+  const taskClassDeclared = resolved.source === "declared";
+  const wouldBeModel = decideModel(input, world, wouldBeRole, resolved.wouldBeClass, taskClassDeclared);
+  const baseModel = decideModel(input, world, resolved.baseRole, baselineClass, taskClassDeclared);
   const rankDelta = classRank(resolved.wouldBeClass) - classRank(baselineClass);
   return {
     status: hint.status,

@@ -1593,7 +1593,7 @@ describe("classifyAgent — arena-ranked model pick (U8)", () => {
   }
 
   function rankings(boards: Record<string, ArenaRankingRow[]>): ArenaRankingsFile {
-    return { fetchedAt: Date.now(), publishDate: "2026-10-08", boards, unmatched: {} };
+    return { fetchedAt: Date.now(), publishDate: "2026-10-08", boards, unmatched: {}, failedBoards: [] };
   }
 
   // Operator order deliberately does NOT match rank order (haiku first, sonnet second): a test
@@ -1722,6 +1722,18 @@ describe("classifyAgent — arena-ranked model pick (U8)", () => {
 
   it("an old policy without the arena key parses and behaves exactly as before: no ranking field at all", () => {
     const decision = classifyAgent(child({ jevHint: workKindHint("frontend") }), world({ policy: arenaPool }));
+    expect(decision.model.ranking).toBeUndefined();
+  });
+
+  it("an honored explicit request never carries a ranking, even when the ranked pick would be a different ref", () => {
+    // Arena would pick claude-sonnet-5 (see arenaWorld's rankings above), but this request
+    // explicitly asks for claude-haiku-4-5-20251001, which is approved and selectable.
+    const decision = classifyAgent(
+      child({ requestedModel: "claude-haiku-4-5-20251001", jevHint: workKindHint("frontend") }),
+      arenaWorld(),
+    );
+    expect(decision.model.outcome).toBe("honored-request");
+    expect(decision.model.model).toBe("claude-haiku-4-5-20251001");
     expect(decision.model.ranking).toBeUndefined();
   });
 

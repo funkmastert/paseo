@@ -2677,6 +2677,7 @@ describe("JEV's labels", () => {
               ],
             },
             unmatched: {},
+            failedBoards: [],
           }),
         },
       });
@@ -2719,6 +2720,24 @@ describe("JEV's labels", () => {
         fakeContext,
       );
 
+      expect(result?.labels?.[ARENA_PICK_LABEL]).toBeUndefined();
+    });
+
+    it("an honored explicit request never carries the label, even when a different ref would have ranked higher", () => {
+      const result = createRoleRouter(arenaOptions())(
+        {
+          ...request({
+            callerAgentId: "c1",
+            labels: { [AGENT_ROLE_LABEL]: "worker" },
+            initialPrompt: "Add a hover state to the submit button.",
+            config: { provider: "claude", model: "claude-haiku-4-5", cwd: "/tmp/work" },
+          }),
+          jevHint: frontendKindHint(),
+        },
+        fakeContext,
+      );
+
+      expect(result?.config.model).toBe("claude-haiku-4-5");
       expect(result?.labels?.[ARENA_PICK_LABEL]).toBeUndefined();
     });
   });

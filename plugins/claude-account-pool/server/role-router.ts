@@ -685,7 +685,9 @@ function applyArenaPickLabel(
   decision: AgentDecision | undefined,
 ): PluginBeforeRequests["agent.create"] | void {
   const ranking = decision?.model.ranking;
-  if (!ranking || ranking.outcome !== "ranked") {
+  // Second layer, belt-and-suspenders: an honored explicit request must never carry this label even
+  // if a future regression lets `ranking` leak through onto that outcome again.
+  if (!ranking || ranking.outcome !== "ranked" || decision?.model.outcome === "honored-request") {
     return routed;
   }
   const base = (routed ?? request) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;

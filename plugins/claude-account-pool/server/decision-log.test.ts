@@ -339,6 +339,7 @@ describe("decision log", () => {
           ],
         },
         unmatched: {},
+        failedBoards: [],
       },
     };
 
