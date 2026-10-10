@@ -55,6 +55,7 @@ import type {
   FetchAgentTimelineDirection,
   FetchAgentTimelinePayload,
   FetchAgentTimelineProjection,
+  CodexGuardStatusPayload,
   JevDecidePayload,
   JevStatusPayload,
   SendAgentMessageResult,
@@ -492,6 +493,15 @@ export interface PaseoJevActions {
   ): Promise<"ok" | "excluded">;
 }
 
+export interface PaseoCodexGuardActions {
+  /**
+   * Codex guard health plus the running-children count (docs/codex-workers.md, "Guard health";
+   * KTD-6, KTD-9) -- the plugin-host boundary the account-pool plugin polls the same way it polls
+   * `jev.status`, feeding `ClassifierWorld.isCodexGuardHealthy` and `runningCodexChildren`.
+   */
+  status(options?: { timeout?: number }): Promise<CodexGuardStatusPayload["status"]>;
+}
+
 export interface PaseoConfigActions {
   /**
    * Reads daemon config through the existing config RPC. Provider profiles,
@@ -523,6 +533,10 @@ export interface PaseoApi {
   // COMPAT(jevPaseoApi): a plugin reloaded against an older daemon's host has no `paseo.jev`, and
   // a call is a TypeError before any RPC. Callers check `typeof paseo.jev?.decide === "function"`.
   readonly jev?: PaseoJevActions;
+  // COMPAT(codexGuardPaseoApi): same shape as `jev` above -- a plugin reloaded against an older
+  // daemon's host has no `paseo.codexGuard`. Callers check
+  // `typeof paseo.codexGuard?.status === "function"`.
+  readonly codexGuard?: PaseoCodexGuardActions;
 }
 
 export interface PaseoClient extends PaseoApi {
@@ -652,6 +666,9 @@ export function createPaseoApi(daemonClient: DaemonClient): PaseoApi {
         const { scope } = await daemonClient.jevScopeCheck(input, options);
         return scope === "excluded" ? "excluded" : "ok";
       },
+    },
+    codexGuard: {
+      status: async (options) => (await daemonClient.codexGuardStatus(options)).status,
     },
   };
 }

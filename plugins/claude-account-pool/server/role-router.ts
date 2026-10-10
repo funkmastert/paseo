@@ -39,6 +39,7 @@ import { formatModelRef } from "./role-availability";
 import type { ParentToolProfiles } from "./parent-profiles";
 import type { ResolveRoleTier } from "./role-resolve";
 import type { McpGatewayCache } from "./mcp-gateway-cache";
+import type { CodexGuardAvailabilitySnapshot } from "./codex-guard-availability";
 import { withMcpScope } from "./mcp-scope-enforcement";
 
 /** Stands in for `callerAgentId` in notifications about a root agent, which has none. */
@@ -196,6 +197,25 @@ export interface RoleRouterOptions {
    * to `"no-file"` — R8's intended behavior for a missing file, not an error.
    */
   arenaRankingCache?: { get(): ArenaRankingsFile | undefined };
+  /**
+   * The daemon's Codex guard health plus its running-children count (docs/codex-workers.md,
+   * KTD-6, KTD-9), polled the same way `arenaRankingCache` is. Optional: without it (or on a
+   * daemon that never started the poller, or an older daemon with no `codexGuard.status` RPC),
+   * `ClassifierWorld.isCodexGuardHealthy` is never supplied, which `isCodexRefUsable` already
+   * treats as unhealthy by design (guards-first, KTD-3) -- no `codex/` ref becomes usable just
+   * because this cache is absent.
+   */
+  codexGuardCache?: {
+    get(): CodexGuardAvailabilitySnapshot | undefined;
+    /**
+     * Code-review finding (round 1): called once a routed create's model provider is `codex`, so
+     * the in-flight create counts against `maxChildren` before the next poll catches up. Optional
+     * so a fake that only supplies `get` (most tests) keeps compiling; a real cache always has it.
+     */
+    reserve?(): void;
+    /** Fire-and-forget right after a codex pick, so the polled count catches up sooner. Optional for the same reason as `reserve`. */
+    refresh?(): Promise<CodexGuardAvailabilitySnapshot | undefined>;
+  };
   /** Called (deduplicated per caller+values) when labels[paseo.mcp] named something no gateway server is called. */
   onDeclaredMcpUnknown?: (episode: DeclaredMcpUnknownEpisode) => void;
   /**
@@ -868,6 +888,8 @@ function routeRoleForCreateUnguarded(
       callerDenials: callerDenialsFor(options, policy, callerAgentId),
       mcpGateway: options.mcpGatewayCache?.get(),
       arenaRanking: options.arenaRankingCache?.get(),
+      isCodexGuardHealthy: () => options.codexGuardCache?.get()?.healthy ?? false,
+      runningCodexChildren: options.codexGuardCache?.get()?.runningChildren,
       ...(input.jevTools ? { jevToolsAvailable: input.jevTools } : {}),
     },
   );
@@ -1084,6 +1106,12 @@ function routeRoleForCreateUnguarded(
     // daemon's own trusted providerOptions (e.g. a read-only tool profile's sandbox_mode) and must
     // never be stripped.
     nextConfig.providerOptions = stripCodexGuardedOverrides(nextConfig.providerOptions);
+    // Code-review finding (round 1): a polled runningChildren count is up to 60s stale, so a
+    // burst of back-to-back creates could all read "under the cap" before any of them shows up
+    // in a poll. Reserve this create's slot immediately, and kick a fire-and-forget refresh so
+    // the real poll catches up sooner -- neither call blocks this create.
+    options.codexGuardCache?.reserve?.();
+    void options.codexGuardCache?.refresh?.()?.catch(() => undefined);
   }
   if (enforcement.providerOptions) {
     nextConfig.providerOptions = enforcement.providerOptions;

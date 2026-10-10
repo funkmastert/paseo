@@ -425,6 +425,34 @@ export interface ResourceMonitorAgentSummary {
 }
 
 /**
+ * Lean per-agent view for `codex.guard.status`'s running-children count (KTD-9's `maxChildren`
+ * cap, review finding: `ResourceMonitorAgentSummary.isRunning` alone undercounts). A freshly
+ * created agent sits at lifecycle `"idle"` until its first turn is admitted -- a burst of Codex
+ * creates would otherwise pass the cap check before any of them ever reports `isRunning`. This
+ * carries what `countRunningCodexChildren` needs to count anything that is, or is about to be,
+ * drawing on the Codex window: `lifecycle` (not just a running/not-running bool) `createdAt` (so a
+ * just-created idle agent still counts, and an old idle one does not), and `busy` (a queued or
+ * admitted turn -- `isAgentBusy`'s definition -- catches an older idle agent that is about to run
+ * anyway, the same signal the done janitor and leader-compaction summaries already use).
+ *
+ * `this.agents` never holds a closed or archived agent at all -- `prepareAgentForClosure` deletes
+ * the entry synchronously, with no `await` between the lifecycle write and the delete -- so
+ * nothing here needs its own archived/closed filter; the map's own invariant already is that
+ * filter. `countRunningCodexChildren` still names the rule in its own comment, since that
+ * invariant lives in a different file.
+ */
+export interface CodexGuardChildCandidateSummary {
+  id: string;
+  provider: AgentProvider;
+  /** The `paseo.parent-agent-id` label: set on a child agent, null on a root (Tyler's own session). */
+  parentAgentId: string | null;
+  lifecycle: AgentLifecycleStatus;
+  /** A foreground turn, an active turn, a pending replacement, or a queued/admitted run. */
+  busy: boolean;
+  createdAt: string;
+}
+
+/**
  * Lean per-agent view for AgentAccountFailoverMonitor's sweep, mirroring
  * TokenBurnMonitorAgentSummary/ResourceMonitorAgentSummary above. Unlike those two, this
  * carries enough for the monitor to decide candidacy without a second round-trip per agent:
@@ -1982,6 +2010,17 @@ export class AgentManager {
       isRunning: agent.lifecycle === "running",
       parentAgentId: getParentAgentIdFromLabels(agent.labels),
       title: agent.config.title ?? null,
+    }));
+  }
+
+  listAgentsForCodexGuardStatus(): CodexGuardChildCandidateSummary[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      provider: agent.provider,
+      parentAgentId: getParentAgentIdFromLabels(agent.labels),
+      lifecycle: agent.lifecycle,
+      busy: this.isAgentBusy(agent),
+      createdAt: agent.createdAt.toISOString(),
     }));
   }
 

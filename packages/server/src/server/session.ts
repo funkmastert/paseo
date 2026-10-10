@@ -207,6 +207,10 @@ import {
 } from "./session/context-usage/context-usage-session.js";
 import type { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
 import { createJevSession, type JevSession } from "./session/jev/jev-session.js";
+import {
+  createCodexGuardSession,
+  type CodexGuardSession,
+} from "./session/codex-guard/codex-guard-session.js";
 import type { JevService } from "./jev/contract.js";
 import { WorkspaceFilesSession } from "./session/files/workspace-files-session.js";
 import { AgentConfigSession } from "./session/agent-config/agent-config-session.js";
@@ -853,6 +857,7 @@ export class Session {
   private readonly tokenUsageSession: TokenUsageSession | null;
   private readonly contextUsageSession: ContextUsageSession | null;
   private readonly jevSession: JevSession | null;
+  private readonly codexGuardSession: CodexGuardSession;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
   private readonly agentConfigSession: AgentConfigSession;
   private readonly projectConfigSession: ProjectConfigSession;
@@ -1102,6 +1107,10 @@ export class Session {
           activity: curateAgentActivity(recent.items),
         };
       },
+    });
+    this.codexGuardSession = createCodexGuardSession({
+      host: { emit: (msg) => this.emit(msg) },
+      listAgents: () => this.agentManager.listAgentsForCodexGuardStatus(),
     });
     this.agentConfigSession = new AgentConfigSession({
       host: {
@@ -2323,7 +2332,8 @@ export class Session {
       this.dispatchUsageHistoryMessage(msg) ??
       this.dispatchTokenUsageMessage(msg) ??
       this.dispatchContextUsageMessage(msg) ??
-      this.dispatchJevMessage(msg)
+      this.dispatchJevMessage(msg) ??
+      this.dispatchCodexGuardMessage(msg)
     );
   }
 
@@ -2366,6 +2376,11 @@ export class Session {
       default:
         return undefined;
     }
+  }
+
+  private dispatchCodexGuardMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type !== "codex.guard.status.request") return undefined;
+    return this.codexGuardSession.handleStatus(msg);
   }
 
   private dispatchOrchestrationSkillsMessage(

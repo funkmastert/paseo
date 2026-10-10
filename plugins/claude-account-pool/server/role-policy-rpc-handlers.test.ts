@@ -1120,3 +1120,77 @@ describe("explain — arena ranking (U8, finding #2)", () => {
     expect(result).toMatchObject({ outcome: "selected", model: "claude-haiku-4-5" });
   });
 });
+
+describe("explain: codexGuardCache (daemon -> plugin guard health bridge, U4/U5)", () => {
+  // Codex first, Claude second, so the picked model actually turns on usability rather than on
+  // the "unavailable -> fall back to top configured model" path a single-model pool would hide
+  // behind -- the same shape role-router.test.ts's equivalent block isolates the gap with.
+  const codexFirstPolicy: RoleModelPolicy = {
+    ...DEFAULT_POLICY,
+    roles: DEFAULT_POLICY.roles.map((role) =>
+      role.id === "worker" ? { ...role, models: ["codex/gpt-5.1", "claude-sonnet-5"] } : role,
+    ),
+  };
+  const codexFirstCatalog: ModelCatalog = new Map([
+    ["codex", new Set(["gpt-5.1"])],
+    ["claude", new Set(["claude-sonnet-5"])],
+  ]);
+  const codexFirstPoolCache = {
+    get: () => ({ pool: { workers: [{ providerId: "claude-backup", priority: 1 }], leader: null }, failOpen: false }),
+    forceRefresh: vi.fn(),
+    stop: vi.fn(),
+  };
+
+  function codexFirstHealth(): ReturnType<typeof createHealthTracker> {
+    const health = createHealthTracker();
+    health.reportUsage("codex", [{ window: "session", usedPct: 10 }]);
+    return health;
+  }
+
+  it("without the cache wired, the preview reports today's order -- no codex/ ref claimed usable", async () => {
+    const handlers = createRoleModelPolicyRpcHandlers(
+      baseDeps({
+        policyCache: fakePolicyCache(codexFirstPolicy),
+        catalogCache: fakeCatalogCache(codexFirstCatalog),
+        poolCache: codexFirstPoolCache,
+        health: codexFirstHealth(),
+      }),
+    );
+
+    const result = await handlers.explain({ role: "worker" }, context(fakePaseo({})));
+
+    expect(result).toMatchObject({ outcome: "selected", model: "claude-sonnet-5" });
+  });
+
+  it("wires the same codex guard health cache the create hook uses: a healthy guard shows the codex pick", async () => {
+    const handlers = createRoleModelPolicyRpcHandlers(
+      baseDeps({
+        policyCache: fakePolicyCache(codexFirstPolicy),
+        catalogCache: fakeCatalogCache(codexFirstCatalog),
+        poolCache: codexFirstPoolCache,
+        health: codexFirstHealth(),
+        codexGuardCache: { get: () => ({ healthy: true, runningChildren: 0 }) },
+      }),
+    );
+
+    const result = await handlers.explain({ role: "worker" }, context(fakePaseo({})));
+
+    expect(result).toMatchObject({ outcome: "selected", model: "gpt-5.1" });
+  });
+
+  it("an unhealthy guard still reports today's order, never claiming the codex/ ref usable", async () => {
+    const handlers = createRoleModelPolicyRpcHandlers(
+      baseDeps({
+        policyCache: fakePolicyCache(codexFirstPolicy),
+        catalogCache: fakeCatalogCache(codexFirstCatalog),
+        poolCache: codexFirstPoolCache,
+        health: codexFirstHealth(),
+        codexGuardCache: { get: () => ({ healthy: false, runningChildren: 0 }) },
+      }),
+    );
+
+    const result = await handlers.explain({ role: "worker" }, context(fakePaseo({})));
+
+    expect(result).toMatchObject({ outcome: "selected", model: "claude-sonnet-5" });
+  });
+});
