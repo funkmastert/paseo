@@ -597,7 +597,7 @@ export class DeviceLeaseManager {
   private readonly chargedUnleasedDevices = new Set<string>();
   /**
    * deviceId → when the simulator was last seen in use (or first observed, if never). Reset to
-   * `now()` on every sweep where something uses it (`isSimulatorInUse`); read, never reset, while
+   * `now()` on every sweep where something uses it (`isLeaseInUse`); read, never reset, while
    * nothing does. A lease that disappears (checked in, released, reassigned) drops its entry on
    * the next sweep.
    */
