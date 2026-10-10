@@ -1246,9 +1246,15 @@ export class DeviceLeaseManager {
     const idle: DeviceLease[] = [];
     for (const lease of this.leases) {
       if (lease.platform === "ios" && lease.booted === true) continue;
+      // A lease with no device yet is `pendingTtlMinutes`'s (never-started's) backstop alone —
+      // that clock exists specifically to tolerate a slow boot (a cold `expo run:ios` spending
+      // its first several minutes on pods and a native build) without reclaiming the slot
+      // early, and idleReleaseMinutes defaults shorter than it, so letting idle-release touch a
+      // pending lease would reclaim it before never-started ever gets the chance to.
+      if (lease.deviceId === undefined) continue;
       const inUse = isLeaseInUse({
         lease,
-        device: lease.deviceId ? devicesById.get(lease.deviceId) : undefined,
+        device: devicesById.get(lease.deviceId),
         holder: agentsById.get(lease.agentId),
         evidence,
       });
