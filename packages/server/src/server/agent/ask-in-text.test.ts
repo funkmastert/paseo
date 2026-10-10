@@ -40,6 +40,34 @@ const DOES_NOT_FIRE: Case[] = [
     text: "Changes made:\n- Fixed the parser\n- Updated the tests",
   },
   { note: "plain next-step statement", text: "Next I'll check X." },
+  {
+    note: "status report with a table and bullets, 'which' as a relative pronoun near a list",
+    text: [
+      "Three agents are running:",
+      "",
+      "| Agent | Doing |",
+      "|---|---|",
+      "| Codex PR A re-review | Confirming the two P0 holes are actually closed |",
+      "| Arena rate-limit fix | So all nine boards load |",
+      "| Explicit-request fix | So the ranking runs even though every spawn names a model |",
+      "",
+      "A background watch is also waiting for the first live workspace archives. When those land:",
+      "- merge PR A if the re-review passes;",
+      "- gate and merge the two arena fixes;",
+      "- one more deploy, which now reloads the plugin automatically;",
+      "- then check the arena shadow's picks over real spawns.",
+      "",
+      "Each agent reports back when done.",
+    ].join("\n"),
+  },
+  {
+    note: "which as a relative pronoun inside a list, no choice phrase",
+    text: "Changes:\n- Simplified the parser\n- Removed the old flag, which was unused\n\nDone.",
+  },
+  {
+    note: "numbered next-steps list with no question",
+    text: "Next steps:\n1. Deploy to staging\n2. Run smoke tests\n3. Promote to prod",
+  },
 ];
 
 describe("asksReaderForReplyInText", () => {
