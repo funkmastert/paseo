@@ -1,4 +1,4 @@
-import { lstatSync, readlinkSync } from "node:fs";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import nodePath from "node:path";
 
 import {
@@ -9,6 +9,7 @@ import {
 } from "./catastrophe-gate.js";
 import type { DeviceLaunchGate } from "./device-lease-manager.js";
 import { commandName, walkShellCommands, type ExpandedWord } from "./shell-commands.js";
+import { comparableName } from "../jev/secret-paths.js";
 
 export interface CodexGuardDecision {
   decision: "accept" | "decline";
@@ -34,19 +35,50 @@ const SHELL_RC_BASENAMES = new Set([
 ]);
 
 // Verify finding #1 (round 3): macOS (APFS/HFS+ default) and Windows volumes are
-// case-insensitive, so `.GIT`/`.Git`/`.SSH` land on the same directory as `.git`/`.ssh`. NFC
-// normalization covers the Unicode equivalent -- a combining-character sequence that renders
-// identically to an ASCII name but compares unequal to it code-point-by-code-point. Comparing
-// lowercased-NFC segments is strictly more inclusive than exact comparison, never less: on a
-// case-sensitive volume this flags nothing a case-sensitive check would have missed, and catches
-// the case-insensitive-volume write a case-sensitive check otherwise would.
+// case-insensitive, so `.GIT`/`.Git`/`.SSH` land on the same directory as `.git`/`.ssh`.
+// Comparing lowercased segments is strictly more inclusive than exact comparison, never less: on
+// a case-sensitive volume this flags nothing a case-sensitive check would have missed, and
+// catches the case-insensitive-volume write a case-sensitive check otherwise would.
+//
+// Verify finding (round 5): an NTFS name alias reaches the same file under a different-looking
+// name -- a trailing dot/space (`.git.`, `.git `) or an alternate-data-stream suffix
+// (`.git::$INDEX_ALLOCATION`) that Windows drops when it opens the file. `comparableName`
+// (jev/secret-paths.ts, shared rather than reimplemented here per docs/jev.md Feature 16 step 7)
+// already strips exactly this, plus Unicode compatibility folding, for the same reason the JEV
+// read check needs it: a secret (or here, sensitive) file name built to look different to a
+// naive string comparison is still the same file to the OS.
 function pathSegments(path: string): string[] {
-  return path
-    .normalize("NFC")
+  return comparableName(path)
     .toLowerCase()
-    .replace(/\\/g, "/")
     .split("/")
     .filter((segment) => segment.length > 0);
+}
+
+// Verify finding (round 5): NTFS also auto-generates an 8.3 "short name" alias for a long file
+// name -- `.git` can be addressed as `GIT~1`, `.gitconfig` as `GITCON~1` -- with no reliable way
+// to compute the exact alias without asking the filesystem (which short-name collision a given
+// directory landed on). Declining any component shaped like `<1-6 chars>~<digits>` whose prefix
+// is a case-insensitive prefix of a sensitive name (dot removed) is a heuristic, not an exact
+// 8.3 implementation, but false positives here cost nothing -- stricter is fine.
+const EIGHT_DOT_THREE_ALIAS_PATTERN = /^(.{1,6})~\d+$/;
+
+function eightDotThreeAliasReason(segment: string): string | null {
+  const match = EIGHT_DOT_THREE_ALIAS_PATTERN.exec(segment);
+  if (!match) {
+    return null;
+  }
+  const prefix = (match[1] ?? "").toLowerCase();
+  const sensitiveNamesWithoutDot = [
+    "git",
+    "gitconfig",
+    "gitattributes",
+    "ssh",
+    ...Array.from(SHELL_RC_BASENAMES, (name) => name.replace(/^\./, "")),
+  ];
+  const matchedName = sensitiveNamesWithoutDot.find((name) => name.startsWith(prefix));
+  return matchedName
+    ? `an 8.3 short-name alias of .${matchedName} (NTFS can address it as ${segment.toUpperCase()})`
+    : null;
 }
 
 /**
@@ -59,6 +91,13 @@ function pathSegments(path: string): string[] {
 export function describeGuardedSensitiveFileChangePath(path: string): string | null {
   const segments = pathSegments(path);
   const basename = segments[segments.length - 1] ?? "";
+
+  for (const segment of segments) {
+    const eightDotThreeReason = eightDotThreeAliasReason(segment);
+    if (eightDotThreeReason) {
+      return eightDotThreeReason;
+    }
+  }
 
   if (segments.includes(".git")) {
     return "a path inside a .git directory";
@@ -182,7 +221,25 @@ function walkSegments(startResolved: string, segments: string[]): string | null 
     } catch {
       stat = null;
     }
-    if (!stat?.isSymbolicLink()) {
+    if (!stat) {
+      resolvedSoFar = candidate;
+      continue;
+    }
+    // Verify finding (round 5): on win32, an existing component may be addressable under an
+    // NTFS 8.3 short-name alias (`GIT~1`) that the heuristic sensitivity check above can only
+    // guess at -- realpathSync.native asks the OS for the real long name directly, resolving
+    // short-name aliases and reparse points (symlinks/junctions) in the same call. Tried only
+    // when the component already exists (it cannot do anything for a not-yet-existing target);
+    // falls through to the manual lstat/readlink handling below on any failure.
+    if (process.platform === "win32") {
+      try {
+        resolvedSoFar = realpathSync.native(candidate);
+        continue;
+      } catch {
+        // Fall through.
+      }
+    }
+    if (!stat.isSymbolicLink()) {
       resolvedSoFar = candidate;
       continue;
     }

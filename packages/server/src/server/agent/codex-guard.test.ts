@@ -322,6 +322,36 @@ describe("describeGuardedSensitiveFileChangePath -- case and Unicode insensitivi
   });
 });
 
+describe("describeGuardedSensitiveFileChangePath -- NTFS name aliases (verify finding, round 5)", () => {
+  test.each([
+    ["trailing dot on a directory", "C:\\workspace\\project\\.git.\\hooks\\post-checkout"],
+    ["trailing space on a directory", "C:\\workspace\\project\\.git \\hooks\\post-checkout"],
+    ["8.3 short name of .git", "C:\\workspace\\project\\GIT~1\\hooks\\post-checkout"],
+    [
+      "alternate-data-stream suffix on a directory",
+      "C:\\workspace\\project\\.git::$INDEX_ALLOCATION\\hooks\\post-checkout",
+    ],
+    ["trailing dot on .ssh", "C:\\workspace\\project\\.ssh.\\config"],
+    ["8.3 short name of .ssh", "C:\\workspace\\project\\SSH~1\\config"],
+    ["trailing dot on a bare basename", "C:\\workspace\\project\\.bashrc."],
+    ["stream suffix on .gitconfig", "C:\\workspace\\project\\.gitconfig::$DATA"],
+    ["8.3 short name of .gitconfig", "C:\\workspace\\project\\GITCON~1"],
+    ["8.3 short name of .bashrc", "C:\\workspace\\project\\BASHRC~1"],
+    ["8.3 short name, lowercase", "C:\\workspace\\project\\git~1\\hooks\\post-checkout"],
+  ])("flags an NTFS alias -- %s: %s", (_label, path) => {
+    expect(describeGuardedSensitiveFileChangePath(path)).not.toBeNull();
+  });
+
+  test.each([
+    "C:\\workspace\\project\\notes.md",
+    "C:\\workspace\\project\\README.",
+    "C:\\workspace\\project\\NOTES~1.TXT",
+    "C:\\workspace\\project\\notes.md::$DATA",
+  ])("clears an ordinary path and an unrelated 8.3/stream-suffixed name: %s", (path) => {
+    expect(describeGuardedSensitiveFileChangePath(path)).toBeNull();
+  });
+});
+
 describe("resolveGuardedFileChangePath (re-review finding #2)", () => {
   let scratch: string;
 
