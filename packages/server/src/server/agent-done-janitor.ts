@@ -153,6 +153,7 @@ export type DoneJanitorWorkspace = Pick<
   | "archivedAt"
   | "pinnedAt"
   | "pinSource"
+  | "createdBy"
 >;
 
 export type DoneJanitorProject = Pick<
@@ -1967,6 +1968,7 @@ function describeIdleRule(
 ): string {
   switch (verdict.rule) {
     case "fixer":
+    case "agent-done":
       return verdict.reason;
     case "idle":
       return `idle past ${formatDuration(sweep.idleMs)}`;

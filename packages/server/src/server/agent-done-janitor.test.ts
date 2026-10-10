@@ -2527,6 +2527,41 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
       expect(h.pushes[0]?.body).toBe("Deleted 1 worktree, freeing 3.0 GB.");
     });
 
+    test("an agent-made worktree still goes through the git gate and snapshot (R6)", async () => {
+      const archivedAt = new Date(NOW - 61 * 60_000).toISOString();
+      const h = sweepHarness({
+        stored: [record({ archivedAt, updatedAt: archivedAt })],
+        workspaces: [workspace({ createdBy: "agent" })],
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.events).toEqual([
+        "snapshot:/home/t/.paseo/worktrees/h/feature",
+        "archive-workspace:ws-1",
+      ]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "deleted",
+          workspaceId: "ws-1",
+          rule: "agent-done",
+          invariant: "holds: every file is tracked and pushed",
+        }),
+      );
+    });
+
+    test("an agent-made worktree is kept 59 minutes after its last agent was archived", async () => {
+      const archivedAt = new Date(NOW - 59 * 60_000).toISOString();
+      const h = sweepHarness({
+        stored: [record({ archivedAt, updatedAt: archivedAt })],
+        workspaces: [workspace({ createdBy: "agent" })],
+      });
+
+      await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+    });
+
     test("dirty with no backup: kept, and reported", async () => {
       const h = sweepHarness({
         stored: [record()],

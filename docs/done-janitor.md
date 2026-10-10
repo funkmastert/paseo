@@ -210,7 +210,7 @@ Ignored files come from `git status --ignored=matching --untracked-files=all`. D
 
 The check runs twice:
 
-1. **Planning, read-only, the same in a dry run and a live one.** No schedule starts agents in the worktree; no process has its cwd, its executable or a file open inside it (one `lsof` over every process the daemon's user can see; the daemon's own process is left out); and the worktree read against HEAD (`readWorktreeCoverage`) shows nothing above: no ignored path that is not regenerable, no nested repository, no directory the delete cannot get through, no hidden change, no LFS file. What differs from HEAD, and any unpushed commit, is what the snapshot will have to hold.
+1. **Planning, read-only, the same in a dry run and a live one.** No schedule starts agents in the worktree; no process has its cwd, its executable or a file open inside it (one `lsof` over every process the daemon's user can see; the daemon's own process is left out, and so is one of its own children — a `tea`, `git` or `gh` forge poll it spawned directly, never an agent's: `isDaemonOwnChildPid`, `agent/process-attribution.ts`, walks the ppid chain from the resource monitor's attributed `ps` sample rather than matching on a command name); and the worktree read against HEAD (`readWorktreeCoverage`) shows nothing above: no ignored path that is not regenerable, no nested repository, no directory the delete cannot get through, no hidden change, no LFS file. What differs from HEAD, and any unpushed commit, is what the snapshot will have to hold.
 2. **Confirming, live only, after `du` and right before the archive.** The schedule and process checks again, then the snapshot. If it reports nothing at risk, the worktree is read against HEAD again and nothing may differ. Otherwise the backup is verified — the ref points at the snapshot, the bundle exists, is non-empty, passes `git bundle verify` and holds the snapshot, or the personal remote holds the pushed branch; a snapshot with no copy outside the repository is not a backup — and the worktree is read against the snapshot commit through a scratch index. Any file not in it keeps the worktree: one written since the plan, or one the snapshot left out for its size, for looking like a secret, or for a rule added later. The next sweep snapshots it again.
 
 The read against the snapshot does not trust anything the snapshotter says about what it held, so its filters can change without this rule changing. A snapshot that does report files it left out (`skippedFiles`, and `possibleSecrets` once the snapshotter fills it) keeps the worktree with that reason.
@@ -221,6 +221,10 @@ A loaded agent's own CLI process counts as a process inside: its worktree stays 
 
 The passes above reach only Paseo-owned worktrees, and only through their agents. Everything else stayed in the sidebar until someone archived it by hand: external worktrees (`~/mobile-worktrees`, `~/bn-worktrees`), local checkouts, `directory` workspaces, dirty Paseo worktrees, and a workspace per [self-heal fixer](remediation.md#the-remediation-agent). The idle-workspace sweep archives them. `agent/workspace-sweep-detector.ts` decides; the janitor reads the facts and acts, after the orphan pass.
 
+### Who made it
+
+Every workspace record carries `createdBy`, `"person"` or `"agent"`, set once at creation and never changed by inference after: a client request — `workspace.create.request` or a `create_agent_request` — with no caller agent and no inherited `paseo.parent-agent-id` label is a person's; everything else (the agent-scoped `create_workspace`/`create_agent` MCP tools, Hub, schedules, heartbeats, remediation, restart recovery) is an agent's. It is the same rule [auto-pin](#manual-pin-vs-auto-pin) already uses to decide whether to pin a session (`isHumanAttributableCreate`, `workspace-auto-pin.ts`), so `createdBy` and the auto-pin decision never disagree. A record written before this field existed is backfilled once at boot (`workspace-created-by-migration.ts`): agent if any agent it ever held carries `paseo.parent-agent-id` or `paseo.remediation`, or if it is a Paseo-owned worktree; person otherwise. The app's sidebar collapses every `agent` workspace into one "Agent workspaces (N)" section, default-collapsed; the done janitor reads it for the `agent-done` rule below. Absent — an older daemon, or a record the backfill has not reached yet — reads as `person`.
+
 A workspace is archived when all of these hold:
 
 - **Not manually pinned** ([Manual pin vs. auto-pin](#manual-pin-vs-auto-pin)), and no agent in it carries `paseo.keep`. An auto-pinned workspace is swept like an unpinned one.
@@ -228,15 +232,18 @@ A workspace is archived when all of these hold:
 - **It is idle past its threshold**, measured from the newest of the record's `createdAt` and `updatedAt`, every agent's last activity and, for an archived one, when it was archived, HEAD's commit time, and the directory's own mtime. Never the git index: `git status` rewrites it. A timestamp that does not parse reads as just now, and a workspace with no signal at all is active.
 - **No earlier pass archived or asked one of its agents this sweep.** Otherwise the dead pass could archive a 24h-quiet agent and this sweep delete its dirty worktree in the same run, skipping the 72 hours.
 
-| Rule    | Which workspaces                                     | Idle after                              |
-| ------- | ---------------------------------------------------- | --------------------------------------- |
-| `fixer` | Every agent it ever held carries `paseo.remediation` | 10 minutes after its last fixer stopped |
-| `idle`  | An unarchived agent in it, or a git checkout         | `idleHours`, 72h                        |
-| `empty` | Neither                                              | `emptyIdleHours`, 24h                   |
+| Rule         | Which workspaces                                                          | Idle after                               |
+| ------------ | ------------------------------------------------------------------------- | ---------------------------------------- |
+| `fixer`      | Every agent it ever held carries `paseo.remediation`                      | 10 minutes after its last fixer stopped  |
+| `agent-done` | `createdBy: "agent"`, not a fixer's                                       | 1 hour after its last agent was archived |
+| `idle`       | A person-made workspace with an unarchived agent in it, or a git checkout | `idleHours`, 72h                         |
+| `empty`      | A person-made workspace with neither                                      | `emptyIdleHours`, 24h                    |
 
 72 hours outlasts a weekend, like the quiet period above. An idle agent does not keep its workspace past that: asking it is the question path's job, and its answer is activity that restarts the clock. A workspace with no agent and no git holds nothing but its record, and a day keeps it for someone who made it to start work tomorrow.
 
 A fixer's workspace ignores its directory, since fixers run in the home directory, whose mtime moves all day. The ten minutes let the ladder read the finished fixer's report first; archived sooner, the ladder reads the fixer as "archived before it reported". A NOT_FIXED fixer goes with its workspace, and the push opens it from the archive. A standing self-heal workspace would group the fixers under one row, but that row stays between fixers; a workspace per fixer shows each one while it works and leaves nothing after.
+
+`agent-done` (R6) replaces `idle`/`empty` for every `createdBy: "agent"` workspace that is not a fixer's: once every agent it ever held is archived, it waits one hour from the last one — short, because nothing in it is waiting for a person the way a workspace Tyler made might be. The directory still follows the ordinary rules below unchanged: record-only for an external worktree or a `directory` workspace, the git gate and a snapshot for a Paseo-owned one. While any agent in it is unarchived, it is not a candidate at all, whatever its directory's age.
 
 ### The directory
 
@@ -253,6 +260,8 @@ The janitor checks the directory archive-by-scope deletes ([the deletion invaria
 
 Each archive is decided again on freshly read state. One that deletes a directory gets [the last look](#the-last-look) as well, with one difference before the records: the workspace has to classify as idle still, since this sweep archives the idle agents in it. A sweep attempts at most `maxArchivesPerSweep`, fixers first and then the longest idle; the rest wait. An attempt spends the budget whatever the last checks decide, in a dry run and a live one alike, so a live run deletes only directories the dry run listed as `would-delete`. It may keep more: a snapshot that fails or leaves a file out, a backup that does not verify, or a file, process or agent that appeared between the plan and the delete.
 
+A candidate kept for a reason unlikely to change within the hour — a process that is not the daemon's own, or an ignored, non-regenerable path no backup covers — is not attempted again for `keptCooldownHours` after that (R5), and spends none of the budget meanwhile: the rest of the backlog gets it instead of the same handful of permanently-stuck candidates every sweep. The cooldown lives in memory, keyed by workspace id, and a restart clears it; new activity drops the workspace out of the candidate list before the cooldown is ever read, so it is eligible again at once. Every other kept reason — dirty with no backup yet, a lock, a merge in progress — may resolve on its own sooner and is reconsidered every sweep as before.
+
 | Key (`agents.doneJanitor.workspaceSweep`) | Default | Meaning                                                                               |
 | ----------------------------------------- | ------- | ------------------------------------------------------------------------------------- |
 | `enabled`                                 | `true`  | Runs whenever the janitor is `enabled`. False also stops the idle-project rule        |
@@ -260,6 +269,7 @@ Each archive is decided again on freshly read state. One that deletes a director
 | `idleHours`                               | `72`    | The `idle` rule's threshold                                                           |
 | `emptyIdleHours`                          | `24`    | The `empty` rule's threshold                                                          |
 | `maxArchivesPerSweep`                     | `10`    | Workspaces archived per sweep                                                         |
+| `keptCooldownHours`                       | `6`     | How long a permanently-stuck candidate is skipped before being re-attempted (R5)      |
 | `projectGraceHours`                       | `24`    | How long a project with no active workspace stays ([Empty projects](#empty-projects)) |
 | `maxProjectRemovalsPerSweep`              | `10`    | Projects that rule removes per sweep                                                  |
 

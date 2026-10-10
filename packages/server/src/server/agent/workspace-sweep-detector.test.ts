@@ -436,6 +436,73 @@ describe("classifyWorkspace", () => {
       expect(verdict).toEqual({ kind: "active", reason: "it is pinned" });
     });
   });
+
+  describe("agent-made workspaces (R6)", () => {
+    const agentMade = workspace({ createdBy: "agent" });
+    const archivedAgent = (overrides: Partial<DoneJanitorAgentView> = {}) =>
+      agent({ archived: true, lastActivityAtMs: NOW - 100 * HOUR, ...overrides });
+
+    test("is archived by agent-done once every agent in it has been archived for over an hour", () => {
+      const verdict = classify({
+        workspace: agentMade,
+        agents: [archivedAgent({ archivedAtMs: NOW - 61 * 60_000 })],
+      });
+      expect(verdict).toMatchObject({
+        kind: "idle",
+        rule: "agent-done",
+        idleForMs: 61 * 60_000,
+      });
+    });
+
+    test("is kept at 59 minutes since the last agent was archived", () => {
+      const verdict = classify({
+        workspace: agentMade,
+        agents: [archivedAgent({ archivedAtMs: NOW - 59 * 60_000 })],
+      });
+      expect(verdict).toMatchObject({ kind: "active", reason: expect.stringContaining("59m") });
+    });
+
+    test("waits on the latest of several agents, not the first", () => {
+      const verdict = classify({
+        workspace: agentMade,
+        agents: [
+          archivedAgent({ id: "agent-1", archivedAtMs: NOW - 5 * HOUR }),
+          archivedAgent({ id: "agent-2", archivedAtMs: NOW - 59 * 60_000 }),
+        ],
+      });
+      expect(verdict).toMatchObject({ kind: "active" });
+    });
+
+    test("is kept while any agent in it is not yet archived", () => {
+      const verdict = classify({
+        workspace: agentMade,
+        agents: [
+          archivedAgent({ id: "agent-1", archivedAtMs: NOW - 5 * HOUR }),
+          agent({ id: "agent-2", archived: false, lastActivityAtMs: NOW - 5 * HOUR }),
+        ],
+      });
+      expect(verdict).toEqual({
+        kind: "active",
+        reason: "not every agent in it is archived yet",
+      });
+    });
+
+    test("a person-made workspace follows idle/empty as today, never agent-done", () => {
+      // Same shape as the first case above, but person-made: the ordinary 72h idle rule applies,
+      // not the 1h agent-done one.
+      const verdict = classify({
+        workspace: workspace({ createdBy: "person" }),
+        agents: [archivedAgent({ archivedAtMs: NOW - 61 * 60_000 })],
+      });
+      expect(verdict.kind).toBe("active");
+
+      const noCreatedBy = classify({
+        workspace: workspace(),
+        agents: [archivedAgent({ archivedAtMs: NOW - 61 * 60_000 })],
+      });
+      expect(noCreatedBy.kind).toBe("active");
+    });
+  });
 });
 
 describe("checkDeletionInvariant", () => {
