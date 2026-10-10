@@ -166,6 +166,7 @@ import {
   type PersistedWorkspaceRecord,
   type ProjectMutation,
   type ProjectRegistry,
+  type WorkspaceCreatedBy,
   type WorkspaceMutation,
   type WorkspaceMutationContext,
   type WorkspaceRegistry,
@@ -275,7 +276,12 @@ import {
   type CreatePaseoWorktreeResult,
 } from "./paseo-worktree-service.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
-import { type AutoPinExpiry, autoPinWorkspaceOnSessionStart } from "./workspace-auto-pin.js";
+import {
+  type AutoPinExpiry,
+  autoPinWorkspaceOnSessionStart,
+  isHumanAttributableCreate,
+  resolveWorkspaceCreatedBy,
+} from "./workspace-auto-pin.js";
 import {
   buildAgentSessionConfig as buildWorktreeAgentSessionConfig,
   createPaseoWorktreeWorkflow as createWorktreeWorkflow,
@@ -4192,17 +4198,26 @@ export class Session {
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
       };
       const workspacePromptTitle = resolveFirstAgentPromptTitle(firstAgentContext);
+      // The same caller rule auto-pin uses below: equivalent to checking resolvedIntent.intent.labels
+      // once it exists, since resolveCreateAgentIntent only ever injects a parent-agent-id label
+      // derived from callerAgentId itself.
+      const createdBy = resolveWorkspaceCreatedBy({
+        callerAgentId: msg.callerAgentId,
+        labels: msg.labels,
+      });
       const createdWorktree = await this.createAgentLifecycleDispatch.createWorktreeForRequest({
         cwd: config.cwd,
         target: worktree,
         firstAgentContext,
         hasLegacyGitOptions: Boolean(git),
+        createdBy,
       });
       createdWorktreeForCleanup = createdWorktree;
       const resolvedIntent = await this.resolveSessionCreateAgentIntent({
         request: msg,
         createdWorktree,
         workspacePromptTitle,
+        createdBy,
       });
       const resolvedCwd = resolve(resolvedIntent.config.cwd);
       if (!(await this.filesystem.isDirectory(resolvedCwd))) {
@@ -4236,7 +4251,13 @@ export class Session {
           provisionalTitle,
           firstAgentContext,
           buildSessionConfig: (sessionConfig, gitOptions, legacyWorktreeName, ctx) =>
-            this.buildAgentSessionConfig(sessionConfig, gitOptions, legacyWorktreeName, ctx),
+            this.buildAgentSessionConfig(
+              sessionConfig,
+              gitOptions,
+              legacyWorktreeName,
+              ctx,
+              createdBy,
+            ),
         },
       );
       createdAgentId = snapshot.id;
@@ -4253,8 +4274,13 @@ export class Session {
       // straight from a client connection (app or CLI), not on behalf of another agent. The label
       // check covers a CLI invocation that clears PASEO_AGENT_ID: it looks like a human on
       // callerAgentId alone, but still carries its creator's parent label through `labels`
-      // (docs/done-janitor.md#manual-pin-vs-auto-pin).
-      if (!msg.callerAgentId && !getParentAgentIdFromLabels(resolvedIntent.intent.labels)) {
+      // (docs/done-janitor.md#manual-pin-vs-auto-pin). Equivalent to `createdBy === "person"`.
+      if (
+        isHumanAttributableCreate({
+          callerAgentId: msg.callerAgentId,
+          labels: resolvedIntent.intent.labels,
+        })
+      ) {
         await this.maybeAutoPinWorkspace(resolvedIntent.intent.workspaceId);
         await this.emitWorkspaceUpdateForWorkspaceId(resolvedIntent.intent.workspaceId);
       }
@@ -4286,6 +4312,7 @@ export class Session {
     request: CreateAgentRequestMessage;
     createdWorktree: CreatePaseoWorktreeWorkflowResult | null;
     workspacePromptTitle: string | null;
+    createdBy: WorkspaceCreatedBy;
   }): Promise<ResolvedSessionCreateAgentIntent> {
     const { request, createdWorktree } = input;
     const callerAgent = request.callerAgentId
@@ -4320,6 +4347,7 @@ export class Session {
           initialTitle: input.workspacePromptTitle,
           // Derived from the first prompt, so the tracker owns it from here.
           initialTitleSource: "auto",
+          createdBy: input.createdBy,
         }),
         cwd: config.cwd,
       }),
@@ -4720,6 +4748,7 @@ export class Session {
     gitOptions?: GitSetupOptions,
     legacyWorktreeName?: string,
     firstAgentContext?: FirstAgentContext,
+    createdBy?: WorkspaceCreatedBy,
   ): Promise<{
     sessionConfig: AgentSessionConfig;
     setupContinuation?: CreatePaseoWorktreeWorkflowResult["setupContinuation"];
@@ -4732,26 +4761,29 @@ export class Session {
         sessionLogger: this.sessionLogger,
         workspaceGitService: this.workspaceGitService,
         createPaseoWorktree: (input, serviceOptions) =>
-          this.createPaseoWorktreeWorkflow(input, {
-            ...serviceOptions,
-            setupContinuation: {
-              kind: "agent",
-              terminalManager: this.terminalManager,
-              appendTimelineItem: ({ agentId, item }) =>
-                appendTimelineItemIfAgentKnown({
-                  agentManager: this.agentManager,
-                  agentId,
-                  item,
-                }),
-              emitLiveTimelineItem: ({ agentId, item }) =>
-                emitLiveTimelineItemIfAgentKnown({
-                  agentManager: this.agentManager,
-                  agentId,
-                  item,
-                }),
-              logger: this.sessionLogger,
+          this.createPaseoWorktreeWorkflow(
+            { ...input, createdBy },
+            {
+              ...serviceOptions,
+              setupContinuation: {
+                kind: "agent",
+                terminalManager: this.terminalManager,
+                appendTimelineItem: ({ agentId, item }) =>
+                  appendTimelineItemIfAgentKnown({
+                    agentManager: this.agentManager,
+                    agentId,
+                    item,
+                  }),
+                emitLiveTimelineItem: ({ agentId, item }) =>
+                  emitLiveTimelineItemIfAgentKnown({
+                    agentManager: this.agentManager,
+                    agentId,
+                    item,
+                  }),
+                logger: this.sessionLogger,
+              },
             },
-          }),
+          ),
         checkoutExistingBranch: (cwd, branch) =>
           this.gitMutation.checkoutExistingBranch(cwd, branch),
         createBranchFromBase: (params) => this.gitMutation.createBranchFromBase(params),
@@ -5645,6 +5677,7 @@ export class Session {
       name: resolveWorkspaceDisplayName(workspace),
       title: workspace.title,
       pinnedAt: workspace.pinnedAt,
+      createdBy: workspace.createdBy,
       ...(workspace.labels && workspace.labels.length > 0 ? { labels: workspace.labels } : {}),
       archivingAt: null,
       status: "done",
@@ -5737,6 +5770,7 @@ export class Session {
       }),
       title: result.workspace.title,
       pinnedAt: result.workspace.pinnedAt,
+      createdBy: result.workspace.createdBy,
       ...(result.workspace.labels && result.workspace.labels.length > 0
         ? { labels: result.workspace.labels }
         : {}),
@@ -6782,6 +6816,7 @@ export class Session {
       {
         expectsInitialAgent: Boolean(request.firstAgentContext),
         titleSource,
+        createdBy: resolveWorkspaceCreatedBy({ callerAgentId: request.callerAgentId }),
       },
     );
     // This RPC is only reachable over a client connection (app or CLI), never from the
@@ -6868,6 +6903,7 @@ export class Session {
         firstAgentContext: request.firstAgentContext,
         title: request.title,
         ...(request.callerAgentId ? { titleSource: "auto" as const } : {}),
+        createdBy: resolveWorkspaceCreatedBy({ callerAgentId: request.callerAgentId }),
       },
       source.baseBranch
         ? { resolveDefaultBranch: async () => source.baseBranch as string }

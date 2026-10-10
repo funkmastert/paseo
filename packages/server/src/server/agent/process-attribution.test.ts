@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { attributeProcessTrees } from "./process-attribution.js";
+import { attributeProcessTrees, isDaemonOwnChildPid } from "./process-attribution.js";
 import type { ProcessSampleRow } from "./process-sampler.js";
 
 function row(
@@ -203,5 +203,59 @@ describe("attributeProcessTrees", () => {
     const result = attributeProcessTrees(rows, ["agent-1"]);
 
     expect(result.orphanBuildDaemons).toEqual({ count: 0, rssBytes: 0, pids: [] });
+  });
+});
+
+describe("isDaemonOwnChildPid", () => {
+  const daemonPid = 100;
+  // daemon(100) -> claude agent-1(200) -> shell(201) -> bun(202)
+  // daemon(100) -> tea(300) directly, the daemon's own forge poll
+  const rows: ProcessSampleRow[] = [
+    row({ pid: daemonPid, ppid: 1, command: "node daemon.js" }),
+    row({
+      pid: 200,
+      ppid: daemonPid,
+      command: "claude --mcp-config url=http://localhost/mcp/agents?callerAgentId=agent-1",
+    }),
+    row({ pid: 201, ppid: 200, command: "/bin/zsh" }),
+    row({ pid: 202, ppid: 201, command: "bun run build" }),
+    row({ pid: 300, ppid: daemonPid, command: "tea pr list" }),
+  ];
+  const attributedPids = new Set(attributeProcessTrees(rows, ["agent-1"]).agentTrees[0]?.pids);
+
+  test("a direct child of the daemon, outside every agent's tree, is the daemon's own", () => {
+    expect(isDaemonOwnChildPid({ pid: 300, rows, daemonPid, attributedPids })).toBe(true);
+  });
+
+  test("a process inside an agent's tree is that agent's, even though the daemon is its ancestor too", () => {
+    expect(isDaemonOwnChildPid({ pid: 202, rows, daemonPid, attributedPids })).toBe(false);
+    expect(isDaemonOwnChildPid({ pid: 201, rows, daemonPid, attributedPids })).toBe(false);
+  });
+
+  test("an unrelated process the daemon never spawned is neither the daemon's nor an agent's", () => {
+    const unrelatedRows: ProcessSampleRow[] = [
+      ...rows,
+      row({ pid: 999, ppid: 1, command: "/usr/bin/vim notes.md" }),
+    ];
+    expect(isDaemonOwnChildPid({ pid: 999, rows: unrelatedRows, daemonPid, attributedPids })).toBe(
+      false,
+    );
+  });
+
+  test("a pid missing from the sample is not assumed to be the daemon's", () => {
+    expect(isDaemonOwnChildPid({ pid: 404, rows, daemonPid, attributedPids })).toBe(false);
+  });
+
+  test("a terminal shell forked under the daemon's long-lived terminal-worker process is not the daemon's own", () => {
+    // daemon(100) -> terminal worker(150, direct child, long-lived, hosts many terminals)
+    // -> user's shell(250, ppid=150, cwd inside the worktree)
+    const terminalRows: ProcessSampleRow[] = [
+      ...rows,
+      row({ pid: 150, ppid: daemonPid, command: "node worker-terminal.js" }),
+      row({ pid: 250, ppid: 150, command: "/bin/zsh" }),
+    ];
+    expect(isDaemonOwnChildPid({ pid: 250, rows: terminalRows, daemonPid, attributedPids })).toBe(
+      false,
+    );
   });
 });

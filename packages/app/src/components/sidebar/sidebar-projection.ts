@@ -18,7 +18,12 @@ import {
   type SidebarShortcutModel,
   type SidebarShortcutSection,
 } from "@/utils/sidebar-shortcuts";
-import { statusWorkspaceGroups, type SidebarWorkspaceGroup } from "./sidebar-labels";
+import {
+  agentWorkspacesGroup,
+  isSidebarWorkspaceGroupCollapsed,
+  statusWorkspaceGroups,
+  type SidebarWorkspaceGroup,
+} from "./sidebar-labels";
 
 export interface SidebarProjection {
   pinnedGroups: PinnedSidebarGroups;
@@ -48,7 +53,7 @@ export interface SidebarProjectionInput {
 }
 
 export function buildSidebarProjection(input: SidebarProjectionInput): SidebarProjection {
-  const pinnedGroups = splitPinnedSidebarGroups({
+  const rawPinnedGroups = splitPinnedSidebarGroups({
     projects: input.projects,
     keys: input.pinnedKeys,
     pinnedWorkspaceOrder: input.pinnedWorkspaceOrder,
@@ -57,10 +62,27 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
   const unpinnedWorkspaces = Array.from(input.workspaceEntriesByKey.values()).filter(
     (workspace) => !pinnedWorkspaceKeys.has(workspace.workspaceKey),
   );
+  // Agent-made workspaces (R3, docs/done-janitor.md#manual-pin-vs-auto-pin) never show among
+  // Tyler's own, in either grouping mode, unless he pinned one himself — a manual pin already
+  // pulled it into `pinnedChats` above, so nothing here ever re-excludes it.
+  const personWorkspaces: SidebarWorkspaceEntry[] = [];
+  const agentWorkspaceRows: SidebarWorkspaceEntry[] = [];
+  for (const workspace of unpinnedWorkspaces) {
+    (workspace.createdBy === "agent" ? agentWorkspaceRows : personWorkspaces).push(workspace);
+  }
+  const agentWorkspaceKeys = new Set(agentWorkspaceRows.map((row) => row.workspaceKey));
+  const pinnedGroups: PinnedSidebarGroups = {
+    pinnedChats: rawPinnedGroups.pinnedChats,
+    unpinnedProjects: rawPinnedGroups.unpinnedProjects.map((project) =>
+      withoutAgentWorkspaces(project, agentWorkspaceKeys),
+    ),
+  };
   // One switch decides both what the list groups by and what the keyboard shortcuts walk, so the
   // two cannot disagree and a new grouping mode is a compile error here rather than a silent
-  // fall-through to the project rows.
-  const workspaceGroups = buildWorkspaceGroups(input, unpinnedWorkspaces);
+  // fall-through to the project rows. The agent-workspaces group rides along in both modes.
+  const workspaceGroups = buildWorkspaceGroups(input, personWorkspaces);
+  const agentGroup = agentWorkspacesGroup(agentWorkspaceRows);
+  if (agentGroup) workspaceGroups.push(agentGroup);
 
   const sections: SidebarShortcutSection[] = [];
   if (!input.pinnedCollapsed) {
@@ -73,11 +95,17 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
         collapsed: input.collapsedProjectKeys.has(project.viewKey),
       })),
     );
+    if (agentGroup) {
+      sections.push({
+        workspaces: agentGroup.rows,
+        collapsed: isSidebarWorkspaceGroupCollapsed(agentGroup, input.collapsedWorkspaceGroupKeys),
+      });
+    }
   } else {
     sections.push(
       ...workspaceGroups.map((group) => ({
         workspaces: group.rows,
-        collapsed: input.collapsedWorkspaceGroupKeys.has(group.key),
+        collapsed: isSidebarWorkspaceGroupCollapsed(group, input.collapsedWorkspaceGroupKeys),
       })),
     );
   }
@@ -88,6 +116,17 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
     projectIconTargets: resolveSidebarProjectIconTargets(input.projects),
     shortcutModel: buildSidebarShortcutSections({ sections }),
   };
+}
+
+/** `project` with its agent-made workspaces removed, or `project` itself when it has none. */
+function withoutAgentWorkspaces(
+  project: SidebarProjectEntry,
+  agentWorkspaceKeys: ReadonlySet<string>,
+): SidebarProjectEntry {
+  const workspaces = project.workspaces.filter(
+    (workspace) => !agentWorkspaceKeys.has(workspace.workspaceKey),
+  );
+  return workspaces.length === project.workspaces.length ? project : { ...project, workspaces };
 }
 
 /** Project mode keeps its project headers and groups nothing; status mode groups the rows. */

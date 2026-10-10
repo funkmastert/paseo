@@ -44,6 +44,9 @@ export interface SidebarWorkspaceEntry extends SidebarStatusWorkspacePlacement {
   title: string | null;
   pinnedAt?: string | null;
   labels?: string[];
+  // COMPAT(workspaceCreatedBy): absent (an older daemon, or a record predating this field) reads
+  // as "person" — see resolveSidebarWorkspaceCreator.
+  createdBy?: "person" | "agent";
   // Checkout branch (null when not a git checkout or detached HEAD).
   currentBranch: string | null;
   archivingAt: string | null;
@@ -170,6 +173,7 @@ export function createSidebarWorkspaceEntry(input: {
     title: input.workspace.title ?? null,
     pinnedAt: input.workspace.pinnedAt,
     labels: input.workspace.labels ?? EMPTY_WORKSPACE_LABELS,
+    createdBy: input.workspace.createdBy,
     currentBranch: normalizeCurrentBranch(input.workspace.gitRuntime?.currentBranch),
     statusBucket: effectiveStatus.status,
     statusEnteredAt: effectiveStatus.enteredAt,

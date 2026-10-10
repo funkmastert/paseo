@@ -3,7 +3,11 @@ import { resolve } from "node:path";
 
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import { getRealpathAwareRelativePath } from "../utils/path.js";
-import type { PersistedWorkspaceRecord, WorkspaceTitleSource } from "./workspace-registry.js";
+import type {
+  PersistedWorkspaceRecord,
+  WorkspaceCreatedBy,
+  WorkspaceTitleSource,
+} from "./workspace-registry.js";
 import type { WorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
 import {
   createWorktreeCore,
@@ -38,6 +42,8 @@ export interface CreatePaseoWorktreeInput extends CreateWorktreeCoreInput {
    * "auto" so the title tracker may refresh it.
    */
   titleSource?: WorkspaceTitleSource;
+  /** Who made this workspace. Omit for a path that never creates one itself (e.g. a legacy caller). */
+  createdBy?: WorkspaceCreatedBy;
 }
 
 export interface CreatePaseoWorktreeResult {
@@ -109,6 +115,7 @@ async function createPaseoWorktreeWithPriority(
       // auto-namer and the tracker that follows it.
       titleSource: input.title?.trim() ? (input.titleSource ?? "manual") : "auto",
       expectsInitialAgent: Boolean(input.firstAgentContext),
+      createdBy: input.createdBy,
       ...(createdWorktree.intent.kind === "checkout-change-request" &&
       createdWorktree.intent.headRepository
         ? {

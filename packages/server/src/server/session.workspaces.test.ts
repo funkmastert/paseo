@@ -9180,6 +9180,9 @@ test("workspace.create worktree source checks out a GitHub PR from githubPrNumbe
     expect(response?.payload.workspace).toMatchObject({
       workspaceDirectory: expect.any(String),
       gitRuntime: { currentBranch: fixture.headRef },
+      // Regression: describeCreatedWorktreeWorkspace used to omit createdBy, so the response
+      // clobbered the correct persisted value with "missing" the moment the client read it.
+      createdBy: "person",
     });
     const workspaceDirectory = response?.payload.workspace?.workspaceDirectory as string;
     expect(readCurrentBranch(workspaceDirectory)).toBe(fixture.headRef);

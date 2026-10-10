@@ -153,6 +153,7 @@ export type DoneJanitorWorkspace = Pick<
   | "archivedAt"
   | "pinnedAt"
   | "pinSource"
+  | "createdBy"
 >;
 
 export type DoneJanitorProject = Pick<
@@ -254,6 +255,14 @@ export interface DoneJanitorDependencies {
   /** Processes with their cwd, their executable or a file open inside the directory. */
   listProcessesInside(directory: string): Promise<ProcessScan>;
   /**
+   * Whether `pid` is the daemon's own child (a forge poll it spawned directly), never an agent's
+   * — see `isDaemonOwnChildPid` (process-attribution.ts). `"unknown"` when there is no fresh
+   * attribution sample to answer from (see `daemon-process-ownership.ts`) — callers must not treat
+   * that the same as a confident `false`. Absent: nothing is excluded, so a build that predates
+   * this still keeps every worktree a process sits in, same as before (R4).
+   */
+  isDaemonOwnProcess?(pid: number): boolean | "unknown";
+  /**
    * Snapshots a worktree's uncommitted and unpushed work under `refs/backup/` without touching
    * it (docs/work-snapshots.md). Called before a dead agent is archived and before any worktree
    * is deleted.
@@ -309,10 +318,20 @@ type IdleWorkspacePlan =
       detail: string;
       invariant: string;
     }
-  | { kind: "keep"; reason: string };
+  | { kind: "keep"; reason: string; category?: KeptCooldownCategory };
+
+/**
+ * A keep reason the sweep treats as unlikely to change within the hour (R5,
+ * docs/done-janitor.md): a process that is not the daemon's own, or an ignored, non-regenerable
+ * path no backup covers. Everything else may resolve on its own sooner — a push, a lock released
+ * — so only these two earn the cooldown.
+ */
+type KeptCooldownCategory = "process" | "ignored-path";
 
 /** Whether a worktree's directory may go: the deletion invariant's verdict, or why not. */
-type DeletionCheck = { ok: true; invariant: string } | { ok: false; reason: string };
+type DeletionCheck =
+  | { ok: true; invariant: string }
+  | { ok: false; reason: string; category?: KeptCooldownCategory };
 
 interface AskCandidate {
   root: DoneJanitorAgentView;
@@ -395,6 +414,17 @@ export class AgentDoneJanitor {
    * from reclamation until the next sweep tries again.
    */
   private readonly snapshotFailures = new Map<string, string>();
+  /**
+   * Workspaces kept for a reason unlikely to change within the hour (R5), by workspace id. Each
+   * sweep's candidate loop skips an entry here outright, spending no budget on it, until it
+   * expires or the workspace stops being an idle candidate at all — new activity reclassifies it
+   * before this map is ever consulted. In memory only, like the janitor's other per-sweep memory
+   * (KTD-6): a restart clears it, and the next sweep re-derives it from scratch.
+   */
+  private readonly idleKeptCooldowns = new Map<
+    string,
+    { category: KeptCooldownCategory; untilMs: number }
+  >();
 
   constructor(options: AgentDoneJanitorOptions) {
     this.options = options;
@@ -599,6 +629,20 @@ export class AgentDoneJanitor {
       );
       let archived = 0;
       for (const candidate of candidates) {
+        // R5: a workspace kept last sweep for a reason unlikely to change within the hour is not
+        // re-attempted until its cooldown expires, and spends none of this sweep's budget — the
+        // rest of the backlog gets it instead.
+        const cooldown = this.idleKeptCooldown(candidate.workspace.workspaceId, nowMs);
+        if (cooldown) {
+          report.entries.push(
+            describeIdleWorkspace(
+              candidate.workspace,
+              "kept-idle-workspace",
+              `kept for ${describeKeptCooldownCategory(cooldown.category)}; not re-attempted for ${formatDuration(cooldown.untilMs - nowMs)}`,
+            ),
+          );
+          continue;
+        }
         if (archived >= sweep.maxArchivesPerSweep) {
           report.entries.push(
             describeIdleWorkspace(
@@ -609,7 +653,17 @@ export class AgentDoneJanitor {
           );
           continue;
         }
-        if (await this.archiveIdleWorkspace(report, candidate, views, workspaces, config, sweep)) {
+        if (
+          await this.archiveIdleWorkspace(
+            report,
+            candidate,
+            views,
+            workspaces,
+            config,
+            sweep,
+            nowMs,
+          )
+        ) {
           archived += 1;
         }
       }
@@ -656,6 +710,7 @@ export class AgentDoneJanitor {
     workspaces: readonly DoneJanitorWorkspace[],
     config: ResolvedDoneJanitorConfig,
     sweep: ResolvedWorkspaceSweepConfig,
+    nowMs: number,
   ): Promise<boolean> {
     const { workspace, verdict } = candidate;
     const directory = await this.deps.resolveArchiveDirectory(workspace);
@@ -667,8 +722,15 @@ export class AgentDoneJanitor {
     if (plan.kind === "keep") {
       // The reason alone, no idle time: it would change the line, and re-log it, every hour.
       report.entries.push(describe("kept-idle-workspace", plan.reason));
+      this.rememberIdleKeptOutcome(
+        workspace.workspaceId,
+        plan.category,
+        nowMs,
+        sweep.keptCooldownMs,
+      );
       return false;
     }
+    this.rememberIdleKeptOutcome(workspace.workspaceId, undefined, nowMs, sweep.keptCooldownMs);
     const reason = `${describeIdleRule(verdict, sweep)}; ${plan.detail}`;
     const facts = { rule: verdict.rule, idleFor: formatDuration(verdict.idleForMs) };
     if (sweep.dryRun) {
@@ -715,6 +777,12 @@ export class AgentDoneJanitor {
     );
     if (!check.ok) {
       report.entries.push(describe("kept-idle-workspace", check.reason));
+      this.rememberIdleKeptOutcome(
+        workspace.workspaceId,
+        check.category,
+        nowMs,
+        sweep.keptCooldownMs,
+      );
       return true;
     }
     // `du` and the snapshot took minutes. Look again here, and archive-by-scope looks again
@@ -833,7 +901,11 @@ export class AgentDoneJanitor {
     config: ResolvedDoneJanitorConfig;
   }): Promise<IdleWorkspacePlan> {
     const { workspace, path, views, workspaces, config } = input;
-    const keep = (reason: string): IdleWorkspacePlan => ({ kind: "keep", reason });
+    const keep = (reason: string, category?: KeptCooldownCategory): IdleWorkspacePlan => ({
+      kind: "keep",
+      reason,
+      category,
+    });
     if (!config.reclaimWorkspaces) {
       return keep("workspace reclamation is off, and archiving it would delete its directory");
     }
@@ -853,7 +925,7 @@ export class AgentDoneJanitor {
     }
     if (!safety.safe && !safety.atRisk) return keep(safety.reason);
     const preview = await this.previewDeletion(path);
-    if (!preview.ok) return keep(preview.reason);
+    if (!preview.ok) return keep(preview.reason, preview.category);
     return {
       kind: "archive",
       deletesDirectory: true,
@@ -870,12 +942,12 @@ export class AgentDoneJanitor {
    */
   private async previewDeletion(path: string): Promise<DeletionCheck> {
     const occupied = await this.occupiedReason(path);
-    if (occupied) return { ok: false, reason: occupied };
+    if (occupied) return { ok: false, reason: occupied.reason, category: occupied.category };
     const coverage = await this.deps.readWorktreeCoverage({ worktreePath: path, commit: null });
     const invariant = checkDeletionInvariant(coverage, "plan");
     return invariant.holds
       ? { ok: true, invariant: invariant.detail }
-      : { ok: false, reason: invariant.reason };
+      : { ok: false, reason: invariant.reason, category: invariant.category };
   }
 
   /**
@@ -891,7 +963,7 @@ export class AgentDoneJanitor {
     reason: string,
   ): Promise<DeletionCheck> {
     const occupied = await this.occupiedReason(path);
-    if (occupied) return { ok: false, reason: occupied };
+    if (occupied) return { ok: false, reason: occupied.reason, category: occupied.category };
     const snapshot = await this.takeSnapshot(report, path, reason);
     if (snapshot.kind === "failed") {
       return {
@@ -904,7 +976,7 @@ export class AgentDoneJanitor {
       const invariant = checkDeletionInvariant(coverage, "head");
       return invariant.holds
         ? { ok: true, invariant: invariant.detail }
-        : { ok: false, reason: invariant.reason };
+        : { ok: false, reason: invariant.reason, category: invariant.category };
     }
     const omitted = describeSnapshotOmissions(snapshot);
     if (omitted) return { ok: false, reason: omitted };
@@ -920,25 +992,44 @@ export class AgentDoneJanitor {
           ok: true,
           invariant: `${invariant.detail}; backed up at ${snapshot.ref}, ${describeOffsite(snapshot.offsite)}`,
         }
-      : { ok: false, reason: invariant.reason };
+      : { ok: false, reason: invariant.reason, category: invariant.category };
   }
 
   /**
    * Something that will use the directory again, or is using it now: a schedule that starts
-   * agents in it, or any process with its cwd, its executable or a file open inside it. Null when
-   * nothing is. A process scan that fails is a reason too.
+   * agents in it, or any process with its cwd, its executable or a file open inside it, other
+   * than the daemon's own (R4): a forge poll it spawned directly, never an agent's, is not a
+   * reason to keep the worktree. Null when nothing occupies it. A process scan that fails is a
+   * reason too.
    */
-  private async occupiedReason(path: string): Promise<string | null> {
+  private async occupiedReason(
+    path: string,
+  ): Promise<{ reason: string; category?: KeptCooldownCategory } | null> {
     const schedules = (await this.deps.listScheduledCwds()).filter((cwd) =>
       isRealpathInsideRoot(path, cwd),
     );
-    if (schedules.length > 0) return `${schedules.length} schedule(s) start agents in it`;
+    if (schedules.length > 0) {
+      return { reason: `${schedules.length} schedule(s) start agents in it` };
+    }
     const scan = await this.deps.listProcessesInside(path);
-    if (scan.kind === "failed") return `the processes inside it could not be listed: ${scan.error}`;
-    const [first] = scan.processes;
+    if (scan.kind === "failed") {
+      return { reason: `the processes inside it could not be listed: ${scan.error}` };
+    }
+    const isDaemonOwnProcess = this.deps.isDaemonOwnProcess;
+    const processes = isDaemonOwnProcess
+      ? scan.processes.filter((process) => isDaemonOwnProcess(process.pid) !== true)
+      : scan.processes;
+    const [first] = processes;
     if (!first) return null;
-    const others = scan.processes.length > 1 ? ` and ${scan.processes.length - 1} more` : "";
-    return `a process runs inside it: ${first.command} (pid ${first.pid})${others}`;
+    const others = processes.length > 1 ? ` and ${processes.length - 1} more` : "";
+    // "unknown" (no fresh attribution sample yet) can't rule out this pid being a daemon forge
+    // poll that just hasn't shown up in a sample — tag no category so R5 never starts a cooldown
+    // off a guess; a confident "not the daemon's own" still earns the normal cooldown.
+    const category = isDaemonOwnProcess?.(first.pid) === false ? "process" : undefined;
+    return {
+      reason: `a process runs inside it: ${first.command} (pid ${first.pid})${others}`,
+      category,
+    };
   }
 
   /** The reason a failed snapshot at or around `path` this sweep keeps it; null when none did. */
@@ -949,6 +1040,34 @@ export class AgentDoneJanitor {
       }
     }
     return null;
+  }
+
+  /** The live cooldown for `workspaceId`, or null when there is none or it has expired. */
+  private idleKeptCooldown(
+    workspaceId: string,
+    nowMs: number,
+  ): { category: KeptCooldownCategory; untilMs: number } | null {
+    const entry = this.idleKeptCooldowns.get(workspaceId);
+    if (!entry) return null;
+    if (entry.untilMs <= nowMs) {
+      this.idleKeptCooldowns.delete(workspaceId);
+      return null;
+    }
+    return entry;
+  }
+
+  /** Records or refreshes a workspace's cooldown for `category`, or clears it for anything else. */
+  private rememberIdleKeptOutcome(
+    workspaceId: string,
+    category: KeptCooldownCategory | undefined,
+    nowMs: number,
+    cooldownMs: number,
+  ): void {
+    if (category) {
+      this.idleKeptCooldowns.set(workspaceId, { category, untilMs: nowMs + cooldownMs });
+    } else {
+      this.idleKeptCooldowns.delete(workspaceId);
+    }
   }
 
   /** Why an idle workspace must not be archived now, read afresh; null while it is still idle. */
@@ -1693,7 +1812,7 @@ export class AgentDoneJanitor {
   ): Promise<string | null> {
     // The slow scan first, so the reads below are the last thing before the delete.
     const occupied = await this.occupiedReason(path);
-    if (occupied) return occupied;
+    if (occupied) return occupied.reason;
     const [views, workspaces] = await Promise.all([this.loadViews(), this.deps.listWorkspaces()]);
     const conflict = directoryConflict(workspace, path, workspaces, views, new Set());
     return conflict ?? this.agentAtWork(workspace.workspaceId, path);
@@ -1855,11 +1974,21 @@ function describeIdleRule(
 ): string {
   switch (verdict.rule) {
     case "fixer":
+    case "agent-done":
       return verdict.reason;
     case "idle":
       return `idle past ${formatDuration(sweep.idleMs)}`;
     case "empty":
       return `no agents and no git checkout, idle past ${formatDuration(sweep.emptyIdleMs)}`;
+  }
+}
+
+function describeKeptCooldownCategory(category: KeptCooldownCategory): string {
+  switch (category) {
+    case "process":
+      return "a process inside it";
+    case "ignored-path":
+      return "an unbacked ignored path";
   }
 }
 

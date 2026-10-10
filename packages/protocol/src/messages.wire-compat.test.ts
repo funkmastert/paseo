@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   AgentSnapshotPayloadSchema,
   AgentTimelineItemPayloadSchema,
+  MutableDaemonConfigSchema,
   ServerInfoStatusPayloadSchema,
   SessionOutboundMessageSchema,
   WSHelloMessageSchema,
@@ -425,6 +426,76 @@ describe("wire schema compatibility", () => {
 
     const newParsed = WorkspaceDescriptorPayloadSchema.parse(payloadFromNewDaemon);
     expect(newParsed.diskUsage).toEqual(payloadFromNewDaemon.diskUsage);
+  });
+
+  test("old clients strip an unknown createdBy field from new daemon workspace descriptors", () => {
+    // Same shape as the diskUsage case above: createdBy is additive-optional (R1,
+    // docs/done-janitor.md), so a pre-createdBy client schema silently drops the extra key
+    // instead of failing to parse, and the new schema reads it straight through.
+    const LegacyWorkspaceDescriptorSchema = z.object({
+      id: z.string(),
+      projectId: z.string(),
+      projectDisplayName: z.string(),
+      projectRootPath: z.string(),
+      workspaceDirectory: z.string().optional(),
+      projectKind: z.enum(["git", "non_git", "directory"]),
+      workspaceKind: z.enum(["directory", "local_checkout", "checkout", "worktree"]),
+      name: z.string(),
+      status: z.string(),
+      activityAt: z.string().nullable(),
+      scripts: z.array(z.unknown()),
+    });
+    const payloadFromNewDaemon = {
+      id: "ws-created-by",
+      projectId: "proj",
+      projectDisplayName: "repo",
+      projectRootPath: "/repo",
+      workspaceDirectory: "/repo",
+      projectKind: "git",
+      workspaceKind: "worktree",
+      name: "feature",
+      status: "done",
+      activityAt: null,
+      scripts: [],
+      createdBy: "agent",
+    };
+
+    const legacyParsed = LegacyWorkspaceDescriptorSchema.parse(payloadFromNewDaemon);
+    expect(legacyParsed).not.toHaveProperty("createdBy");
+
+    const newParsed = WorkspaceDescriptorPayloadSchema.parse(payloadFromNewDaemon);
+    expect(newParsed.createdBy).toEqual(payloadFromNewDaemon.createdBy);
+
+    // A descriptor an old daemon sent, with no createdBy at all, still parses — the app treats
+    // absence as "person" (see resolveSidebarWorkspaceCreator), not a parse failure.
+    const { createdBy: _omit, ...payloadFromOldDaemon } = payloadFromNewDaemon;
+    expect(WorkspaceDescriptorPayloadSchema.parse(payloadFromOldDaemon).createdBy).toBeUndefined();
+  });
+
+  test("an old daemon config without keptCooldownHours still parses, and a new one round-trips it", () => {
+    const configWithoutCooldown = {
+      mcp: { injectIntoAgents: false },
+      doneJanitor: {
+        enabled: true,
+        workspaceSweep: { enabled: true, idleHours: 72 },
+      },
+    };
+    expect(
+      MutableDaemonConfigSchema.parse(configWithoutCooldown).doneJanitor?.workspaceSweep
+        ?.keptCooldownHours,
+    ).toBeUndefined();
+
+    const configWithCooldown = {
+      mcp: { injectIntoAgents: false },
+      doneJanitor: {
+        enabled: true,
+        workspaceSweep: { enabled: true, idleHours: 72, keptCooldownHours: 6 },
+      },
+    };
+    expect(
+      MutableDaemonConfigSchema.parse(configWithCooldown).doneJanitor?.workspaceSweep
+        ?.keptCooldownHours,
+    ).toBe(6);
   });
 
   test("notification timeline items parse their level and message", () => {

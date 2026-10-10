@@ -22,7 +22,10 @@ import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store"
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { type SidebarWorkspaceEntry } from "@/hooks/use-sidebar-workspaces-list";
 import type { StatusBucket } from "@/hooks/sidebar-status-view-model";
-import type { SidebarWorkspaceGroup } from "@/components/sidebar/sidebar-labels";
+import {
+  isSidebarWorkspaceGroupCollapsed,
+  type SidebarWorkspaceGroup,
+} from "@/components/sidebar/sidebar-labels";
 import { SidebarFilterEmptyState } from "@/components/sidebar/empty-states";
 import type { HostBadgeModel } from "@/hosts/appearance";
 import { isWeb as platformIsWeb, isNative as platformIsNative } from "@/constants/platform";
@@ -34,6 +37,7 @@ import type { Theme } from "@/styles/theme";
 import type { SidebarSurfaceBackdrop } from "@/styles/surface-backdrop";
 import { withUnistyles } from "react-native-unistyles";
 import {
+  Bot,
   ChevronDown,
   ChevronRight,
   CircleAlert,
@@ -108,6 +112,7 @@ const ThemedCircleAlert = withUnistyles(CircleAlert);
 const ThemedCircleCheck = withUnistyles(CircleCheck);
 const ThemedCircleDot = withUnistyles(CircleDot);
 const ThemedCircleX = withUnistyles(CircleX);
+const ThemedBot = withUnistyles(Bot);
 const EMPTY_SHORTCUT_INDEX = new Map<string, number>();
 
 function statusWorkspaceKeyExtractor(workspace: SidebarWorkspaceEntry): string {
@@ -279,7 +284,7 @@ export function SidebarStatusWorkspaceList({
   );
 }
 
-function StatusGroupList({
+export function StatusGroupList({
   groups,
   collapsedWorkspaceGroupKeys,
   projectIconByProjectViewKey,
@@ -306,7 +311,7 @@ function StatusGroupList({
         <StatusGroupRows
           key={group.key}
           group={group}
-          collapsed={collapsedWorkspaceGroupKeys.has(group.key)}
+          collapsed={isSidebarWorkspaceGroupCollapsed(group, collapsedWorkspaceGroupKeys)}
           projectIconByProjectViewKey={projectIconByProjectViewKey}
           shortcutIndex={shortcutIndex}
           showShortcutBadges={showShortcutBadges}
@@ -473,7 +478,11 @@ function StatusGroupLeadingVisual({
   showChevron: boolean;
 }) {
   if (!showChevron) {
-    return <StatusGroupIcon bucket={leading.bucket} />;
+    return leading.kind === "agent" ? (
+      <AgentGroupIcon needsAttention={leading.needsAttention} />
+    ) : (
+      <StatusGroupIcon bucket={leading.bucket} />
+    );
   }
   if (collapsed) {
     return <ThemedChevronRight size={14} uniProps={foregroundMutedColorMapping} />;
@@ -494,6 +503,19 @@ function StatusGroupIcon({ bucket }: { bucket: StatusBucket }) {
     case "done":
       return <ThemedCircleCheck size={14} uniProps={foregroundMutedColorMapping} />;
   }
+}
+
+/** The agent-workspaces header's icon. The attention dot mirrors `needs_input`'s color — the
+ * same thing a single workspace row's own dot would show for a pending permission or an error. */
+function AgentGroupIcon({ needsAttention }: { needsAttention: boolean }) {
+  return (
+    <View style={styles.agentGroupIconSlot}>
+      <ThemedBot size={14} uniProps={foregroundMutedColorMapping} />
+      {needsAttention ? (
+        <View style={styles.agentGroupAttentionDot} testID="sidebar-agent-group-attention-dot" />
+      ) : null}
+    </View>
+  );
 }
 
 const StatusWorkspaceRow = memo(function StatusWorkspaceRow({
@@ -1128,6 +1150,20 @@ const styles = StyleSheet.create((theme) => ({
     flexShrink: 0,
     alignItems: "center",
     justifyContent: "center",
+  },
+  agentGroupIconSlot: {
+    position: "relative",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  agentGroupAttentionDot: {
+    position: "absolute",
+    top: -2,
+    right: -2,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: theme.colors.statusDotWarning,
   },
   statusGroupTitleGroup: {
     flexDirection: "row",

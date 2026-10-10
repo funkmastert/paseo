@@ -151,6 +151,7 @@ function harness(input: {
   /** Why a snapshot's backup is not verified; absent: it is. */
   unverifiedBackup?: (snapshot: WorktreeSnapshotResult) => string | null;
   processes?: (directory: string) => ProcessScan;
+  isDaemonOwnProcess?: (pid: number) => boolean | "unknown";
   scheduledCwds?: string[];
   runningScripts?: number;
   /** Open terminals per read; overrides `terminals`. */
@@ -309,6 +310,7 @@ function harness(input: {
     verifyBackup: async ({ snapshot }) => input.unverifiedBackup?.(snapshot) ?? null,
     listProcessesInside: async (directory) =>
       input.processes?.(directory) ?? { kind: "scanned", processes: [] },
+    isDaemonOwnProcess: input.isDaemonOwnProcess,
     snapshotWorktree: async ({ cwd }) => {
       events.push(`snapshot:${cwd}`);
       return input.snapshot?.(cwd) ?? { kind: "nothing-at-risk", worktreePath: cwd };
@@ -2525,6 +2527,41 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
       expect(h.pushes[0]?.body).toBe("Deleted 1 worktree, freeing 3.0 GB.");
     });
 
+    test("an agent-made worktree still goes through the git gate and snapshot (R6)", async () => {
+      const archivedAt = new Date(NOW - 61 * 60_000).toISOString();
+      const h = sweepHarness({
+        stored: [record({ archivedAt, updatedAt: archivedAt })],
+        workspaces: [workspace({ createdBy: "agent" })],
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.events).toEqual([
+        "snapshot:/home/t/.paseo/worktrees/h/feature",
+        "archive-workspace:ws-1",
+      ]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "deleted",
+          workspaceId: "ws-1",
+          rule: "agent-done",
+          invariant: "holds: every file is tracked and pushed",
+        }),
+      );
+    });
+
+    test("an agent-made worktree is kept 59 minutes after its last agent was archived", async () => {
+      const archivedAt = new Date(NOW - 59 * 60_000).toISOString();
+      const h = sweepHarness({
+        stored: [record({ archivedAt, updatedAt: archivedAt })],
+        workspaces: [workspace({ createdBy: "agent" })],
+      });
+
+      await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+    });
+
     test("dirty with no backup: kept, and reported", async () => {
       const h = sweepHarness({
         stored: [record()],
@@ -2984,6 +3021,151 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
           expect.objectContaining({ action: "kept-idle-workspace", reason }),
         );
       }
+    });
+
+    test("the daemon's own process inside the worktree does not keep it (R4)", async () => {
+      const h = owned({
+        processes: () => ({
+          kind: "scanned",
+          processes: [{ pid: 777, command: "tea pr list", path: PASEO }],
+        }),
+        isDaemonOwnProcess: (pid) => pid === 777,
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual(["ws-1"]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({ action: "deleted", workspaceId: "ws-1" }),
+      );
+    });
+
+    test("a process that is not the daemon's own still keeps the worktree (R4)", async () => {
+      const h = owned({
+        processes: () => ({
+          kind: "scanned",
+          processes: [{ pid: 555, command: "bun run build", path: PASEO }],
+        }),
+        isDaemonOwnProcess: (pid) => pid === 777,
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: "a process runs inside it: bun run build (pid 555)",
+        }),
+      );
+    });
+
+    test("an 'unknown' daemon-ownership verdict still keeps the worktree, same as a confident false (R4)", async () => {
+      const h = owned({
+        processes: () => ({
+          kind: "scanned",
+          processes: [{ pid: 555, command: "bun run build", path: PASEO }],
+        }),
+        isDaemonOwnProcess: () => "unknown",
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: "a process runs inside it: bun run build (pid 555)",
+        }),
+      );
+    });
+
+    test("an 'unknown' daemon-ownership verdict does not start the R5 cooldown, unlike a confident false", async () => {
+      let scans = 0;
+      const h = owned({
+        processes: () => {
+          scans += 1;
+          return {
+            kind: "scanned",
+            processes: [{ pid: 555, command: "bun run build", path: PASEO }],
+          };
+        },
+        isDaemonOwnProcess: () => "unknown",
+      });
+
+      await h.janitor.tick();
+      expect(scans).toBe(1);
+
+      h.setNow(NOW + 3 * HOUR); // would still be inside a 6h cooldown, if one had started
+      await h.janitor.tick();
+
+      // No cooldown: the scan runs again rather than being skipped as already-known-kept.
+      expect(scans).toBe(2);
+    });
+
+    test("the kept cooldown (R5): an unbacked ignored path is skipped for 6h and spends no budget", async () => {
+      // The failure surfaces only at the live recheck — divergent coverage per read, like "a
+      // clean tree that changed after it was planned" above — the same path the starvation
+      // happened on: the planning read alone never cost the sweep anything.
+      let reads = 0;
+      const h = owned({
+        coverage: (_path, commit) => {
+          reads += 1;
+          return coverage({
+            commit: commit ?? "head",
+            ignored: reads > 1 ? ["node_modules/", "apps/mobile/ios/.xcode.env.local"] : [],
+          });
+        },
+      });
+
+      const first = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(first?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: expect.stringContaining("not regenerable"),
+        }),
+      );
+      expect(reads).toBe(2);
+
+      h.setNow(NOW + 3 * HOUR); // inside the 6h cooldown
+      const second = await h.janitor.tick();
+
+      // Skipped before planning or confirming again: no new coverage read.
+      expect(reads).toBe(2);
+      expect(second?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: expect.stringContaining("not re-attempted"),
+        }),
+      );
+
+      h.setNow(NOW + 7 * HOUR); // the cooldown has expired
+      await h.janitor.tick();
+      expect(reads).toBeGreaterThan(2);
+    });
+
+    test("the kept cooldown (R5): new activity in a cooled-down workspace makes it eligible again", async () => {
+      const h = owned({
+        ignored: () => ["node_modules/", "apps/mobile/ios/.xcode.env.local"],
+      });
+
+      await h.janitor.tick();
+
+      h.setNow(NOW + 3 * HOUR); // inside the 6h cooldown
+      h.stored[0] = {
+        ...h.stored[0],
+        lastStatus: "running",
+        updatedAt: new Date(NOW + 3 * HOUR).toISOString(),
+      };
+      const report = await h.janitor.tick();
+
+      // A running agent is active, not idle, so it is not a candidate at all — the cooldown
+      // from the sweep before never even gets consulted.
+      expect(report?.entries).not.toContainEqual(
+        expect.objectContaining({ action: "kept-idle-workspace" }),
+      );
     });
 
     test("a schedule that starts agents in the worktree keeps it", async () => {

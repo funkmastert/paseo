@@ -223,6 +223,7 @@ import {
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { WorkspaceTitleTracker } from "./workspace-title-tracker.js";
+import { migrateWorkspaceCreatedBy } from "./workspace-created-by-migration.js";
 import { migrateWorkspaceTitleSources } from "./workspace-title-source-migration.js";
 import { createTitleRefreshRecorder } from "./workspace-title-refresh-jev.js";
 import { resolveWorkspaceTitleRefreshConfig } from "./workspace-title-refresh-config.js";
@@ -323,6 +324,7 @@ import { resolveProviderExtends } from "./agent/device-launch-enforcement.js";
 import { DeviceReservationStore } from "./agent/device-reservation-store.js";
 import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
 import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
+import { createDaemonProcessOwnershipTracker } from "./agent/daemon-process-ownership.js";
 import { createNativeBuildGate } from "./agent/native-build-gate.js";
 import { PhysicalDeviceLeaseManager } from "./agent/physical-device-lease-manager.js";
 import { physicalDeviceMatches, type PhysicalDevice } from "./agent/physical-device-registry.js";
@@ -1154,6 +1156,7 @@ function createDoneJanitor(input: {
   worktreeSnapshotter: WorktreeSnapshotter;
   serverId: string;
   logger: Logger;
+  isDaemonOwnProcess?: (pid: number) => boolean | "unknown";
 }): AgentDoneJanitor {
   const { agentManager, agentStorage, terminalManager, logger } = input;
   const overrides = input.config.doneJanitorOverrides;
@@ -1249,6 +1252,7 @@ function createDoneJanitor(input: {
           offsite: snapshot.offsite,
         }),
       listProcessesInside: (directory) => listProcessesInside(directory),
+      isDaemonOwnProcess: input.isDaemonOwnProcess,
       snapshotWorktree: (request) => input.worktreeSnapshotter.snapshot(request),
       listProjects: () => input.projectRegistry.list(),
       probeProjectRoot,
@@ -2212,6 +2216,7 @@ export async function createPaseoDaemon(
     return stats.bavail * stats.bsize;
   };
   // The resource monitor hands it each sweep's attributed `ps` (reportAttributedSample below).
+  const daemonProcessOwnership = createDaemonProcessOwnershipTracker(process.pid);
   const nativeBuildGate = createNativeBuildGate({
     inner: {
       async gateLaunch(input) {
@@ -2540,11 +2545,13 @@ export async function createPaseoDaemon(
     cwd: string,
     firstAgentContext?: FirstAgentContext,
   ): Promise<string> => {
+    // Only the agent-scoped create_agent/create_workspace MCP tools reach this, never a client
+    // connection (docs/done-janitor.md#manual-pin-vs-auto-pin).
     const workspace = await workspaceProvisioning.createWorkspaceForDirectory(
       cwd,
       resolveFirstAgentPromptTitle(firstAgentContext),
       undefined,
-      { titleSource: "auto" },
+      { titleSource: "auto", createdBy: "agent" },
     );
     if (firstAgentContext) {
       workspaceAutoName.scheduleForDirectory({
@@ -2637,6 +2644,15 @@ export async function createPaseoDaemon(
     logger,
   }).catch((error: unknown) => {
     logger.warn({ err: error }, "Workspace title provenance migration failed");
+  });
+  // One-time: backfill who made each workspace that predates createdBy (docs/done-janitor.md).
+  await migrateWorkspaceCreatedBy({
+    workspaceRegistry,
+    listAgents: () => agentStorage.list(),
+    markerPath: path.join(config.paseoHome, "projects", "workspace-created-by-migration.json"),
+    logger,
+  }).catch((error: unknown) => {
+    logger.warn({ err: error }, "Workspace createdBy backfill failed");
   });
   const workspaceTitleTracker = new WorkspaceTitleTracker({
     agentManager,
@@ -2738,21 +2754,27 @@ export async function createPaseoDaemon(
     input: Parameters<typeof createPaseoWorktreeWorkflow>[1],
     serviceOptions?: Parameters<typeof createPaseoWorktreeWorkflow>[2],
   ) => {
+    // Every caller of this dependency is the agent-scoped create_agent MCP tool, a schedule, or
+    // Hub — never a client connection — so the workspace it creates is always agent-made
+    // (docs/done-janitor.md#manual-pin-vs-auto-pin).
     return createPaseoWorktreeWorkflow(
       {
         paseoHome: config.paseoHome,
         worktreesRoot: config.worktreesRoot,
         createPaseoWorktree: async (workflowInput, workflowOptions) => {
-          return createRegisteredPaseoWorktree(workflowInput, {
-            github,
-            ...(workflowOptions?.resolveDefaultBranch
-              ? {
-                  resolveDefaultBranch: workflowOptions.resolveDefaultBranch,
-                }
-              : {}),
-            workspaceGitService,
-            workspaceProvisioning,
-          });
+          return createRegisteredPaseoWorktree(
+            { ...workflowInput, createdBy: "agent" },
+            {
+              github,
+              ...(workflowOptions?.resolveDefaultBranch
+                ? {
+                    resolveDefaultBranch: workflowOptions.resolveDefaultBranch,
+                  }
+                : {}),
+              workspaceGitService,
+              workspaceProvisioning,
+            },
+          );
         },
         warmWorkspaceGitData: async (workspace) => {
           await Promise.all(
@@ -2912,7 +2934,7 @@ export async function createPaseoDaemon(
       input.cwd,
       resolveFirstAgentPromptTitle(input.firstAgentContext),
       undefined,
-      { titleSource: "auto" },
+      { titleSource: "auto", createdBy: "agent" },
     );
     workspaceAutoName.scheduleForDirectory({
       workspaceId: workspace.workspaceId,
@@ -3044,7 +3066,7 @@ export async function createPaseoDaemon(
         title,
         projectId,
         // Only agents reach this (create_workspace), so the title tracker may refresh it.
-        title ? { titleSource: "auto" } : undefined,
+        { ...(title ? { titleSource: "auto" as const } : {}), createdBy: "agent" },
       );
       await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
       return workspace;
@@ -3611,7 +3633,10 @@ export async function createPaseoDaemon(
               // watches, and names what that monitor's growth sample saw grow.
               readFreeDiskBytes,
               // The build gate counts builds from this sweep's `ps` rather than its own.
-              reportAttributedSample: (sample) => nativeBuildGate.observeSample(sample),
+              reportAttributedSample: (sample) => {
+                nativeBuildGate.observeSample(sample);
+                daemonProcessOwnership.observeSample(sample);
+              },
               // The physical-device lease manager's only process evidence (docs/device-leases.md
               // #physical-devices); its own detection is push-based, never a `ps` sample.
               reportPhysicalDeviceSample: (sample) =>
@@ -3739,6 +3764,7 @@ export async function createPaseoDaemon(
               daemonConfigStore,
               worktreeSnapshotter,
               serverId,
+              isDaemonOwnProcess: (pid) => daemonProcessOwnership.isDaemonOwnProcess(pid),
               logger,
             });
             doneJanitor.start();
