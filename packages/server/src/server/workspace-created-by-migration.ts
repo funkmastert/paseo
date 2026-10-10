@@ -9,14 +9,21 @@ import type {
 
 /**
  * One-time backfill of `createdBy` (docs/done-janitor.md#manual-pin-vs-auto-pin). Every record
- * written before this field existed carries none. A workspace is classified "agent" from
- * evidence that survives it: any agent it ever held carrying `paseo.parent-agent-id` (an
- * orchestrator's child) or `paseo.remediation` (a self-heal fixer), or the workspace itself being
- * a Paseo-owned worktree (always created on an agent's behalf). Everything else is "person". A
- * stored value, including one this pass already set, is never touched again.
+ * written before this field existed carries none.
+ *
+ * A workspace is "agent" only when every agent it ever held is a child (carries
+ * `paseo.parent-agent-id`) or a self-heal fixer (`paseo.remediation`) — never when it holds even
+ * one root agent that isn't a fixer, since that root is exactly what a person starting a session
+ * looks like, same-workspace subagents included: an orchestrator's own workspace routinely holds
+ * many children carrying the orchestrator's id, and that workspace is still the orchestrator's,
+ * not theirs. `isPaseoOwnedWorktree` is evidence only for a workspace with no agent record at all
+ * — once there is one, it answers the question directly and the flag (which Tyler's own app flow
+ * also sets) would only mislead. Ambiguity resolves to "person": inference never hides a
+ * workspace that might be his. A stored value, including one this pass already set, is never
+ * touched again.
  */
 
-const MIGRATION_VERSION = 1;
+const MIGRATION_VERSION = 2;
 const PARENT_AGENT_LABEL = "paseo.parent-agent-id";
 const REMEDIATION_LABEL = "paseo.remediation";
 
@@ -36,8 +43,8 @@ function agentMadeWorkspace(
   workspace: PersistedWorkspaceRecord,
   agentsInWorkspace: readonly CreatedByMigrationAgent[],
 ): boolean {
-  if (workspace.isPaseoOwnedWorktree) return true;
-  return agentsInWorkspace.some(
+  if (agentsInWorkspace.length === 0) return workspace.isPaseoOwnedWorktree;
+  return agentsInWorkspace.every(
     (agent) =>
       Boolean(agent.labels?.[PARENT_AGENT_LABEL]) || Boolean(agent.labels?.[REMEDIATION_LABEL]),
   );

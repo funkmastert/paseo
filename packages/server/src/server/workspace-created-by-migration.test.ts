@@ -35,31 +35,59 @@ function record(overrides: Partial<PersistedWorkspaceRecord> = {}): PersistedWor
   };
 }
 
+function agentOf(overrides: Partial<CreatedByMigrationAgent> = {}): CreatedByMigrationAgent {
+  return { workspaceId: "wks_a", labels: {}, ...overrides };
+}
+
 describe("classifyWorkspaceCreatedBy", () => {
-  test("a Paseo-owned worktree is agent-made regardless of its agents", () => {
+  test("a workspace with no agent record at all falls back to isPaseoOwnedWorktree", () => {
     expect(classifyWorkspaceCreatedBy(record({ isPaseoOwnedWorktree: true }), [])).toBe("agent");
+    expect(classifyWorkspaceCreatedBy(record({ isPaseoOwnedWorktree: false }), [])).toBe("person");
   });
 
-  test("an agent carrying paseo.parent-agent-id makes its workspace agent-made", () => {
-    const agent: CreatedByMigrationAgent = {
-      workspaceId: "wks_a",
-      labels: { "paseo.parent-agent-id": "leader-1" },
-    };
+  test("a lone child agent (paseo.parent-agent-id) makes its workspace agent-made", () => {
+    const agent = agentOf({ labels: { "paseo.parent-agent-id": "leader-1" } });
     expect(classifyWorkspaceCreatedBy(record(), [agent])).toBe("agent");
   });
 
-  test("an agent carrying paseo.remediation makes its workspace agent-made", () => {
-    const agent: CreatedByMigrationAgent = {
-      workspaceId: "wks_a",
-      labels: { "paseo.remediation": "disk-falling" },
-    };
+  test("a lone self-heal fixer (paseo.remediation) makes its workspace agent-made", () => {
+    const agent = agentOf({ labels: { "paseo.remediation": "disk-falling" } });
     expect(classifyWorkspaceCreatedBy(record(), [agent])).toBe("agent");
   });
 
-  test("a workspace with only an unlabelled agent is person-made", () => {
-    const agent: CreatedByMigrationAgent = { workspaceId: "wks_a", labels: {} };
-    expect(classifyWorkspaceCreatedBy(record(), [agent])).toBe("person");
-    expect(classifyWorkspaceCreatedBy(record(), [])).toBe("person");
+  test("a workspace with only an unlabelled (root) agent is person-made", () => {
+    expect(classifyWorkspaceCreatedBy(record(), [agentOf()])).toBe("person");
+  });
+
+  test("isPaseoOwnedWorktree never overrides a verdict the agents themselves answer", () => {
+    // Tyler's own app flow creates worktrees too, so the flag means nothing once there is an
+    // agent record to read instead.
+    expect(classifyWorkspaceCreatedBy(record({ isPaseoOwnedWorktree: true }), [agentOf()])).toBe(
+      "person",
+    );
+  });
+
+  test("a leader workspace with 5 child agents in it backfills as person", () => {
+    // The orchestrator's own root agent lives in the same workspace as every subagent it spawned
+    // there; that root, not the children, is who made the workspace.
+    const agents = [
+      agentOf({ labels: {} }), // the leader itself: no parent-agent-id
+      ...Array.from({ length: 5 }, () =>
+        agentOf({
+          workspaceId: "wks_a",
+          labels: { "paseo.parent-agent-id": "leader-1" },
+        }),
+      ),
+    ];
+    expect(classifyWorkspaceCreatedBy(record(), agents)).toBe("person");
+  });
+
+  test("a workspace is agent-made only when every agent it ever held is a child or a fixer", () => {
+    const agents = [
+      agentOf({ labels: { "paseo.parent-agent-id": "leader-1" } }),
+      agentOf({ labels: { "paseo.remediation": "disk-falling" } }),
+    ];
+    expect(classifyWorkspaceCreatedBy(record(), agents)).toBe("agent");
   });
 });
 
@@ -101,22 +129,29 @@ describe("migrateWorkspaceCreatedBy", () => {
     const h = harness(
       [
         record({ workspaceId: "wks_child" }),
-        record({ workspaceId: "wks_worktree", isPaseoOwnedWorktree: true }),
+        record({ workspaceId: "wks_worktree_no_agents", isPaseoOwnedWorktree: true }),
         record({ workspaceId: "wks_person" }),
+        // A leader's own workspace, holding the leader (root) and one child it spawned there.
+        record({ workspaceId: "wks_leader" }),
         // Already stamped by the create path — the migration must leave it alone.
         record({ workspaceId: "wks_already_person", createdBy: "person" }),
       ],
-      [{ workspaceId: "wks_child", labels: { "paseo.parent-agent-id": "leader-1" } }],
+      [
+        { workspaceId: "wks_child", labels: { "paseo.parent-agent-id": "leader-1" } },
+        { workspaceId: "wks_leader", labels: {} },
+        { workspaceId: "wks_leader", labels: { "paseo.parent-agent-id": "leader-1" } },
+      ],
     );
 
     const counts = await migrateWorkspaceCreatedBy(h.deps);
 
     expect(h.byId.get("wks_child")?.createdBy).toBe("agent");
-    expect(h.byId.get("wks_worktree")?.createdBy).toBe("agent");
+    expect(h.byId.get("wks_worktree_no_agents")?.createdBy).toBe("agent");
     expect(h.byId.get("wks_person")?.createdBy).toBe("person");
+    expect(h.byId.get("wks_leader")?.createdBy).toBe("person");
     expect(h.byId.get("wks_already_person")?.createdBy).toBe("person");
-    expect(counts).toMatchObject({ scanned: 4, setToAgent: 2, setToPerson: 1 });
-    expect(JSON.parse(await readFile(h.deps.markerPath, "utf8"))).toMatchObject({ version: 1 });
+    expect(counts).toMatchObject({ scanned: 5, setToAgent: 2, setToPerson: 2 });
+    expect(JSON.parse(await readFile(h.deps.markerPath, "utf8"))).toMatchObject({ version: 2 });
 
     h.byId.set("wks_later", record({ workspaceId: "wks_later" }));
     const again = await migrateWorkspaceCreatedBy({
