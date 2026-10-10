@@ -172,10 +172,30 @@ ln -s ~/.claude/skills ~/.claude-accounts/worker-1/skills         # if you have 
 CLAUDE_CONFIG_DIR=~/.claude-accounts/worker-1 claude auth login --email worker-1@example.com
 ```
 
-Sign each directory in to a different Claude account, and pass its
-`--email`. The flag pre-fills the browser's sign-in page with that address,
-so a browser already signed into your main account does not sign the worker
-directory into it. Give each entry the same `email` in `config.json`.
+Sign each directory in to a different Claude account, and pass its `--email`.
+
+**`--email` is not enough on its own.** It only pre-fills the address on the
+sign-in page. If the browser already holds a live claude.com session, the
+authorize step completes against *that* account without ever showing the page,
+and the directory is signed in to the wrong login. Measured while setting up two
+machines: two of five sign-ins cross-signed this way, each one silently adopting
+the account used in the previous sign-in. **Sign out of claude.com, or use a
+private window, between accounts.**
+
+Verify every directory afterwards rather than trusting the flag, and compare
+`orgId` as well as `email`:
+
+```bash
+for d in leader worker-1 worker-2; do
+  CLAUDE_CONFIG_DIR=~/.claude-accounts/$d claude auth status | grep -E '"(email|orgId)"'
+done
+```
+
+Distinct `orgId` values are the proof the pool really has that many accounts. If
+two match, the pool has fewer accounts than entries: log the wrong one out with
+`CLAUDE_CONFIG_DIR=~/.claude-accounts/<dir> claude auth logout` and sign it in
+again. Logging one directory out does not disturb the others, even when they
+share a login. Give each entry the same `email` in `config.json`.
 Two directories on one login are one budget, and the pool then has one
 account, not two. The usage windows the
 pool ranks accounts by come from that login. An entry authenticated some other

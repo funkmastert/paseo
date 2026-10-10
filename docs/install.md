@@ -36,8 +36,39 @@ cp -R ~/.paseo.pre-bozeo-<date>/agent-context ~/.paseo/agent-context   # if you 
 cp -R ~/.paseo.pre-bozeo-<date>/models ~/.paseo/models                 # saves a ~1 GB re-download
 ```
 
+**Your schedules and loops do not come back on their own.** Copy them too, then restart
+the daemon:
+
+```bash
+cp -R ~/.paseo.pre-bozeo-<date>/schedules/. ~/.paseo/schedules/
+cp -R ~/.paseo.pre-bozeo-<date>/loops/. ~/.paseo/loops/
+```
+
+**Agent history does not survive the move, and copying `agents/` back does not restore
+it.** Measured on a 0.8.0 daemon: 45 records copied from an old home into a new one, and
+`paseo ls -a -g --json` still returned `[]`. The records are inert in the new home, so
+treat the backup as an archive you read directly, not as something you can graft back.
+If the sessions matter, keep the old home and run the new instance beside it instead
+(**Isolated instance**).
+
 Re-run `node scripts/install-preflight.mjs` after the move. It reports `clear`, and
 `/install` then offers a fresh install.
+
+## After a fresh install the app looks empty
+
+Both are expected, and neither is a broken connection:
+
+- **The session list is empty.** A new home has no agents, and Bozeo shows only the
+  daemon it is connected to.
+- **Another machine's agents are not listed.** The app shows one host at a time. Add the
+  other daemon under **Settings → hosts**; there is no CLI or config-file equivalent, and
+  the host list is not in `desktop-settings.json`.
+
+Also worth knowing before you rely on the app: its defaults are
+`daemon.manageBuiltInDaemon: true` and `daemon.keepRunningAfterQuit: false`, so **quitting
+Bozeo stops the daemon**, and with it every running agent. For an always-on host, run the
+daemon from the CLI or a launch agent instead of leaving the app open, or turn
+`keepRunningAfterQuit` on.
 
 ## Prerequisites
 
@@ -135,6 +166,62 @@ Providers
 
 The plugin README's [verify](../plugins/claude-account-pool/README.md#verify-it-works) section checks the pool itself.
 
+## Reaching a daemon from another machine
+
+A fresh home listens on `127.0.0.1:6767`, which nothing off the box can reach. Pick one:
+
+| `daemon.listen`     | Reachable from            | Cost                                                                                                                                                                                   |
+| ------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `127.0.0.1:6767`    | this machine only         | the default; no phone, no other host                                                                                                                                                   |
+| `<tailnet-ip>:6767` | your tailnet only         | **the daemon fails to start when Tailscale is down**, because the address is not assigned; local CLI calls then need `--host <tailnet-ip>:6767`, since loopback is no longer listening |
+| `0.0.0.0:6767`      | tailnet, LAN and loopback | always bindable, and plain `paseo` keeps working — but anything on the same Wi-Fi can reach it unless you set `daemon.auth.password`                                                   |
+
+[Connectivity](https://paseo.sh/docs/connectivity) documents the tailnet-IP form. Prefer it
+on an always-on host that is always on the tailnet; prefer `0.0.0.0` on a laptop that
+roams, and set a password if its networks are not all trusted. The relay stays a third
+option and needs no listen change at all.
+
+Changing `daemon.listen` needs a daemon restart. Then check where it actually bound,
+rather than trusting the config:
+
+```bash
+paseo daemon status --home ~/.paseo | grep -E 'Local Daemon|Listen'
+lsof -nP -iTCP:6767 -sTCP:LISTEN          # the address it really bound
+paseo ls -a -g --host <ip>:6767           # run from the other machine
+```
+
+`paseo ls` **excludes archived agents unless you pass `-a`**, so an empty list is not by
+itself evidence that the connection failed.
+
+## Signing in a pooled account on a headless host
+
+`claude auth login` wants a browser and then a pasted code, which a host you only reach
+over SSH cannot provide. Wire its stdin to a FIFO you can write to later:
+
+```bash
+ssh host 'bash -s' <<'EOF'
+export PATH=$HOME/.local/bin:$PATH          # claude often lives here, and a
+                                            # non-interactive shell loads no version manager
+F=/tmp/login.fifo; L=/tmp/login.log
+rm -f "$F" "$L"; mkfifo "$F"
+nohup sleep 900 > "$F" 2>/dev/null &        # holds the FIFO open so the reader can start
+export CLAUDE_CONFIG_DIR=$HOME/.claude-accounts/worker
+nohup claude auth login --email worker@example.com < "$F" > "$L" 2>&1 &
+sleep 6; sed -n 2p "$L"                     # prints the authorize URL
+EOF
+```
+
+Open that URL yourself, sign in as the account that entry should use, then send the code
+the callback page shows to the waiting prompt and clean up:
+
+```bash
+printf '%s\n' '<code>' | ssh host 'cat > /tmp/login.fifo'
+ssh host 'rm -f /tmp/login.fifo /tmp/login.log'     # the log records the authorize URL
+```
+
+The cross-signing trap applies here too, so verify `orgId` afterwards as the
+[plugin README](../plugins/claude-account-pool/README.md#3-sign-each-account-in) describes.
+
 ## Troubleshooting
 
 The plugin README's [troubleshooting](../plugins/claude-account-pool/README.md#troubleshooting) covers the pool: plugins disabled or failed, signed-out accounts, a malformed pool config. These are the app and daemon failures.
@@ -155,7 +242,7 @@ The plugin README's [troubleshooting](../plugins/claude-account-pool/README.md#t
 
 **The build fails at notarization, or asks for an Apple Developer ID.** `packages/desktop/electron-builder.yml` sets `notarize: true` and `hardenedRuntime: true` for the signed release job. A local build has to turn both off and sign ad hoc; the [Build](#build) command's three `-c.mac.*` overrides do that. Without them the build gets as far as packaging and then fails.
 
-**The phone cannot reach the daemon after a fresh install.** A new home is written with `daemon.relay.enabled: false` and `daemon.listen: 127.0.0.1:6767`. Loopback accepts nothing from the network, so neither the relay nor a direct connection works until you change one of them. Either enable the relay, or set `daemon.listen` to the machine's Tailscale or LAN address — see [Connectivity](https://paseo.sh/docs/connectivity). Both need a daemon restart.
+**The phone or another machine cannot reach the daemon after a fresh install.** A new home is written with `daemon.relay.enabled: false` and `daemon.listen: 127.0.0.1:6767`. Loopback accepts nothing from the network, so neither the relay nor a direct connection works until you change one of them. See [Reaching a daemon from another machine](#reaching-a-daemon-from-another-machine) for the trade-offs between the relay, a tailnet address and `0.0.0.0`.
 
 **`paseo doctor` warns `no skills/` for every pooled account.** The account directories were created before the [plugin setup](../plugins/claude-account-pool/README.md#3-sign-each-account-in) linked `skills/`. Doctor prints the `ln -s` for each one. Without the link, each account sees a different skill set, so the same prompt behaves differently depending on where the pool placed it.
 

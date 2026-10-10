@@ -563,17 +563,41 @@ Then print, for the user to run in their own terminal, one line per directory.
 **Do not run it.** It opens a browser.
 
 ```bash
-CLAUDE_CONFIG_DIR="<abs dir>" claude /login
+CLAUDE_CONFIG_DIR="<abs dir>" claude auth login --email <that entry's email>
 ```
+
+Use the `auth login --email` form, not a bare `claude /login`: it pre-fills the
+address, and it is the form `paseo doctor` prints as the fix.
 
 On Windows, give the PowerShell form too, also untested:
 
 ```powershell
-$env:CLAUDE_CONFIG_DIR = "<abs dir>"; claude /login; Remove-Item Env:CLAUDE_CONFIG_DIR
+$env:CLAUDE_CONFIG_DIR = "<abs dir>"; claude auth login --email <email>; Remove-Item Env:CLAUDE_CONFIG_DIR
 ```
 
-Each directory signs in to a different Claude account. Wait for the user to
-say they are done, or to skip for now. Step 11 checks sign-in.
+Each directory signs in to a different Claude account. **Tell the user to sign
+out of claude.com, or use a private window, between accounts.** `--email` only
+pre-fills the page: with a live claude.com session the authorize step completes
+against that account without showing the page, and the directory ends up on the
+wrong login. Two of five sign-ins cross-signed this way while setting up two
+machines, each silently adopting the previous sign-in's account.
+
+Wait for the user after each directory, one at a time, and verify it before
+moving to the next. Compare `orgId`, not just `email`:
+
+```bash
+. "<ENV_FILE>"
+CLAUDE_CONFIG_DIR="<abs dir>" claude auth status | grep -E '"(email|orgId)"'
+```
+
+This prints an account name, not a credential, so it is fine to show. Distinct
+`orgId` values across the directories are the proof the pool has that many real
+accounts; two the same means fewer accounts than entries, and the pool then
+treats one budget as two. On a mismatch, run
+`CLAUDE_CONFIG_DIR="<abs dir>" claude auth logout` and sign that one in again —
+it leaves the other directories alone, even ones sharing a login.
+
+Step 11 checks sign-in.
 
 ### 10. Install the plugin — Fresh install, Isolated instance
 
