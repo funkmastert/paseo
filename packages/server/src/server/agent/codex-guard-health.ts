@@ -306,6 +306,7 @@ export async function runCodexGuardSelfTest(options: RunCodexGuardSelfTestOption
         seen.catastrophe = true;
       }
     });
+    let timeoutHandle: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
         session.run(
@@ -315,10 +316,16 @@ export async function runCodexGuardSelfTest(options: RunCodexGuardSelfTestOption
             "Run all three even if one is denied.",
         ),
         new Promise((_, reject) => {
-          setTimeout(() => reject(new Error("Codex guard self-test timed out")), timeoutMs);
+          timeoutHandle = setTimeout(
+            () => reject(new Error("Codex guard self-test timed out")),
+            timeoutMs,
+          );
         }),
       ]);
     } finally {
+      // Review finding #10: a fast session.run() winning the race left this timer armed for the
+      // rest of timeoutMs, holding the event loop open for no reason.
+      clearTimeout(timeoutHandle);
       unsubscribe();
       await session.close();
     }

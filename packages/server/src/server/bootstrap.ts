@@ -334,6 +334,7 @@ import { DeviceReservationStore } from "./agent/device-reservation-store.js";
 import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
 import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
 import { createNativeBuildGate } from "./agent/native-build-gate.js";
+import { runProviderRefreshWithDeadline } from "./agent/provider-refresh-deadline.js";
 import { PhysicalDeviceLeaseManager } from "./agent/physical-device-lease-manager.js";
 import { physicalDeviceMatches, type PhysicalDevice } from "./agent/physical-device-registry.js";
 import {
@@ -2335,7 +2336,16 @@ export async function createPaseoDaemon(
         }
         const codexRuntimeSettings = config.agentProviderSettings?.codex;
         const probeClient = new CodexAppServerAgentClient(logger, codexRuntimeSettings);
-        const { models } = await probeClient.fetchCatalog({ scope: "global", force: false });
+        // Review finding #9: an unresponsive Codex binary left this probe hanging with no
+        // deadline, unlike the self-test's own 60s turn race below -- matching the provider
+        // catalog registry's own refresh timeout keeps a stuck probe from blocking the hourly
+        // self-test schedule indefinitely.
+        const { models } = await runProviderRefreshWithDeadline({
+          label: "Codex guard self-test catalog",
+          timeoutMs: 120_000,
+          operation: (context) =>
+            probeClient.fetchCatalog({ scope: "global", force: false }, context),
+        });
         const model = models.find((candidate) => candidate.id.includes("luna")) ?? models[0];
         if (!model) return;
         await runCodexGuardSelfTest({
