@@ -1591,6 +1591,110 @@ describe("DeviceLeaseManager idle release", () => {
     );
     expect((await harness.manager.getSnapshot()).used).toBe(1);
   });
+
+  test("a holder whose process tree can't be attributed (no callerAgentId marker, as on Codex or OpenCode) keeps its lease rather than reading as idle", async () => {
+    const harness = createManager({
+      agents: [IDLE_HOLDER],
+      rows: [emulatorRow(1, 0, "fake_pixel_b")],
+    });
+    const result = await harness.manager.checkout({
+      agentId: "agent-1",
+      platform: "android",
+      device: "fake_pixel_b",
+    });
+    expect(result.status).toBe("granted");
+    await sweepRows(harness);
+
+    // No agentRootRow is ever added for agent-1 — its provider never carries the marker
+    // attribution keys on, so its tree can never be found, in any sweep.
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(
+      harness.logger.info.mock.calls.some(
+        ([fields, msg]) => msg === "Device slot released" && fields.reason === "idle",
+      ),
+    ).toBe(false);
+  });
+
+  test("a launch command naming another agent's device does not reset that agent's idle clock", async () => {
+    const harness = createManager({
+      rows: [simulatorRow(1, UDID_A), agentRootRow(500, "agent-1")],
+      agents: [IDLE_HOLDER, { agentId: "agent-2", provider: "claude", isRunning: true }],
+    });
+    const first = await harness.manager.checkout({
+      agentId: "agent-1",
+      platform: "ios",
+      device: UDID_A,
+    });
+    expect(first.status).toBe("granted");
+    await sweepRows(harness);
+
+    harness.state.nowMs += 10 * 60_000;
+    // agent-2 names agent-1's device in a launch command — allowed (the device is already
+    // running), but must not touch agent-1's idle clock.
+    await harness.manager.gateLaunch({
+      agentId: "agent-2",
+      command: `xcrun simctl boot ${UDID_A}`,
+    });
+
+    harness.state.nowMs += 10 * 60_000;
+    await sweepRows(harness);
+
+    // 20 minutes since the lease was taken and never touched by its own holder.
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: UDID_A, reason: "idle" }),
+      "Device slot released",
+    );
+  });
+
+  test("a pending lease with no device yet is not idle-released before the never-started TTL", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    // Nothing of the platform is running: checkout grants a pending lease with no deviceId yet.
+    const result = await harness.manager.checkout({ agentId: "agent-1", platform: "android" });
+    expect(result.status).toBe("granted");
+    await sweepRows(harness);
+
+    // Past idleReleaseMinutes (15) but short of pendingTtlMinutes (25).
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(
+      harness.logger.info.mock.calls.some(
+        ([fields, msg]) => msg === "Device slot released" && fields.reason === "idle",
+      ),
+    ).toBe(false);
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+
+    // Past pendingTtlMinutes (25): never-started is the one backstop for a pending lease.
+    harness.state.nowMs += 6 * 60_000;
+    await sweepRows(harness);
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: "agent-1", reason: "never-started" }),
+      "Device slot released",
+    );
+  });
+});
+
+describe("DeviceLeaseManager reconcileAgentGone", () => {
+  test("releases a held lease in the same call, once the agent is no longer known", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+    });
+    const result = await harness.manager.checkout({ agentId: "agent-1", platform: "android" });
+    expect(result.status).toBe("granted");
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+
+    // The agent manager no longer knows this agent — archived or closed.
+    harness.state.agents = [];
+    await harness.manager.reconcileAgentGone();
+
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: "agent-1", reason: "agent-gone" }),
+      "Device slot released",
+    );
+    expect((await harness.manager.getSnapshot()).used).toBe(0);
+  });
 });
 
 describe("DeviceLeaseManager refreshSnapshot", () => {

@@ -743,4 +743,41 @@ describe("PhysicalDeviceLeaseManager idle release", () => {
       harness.logger.info.mock.calls.some(([, msg]) => msg === "Physical device lease released"),
     ).toBe(false);
   });
+
+  test("a holder whose process tree can't be attributed (no callerAgentId marker, as on Codex or OpenCode) keeps its lease rather than reading as idle", async () => {
+    const harness = createManager({ devices: [USB_PIXEL], agents: [IDLE_HOLDER] });
+    await harness.manager.checkout({ agentId: "agent-1", platform: "android" });
+    // No agentRootRow is ever added for agent-1 — its provider never carries the marker
+    // attribution keys on, so its tree can never be found, in any sweep.
+    sweepRows(harness);
+
+    harness.state.nowMs += 20 * MINUTE;
+    sweepRows(harness);
+
+    expect(
+      harness.logger.info.mock.calls.some(([, msg]) => msg === "Physical device lease released"),
+    ).toBe(false);
+  });
+});
+
+describe("PhysicalDeviceLeaseManager reconciling a gone agent", () => {
+  test("detectionChanged releases a held lease in the same call, once the agent is no longer known", async () => {
+    const harness = createManager({
+      devices: [USB_PIXEL],
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+    });
+    const result = await harness.manager.checkout({ agentId: "agent-1", platform: "android" });
+    expect(result.status).toBe("granted");
+
+    // The agent manager no longer knows this agent — archived or closed.
+    harness.state.agents = [];
+    harness.manager.detectionChanged();
+
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: "agent-1", reason: "agent-gone" }),
+      "Physical device lease released",
+    );
+    const snapshot = await harness.manager.getSnapshot();
+    expect(snapshot.devices.find((device) => device.id === USB_PIXEL.id)?.agentId).toBeUndefined();
+  });
 });
