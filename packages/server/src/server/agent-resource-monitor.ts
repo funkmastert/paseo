@@ -406,6 +406,16 @@ export interface AgentResourceMonitorOptions {
     agentTrees: readonly AgentProcessTree[];
   }) => void;
   /**
+   * Hands the physical-device lease manager (docs/device-leases.md#physical-devices) this
+   * sweep's attributed `ps`, the only process evidence a phone lease has — that manager's own
+   * detection is push-based (adb track-devices, a devicectl poll), never a `ps` sample. Used for
+   * the idle-release sweep (KTD-3, docs/plans/2026-10-09-002-fix-device-idle-release-plan.md).
+   */
+  reportPhysicalDeviceSample?: (sample: {
+    rows: readonly ProcessSampleRow[];
+    agentTrees: readonly AgentProcessTree[];
+  }) => void;
+  /**
    * Processes the daemon runs as an agent's own work (`ask_jev`'s command), by agent: extra roots
    * of each agent's tree (agent/agent-side-processes.ts). Absent: none.
    */
@@ -752,6 +762,7 @@ export class AgentResourceMonitor {
   private readonly readFreeDiskBytes: AgentResourceMonitorOptions["readFreeDiskBytes"];
   private readonly readDiskGrowth: () => DiskGrowthReport | null;
   private readonly reportAttributedSample: AgentResourceMonitorOptions["reportAttributedSample"];
+  private readonly reportPhysicalDeviceSample: AgentResourceMonitorOptions["reportPhysicalDeviceSample"];
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Machine-level legs have no agent to attach state to, so this monitor instance — a
    * bootstrap-time singleton — owns it directly instead of round-tripping through AgentManager. */
@@ -833,6 +844,7 @@ export class AgentResourceMonitor {
     this.readFreeDiskBytes = options.readFreeDiskBytes;
     this.readDiskGrowth = options.readDiskGrowth ?? (() => null);
     this.reportAttributedSample = options.reportAttributedSample;
+    this.reportPhysicalDeviceSample = options.reportPhysicalDeviceSample;
   }
 
   start(): void {
@@ -942,6 +954,14 @@ export class AgentResourceMonitor {
       this.reportAttributedSample?.({ rows: cpu.rows, agentTrees: attribution.agentTrees });
     } catch (error) {
       this.logger.warn({ err: error }, "Failed to hand the build gate this sweep's sample");
+    }
+    try {
+      this.reportPhysicalDeviceSample?.({ rows: cpu.rows, agentTrees: attribution.agentTrees });
+    } catch (error) {
+      this.logger.warn(
+        { err: error },
+        "Failed to hand the physical-device lease manager this sweep's sample",
+      );
     }
 
     const agentBreaches = this.evaluateAgentBreaches(agents, attribution.agentTrees, config, nowMs);

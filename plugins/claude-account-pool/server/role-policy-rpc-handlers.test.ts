@@ -1007,3 +1007,49 @@ describe("explain — MCP scope", () => {
     expect(result.mcp?.scopeLabel).toBeUndefined();
   });
 });
+
+describe("explain — arena ranking (U8, finding #2)", () => {
+  // Two same-shaped candidates (same thinking level across classes, via the flattened `thinking`
+  // block below) so neither class nor role would ask on their own — only arena ranking can make
+  // `work_kind` matter here, proving the preview actually simulates ranking rather than always
+  // treating it as off.
+  const rankedPolicy: RoleModelPolicy = {
+    ...DEFAULT_POLICY,
+    roles: DEFAULT_POLICY.roles.map((role) =>
+      role.id === "worker" ? { ...role, models: ["claude-haiku-4-5", "claude-sonnet-5"], mechanicalModels: [], hardModels: [] } : role,
+    ),
+    thinking: { leader: null, byTaskClass: { mechanical: "high", standard: "high", hard: "high" } },
+    arena: { enabled: true, shadow: false, roles: ["worker", "reviewer"], topTier: [], topTierMarginCi: 0, maxAgeHours: 72 },
+  };
+  const { arena: _arena, ...unrankedPolicy } = rankedPolicy;
+  const catalog: ModelCatalog = new Map([["claude", new Set(["claude-haiku-4-5", "claude-sonnet-5"])]]);
+  const live = { active: true, reason: null, shadow: false, applyHard: false, applyRole: false, auditDeclared: false };
+
+  it("simulates ranking as live when policy.arena.enabled is true, asking work_kind and saying so", async () => {
+    const handlers = createRoleModelPolicyRpcHandlers(
+      baseDeps({
+        policyCache: fakePolicyCache(rankedPolicy),
+        catalogCache: fakeCatalogCache(catalog),
+        jevAvailability: { get: () => ({ spawnHint: live, agentTools: { active: false, served: false, assignShare: 0 } }) },
+      }),
+    );
+
+    const result = await handlers.explain({ role: "worker", prompt: "Add a hover state to the submit button." }, context(fakePaseo({})));
+
+    expect(result.reasons.taskClass).toContain("Decided at create");
+  });
+
+  it("says nothing extra when policy.arena is absent: the no-effect skip is unchanged", async () => {
+    const handlers = createRoleModelPolicyRpcHandlers(
+      baseDeps({
+        policyCache: fakePolicyCache(unrankedPolicy),
+        catalogCache: fakeCatalogCache(catalog),
+        jevAvailability: { get: () => ({ spawnHint: live, agentTools: { active: false, served: false, assignShare: 0 } }) },
+      }),
+    );
+
+    const result = await handlers.explain({ role: "worker", prompt: "Add a hover state to the submit button." }, context(fakePaseo({})));
+
+    expect(result.reasons.taskClass).not.toContain("Decided at create");
+  });
+});

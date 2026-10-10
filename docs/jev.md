@@ -433,10 +433,11 @@ The `paseo.jev` guard alone is not enough. Every plugin start forks the child fr
 
 `planSpawnHint` decides, from the classifier alone, whether an answer could change the create. `fetchSpawnHint` returns `{ status: "not-needed", reason }` without a call unless:
 
-- No valid `paseo.task-class` declares the class (an unrecognized value counts as none) — unless `spawnHint.auditDeclared` is on and the create has a caller, which asks a declared child anyway, in shadow ([Auditing a declared label](#auditing-a-declared-label)); no hard risk keyword already made it `hard`, which JEV cannot lower; there is a title or prompt; and, for the role resolved without JEV, running the pure classifier with each of the three classes gives different models or thinking. The skip reasons are `declared`, `hard-seed`, `no-text` and `no-effect`.
+- No valid `paseo.task-class` declares the class (an unrecognized value counts as none) — unless `spawnHint.auditDeclared` is on and the create has a caller, which asks a declared child anyway, in shadow ([Auditing a declared label](#auditing-a-declared-label)); no hard risk keyword already made it `hard`, which JEV cannot lower; there is a title or prompt; and, for the role resolved without JEV, running the pure classifier with each of the three classes gives different models or thinking, **or** the arena ranking plugin (`agentModelPolicy.arena`, live or shadow) is on and the resolved class has at least two approved candidates for `work_kind` to reorder (KTD-12, below). The skip reasons are `declared`, `hard-seed`, `no-text` and `no-effect` — `no-effect` now means both checks came back negative, not only the model/thinking one.
 - A root create never calls (`leader`), whatever the policy says: it resolves to the leader, whose policy has no mechanical pool, the same hard pool as standard, and thinking from the leader rule. Over the 7 days to 2026-09-28, 38 of 51 root creates were unlabelled; each would have paid up to 1.5 s for nothing. A caller-less create that declares a non-leader role (a daemon job's worker) is placed like a child and asks like one, with `spawned_by` `a person or a daemon job`.
 - The check uses the plugin's cached policy, so it can start before the refresh finishes. A policy edit landing in the same second costs at most one unneeded call or one skipped call.
 - The role question rides on calls made for the class, for a child whose role is a keyword guess (tier 3 or 4). It earns a call of its own only with `applyRole` on.
+- `work_kind` (KTD-12) rides the same call whenever ranking could reorder the resolved class's pool, independent of whether the class or role also matters — a kind answer never moves either, only the arena-ranking plugin's model pick. On a declared child it rides in shadow even with `auditDeclared` off, since the declared label already decided the model and the kind can only ever be a record there.
 
 `fetchSpawnHint` never throws and is bounded on its own side:
 
@@ -499,6 +500,28 @@ For a child with no type mapping and no role label, add `role`. Its options are 
 }
 ```
 
+When ranking could reorder the resolved class's pool, add `work_kind`. Its options are KTD-11's boards plus `other`, fixed in code:
+
+```json
+{
+  "work_kind": {
+    "type": "choice",
+    "instructions": "Which kind of work does `prompt` hand to the new agent?",
+    "criteria": {
+      "coding": "Implements, fixes, or refactors code; writes or updates tests; runs builds",
+      "frontend": "Builds or styles UI: screens, components, layout, CSS, web pages",
+      "research": "Investigates or compares options without changing code: a root-cause hunt, a design survey",
+      "review": "Judges existing work without changing it: reviews a diff, verifies a claim, audits for defects",
+      "writing": "Produces prose: documentation, a changelog, a commit message, a plan or report",
+      "ops": "Runs or recovers infrastructure: deploys, incident response, environment or process repair",
+      "other": "None of these, or too little text to tell"
+    }
+  }
+}
+```
+
+`work_kind` carries no confidence floor the way `task_class`/`role` do: a wrong kind only misorders an already-approved pool (the arena-ranking plugin's job), never moves capability or class, so there is nothing for a floor to protect against. The answer is read straight off `jevHint.answers.workKind` into the `paseo.work-kind` label — the classifier adds no field for it, since ranking reads it as world data rather than a classification output. A create with no answer at all (JEV unavailable, or the question never rode) gets no `paseo.work-kind` label; U8's ranking treats a missing kind as unknown (today's order) for every role except reviewer, which it defaults to `review` instead — never a keyword guess, only that one role-shaped fallback.
+
 ### Thresholds and precedence
 
 The floors bias down. A move to a cheaper model needs less agreement than a move to a dearer one, and the dearer moves are off until measured. Calibration error for JEV is 0.13–0.25, and a hard answer compounds: it also raises thinking to xhigh through `byTaskClass`.
@@ -538,6 +561,7 @@ A leader (no caller) and a schedule-run root create (placed like a child only fo
 - `paseo.jev-call`: the `callId`, so `jev.decisions.list` can attach the decision to the new agent. A call that failed after sending (`failed: contract`, a timeout) gets no label; the ledger alone prices it.
 - `paseo.jev-tools`: the D8 arm, `on` or `control`, for a create eligible for the agent tools ([Which agents get them](#which-agents-get-them)). No create is labelled until the daemon serves the tools (`status.agentTools.served`), so no agent enters an arm with nothing behind it and gains seven tools mid-life, a cache break, when they ship. No agent id exists before a create, so the arm is a `Math.random()` draw against `assignShare` made in the hook and passed to the classifier as data. The hook owns the label whenever it evaluated the arm: it writes the drawn arm over any value the caller sent, and removes a caller's value from an ineligible create, so no caller picks its own arm. Nothing that carries an agent's labels forward (failover, resume, reload) runs the create hook, and a handoff agent is a new conversation with no cache to keep. The scope check is bounded at 2 s and fails closed: unanswered is no tools.
 - The `classifier-decision` line (`decision-log.ts`) gains `jev: { status, callId?, reason?, taskClass?: { choice, confidence }, reasoning?: { score, confidence }, role?: { choice, confidence }, applied, wouldBe? }` whenever the hook passed a hint, and `jevTools` (the arm the agent carries, read off its labels, or null when it carries none) whenever the arm was evaluated. `wouldBe` is on every answer, applied or shadowed: `{ taskClass, role?, model, move }`, the class, the role (when asked) and the model the create would run with every answer past its floor applied, and `move`, `down`, `up` or `none` against the class resolved without JEV.
+- `paseo.work-kind`: `coding`, `frontend`, `research`, `review`, `writing`, `ops` or `other` (KTD-12), read straight off `jevHint.answers.workKind` whenever the hint was answered or shadowed. Written on a declared child too — it is purely a record there, since the declared label already fixed the model — and never invented from an unrecognized choice or a missing answer. The arena-ranking plugin's decision line and `paseo.arena-pick` label, not this one, record whether the kind was actually used (see `docs/arena-ranking.md`).
 
 Labels never reach the Claude prompt (no `labels` in `providers/claude/agent.ts`), so they are cache-neutral.
 
@@ -554,9 +578,9 @@ Any outcome other than `answered` leaves `jevHint` as `{ status: "unavailable" |
 
 ### Tests and verification
 
-- `jev-hint.test.ts`: every precedence step with scripted answers; the `HARD_SEED_RE` override; the two-answer rule for `mechanical`; `hard` and `role` logged as `wouldBe` with the apply switches off; `standard` lifting the mechanical seed only at `reasoning.score` ≥ 1.2, and only when live; prompt boilerplate never seeding mechanical; `other` and low confidence falling through; each `not-needed` reason, including a root create; the request's scope, deadlines and clipped prompt; no call when `paseo.jev` is absent, before a poll has answered, or when the status says off; `unavailable` when the RPC rejects and when it never resolves (the create proceeds within 2 s); a D7 exclusion changing nothing; a malformed answer, a non-string `callId` and a non-object response failing `contract`; shadow logs `wouldBe` and changes nothing; the preview. The declared-label audit: a declared child asked only when `auditDeclared` is on, never a root or schedule-run create; the request carries `shadow: true` and `declared_task_class`; the switch off restores today's skip; the preview says nothing for it.
+- `jev-hint.test.ts`: every precedence step with scripted answers; the `HARD_SEED_RE` override; the two-answer rule for `mechanical`; `hard` and `role` logged as `wouldBe` with the apply switches off; `standard` lifting the mechanical seed only at `reasoning.score` ≥ 1.2, and only when live; prompt boilerplate never seeding mechanical; `other` and low confidence falling through; each `not-needed` reason, including a root create; the request's scope, deadlines and clipped prompt; no call when `paseo.jev` is absent, before a poll has answered, or when the status says off; `unavailable` when the RPC rejects and when it never resolves (the create proceeds within 2 s); a D7 exclusion changing nothing; a malformed answer, a non-string `callId` and a non-object response failing `contract`; shadow logs `wouldBe` and changes nothing; the preview. The declared-label audit: a declared child asked only when `auditDeclared` is on, never a root or schedule-run create; the request carries `shadow: true` and `declared_task_class`; the switch off restores today's skip; the preview says nothing for it. `work_kind` (KTD-12): rides alone when ranking is on and the resolved class has two-plus candidates, even with no other reason to ask; today's `no-effect` skip is unchanged with ranking off; it rides beside the task-class question when both matter; a declared child still gets it, in shadow, with `auditDeclared` off; a leader or no-text create never asks it either; the question and answer round-trip through `buildSpawnHintQuestions`/`readSpawnHintAnswers`.
 - `classifier.test.ts`: a `classified-jev` role leaves tools and MCP servers as the role resolved without JEV gets them, with `enforceToolsOnClassifiedRoles` both off and on, and never cancels the flag's enforcement of a keyword guess; `classified-jev` and the `jev` source reach the decision and the reasons; a non-answer is today's decision; the tools' arm and eligibility. A declared `hard` child with a shadow hint proposing `mechanical`: the real class, model and thinking stay `hard`; `wouldBe` reads `mechanical` (the label stripped before the would-be resolve) rather than echoing the declared value back; `applied` is false.
-- `role-router.test.ts`: the new labels are written; a hint that makes classification throw passes the request through; the drawn arm replaces a caller's, an ineligible create loses a caller's, and an unevaluated arm leaves the labels alone. A declared `hard` child with an audit hint: the config, labels and model are unchanged from a plain declared create, and `paseo.jev-call`/`paseo.jev-spawn` record JEV's class with `applied=0;audit=1`. A role-only ask on the same declared child instead writes `audit=0`, even though its class source is still `declared`.
+- `role-router.test.ts`: the new labels are written; a hint that makes classification throw passes the request through; the drawn arm replaces a caller's, an ineligible create loses a caller's, and an unevaluated arm leaves the labels alone. A declared `hard` child with an audit hint: the config, labels and model are unchanged from a plain declared create, and `paseo.jev-call`/`paseo.jev-spawn` record JEV's class with `applied=0;audit=1`. A role-only ask on the same declared child instead writes `audit=0`, even though its class source is still `declared`. `paseo.work-kind`: an unlabelled worker's answer lands in the label; a declared child's kind is recorded with its model unchanged; no answer and an unrecognized choice both leave the label unwritten rather than inventing one.
 - `jev-availability.test.ts`: reading a status, forgetting it on a failed poll, the 10-minute pause on `unknown_schema`, no arm until the daemon serves the tools, and the scope check failing closed. `auditDeclared` read off the status, defaulting off when an older daemon omits it.
 - `jev-session.test.ts`: `shadow: true` on the wire request reaches `JevDecideInput.shadow`; its absence leaves the field unset.
 - `savings-spawn.test.ts`: a declared `hard` child JEV judged `standard` prices as a would-have saving once it settles, through the same label and formula an unlabelled child uses; parsing the label's `audit` field; a role-only ask on a declared child is not counted as the audit even though its class source reads `declared` too.
@@ -1224,7 +1248,7 @@ A leader is a root agent (`leaderSkipReason`, `away-reply/detect.ts`). The job s
 `detectWaiting` counts a leader as waiting in two cases:
 
 - **Its turn ended on its own words.** It is idle, nothing is in flight (the done janitor's `busy`), and the newest message in its timeline is its own.
-- **It has exactly one pending request**: a `question` (AskUserQuestion), a `plan` approval (ExitPlanMode) or a `tool` permission. The kinds are `AgentPermissionRequestKind` (`agent/agent-sdk-types.ts`); Claude assigns them in `resolvePermissionKind` (`agent/providers/claude/agent.ts`). Several pending requests, or a `mode` request, are left alone.
+- **It has exactly one pending request**: a `question` (AskUserQuestion), a `plan` approval (ExitPlanMode) or a `tool` permission. The kinds are `AgentPermissionRequestKind` (`agent/agent-sdk-types.ts`); Claude assigns them in `resolvePermissionKind` (`agent/providers/claude/agent.ts`). Several pending requests, or a `mode` request, are left alone. A leader that asks Tyler something as plain text instead of an AskUserQuestion call gets no `question` request to wait on here — see [ask-user-question.md](ask-user-question.md) for the `Stop` hook that pushes agents toward asking properly in the first place.
 
 The wait starts at the newest timeline row and must pass `thresholdMinutes`. A restart restarts every clock: the wait counts from the later of its start and the daemon's boot.
 
@@ -1439,7 +1463,13 @@ Every read is reported through `jev.savings.noteRead`. JEV is asked only when al
 
 Only then is the file opened, and what is sent is the file the checks saw (`changed` otherwise). The observer `lstat`s the real path before the first name check and opens it with `O_NOFOLLOW` (on Windows, after an `lstat`); device, inode, size, modification time and a single link must match before and after the read. A rename, a symlink swap or a write during the git runs sends nothing. A Bash read sends the range read this way, never the command's output. A `Read` sends the hook's text only when it equals the same lines read from disk, CRLF and a final newline aside: a path the CLI resolved differently from the observer, or a symlink swapped back after the tool opened it, sends nothing. The observer expands a leading `~` in `file_path` as the CLI does.
 
-A read inside an in-process subagent is judged against the parent agent's task, and its record says `subagent: true`.
+A read inside an in-process subagent is judged against that subagent's own task (R1, next section), and its record says `subagent: true`.
+
+### The `named` rule
+
+R2, KTD-3: a read whose path, or its file name, the reader was already told about or recently talked about is `needed` without a JEV call — asking would only confirm what code already knows. After the file is loaded and the state is built, `ask()` (`read-check/named.ts`) searches the reader's `task` (a subagent's brief, or the legacy title and assignment), the current turn's latest prompt and any `recent` line that starts `assistant: `, against three things: the path as the tool named it, the path relative to the agent's cwd, and the file's base name. The base name counts on its own only past 6 characters and off a short deny list (`index.ts`, `README.md`, `SKILL.md`, `package.json` and the like, case-insensitively) — a full path containing one of those still counts. `excerpt` and `outline` are never searched: a path the file's own content happens to mention says nothing about whether the agent already expected it, and searching them would make every self-referential file immune to a real skip.
+
+A match counts as the not-asked reason `named`, makes no JEV call, and opens no validation window — it never produces a record, same as every other not-asked reason. It is the only not-asked reason not yet discussed: 1–9 above all run before the file is read; `named` runs after, since it needs nothing the file holds and still needs to run before the one expensive step, the JEV call.
 
 ### The shadow-only subtrees
 
@@ -1460,11 +1490,16 @@ The record's facts carry `shadowOnly` (`skill-docs` or `ce-scratch`), which reac
 
 ### State and question
 
-The observer builds the state after the read ran, from the agent record, its timeline tail (`agentManager.fetchTimeline(id, { direction: "tail", limit: 16 })`, the read's own call removed and each tool call listed once) and what the read loaded (`read-check/state.ts`). At most 10,000 bytes; the excerpt shrinks first, then `recent`:
+The observer builds the state after the read ran (`read-check/state.ts`), from what the read loaded and from the reader's own context, which splits two ways:
+
+- **A main agent, or a subagent whose brief could not be found** (`brief: missing`, next section): the agent record, its timeline tail (`agentManager.fetchTimeline(id, { direction: "tail", limit: 16 })`, the read's own call removed and each tool call listed once), and R3's two additions: the newest `user_message` in that tail is appended to `task` after the assignment, and the search call (`rg`, `grep`, `find`, a Glob) whose matched files named this read's path is kept in `recent` even past the ordinary 16-row tail, as long as it is in the read's own turn — the observer scans a wider page (200 rows) to find that one line alone.
+- **A subagent whose own brief was found** (R1, next section): its own Agent/Task call's description and prompt, and its own ring of the last 16 Read, Bash and edit-tool calls it made — never the parent's.
+
+At most 10,000 bytes; the excerpt shrinks first, then `recent`:
 
 ```json
 {
-  "task": "<agent title>\n<first 800 characters of its assignment>",
+  "task": "<agent title>\n<first 800 characters of its assignment>\n<the current turn's latest prompt, when one landed mid-session>",
   "recent": [
     "assistant: <last assistant text, 600 characters>",
     "tool Read src/server/session.ts",
@@ -1475,6 +1510,15 @@ The observer builds the state after the read ran, from the agent record, its tim
   "size": "lines 1-1240 of 3100, about 14,300 tokens",
   "outline": "<declaration lines from the range: imports, exports, classes, functions, headings; 2,000 characters>",
   "excerpt": "<first 6,000 characters of the range>"
+}
+```
+
+A subagent with a found brief sends a different `task` — its own brief, then its parent kept to one line, never the parent's turn prompt:
+
+```json
+{
+  "task": "<the subagent's own Agent/Task description>\n<its own prompt, clipped to 800 characters>\n(parent task: <parent agent title>)",
+  "recent": ["tool Read docs/plans/persona-plan.md"]
 }
 ```
 
@@ -1498,6 +1542,14 @@ Enough of the file is the excerpt and the outline. Whether a file matters to a t
   }
 }
 ```
+
+### A subagent's own context
+
+Two-thirds of all judged reads come from inside an in-process subagent, and a third of all would-skip verdicts across the fleet are false skips — 52 of 58, 90%, from a subagent read judged against the parent's unrelated task (measured from `~/.paseo/jev/savings.jsonl` on 2026-10-09). R1 fixes the context, not the judgment: a subagent's read is judged against what the subagent was actually asked.
+
+- **The brief.** The Claude provider (`providers/claude/agent.ts`) asks `ClaudeTaskProtocolSource.briefFor(agentId)` for the subagent the hook fired inside: the Agent/Task call's own `description` and `prompt`, which the provider already reads off Claude's `task_started` announcement and keeps in a small per-session `task_id -> brief` map (`task_id` is the same id a hook reports as `agent_id`: `providers/claude/subagents/live-source.ts`). The brief rides the hook event beside `subagentId`, clipped to 800 characters like the legacy assignment (KTD-5).
+- **The ring.** The observer keeps its own per-subagent-id ring of the last 16 Read, Bash and edit-tool calls it sees (KTD-2), rendered through the same `recentLine` the legacy path uses — no second rendering to keep in sync. It is pushed after a read is judged, so a read never sees itself, and dropped on `SubagentStop`.
+- **A missing brief** — an `agent_id` this provider never declared — judges the read exactly as before this plan: the parent's task and timeline tail, with `briefMissing: true` on the record's facts so live mode knows never to deny it ([Live mode](#live-mode-d11)).
 
 ### Decision
 
@@ -1523,7 +1575,9 @@ The callback denies (`permissionDecision: "deny"`) only when all of these hold:
 - the call is a `Read`, or a Bash line that reads only this file;
 - this agent was not denied this path before in its session: the second read of a path always goes through, unchecked;
 - the agent has not edited the path in this session;
-- the agent had fewer than `maxDeniesPerAgentPerHour` (5) denials and fewer than 2 regrets in the last hour.
+- the agent had fewer than `maxDeniesPerAgentPerHour` (5) denials and fewer than 2 regrets in the last hour;
+- R4, KTD-4: this is not a subagent read whose own brief could not be found — it was judged against a task the agent never got to see, too uncertain a basis to deny on (`briefMissing: true`, `liveReason: "subagent-brief-missing"`);
+- KTD-4: the `named` rule did not already match this read — in practice it never reaches here, since `ask()` already returned before the JEV call, so this guards against a future caller that asks anyway (`liveReason: "named"`).
 
 The reason the agent reads:
 
@@ -1536,6 +1590,8 @@ It denies; it never substitutes. A PostToolUse `updatedToolOutput` replaces a re
 D1 holds everywhere else. No tool is removed (D2), the deny is advice one call overrules, and the catastrophe gate stays the only gate an agent cannot overrule.
 
 **Evidence for going live,** the rule the dashboard reports: at least 200 judged `would-skip`s of reads of 8,000 tokens or more, at most 30% of them false skips, and a positive projected net, which is the live formula applied to those shadow records. At 8,000 tokens a deny pays once more than 18% of denies are right (research 03 §3); allowing 30% false skips leaves room for shadow overcounting what agents did not use.
+
+R5: `evidence.observed` also reports the same would-skips split by reader — `bigWouldSkip.main`/`bigWouldSkipFalse.main` and `bigWouldSkip.subagent`/`bigWouldSkipFalse.subagent` (`savings-formulas.ts`), from the record's `subagent` fact — so this plan's effect on the subagent false-skip rate is visible beside the one rule, without a second rule to track it. The split is reporting only: it never changes `met`.
 
 ### Did the agent use it
 
@@ -1569,10 +1625,11 @@ In shadow nothing the check does can reach the read: the read has already run. I
 
 - `read-check/recognize.test.ts`: each reader and its flags; `cd` then a read; a pipe into `head`; `2>/dev/null`; a redirect, `rg`, `tail -f`, `sed -i`, a glob, an unnameable command, and a read mixed with any other command are not reads. `agent/shell-commands.test.ts`: the walker's `unresolvedCommand` and `inputRedirect`.
 - `read-check/paths.test.ts`: a file in an agent's checkout is not personal, while the daemon's state beside it is, including a directory not yet invented and a second spelling of Paseo's home; a sibling whose name starts with the cwd's; case, NFC and the data-volume firmlink; each shadow-only subtree and each spelling of tmp, with the credentials, settings, history, projects and `plugins/config.json` beside the cache still personal, `..` unable to climb out, and a Windows-shaped path on win32.
-- `read-check/decision.test.ts`: every row of the decision table and every live condition, including the second read of a path and the regret cooldown. `read-check/state.test.ts`: ranges, sizes, the outline and the state's 10,000-byte cap. `read-check/validation.test.ts`: each signal and the window's close by turns and by time.
+- `read-check/decision.test.ts`: every row of the decision table and every live condition, including the second read of a path, the regret cooldown, a brief-missing subagent and a `named` match never denying. `read-check/state.test.ts`: ranges, sizes, the outline, the state's 10,000-byte cap, a subagent's brief-based task and the pinned recent line. `read-check/validation.test.ts`: each signal and the window's close by turns and by time.
+- `read-check/named.test.ts`: the exact path, the display path and the base name each match; a short or generic base name alone does not; a full path containing one does; a path named only inside the content being judged does not.
 - `read-check/observer.egress.test.ts`: the adversarial review's probes, each proving nothing reaches the fake transport: compound Bash lines, a Bash read's excerpt taken from disk, secret-shaped names on any symlink hop, hard links, the shared secret list, personal locations with the cwd at the home directory, the daemon's state with the cwd at Paseo's home, files outside any repository; that an agent's checkout under Paseo's home is judged while a secret-shaped name in it, a file its git ignores, a name pointing out at the daemon's state, and a configured exclusion on it are not; and that live never holds a small read on git, a use while JEV answers is recorded, and a burst is bounded.
-- `read-check/observer.test.ts`, on the real service over the fake: a shadow-only read judged and its subtree on the record, a link out of the cache refused on both nets, and live mode asking, recording and never denying one while it still denies an ordinary repo read; each not-asked reason in order; an excluded file is never opened and nothing is sent; the state's fields; a repeat makes no call; each validation signal; the control arm answers shadow on a live feature; live denies once, settles a read that ran, and gives no late deny.
-- `providers/claude/agent.read-check.test.ts`: no observer, no matcher; the gates keep theirs; a shadow callback resolves `{}` before the observer's work starts; a throwing observer returns `{}`; live denies once and returns `{}` past its timeout; and the in-process latency arms.
+- `read-check/observer.test.ts`, on the real service over the fake: a shadow-only read judged and its subtree on the record, a link out of the cache refused on both nets, and live mode asking, recording and never denying one while it still denies an ordinary repo read; each not-asked reason in order; an excluded file is never opened and nothing is sent; the state's fields; a repeat makes no call; each validation signal; the control arm answers shadow on a live feature; live denies once, settles a read that ran, and gives no late deny; a subagent's found brief judged against itself with its own ring, a missing brief falling back to the parent, two concurrent subagents kept apart, the ring dropped on `SubagentStop`; a named path or base name asking nothing; a mid-session prompt added to a main agent's task, and a search call pinned past the ordinary tail within its own turn.
+- `providers/claude/agent.read-check.test.ts`: no observer, no matcher; the gates keep theirs; a shadow callback resolves `{}` before the observer's work starts; a throwing observer returns `{}`; live denies once and returns `{}` past its timeout; the in-process latency arms; a subagent's read carries its own brief, the main thread carries none, and an undeclared subagent gets `brief: missing`; `SubagentStop` drops its ring. `providers/claude/subagents/live-source.test.ts`: `briefFor` keyed by `task_id`, the same id a hook reports as `agent_id`.
 - Verify: `npx vitest run packages/server/src/server/jev/read-check packages/server/src/server/agent/providers/claude/agent.read-check.test.ts`.
 - Real CLI latency, which spends nothing (the CLI talks to a local fake of the Messages API): `env -i PATH=… HOME=<scratch> PASEO_READ_CHECK_LATENCY_CLAUDE_BIN=~/.local/share/claude/versions/<v> PASEO_READ_CHECK_LATENCY_OUT=<file> npx vitest run src/server/agent/providers/claude/agent.read-check.latency.e2e.test.ts` from `packages/server`.
 
@@ -1735,7 +1792,7 @@ The global view of what JEV did on a host: tokens saved, live and would-have kep
 
 Ranges: Today, 7 days, All. Polled every 30 seconds while focused.
 
-1. **Totals.** Four tiles: _Saved_ (live), _Would have saved_ (shadow), _JEV cost_ (dollars, with the token equivalent under it) and _Net_ (live saved minus all JEV cost, with the if-live net as a second line). Shadow is never added to live: its tile says "in shadow" and uses the shadow tone. A tile whose total includes `estimatedTokens` shows that part as "estimated" under it, never folded into "saved" without a word. A caption names the unit, "Opus-equivalent tokens: weighted tokens at Opus 5.5 prices; Opus 5.5 cache reads count double, so figures from Opus 5.5 agents run high". Below, the days as bars, live and shadow as two series, following the `dataviz` skill.
+1. **Totals.** Four tiles: _Saved_ (live), _Would have saved_ (shadow), _JEV cost_ (dollars, with the token equivalent under it) and _Net_ (live saved minus all JEV cost, with the if-live net as a second line). Saved, would-have-saved and net each show a dollar line, "≈ $X at API prices": the tokens at Opus 5.5's list input price, `opusTokensToUsd` in `@getpaseo/protocol/jev/pricing`, the same rate that defines the unit and that the daemon's formulas use. The fleet runs on subscriptions, so that line is a comparison, not money saved off a bill; JEV cost is the only real spend and shows as plain dollars. Shadow is never added to live: its tile says "in shadow" and uses the shadow tone. A tile whose total includes `estimatedTokens` shows that part as "estimated" under it, never folded into "saved" without a word. A caption names the unit and its bias: "Opus-equivalent tokens: weighted tokens at Opus 5.5 prices; Opus 5.5 cache reads count double, so figures from Opus 5.5 agents run high", which carries into the dollar lines too. Below, the days as bars, live and shadow as two series, following the `dataviz` skill.
 2. **Features.** A row each, in a fixed order (`JEV_SAVINGS_FEATURE_ORDER`, `jev/jev-dashboard-model.ts`) with feature 16 and feature 17 (title refresh, counted as an involvement, no token claim) added: state (Off, Shadow, Dry run, Live, Dormant: feature 9 while leader compaction is off); involvements, with the not-asked total (not broken out by reason — the per-reason breakdown on tap is deferred; `JevSavingsFeatureSummary.notAsked` already carries the counts for it); tokens live and would-have; the other benefit in its own unit ("31 pushes held", "4.2 h of waiting"); the wrong rate (false skips, regrets and contradictions over those checked); JEV cost; and the evidence: the rule, what was observed, and met, not met, or not enough data yet. A feature with no token benefit shows no token figure, never a zero. Tapping a row filters Recent to that feature.
 3. **Where agents use it.** The top 10 agents and top 10 workspaces by involvements, with their tokens. A tap opens the agent or the workspace.
 4. **Recent.** `jev.savings.events`, paged by cursor, filterable by feature: time, feature, agent, what JEV was asked, what code did and what the answer would do, mode, tokens or "pending", validation. A tap opens the agent, whose context popover lists that agent's decisions (feature 11).
@@ -1770,7 +1827,7 @@ The ledger is merged: `JevService.savings` is a real `JevSavingsLedger`, and `we
 
 ### Tests and verification
 
-- `jev/jev-dashboard-model.test.ts`: tiles from a summary fixture; shadow never summed into live; the net; a non-token feature has no token figure; each evidence state; `jevFeatureStateLabel`'s away-reply dry-run case.
+- `jev/jev-dashboard-model.test.ts`: tiles from a summary fixture; shadow never summed into live; the net; each tile's dollar line and its kind (list price or billed); a non-token feature has no token figure; each evidence state; `jevFeatureStateLabel`'s away-reply dry-run case.
 - `screens/jev-dashboard-view.browser.test.tsx`: `resolveJevDashboardAvailability`'s five states; `NotConfiguredBanner` per state; the ready content with fixture data — tiles, feature order including the dormant and dry-run labels, the feature-row filter callback, opening an agent from the top list, "Load more", the loading row; desktop and phone screenshots.
 - `components/sidebar/use-sidebar-jev-dashboard-target.test.ts`: null for no host, a disconnected host and an older daemon.
 - Verify: `npx vitest run packages/app/src/jev packages/app/src/screens/jev-dashboard-screen.tsx packages/app/src/screens/jev-dashboard-view.tsx packages/app/src/components/sidebar/use-sidebar-jev-dashboard-target.test.ts --bail=1`.

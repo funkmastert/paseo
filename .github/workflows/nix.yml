@@ -139,5 +139,6 @@ jobs:
           app="result-desktop/Applications/${app_name}.app"
           test -x "$app/Contents/MacOS/${app_name}"
           test -L result-desktop/bin/paseo-desktop
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = "sh.paseo.desktop"
+          app_id="$(node -e "console.log(require('./packages/desktop/scripts/executable-name.js').readAppIdFromConfig())")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = "$app_id"
           find "$app" -name Info.plist -print0 | xargs -0 -n 1 plutil -lint

@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
+import type { ArenaRankingRow, ArenaRankingsFile } from "../shared/arena-aliases";
 import {
   DEFAULT_POLICY,
   DEFAULT_THINKING_POLICY,
+  type ArenaPolicy,
   type RoleModelPolicy,
   type RoleRecord,
   type ThinkingPolicy,
 } from "../shared/role-policy-schema";
 import { classifyAgent, type ClassifierInput, type ClassifierWorld } from "./classifier";
 import { createHealthTracker } from "./health";
+import type { SpawnHint } from "./jev-hint";
 import type { ModelThinkingOptions, ThinkingCatalog } from "./model-catalog";
 import type { ModelCatalog } from "./role-availability";
 
@@ -1577,5 +1580,177 @@ describe("classifyAgent — output style", () => {
     );
     expect(decision.outputStyle).toMatchObject({ style: null, source: "none" });
     expect(decision.outputStyle.reason).toContain("codex");
+  });
+});
+
+describe("classifyAgent — arena-ranked model pick (U8)", () => {
+  function arenaPolicy(overrides: Partial<ArenaPolicy> = {}): ArenaPolicy {
+    return { enabled: true, shadow: false, roles: ["worker", "reviewer"], topTier: ["claude-opus-5-5"], topTierMarginCi: 0, maxAgeHours: 72, ...overrides };
+  }
+
+  function row(overrides: Partial<ArenaRankingRow> & { ours: string }): ArenaRankingRow {
+    return { arenaName: overrides.ours, effort: "high", rating: 1500, ratingLower: 1490, ratingUpper: 1510, votes: 500, ...overrides };
+  }
+
+  function rankings(boards: Record<string, ArenaRankingRow[]>): ArenaRankingsFile {
+    return { fetchedAt: Date.now(), publishDate: "2026-10-08", boards, unmatched: {}, failedBoards: [] };
+  }
+
+  // Operator order deliberately does NOT match rank order (haiku first, sonnet second): a test
+  // that picks sonnet would otherwise prove nothing, since sonnet is also the pool's own default.
+  const arenaPool: RoleModelPolicy = withRole(
+    withRole(DEFAULT_POLICY, "worker", { models: ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-5-5"] }),
+    "reviewer",
+    { models: ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-5-5"] },
+  );
+
+  function workKindHint(choice: string, status: "answered" | "shadow" = "answered"): SpawnHint {
+    return {
+      status,
+      callId: "jev-call-arena",
+      answers: { workKind: { choice, confidence: 0.9 } },
+      proposal: {},
+      applyHard: false,
+      applyRole: false,
+      declaredAudit: status === "shadow",
+    };
+  }
+
+  function arenaWorld(overrides: Partial<ClassifierWorld> = {}): ClassifierWorld {
+    return world({
+      policy: { ...arenaPool, arena: arenaPolicy() },
+      catalog: catalog(["claude-sonnet-5", "claude-opus-5-5", "claude-haiku-4-5-20251001"]),
+      // Non-overlapping CIs, so a genuine score-order win is distinguishable from a CI-overlap tie
+      // (which would fall back to operator order instead — see `arenaPool` above for why that matters).
+      arenaRanking: rankings({
+        "webdev/webdev-react": [
+          row({ ours: "claude-sonnet-5", rating: 1774, ratingLower: 1760, ratingUpper: 1790 }),
+          row({ ours: "claude-opus-5-5", rating: 1900, ratingLower: 1880, ratingUpper: 1920 }),
+          row({ ours: "claude-haiku-4-5-20251001", rating: 1500, ratingLower: 1480, ratingUpper: 1510 }),
+        ],
+      }),
+      ...overrides,
+    } as Partial<ClassifierWorld>);
+  }
+
+  it("a frontend standard worker: ranking reorders the pool to the higher-ranked mid-tier model", () => {
+    const decision = classifyAgent(child({ jevHint: workKindHint("frontend") }), arenaWorld());
+    // claude-opus-5-5 is topTier, dropped from a standard pool before ranking ever runs, so the
+    // best REMAINING ranked candidate (sonnet-5, over haiku) wins — proving the reorder landed,
+    // not just "whatever was listed first".
+    expect(decision.model.model).toBe("claude-sonnet-5");
+    expect(decision.model.ranking).toMatchObject({ outcome: "ranked", applied: true, ref: "claude-sonnet-5" });
+  });
+
+  it("with arena.shadow on: the label/decision show the would-be pick, applied 0, and the model stays today's order", () => {
+    const shadowPool = withRole(arenaPool, "worker", { models: ["codex/gpt-6-sol", "claude-sonnet-5"] });
+    const decision = classifyAgent(
+      child({ jevHint: workKindHint("frontend") }),
+      world({
+        policy: { ...shadowPool, arena: arenaPolicy({ shadow: true, topTier: [] }) },
+        catalog: new Map([
+          ["claude", new Set(["claude-sonnet-5"])],
+          ["codex", new Set(["gpt-6-sol"])],
+        ]),
+        arenaRanking: rankings({
+          "webdev/webdev-react": [
+            row({ ours: "claude-sonnet-5", rating: 1774, ratingLower: 1760, ratingUpper: 1790 }),
+            row({ ours: "codex/gpt-6-sol", rating: 1688, ratingLower: 1670, ratingUpper: 1700 }),
+          ],
+        }),
+      } as Partial<ClassifierWorld>),
+    );
+    // Today's order (operator order) still wins: codex/gpt-6-sol is first in the pool.
+    expect(decision.model.provider).toBe("codex");
+    expect(decision.model.model).toBe("gpt-6-sol");
+    expect(decision.model.ranking).toMatchObject({ outcome: "ranked", applied: false, ref: "claude-sonnet-5" });
+  });
+
+  it("no leader decision carries a ranking, even with arena.enabled true", () => {
+    const decision = classifyAgent({ title: "lead this" }, arenaWorld());
+    expect(decision.model.ranking).toBeUndefined();
+  });
+
+  it("every fallback case gives today's order with a reason", () => {
+    // Declared class: always falls back, whatever the kind.
+    const declared = classifyAgent(
+      child({ labels: { "paseo.task-class": "standard" }, jevHint: workKindHint("frontend") }),
+      arenaWorld(),
+    );
+    expect(declared.model.ranking).toMatchObject({ outcome: "fallback", reason: "declared-class" });
+
+    // Unknown kind: no hint at all, and the role isn't a reviewer.
+    const unknownKind = classifyAgent(child(), arenaWorld());
+    expect(unknownKind.model.ranking).toMatchObject({ outcome: "fallback", reason: "unknown-kind" });
+
+    // Ranking disabled.
+    const disabled = classifyAgent(
+      child({ jevHint: workKindHint("frontend") }),
+      arenaWorld({ policy: { ...arenaPool, arena: arenaPolicy({ enabled: false }) } } as Partial<ClassifierWorld>),
+    );
+    expect(disabled.model.ranking).toMatchObject({ outcome: "fallback", reason: "disabled" });
+
+    // Role not in arena.roles.
+    const outOfScope = classifyAgent(
+      child({ labels: { "paseo.agent-type": "advisor" }, jevHint: workKindHint("research") }),
+      arenaWorld(),
+    );
+    expect(outOfScope.model.ranking).toMatchObject({ outcome: "fallback", reason: "role-out-of-scope" });
+
+    // Missing rankings file.
+    const noFile = classifyAgent(child({ jevHint: workKindHint("frontend") }), arenaWorld({ arenaRanking: undefined }));
+    expect(noFile.model.ranking).toMatchObject({ outcome: "fallback", reason: "no-file" });
+  });
+
+  it("a reviewer with no work_kind answer defaults to the review kind", () => {
+    const reviewPolicy = withRole(arenaPool, "reviewer", { models: ["claude-sonnet-5", "codex/gpt-6-sol"] });
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "reviewer" } }),
+      world({
+        policy: { ...reviewPolicy, arena: arenaPolicy() },
+        catalog: new Map([
+          ["claude", new Set(["claude-sonnet-5"])],
+          ["codex", new Set(["gpt-6-sol"])],
+        ]),
+        arenaRanking: rankings({
+          "text_style_control/hard_prompts": [row({ ours: "claude-sonnet-5", rating: 1500 }), row({ ours: "codex/gpt-6-sol", rating: 1400 })],
+        }),
+      } as Partial<ClassifierWorld>),
+    );
+    expect(decision.model.ranking).toMatchObject({ outcome: "ranked", board: "text_style_control/hard_prompts" });
+  });
+
+  it("an old policy without the arena key parses and behaves exactly as before: no ranking field at all", () => {
+    const decision = classifyAgent(child({ jevHint: workKindHint("frontend") }), world({ policy: arenaPool }));
+    expect(decision.model.ranking).toBeUndefined();
+  });
+
+  it("an honored explicit request never carries a ranking, even when the ranked pick would be a different ref", () => {
+    // Arena would pick claude-sonnet-5 (see arenaWorld's rankings above), but this request
+    // explicitly asks for claude-haiku-4-5-20251001, which is approved and selectable.
+    const decision = classifyAgent(
+      child({ requestedModel: "claude-haiku-4-5-20251001", jevHint: workKindHint("frontend") }),
+      arenaWorld(),
+    );
+    expect(decision.model.outcome).toBe("honored-request");
+    expect(decision.model.model).toBe("claude-haiku-4-5-20251001");
+    expect(decision.model.ranking).toBeUndefined();
+  });
+
+  it("a ref the usability check rejects is never picked and does not count toward the two-candidate floor", () => {
+    // Neither candidate is topTier, so this isolates the usability check: codex/gpt-6-sol is
+    // ranked and would otherwise count, but it's absent from the catalog and not allowlisted.
+    const usabilityPool = withRole(arenaPool, "worker", { models: ["claude-sonnet-5", "codex/gpt-6-sol"] });
+    const decision = classifyAgent(
+      child({ jevHint: workKindHint("frontend") }),
+      world({
+        policy: { ...usabilityPool, arena: arenaPolicy({ topTier: [] }) },
+        catalog: new Map([["claude", new Set(["claude-sonnet-5"])]]), // no "codex" family at all
+        arenaRanking: rankings({
+          "webdev/webdev-react": [row({ ours: "claude-sonnet-5", rating: 1774 }), row({ ours: "codex/gpt-6-sol", rating: 1900 })],
+        }),
+      } as Partial<ClassifierWorld>),
+    );
+    expect(decision.model.ranking).toMatchObject({ outcome: "fallback", reason: "no-ranked-board" });
   });
 });

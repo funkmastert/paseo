@@ -445,7 +445,13 @@ export type JevNotAskedReason =
    * The file changed between the path checks and the read, or a `Read`'s text is not what is on
    * disk under the path the checks saw: what would be sent is not what was checked.
    */
-  | "changed";
+  | "changed"
+  /**
+   * The `named` rule (R2): the reader's own brief or task, the current turn's latest prompt, or
+   * recent assistant text already named this path or its file name. Deterministic, free, and
+   * never asked.
+   */
+  | "named";
 
 export interface JevSavingsDecision {
   /** What code did, in the feature's words: `start-agent`, `alert`, `class standard on claude-sonnet-5`. */

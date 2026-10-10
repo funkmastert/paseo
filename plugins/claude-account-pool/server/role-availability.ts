@@ -185,6 +185,33 @@ function isRefCurrentlySelectable(
   return present && isRefUsable(family, catalogIdFor(family, model, catalog) ?? model, pool, health, thresholdPct);
 }
 
+/**
+ * `isRefCurrentlySelectable`, taking a whole `ref` (`model` or
+ * `provider/model`) instead of a pre-split `(family, model)` pair — the same
+ * bar `selectModel`'s ordered walk applies to every pool entry. The arena-
+ * ranking plugin (U8) reorders an already-approved pool by this check, not a
+ * new one of its own: a ref this says is unusable (capped, drained,
+ * budget-gated, or a Codex ref with its guard red — the gates PR A adds
+ * inside `isRefUsable` above) is dropped from ranking before scores are ever
+ * compared, and never counts toward KTD-11's two-candidate floor. An
+ * unparseable ref is unusable.
+ */
+export function isModelRefUsable(
+  ref: string,
+  catalog: ModelCatalog,
+  pool: AvailabilityPool,
+  health: AvailabilityHealth,
+  options: SelectModelOptions = {},
+): boolean {
+  const parsed = splitModelRef(ref);
+  if (!parsed) {
+    return false;
+  }
+  const family = modelRefFamily(parsed);
+  const thresholdPct = options.modelBudgetThresholdPct ?? DEFAULT_MODEL_BUDGET_THRESHOLD_PCT;
+  return isRefCurrentlySelectable(family, parsed.model, catalog, pool, health, thresholdPct, options.allowUnlistedModels ?? []);
+}
+
 /** Renders a selection back into the ref spelling the operator configured, for logs/notifications. */
 export function formatModelRef(outcome: { provider: string | null; model: string }): string {
   return outcome.provider === null ? outcome.model : `${outcome.provider}/${outcome.model}`;

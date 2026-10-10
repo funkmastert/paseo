@@ -37,7 +37,7 @@ import { initGitRepo } from "../../../jev/test-utils/git-repo.js";
  * to 2 seconds.
  */
 
-function createQueryMock(): Query {
+function createQueryMock(extraEvents: unknown[] = []): Query {
   const events = [
     {
       type: "system",
@@ -46,6 +46,7 @@ function createQueryMock(): Query {
       permissionMode: "bypassPermissions",
       model: "opus",
     },
+    ...extraEvents,
     { type: "assistant", message: { content: "done" } },
     {
       type: "result",
@@ -80,13 +81,17 @@ type Hooks = NonNullable<ClaudeQueryInput["options"]["hooks"]>;
 
 let repo: string;
 
-async function launch(fileReadObserver?: FileReadObserver, cwd = repo): Promise<Hooks> {
+async function launch(
+  fileReadObserver?: FileReadObserver,
+  cwd = repo,
+  extraEvents: unknown[] = [],
+): Promise<Hooks> {
   let captured: ClaudeQueryInput["options"] | undefined;
   const client = new ClaudeAgentClient({
     logger: pino({ level: "silent" }),
     queryFactory: ({ options }: ClaudeQueryInput) => {
       captured = options;
-      return createQueryMock();
+      return createQueryMock(extraEvents);
     },
     resolveBinary: async () => "/test/claude/bin",
     ...(fileReadObserver ? { fileReadObserver } : {}),
@@ -102,6 +107,33 @@ async function launch(fileReadObserver?: FileReadObserver, cwd = repo): Promise<
   }
   if (!captured?.hooks) throw new Error("queryFactory was never called with hooks");
   return captured.hooks;
+}
+
+/**
+ * Like `launch`, but leaves the session open so a test can call its captured hooks before
+ * `close()` resets the task protocol's per-session tables. The caller must close it.
+ */
+async function launchOpen(
+  fileReadObserver: FileReadObserver,
+  extraEvents: unknown[] = [],
+): Promise<{ hooks: Hooks; close: () => Promise<void> }> {
+  let captured: ClaudeQueryInput["options"] | undefined;
+  const client = new ClaudeAgentClient({
+    logger: pino({ level: "silent" }),
+    queryFactory: ({ options }: ClaudeQueryInput) => {
+      captured = options;
+      return createQueryMock(extraEvents);
+    },
+    resolveBinary: async () => "/test/claude/bin",
+    fileReadObserver,
+  });
+  const session = await client.createSession(
+    { provider: "claude", cwd: repo, modeId: "bypassPermissions" },
+    { agentId: "agent-1" },
+  );
+  await session.run("read check");
+  if (!captured?.hooks) throw new Error("queryFactory was never called with hooks");
+  return { hooks: captured.hooks, close: () => session.close() };
 }
 
 /** Every callback the CLI would run for `tool` on `event`: matcherless ones and exact matches. */
@@ -226,7 +258,11 @@ describe("Claude read check: matchers", () => {
   });
 
   test("with an observer, its matchers come after the gates, which keep theirs", async () => {
-    const observer: FileReadObserver = { preToolUse: () => null, postToolUse: () => undefined };
+    const observer: FileReadObserver = {
+      preToolUse: () => null,
+      postToolUse: () => undefined,
+      subagentEnd: () => undefined,
+    };
     const hooks = await launch(observer);
     expect((hooks.PreToolUse ?? []).map((entry) => entry.matcher)).toEqual([
       undefined,
@@ -244,6 +280,11 @@ describe("Claude read check: matchers", () => {
       "Read",
       "Bash",
     ]);
+    // KTD-2's SubagentStop matcher comes after the effort hook's matcherless one.
+    expect((hooks.SubagentStop ?? []).map((entry) => entry.matcher)).toEqual([
+      undefined,
+      undefined,
+    ]);
     expect(hooks.PreToolUse?.slice(3).every((entry) => entry.timeout === 3)).toBe(true);
     // The catastrophe gate still refuses: it is the first Bash matcher.
     const gate = hooks.PreToolUse?.[1]?.hooks[0] as unknown as HookCallback;
@@ -255,6 +296,105 @@ describe("Claude read check: matchers", () => {
       cwd: repo,
     });
     expect(result["hookSpecificOutput"]).toMatchObject({ permissionDecision: "deny" });
+  });
+});
+
+describe("Claude read check: a subagent's own brief (R1, R4)", () => {
+  const TASK_STARTED = {
+    type: "system",
+    subtype: "task_started",
+    task_id: "task-1",
+    tool_use_id: "toolu_task1",
+    description: "Summarize the docs",
+    subagent_type: "general-purpose",
+    task_type: "local_agent",
+    prompt: "Read docs/plans/x.md, then summarize it",
+  };
+
+  test("a read inside a declared subagent carries its own brief", async () => {
+    const seen: Array<{ subagentBrief?: unknown }> = [];
+    const observer: FileReadObserver = {
+      preToolUse: (event) => {
+        seen.push(event);
+        return null;
+      },
+      postToolUse: (event) => {
+        seen.push(event);
+      },
+      subagentEnd: () => undefined,
+    };
+    const { hooks, close } = await launchOpen(observer, [TASK_STARTED]);
+    try {
+      const file = path.join(repo, "a.ts");
+      writeFileSync(file, "export const x = 1;\n");
+      const [pre] = callbacksFor(hooks, "PreToolUse", "Read").slice(-1);
+      const [post] = callbacksFor(hooks, "PostToolUse", "Read").slice(-1);
+      await pre!({ ...readInput("PreToolUse", file, "t1"), agent_id: "task-1" });
+      await post!({
+        ...readInput("PostToolUse", file, "t1", "export const x = 1;\n"),
+        agent_id: "task-1",
+      });
+    } finally {
+      await close();
+    }
+    expect(seen).toHaveLength(2);
+    for (const event of seen) {
+      expect(event.subagentBrief).toEqual({
+        description: "Summarize the docs",
+        prompt: "Read docs/plans/x.md, then summarize it",
+      });
+    }
+  });
+
+  test("a hook with no agent_id (the main thread) carries no subagentBrief at all", async () => {
+    const seen: Array<{ subagentBrief?: unknown }> = [];
+    const observer: FileReadObserver = {
+      preToolUse: (event) => {
+        seen.push(event);
+        return null;
+      },
+      postToolUse: () => undefined,
+      subagentEnd: () => undefined,
+    };
+    const hooks = await launch(observer, repo, [TASK_STARTED]);
+    const [pre] = callbacksFor(hooks, "PreToolUse", "Read").slice(-1);
+    await pre!(readInput("PreToolUse", "/x", "t"));
+    expect(seen[0]?.subagentBrief).toBeUndefined();
+  });
+
+  test("a hook inside a subagent this provider never declared gets brief: missing", async () => {
+    const seen: Array<{ subagentBrief?: unknown }> = [];
+    const observer: FileReadObserver = {
+      preToolUse: (event) => {
+        seen.push(event);
+        return null;
+      },
+      postToolUse: () => undefined,
+      subagentEnd: () => undefined,
+    };
+    const hooks = await launch(observer);
+    const [pre] = callbacksFor(hooks, "PreToolUse", "Read").slice(-1);
+    await pre!({ ...readInput("PreToolUse", "/x", "t"), agent_id: "unknown-task" });
+    expect(seen[0]?.subagentBrief).toBeNull();
+  });
+
+  test("SubagentStop drops that subagent's own ring", async () => {
+    const ended: string[] = [];
+    const observer: FileReadObserver = {
+      preToolUse: () => null,
+      postToolUse: () => undefined,
+      subagentEnd: (subagentId) => {
+        ended.push(subagentId);
+      },
+    };
+    const hooks = await launch(observer);
+    const stopHooks = (hooks.SubagentStop ?? []).flatMap(
+      (entry) => entry.hooks as unknown as HookCallback[],
+    );
+    await Promise.all(
+      stopHooks.map((cb) => cb({ hook_event_name: "SubagentStop", agent_id: "task-9" })),
+    );
+    expect(ended).toEqual(["task-9"]);
   });
 });
 
@@ -283,6 +423,7 @@ describe("Claude read check: shadow adds nothing to a read", () => {
       postToolUse: () => {
         throw new Error("boom");
       },
+      subagentEnd: () => undefined,
     };
     const hooks = await launch(observer);
     for (const event of ["PreToolUse", "PostToolUse"] as const) {
@@ -425,7 +566,11 @@ describe("Claude read check: live mode", () => {
 
   test("returns {} past the hold's timeout, whatever the observer does", async () => {
     const never: FileReadHold = { verdict: new Promise(() => undefined), timeoutMs: 50 };
-    const observer: FileReadObserver = { preToolUse: () => never, postToolUse: () => undefined };
+    const observer: FileReadObserver = {
+      preToolUse: () => never,
+      postToolUse: () => undefined,
+      subagentEnd: () => undefined,
+    };
     const hooks = await launch(observer);
     const [pre] = callbacksFor(hooks, "PreToolUse", "Read").slice(-1);
     const startedAt = performance.now();

@@ -47,6 +47,8 @@ describe("decideLiveDeny", () => {
     deniesLastHour: 0,
     regretsLastHour: 0,
     maxDeniesPerAgentPerHour: 5,
+    subagentBriefMissing: false,
+    named: false,
   };
 
   test("denies only when every condition holds", () => {
@@ -84,6 +86,33 @@ describe("decideLiveDeny", () => {
       deny: false,
       reason: "regret-cap",
     });
+    expect(decideLiveDeny({ ...base, subagentBriefMissing: true })).toEqual({
+      deny: false,
+      reason: "subagent-brief-missing",
+    });
+    expect(decideLiveDeny({ ...base, named: true })).toEqual({
+      deny: false,
+      reason: "named",
+    });
+  });
+
+  test("R4, KTD-4: a brief-missing subagent read and a named read are refused before confidence", () => {
+    // Neither condition depends on the answer: a low-confidence `needed` answer would already
+    // refuse on its own, so this proves the new checks run even on a confident `not_needed`.
+    expect(
+      decideLiveDeny({
+        ...base,
+        subagentBriefMissing: true,
+        answer: readCheckAnswerOf(choice("not_needed", 0.99)),
+      }),
+    ).toEqual({ deny: false, reason: "subagent-brief-missing" });
+    expect(
+      decideLiveDeny({
+        ...base,
+        named: true,
+        answer: readCheckAnswerOf(choice("not_needed", 0.99)),
+      }),
+    ).toEqual({ deny: false, reason: "named" });
   });
 
   test("0.85 exactly denies; one regret does not stop denials", () => {

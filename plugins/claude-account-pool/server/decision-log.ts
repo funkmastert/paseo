@@ -204,6 +204,30 @@ function keptArm(result: LoggedRequest | undefined): string | null {
   return typeof arm === "string" ? echoed(arm) : null;
 }
 
+/**
+ * U8's arena-ranked pick (KTD-1, KTD-2, KTD-11, KTD-13): a reason on every
+ * evaluation, a board/pick/credit only on a ranked one — so a leader never
+ * reaches this (`decideModel` never calls `decideArenaPick` for one), but a
+ * declared class, an unknown kind, a stale/missing file, ranking disabled,
+ * and a role out of scope all still show up with their reason.
+ */
+function describeRanking(ranking: NonNullable<AgentDecision["model"]["ranking"]>): Record<string, unknown> {
+  if (ranking.outcome === "fallback") {
+    return { outcome: "fallback", reason: ranking.reason, applied: false };
+  }
+  return {
+    outcome: "ranked",
+    applied: ranking.applied,
+    ref: echoed(ranking.ref),
+    tier: ranking.tier,
+    board: ranking.board,
+    publishDate: ranking.publishDate,
+    credit: ranking.credit,
+    pick: ranking.pick,
+    ...(ranking.comparedTo ? { comparedTo: ranking.comparedTo } : {}),
+  };
+}
+
 function describe(decision: AgentDecision, result: LoggedRequest | undefined): Record<string, unknown> {
   const { role, taskClass, model, thinking, outputStyle, mcp } = decision;
   return {
@@ -218,6 +242,9 @@ function describe(decision: AgentDecision, result: LoggedRequest | undefined): R
       ...(model.requestedRef !== undefined ? { requested: model.requestedRef } : {}),
       ...(model.override ? { overridden: true } : {}),
       ...(model.unadvertised ? { unadvertised: model.unadvertised.ref } : {}),
+      // Second layer, belt-and-suspenders: never report a ranking against an honored explicit
+      // request, even if a future regression lets `ranking` leak through onto that outcome again.
+      ...(model.ranking && model.outcome !== "honored-request" ? { ranking: describeRanking(model.ranking) } : {}),
       // What the request actually carries after every hook ran, for the case a hook skipped the rewrite.
       ...finalModel(result),
     },

@@ -72,10 +72,24 @@ export interface LiveDenyInput {
   deniesLastHour: number;
   regretsLastHour: number;
   maxDeniesPerAgentPerHour: number;
+  /**
+   * R4: this read ran inside a subagent whose own Agent/Task brief could not be found. It was
+   * judged against the parent's task, which the parent never got to see — too uncertain a basis
+   * to deny on.
+   */
+  subagentBriefMissing: boolean;
+  /**
+   * KTD-4: the `named` rule (R2) already matched this read. In practice a named read never
+   * reaches here — `ask()` returns before calling JEV — so this only guards against a future
+   * caller that asks anyway.
+   */
+  named: boolean;
 }
 
 export type LiveDenyReason =
   | "not-answered"
+  | "subagent-brief-missing"
+  | "named"
   | "not-confident"
   | "not-plain-read"
   | "denied-before"
@@ -88,6 +102,8 @@ export function decideLiveDeny(
   input: LiveDenyInput,
 ): { deny: true } | { deny: false; reason: LiveDenyReason } {
   if (!input.answered) return { deny: false, reason: "not-answered" };
+  if (input.subagentBriefMissing) return { deny: false, reason: "subagent-brief-missing" };
+  if (input.named) return { deny: false, reason: "named" };
   if (
     input.answer.choice !== "not_needed" ||
     (input.answer.confidence ?? 0) < READ_CHECK_LIVE_DENY_CONFIDENCE

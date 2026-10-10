@@ -1,4 +1,5 @@
 import { JEV_FEATURE_LABELS } from "@getpaseo/protocol/jev/labels";
+import { opusTokensToUsd } from "@getpaseo/protocol/jev/pricing";
 import type {
   JevOtherBenefit,
   JevSavingsDay,
@@ -52,6 +53,11 @@ export interface JevDashboardTile {
   label: string;
   tokens: number | null;
   usd: number | null;
+  /**
+   * `billed` is money actually spent (JEV's own metered key). `list-price` is tokens at Opus 5.5
+   * API list prices: the fleet runs on subscriptions, so that figure is a comparison, not a bill.
+   */
+  usdKind: "billed" | "list-price";
   caption: string;
   tone: "live" | "shadow" | "neutral";
 }
@@ -78,7 +84,8 @@ export function buildJevDashboardTiles(summary: JevSavingsSummary): JevDashboard
       id: "saved",
       label: "Saved",
       tokens: summary.live.tokensSaved,
-      usd: null,
+      usd: opusTokensToUsd(summary.live.tokensSaved),
+      usdKind: "list-price",
       caption: withEstimatedCaption(
         `${summary.live.involvements} involvement${summary.live.involvements === 1 ? "" : "s"}`,
         liveEstimated,
@@ -89,7 +96,8 @@ export function buildJevDashboardTiles(summary: JevSavingsSummary): JevDashboard
       id: "would-have-saved",
       label: "Would have saved",
       tokens: summary.shadow.tokensWouldSave,
-      usd: null,
+      usd: opusTokensToUsd(summary.shadow.tokensWouldSave),
+      usdKind: "list-price",
       caption: withEstimatedCaption(`${summary.shadow.involvements} in shadow`, shadowEstimated),
       tone: "shadow",
     },
@@ -98,6 +106,7 @@ export function buildJevDashboardTiles(summary: JevSavingsSummary): JevDashboard
       label: "JEV cost",
       tokens: summary.jevSpend.tokensEquivalent,
       usd: summary.jevSpend.usd,
+      usdKind: "billed",
       caption: `${summary.jevSpend.calls} call${summary.jevSpend.calls === 1 ? "" : "s"}`,
       tone: "neutral",
     },
@@ -105,7 +114,9 @@ export function buildJevDashboardTiles(summary: JevSavingsSummary): JevDashboard
       id: "net",
       label: "Net",
       tokens: summary.net.live,
-      usd: null,
+      // Net already subtracts JEV's cost in tokens, so converting it keeps the tiles consistent.
+      usd: opusTokensToUsd(summary.net.live),
+      usdKind: "list-price",
       caption: `If every shadow answer went live: ${formatSignedTokens(summary.net.ifLive)}`,
       tone: summary.net.live >= 0 ? "live" : "shadow",
     },
@@ -134,8 +145,16 @@ export function formatTokensWithEstimate(tokens: number, estimatedTokens: number
 
 export function formatUsd(usd: number): string {
   if (usd === 0) return "$0";
-  if (usd < 0.01) return `$${usd.toFixed(4)}`;
-  return `$${usd.toFixed(2)}`;
+  const sign = usd < 0 ? "-" : "";
+  const abs = Math.abs(usd);
+  if (abs < 0.01) return `${sign}$${abs.toFixed(4)}`;
+  return `${sign}$${abs.toFixed(2)}`;
+}
+
+/** A tile's dollar line: real spend as is, a list-price comparison marked as one. */
+export function formatTileUsd(tile: Pick<JevDashboardTile, "usd" | "usdKind">): string | null {
+  if (tile.usd === null) return null;
+  return tile.usdKind === "billed" ? formatUsd(tile.usd) : `≈ ${formatUsd(tile.usd)} at API prices`;
 }
 
 export function formatOtherBenefit(benefit: JevOtherBenefit): string {
