@@ -15,6 +15,25 @@ dataset (CC-BY-4.0)" — https://huggingface.co/datasets/lmarena-ai/leaderboard-
    guessed), drops rows below the vote floor, and writes
    `$PASEO_HOME/arena-rankings.json` atomically. A failed refresh keeps the
    old file.
+
+   Several boards share one HF config — `text_style_control` alone backs
+   five — so fetches are grouped by config and each is read once, not once
+   per category, with requests spaced ~1.5s apart. A 429 or 5xx backs off
+   5s/15s/45s, honoring `Retry-After` up to a 5-minute cap; past that, the
+   page fails immediately rather than blocking the refresh. A board whose
+   config errors after some of its rows were already collected keeps those
+   rows instead of losing them; only boards with nothing collected land in
+   `failedBoards`.
+
+   A second poller (`startArenaRankingsPoller`'s `retryPoller`) retries just
+   that refresh's `failedBoards` every ~45 minutes, up to 3 attempts, merging
+   any recovery into the file instead of waiting for the next daily run — so
+   a 429'd board can come back within the hour instead of sitting failed for
+   a full day. Both pollers write the same file; they're serialized through a
+   shared lock, and the retry additionally re-reads the file right before
+   writing and drops its own merge if a daily refresh landed in the meantime
+   (`retryFailedBoards`'s `"superseded"` result).
+
 2. **The plugin cache** (`server/arena-ranking-cache.ts`) re-reads that file
    on an interval and feeds it to the classifier as `ClassifierWorld.arenaRanking`
    — undefined when the file is missing or older than `arena.maxAgeHours`.
