@@ -8,6 +8,7 @@ import type {
   JevSavingsUnit,
   JevSavingsValidation,
 } from "./contract.js";
+import { usdToOpusTokens } from "@getpaseo/protocol/jev/pricing";
 
 /**
  * The one place facts become Opus-equivalent weighted tokens (docs/jev.md, "Formulas"). Call sites
@@ -49,13 +50,6 @@ export const JEV_FLEET_MEDIAN_CONTEXT_TOKENS = 228_000;
 
 export function extraStepTokens(contextTokens: number): number {
   return JEV_STEP_CONTEXT_WEIGHT * contextTokens + JEV_STEP_OUTPUT_TOKENS;
-}
-
-/** Claude Opus 5.5's list input price: $4 per million. $0.0001 of JEV is 25 tokens. */
-export const OPUS_55_INPUT_USD_PER_TOKEN = 4 / 1_000_000;
-
-export function usdToOpusTokens(usd: number): number {
-  return usd / OPUS_55_INPUT_USD_PER_TOKEN;
 }
 
 /**

@@ -36,10 +36,10 @@ import {
   JEV_SAVINGS_BENEFIT,
   JEV_SAVINGS_UNIT,
   priceSavings,
-  usdToOpusTokens,
   type JevSavingsFacts,
   type JevSavingsPrice,
 } from "./savings-formulas.js";
+import { usdToOpusTokens } from "@getpaseo/protocol/jev/pricing";
 
 /**
  * The savings ledger (docs/jev.md, "Savings"): one append-only record per JEV involvement, across

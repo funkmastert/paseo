@@ -15,9 +15,9 @@ import {
   normalizeSavingsModel,
   priceSavings,
   priceWeight,
-  usdToOpusTokens,
   type JevSavingsFacts,
 } from "./savings-formulas.js";
+import { usdToOpusTokens } from "@getpaseo/protocol/jev/pricing";
 
 function price(
   feature: JevSavingsFeature,
