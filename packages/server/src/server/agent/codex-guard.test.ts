@@ -407,3 +407,71 @@ describe("resolveGuardedFileChangePath (re-review finding #2)", () => {
     expect(resolveGuardedFileChangePath("a", scratch)).toBeNull();
   });
 });
+
+describe("resolveGuardedFileChangePath -- an earlier symlinked ancestor does not shadow a deeper attack symlink (verify finding #2, round 2)", () => {
+  // The regression: the broken version substituted an earlier symlinked ancestor (macOS's own
+  // /tmp -> /private/tmp, or a symlinked home directory) and then appended everything after it
+  // as a literal string, never lstat-ing it again -- so an attack symlink further down the same
+  // path was never inspected. These tests deliberately do NOT realpath the workspace path
+  // passed to resolveGuardedFileChangePath (unlike the describe block above, whose shared
+  // `scratch` is realpathed up front and so never exercised this path).
+  let realBase: string;
+  let ancestorLink: string;
+
+  beforeEach(() => {
+    // Canonicalized once, so expected values below are exact -- the symlink actually under test
+    // is ancestorLink, created fresh below and never realpathed before use.
+    realBase = realpathSync(mkdtempSync(nodePath.join(os.tmpdir(), "codex-guard-real-base-")));
+    ancestorLink = `${realBase}-link`;
+    symlinkSync(realBase, ancestorLink);
+  });
+
+  afterEach(() => {
+    rmSync(ancestorLink, { force: true });
+    rmSync(realBase, { recursive: true, force: true });
+  });
+
+  test("resolves an attack symlink reached through a symlinked ancestor, not just the ancestor itself", () => {
+    mkdirSync(nodePath.join(realBase, ".git", "hooks"), { recursive: true });
+    const hookTarget = nodePath.join(realBase, ".git", "hooks", "post-checkout");
+    symlinkSync(".git/hooks/post-checkout", nodePath.join(realBase, "evil-hook-link.md"));
+    expect(existsSync(hookTarget)).toBe(false);
+
+    // ancestorLink itself is a symlink to realBase, and is passed in as-is (not pre-realpathed)
+    // -- the PoC the verifier reproduced via /tmp/... (accepted, before this fix) vs
+    // /private/tmp/... (declined).
+    const resolved = resolveGuardedFileChangePath("evil-hook-link.md", ancestorLink);
+    expect(resolved).toBe(hookTarget);
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
+  });
+
+  test("resolves an ordinary path reached through a symlinked ancestor to its real, non-sensitive location", () => {
+    const resolved = resolveGuardedFileChangePath("notes.md", ancestorLink);
+    expect(resolved).toBe(nodePath.join(realBase, "notes.md"));
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).toBeNull();
+  });
+
+  test("resolves cwd itself through the symlinked ancestor before joining the relative path", () => {
+    writeFileSync(nodePath.join(realBase, "notes.md"), "hello");
+    // No path segment here is itself a symlink past the ancestor -- this isolates that cwd
+    // resolution alone (not just the per-segment walk) follows the ancestor link.
+    const resolved = resolveGuardedFileChangePath("notes.md", ancestorLink);
+    expect(resolved).toBe(nodePath.join(realBase, "notes.md"));
+  });
+
+  test("a symlinked home-like ancestor two levels up still exposes a sensitive symlink nested further inside", () => {
+    // home -> realBase; workspace is a real directory *inside* home, reached only through the
+    // ancestor link -- simulates a symlinked home directory with an ordinary project checkout
+    // underneath it, not just a symlinked workspace root itself.
+    const homeLink = ancestorLink;
+    mkdirSync(nodePath.join(realBase, "project", ".ssh"), { recursive: true });
+    const sshConfigTarget = nodePath.join(realBase, "project", ".ssh", "config");
+    symlinkSync(".ssh/config", nodePath.join(realBase, "project", "innocuous-notes.md"));
+    expect(existsSync(sshConfigTarget)).toBe(false);
+
+    const workspace = nodePath.join(homeLink, "project");
+    const resolved = resolveGuardedFileChangePath("innocuous-notes.md", workspace);
+    expect(resolved).toBe(sshConfigTarget);
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
+  });
+});

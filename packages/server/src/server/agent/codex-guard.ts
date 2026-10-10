@@ -78,69 +78,91 @@ export function describeGuardedSensitiveFileChangePath(path: string): string | n
   return null;
 }
 
-// Verify re-review finding #2: resolving an already-dangling symlink (its target does not exist
-// yet) requires an lstat+readlink hop, not realpathSync -- realpathSync throws on the whole
-// chain the moment the final target is missing, with no way to recover the target it was
-// pointing at. A hop limit is the fail-closed backstop against a symlink cycle.
+// Verify re-review finding #2 (round 2): resolving an already-dangling symlink (its target does
+// not exist yet) requires an lstat+readlink hop, not realpathSync -- realpathSync throws on the
+// whole chain the moment the final target is missing, with no way to recover the target it was
+// pointing at. A hop limit (incremented once per symlink actually followed, not per path
+// component) is the fail-closed backstop against a symlink cycle.
 const MAX_SYMLINK_RESOLUTION_HOPS = 40;
+
+/** `absolutePath`'s own root and the rest of its components, in order, with no empty segments. */
+function splitAbsolutePath(absolutePath: string): { root: string; segments: string[] } {
+  const { root } = nodePath.parse(absolutePath);
+  const segments = absolutePath
+    .slice(root.length)
+    .split(nodePath.sep)
+    .filter((segment) => segment.length > 0);
+  return { root, segments };
+}
 
 /**
  * The sensitivity check above keys on the literal reported path string -- a symlink planted at
  * an ordinary in-workspace path (never itself gated, since in-workspace writes raise no approval
  * request at all) can redirect an always-accepted write into a sensitive location with a name
  * that never matches (review finding #2). Resolves to what the path will actually touch on disk
- * by lstat-ing each existing path component in order and following any symlink found -- reading
- * its target via `readlinkSync` and resolving that target (relative to the symlink's own
- * directory, or absolute) even when the target does not exist yet, which is exactly the "create
- * a file through a dangling symlink" shape `apply_patch` takes. The first component that does
- * not exist at all ends the walk; everything after it is appended literally, since nothing past
- * that point can have redirected anything. Returns null when resolution fails for any reason, or
- * exceeds the symlink-hop limit -- the caller declines on an unresolved path rather than assume
- * it is safe.
+ * with an explicit component-by-component walk: a queue of remaining path components, each
+ * `lstat`-ed against the real location built up so far. A component that doesn't exist ends the
+ * walk -- nothing past it can be a symlink, so the rest is appended literally. A component that
+ * is a symlink is `readlink`-ed, and the target's own components (absolute: restart from `/`;
+ * relative: resolved against the symlink's own directory) are pushed onto the FRONT of the
+ * queue, so every one of them -- and everything already queued after the symlink -- gets
+ * `lstat`-ed again from scratch. A fixed substitution that stops re-walking the remaining
+ * components (an earlier, broken version of this function) misses a second symlink anywhere
+ * past the first one found: an ordinary symlinked ancestor (macOS's `/tmp` -> `/private/tmp`, or
+ * a symlinked home directory) would otherwise shadow an attack symlink further down the same
+ * path. `cwd` is resolved the same way before a relative `rawPath` is joined onto it, so a
+ * symlinked workspace root is covered too, not only the path requested within it. Returns null
+ * when resolution fails for any reason, or exceeds the symlink-hop limit -- the caller declines
+ * on an unresolved path rather than assume it is safe.
  */
 export function resolveGuardedFileChangePath(rawPath: string, cwd: string): string | null {
   try {
-    const absolute = nodePath.isAbsolute(rawPath) ? rawPath : nodePath.resolve(cwd, rawPath);
-    return resolveFollowingSymlinks(absolute, 0);
+    if (nodePath.isAbsolute(rawPath)) {
+      return resolveFollowingSymlinks(rawPath);
+    }
+    const resolvedCwd = resolveFollowingSymlinks(cwd);
+    if (resolvedCwd === null) {
+      return null;
+    }
+    return resolveFollowingSymlinks(nodePath.resolve(resolvedCwd, rawPath));
   } catch {
     return null;
   }
 }
 
-function resolveFollowingSymlinks(absolutePath: string, hops: number): string | null {
-  if (hops > MAX_SYMLINK_RESOLUTION_HOPS) {
-    return null;
-  }
-  const { root } = nodePath.parse(absolutePath);
-  const segments = absolutePath
-    .slice(root.length)
-    .split(nodePath.sep)
-    .filter((segment) => segment.length > 0);
+function resolveFollowingSymlinks(absolutePath: string): string | null {
+  const { root, segments: remaining } = splitAbsolutePath(absolutePath);
   let resolvedSoFar = root;
-  for (let index = 0; index < segments.length; index++) {
-    const candidate = nodePath.join(resolvedSoFar, segments[index] ?? "");
+  let hops = 0;
+  while (remaining.length > 0) {
+    const segment = remaining.shift() as string;
+    const candidate = nodePath.join(resolvedSoFar, segment);
     let stat;
     try {
       stat = lstatSync(candidate);
     } catch {
       // Nothing exists here yet (the common case for a file apply_patch is about to create) --
       // nothing past this point can be a symlink, so the rest of the path is literal.
-      return nodePath.join(resolvedSoFar, ...segments.slice(index));
+      return nodePath.join(candidate, ...remaining);
     }
     if (!stat.isSymbolicLink()) {
       resolvedSoFar = candidate;
       continue;
     }
-    const linkTarget = readlinkSync(candidate);
-    const resolvedTarget = nodePath.isAbsolute(linkTarget)
-      ? linkTarget
-      : nodePath.resolve(resolvedSoFar, linkTarget);
-    const resolvedBase = resolveFollowingSymlinks(resolvedTarget, hops + 1);
-    if (resolvedBase === null) {
+    hops++;
+    if (hops > MAX_SYMLINK_RESOLUTION_HOPS) {
       return null;
     }
-    const remaining = segments.slice(index + 1);
-    return remaining.length > 0 ? nodePath.join(resolvedBase, ...remaining) : resolvedBase;
+    const linkTarget = readlinkSync(candidate);
+    const resolvedLinkTarget = nodePath.isAbsolute(linkTarget)
+      ? linkTarget
+      : nodePath.resolve(resolvedSoFar, linkTarget);
+    const { root: targetRoot, segments: targetSegments } = splitAbsolutePath(resolvedLinkTarget);
+    resolvedSoFar = targetRoot;
+    // The target's own components go back through lstat too -- including whatever was already
+    // queued after this symlink, so a second symlink anywhere later in the original path is
+    // never skipped.
+    remaining.unshift(...targetSegments);
   }
   return resolvedSoFar;
 }
