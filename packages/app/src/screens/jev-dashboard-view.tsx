@@ -18,6 +18,7 @@ import {
   formatOtherBenefit,
   formatTokens,
   formatTokensWithEstimate,
+  formatTileUsd,
   formatUsd,
   type JevDashboardDayBar,
   type JevDashboardFeatureRow,
@@ -229,13 +230,18 @@ function TilesRow({ tiles }: { tiles: JevDashboardTile[] }) {
             {formatTokens(tile.tokens ?? 0)}
           </Text>
           {tile.usd !== null ? (
-            <Text style={styles.tileSubValue}>{formatUsd(tile.usd)}</Text>
+            <Text style={styles.tileSubValue} testID={`jev-dashboard-tile-${tile.id}-usd`}>
+              {formatTileUsd(tile)}
+            </Text>
           ) : null}
           <Text style={styles.tileCaption}>{tile.caption}</Text>
         </View>
       ))}
       <Text style={styles.unitCaption}>
-        Opus-equivalent tokens: weighted tokens at Opus 5.5 prices
+        Opus-equivalent tokens: weighted tokens at Opus 5.5 prices; Opus 5.5 cache reads count
+        double, so figures from Opus 5.5 agents run high. The ≈ dollar figures are those tokens at
+        Opus 5.5 API list prices ($4 per million); your subscriptions are not billed per token. JEV
+        cost is real spend.
       </Text>
     </View>
   );

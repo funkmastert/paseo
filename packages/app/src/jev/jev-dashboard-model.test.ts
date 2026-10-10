@@ -7,6 +7,7 @@ import {
   formatSignedTokens,
   formatTokens,
   formatTokensWithEstimate,
+  formatTileUsd,
   formatUsd,
   jevFeatureStateLabel,
 } from "@/jev/jev-dashboard-model";
@@ -93,8 +94,26 @@ describe("buildJevDashboardTiles", () => {
     );
     const cost = tiles.find((tile) => tile.id === "cost");
     expect(cost?.usd).toBe(0.03);
+    expect(cost?.usdKind).toBe("billed");
     expect(cost?.tokens).toBe(7500);
     expect(cost?.caption).toBe("3 calls");
+  });
+
+  it("prices saved, would-have-saved and net at Opus 5.5 list prices ($4 per million)", () => {
+    const tiles = buildJevDashboardTiles(
+      summary({
+        live: { involvements: 4, tokensSaved: 250_000 },
+        shadow: { involvements: 9, tokensWouldSave: 6_908_965 },
+        net: { live: 120_000, ifLive: 6_000_000 },
+      }),
+    );
+    const byId = (id: string) => tiles.find((tile) => tile.id === id);
+    expect(byId("saved")?.usd).toBeCloseTo(1, 6);
+    expect(byId("would-have-saved")?.usd).toBeCloseTo(27.63586, 4);
+    expect(byId("net")?.usd).toBeCloseTo(0.48, 6);
+    for (const id of ["saved", "would-have-saved", "net"]) {
+      expect(byId(id)?.usdKind).toBe("list-price");
+    }
   });
 
   it("names the estimated share in the caption, summed across every feature", () => {
@@ -317,6 +336,18 @@ describe("formatSignedTokens", () => {
     expect(formatSignedTokens(500)).toBe("+500");
     expect(formatSignedTokens(-500)).toBe("-500");
     expect(formatSignedTokens(0)).toBe("0");
+  });
+});
+
+describe("formatTileUsd", () => {
+  it("marks a list-price figure as a comparison and shows real spend as is", () => {
+    expect(formatTileUsd({ usd: 27.64, usdKind: "list-price" })).toBe("≈ $27.64 at API prices");
+    expect(formatTileUsd({ usd: 0.53, usdKind: "billed" })).toBe("$0.53");
+    expect(formatTileUsd({ usd: null, usdKind: "list-price" })).toBeNull();
+  });
+
+  it("keeps the sign of a negative net", () => {
+    expect(formatTileUsd({ usd: -0.2, usdKind: "list-price" })).toBe("≈ -$0.20 at API prices");
   });
 });
 
