@@ -24,6 +24,7 @@ import {
   readCheckAnswerOf,
   type ReadCheckAnswer,
 } from "./decision.js";
+import { isNamedRead } from "./named.js";
 import { JEV_CHARS_PER_TOKEN } from "../savings-formulas.js";
 import { isSecretShapedPath } from "../secret-paths.js";
 import {
@@ -1201,6 +1202,7 @@ export class ReadCheckObserver implements FileReadObserver {
     const asked = await this.ask({
       event,
       read,
+      namedPath: file.path,
       realPath,
       slice,
       tokens,
@@ -1299,6 +1301,8 @@ export class ReadCheckObserver implements FileReadObserver {
   private async ask(input: {
     event: FileReadHookEvent;
     read: RecognizedRead;
+    /** As the tool named it, before the observer resolved it (R2, KTD-3). */
+    namedPath: string;
     realPath: string;
     slice: RangeText;
     tokens: number;
@@ -1326,6 +1330,20 @@ export class ReadCheckObserver implements FileReadObserver {
       size: describeSize({ ...slice, tokens: input.tokens }),
       rangeText: slice.text,
     });
+    // R2, KTD-3: after the eligibility checks, before the JEV call. Only `task` and the recent
+    // assistant lines are searched, never `excerpt` or `outline` — a path named only inside the
+    // content being judged says nothing about whether the agent already knew to expect it.
+    if (
+      isNamedRead(
+        { namedPath: input.namedPath, displayPath, realPath },
+        {
+          texts: [state.task, ...state.recent.filter((line) => line.startsWith("assistant: "))],
+        },
+      )
+    ) {
+      this.countNotAsked("named");
+      return null;
+    }
     const outcome = await this.options.jev.decide({
       feature: "readCheck",
       callSite: input.live ? CALL_SITE_LIVE : CALL_SITE_SHADOW,
@@ -1539,10 +1557,11 @@ export class ReadCheckObserver implements FileReadObserver {
     const startedAt = this.now();
     const prepared = await this.prepareLive(input);
     if (!prepared) return null;
-    const { event, read, config } = input;
+    const { event, read, file, config } = input;
     const asked = await this.ask({
       event,
       read,
+      namedPath: file.path,
       realPath: prepared.realPath,
       slice: prepared.slice,
       tokens: prepared.tokens,

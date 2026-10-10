@@ -731,9 +731,12 @@ describe("ReadCheckObserver: the shadow-only subtrees (D12)", () => {
 });
 
 describe("ReadCheckObserver: a subagent's own context (R1, R4, KTD-2)", () => {
+  // Deliberately never names `src/template.hbs` or its base name: a brief naming the path being
+  // read is the `named` rule's job (named.test.ts and the "named" describe block below), not
+  // this one's.
   const BRIEF = {
     description: "Read the persona file, then the template",
-    prompt: "Read docs/plans/persona-plan.md, then src/template.hbs",
+    prompt: "Read docs/plans/persona-plan.md for background on the template format",
   };
 
   test("a found brief is judged against itself, with the parent kept to one line, and its own ring as `recent`", async () => {
@@ -757,7 +760,7 @@ describe("ReadCheckObserver: a subagent's own context (R1, R4, KTD-2)", () => {
     const state = jev.transport.calls[0]!.state as Record<string, unknown>;
     expect(state["task"]).toBe(
       "Read the persona file, then the template\n" +
-        "Read docs/plans/persona-plan.md, then src/template.hbs\n" +
+        "Read docs/plans/persona-plan.md for background on the template format\n" +
         "(parent task: Fix the login bug)",
     );
     // The subagent's own ring, not the parent's timeline tail (`rows`, set up in `beforeEach`).
@@ -788,8 +791,8 @@ describe("ReadCheckObserver: a subagent's own context (R1, R4, KTD-2)", () => {
     const content = bigSource();
     const fileA = writeRepoFile("src/a.hbs", content);
     const fileB = writeRepoFile("src/b.hbs", content);
-    const briefA = { description: "Work on A", prompt: "Read src/a.hbs" };
-    const briefB = { description: "Work on B", prompt: "Read src/b.hbs" };
+    const briefA = { description: "Work on A", prompt: "Investigate the A feature" };
+    const briefB = { description: "Work on B", prompt: "Investigate the B feature" };
     observer.postToolUse({
       ...readPost(
         writeRepoFile("src/a-note.ts", "export const a = 1;\n"),
@@ -825,8 +828,12 @@ describe("ReadCheckObserver: a subagent's own context (R1, R4, KTD-2)", () => {
     const tasks = jev.transport.calls.map(
       (call) => (call.state as Record<string, unknown>)["task"],
     );
-    expect(tasks).toContain("Work on A\nRead src/a.hbs\n(parent task: Fix the login bug)");
-    expect(tasks).toContain("Work on B\nRead src/b.hbs\n(parent task: Fix the login bug)");
+    expect(tasks).toContain(
+      "Work on A\nInvestigate the A feature\n(parent task: Fix the login bug)",
+    );
+    expect(tasks).toContain(
+      "Work on B\nInvestigate the B feature\n(parent task: Fix the login bug)",
+    );
   });
 
   test("the ring is dropped when the subagent ends", async () => {
@@ -850,5 +857,56 @@ describe("ReadCheckObserver: a subagent's own context (R1, R4, KTD-2)", () => {
     expect(jev.transport.calls).toHaveLength(1);
     const state = jev.transport.calls[0]!.state as Record<string, unknown>;
     expect(state["recent"]).toEqual([]);
+  });
+});
+
+describe("ReadCheckObserver: the `named` rule (R2, KTD-3)", () => {
+  test("a path named in recent assistant text is `needed`, with no JEV call", async () => {
+    const { observer, jev, savings } = setup();
+    rows.push({
+      seq: rows.length,
+      timestamp: new Date().toISOString(),
+      turnId: "turn-1",
+      item: { type: "assistant_message", text: "I'll check src/session.ts for the token logic." },
+    });
+    const content = bigSource();
+    const file = writeRepoFile("src/session.ts", content);
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+
+    expect(jev.transport.calls).toEqual([]);
+    expect(savings.notAsked).toContain("named");
+    expect(savings.records).toEqual([]);
+  });
+
+  test("a subagent's own brief naming the path is `needed`, with no JEV call", async () => {
+    const { observer, jev, savings } = setup();
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    const brief = {
+      description: "Read the template",
+      prompt: "Read src/template.hbs for the layout",
+    };
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-named" }),
+      subagentBrief: brief,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toEqual([]);
+    expect(savings.notAsked).toContain("named");
+    expect(savings.records).toEqual([]);
+  });
+
+  test("a path named only in the file's own content is not `named`: it is still judged", async () => {
+    const { observer, jev } = setup();
+    // The path string appears inside the excerpt it would load, never in task/recent — named.ts's
+    // own tests cover the rule in isolation; this proves the observer never feeds it the content.
+    const content = `// src/session.ts lives here too\n${bigSource()}`;
+    const file = writeRepoFile("src/session.ts", content);
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
   });
 });
