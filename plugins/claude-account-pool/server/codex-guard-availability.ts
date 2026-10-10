@@ -20,9 +20,27 @@ export interface CodexGuardAvailabilitySnapshot {
   runningChildren: number;
 }
 
-export interface CodexGuardAvailability {
+export interface CodexGuardCache {
+  /**
+   * The last poll's snapshot, with every unexpired `reserve()` call added onto
+   * `runningChildren` (code-review finding, round 1). `reserve()`/`get()` close a check-then-act
+   * gap: a 60 s poll is stale the instant a create lands, so three back-to-back creates against a
+   * two-under-cap polled count would otherwise all read "usable" before any of them shows up in a
+   * poll.
+   */
   get(): CodexGuardAvailabilitySnapshot | undefined;
+  /**
+   * Records an in-flight Codex create: call this the moment the classifier selects a `codex/`
+   * ref, before the create has had any chance to show up in a poll. Expires when a poll whose
+   * request went out after this call resolves (the daemon's own count by then already reflects
+   * whichever of these turned into real agents), or after `RESERVATION_TTL_MS` as a safety net
+   * for a create that errored before ever reaching the daemon.
+   */
+  reserve(): void;
   refresh(): Promise<CodexGuardAvailabilitySnapshot | undefined>;
+}
+
+export interface CodexGuardAvailability extends CodexGuardCache {
   stop(): void;
 }
 
@@ -49,6 +67,13 @@ const STATUS_TIMEOUT_MS = 5_000;
  * whose scheduling has stopped.
  */
 const MAX_HEALTH_AGE_HOURS = 26;
+/**
+ * How long an unexpired reservation (`CodexGuardCache.reserve`) keeps counting against the cap
+ * when no poll ever resolves after it -- mirrors `codex-guard-session.ts`'s
+ * `RECENT_CREATE_WINDOW_MS` on the daemon side, which exists for the same reason: a burst of
+ * creates must not sail past `maxChildren` just because the daemon hasn't reported them back yet.
+ */
+const RESERVATION_TTL_MS = 15 * 60 * 1000;
 
 const TIMED_OUT = Symbol("timed-out");
 
@@ -93,11 +118,22 @@ export function createCodexGuardAvailability(
   const now = options.now ?? Date.now;
   let current: CodexGuardAvailabilitySnapshot | undefined;
   let quietUntil = 0;
+  // Timestamps of in-flight `reserve()` calls not yet accounted for by a poll (code-review
+  // finding, round 1). Pruned on every read/write by TTL, and on a successful poll by the poll's
+  // own start time -- see the two prune calls below for which rule applies where.
+  let reservations: number[] = [];
+
+  function dropExpiredReservations(): void {
+    const nowMs = now();
+    reservations = reservations.filter((reservedAt) => nowMs - reservedAt < RESERVATION_TTL_MS);
+  }
+
   const poller = createIntervalPoller({
     intervalMs: options.intervalMs ?? DEFAULT_INTERVAL_MS,
     setIntervalFn: options.setIntervalFn,
     clearIntervalFn: options.clearIntervalFn,
     run: async () => {
+      const pollStartedAt = now();
       try {
         // COMPAT(codexGuardPaseoApi): added in v0.9.x. A daemon without the RPC has no
         // `paseo.codexGuard`, or has it from a newer plugin child and rejects the request; either
@@ -108,7 +144,15 @@ export function createCodexGuardAvailability(
           return current;
         }
         const status = await withinBound(codexGuard.status({ timeout: STATUS_TIMEOUT_MS }), STATUS_TIMEOUT_MS);
-        current = status === TIMED_OUT ? undefined : snapshotOf(status, now);
+        if (status === TIMED_OUT) {
+          current = undefined;
+        } else {
+          current = snapshotOf(status, now);
+          // This poll's request went out at pollStartedAt, after every reservation made before
+          // that moment -- the daemon's own runningChildren by now already reflects whichever of
+          // those turned into real agents, so keeping them would double count from here on.
+          reservations = reservations.filter((reservedAt) => reservedAt >= pollStartedAt);
+        }
       } catch (error) {
         current = undefined;
         if (isUnknownRpc(error)) {
@@ -119,7 +163,17 @@ export function createCodexGuardAvailability(
     },
   });
   return {
-    get: () => current,
+    get: () => {
+      dropExpiredReservations();
+      if (!current) return undefined;
+      return reservations.length === 0
+        ? current
+        : { ...current, runningChildren: current.runningChildren + reservations.length };
+    },
+    reserve: () => {
+      dropExpiredReservations();
+      reservations.push(now());
+    },
     refresh: () => poller.runOnce(),
     stop: () => poller.stop(),
   };

@@ -4,51 +4,103 @@ import {
   resetCodexGuardHealthStateForTests,
   setCodexGuardHealthState,
 } from "../../agent/codex-guard-health.js";
-import type { ResourceMonitorAgentSummary } from "../../agent/agent-manager.js";
+import type { CodexGuardChildCandidateSummary } from "../../agent/agent-manager.js";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
+
+const NOW = new Date("2026-10-10T12:00:00.000Z").getTime();
+const now = () => NOW;
 
 afterEach(() => {
   resetCodexGuardHealthStateForTests();
 });
 
-function agent(overrides: Partial<ResourceMonitorAgentSummary> = {}): ResourceMonitorAgentSummary {
+function agent(
+  overrides: Partial<CodexGuardChildCandidateSummary> = {},
+): CodexGuardChildCandidateSummary {
   return {
     id: "agent-1",
     provider: "codex",
-    workspaceId: "ws-1",
-    internal: false,
-    isRunning: true,
     parentAgentId: "parent-1",
-    title: null,
+    lifecycle: "running",
+    busy: false,
+    createdAt: new Date(NOW - 20 * 60 * 1000).toISOString(), // created well before the recent-create window
     ...overrides,
   };
 }
 
 describe("countRunningCodexChildren", () => {
   it("counts a running codex agent with a parent", () => {
-    expect(countRunningCodexChildren([agent()])).toBe(1);
+    expect(countRunningCodexChildren([agent()], now)).toBe(1);
   });
 
   it("does not count a non-codex provider", () => {
-    expect(countRunningCodexChildren([agent({ provider: "claude" })])).toBe(0);
-  });
-
-  it("does not count an idle codex agent", () => {
-    expect(countRunningCodexChildren([agent({ isRunning: false })])).toBe(0);
+    expect(countRunningCodexChildren([agent({ provider: "claude" })], now)).toBe(0);
   });
 
   it("does not count a root codex agent (Tyler's own session, no parent)", () => {
-    expect(countRunningCodexChildren([agent({ parentAgentId: null })])).toBe(0);
+    expect(countRunningCodexChildren([agent({ parentAgentId: null })], now)).toBe(0);
+  });
+
+  it("does not count a closed codex agent", () => {
+    expect(countRunningCodexChildren([agent({ lifecycle: "closed" })], now)).toBe(0);
+  });
+
+  it("counts an initializing codex agent, not just a running one", () => {
+    expect(countRunningCodexChildren([agent({ lifecycle: "initializing" })], now)).toBe(1);
+  });
+
+  it("counts an idle-but-just-created child (the burst-of-creates gap)", () => {
+    const freshlyCreated = agent({
+      lifecycle: "idle",
+      createdAt: new Date(NOW - 60 * 1000).toISOString(),
+    });
+    expect(countRunningCodexChildren([freshlyCreated], now)).toBe(1);
+  });
+
+  it("does not count an old idle child with no queued turn", () => {
+    const oldIdle = agent({
+      lifecycle: "idle",
+      createdAt: new Date(NOW - 20 * 60 * 1000).toISOString(),
+    });
+    expect(countRunningCodexChildren([oldIdle], now)).toBe(0);
+  });
+
+  it("counts an old idle child that is busy (a queued/admitted turn)", () => {
+    const oldIdleButBusy = agent({
+      lifecycle: "idle",
+      busy: true,
+      createdAt: new Date(NOW - 20 * 60 * 1000).toISOString(),
+    });
+    expect(countRunningCodexChildren([oldIdleButBusy], now)).toBe(1);
+  });
+
+  it("counts a child right at the edge of the recent-create window", () => {
+    const edge = agent({
+      lifecycle: "idle",
+      createdAt: new Date(NOW - 15 * 60 * 1000).toISOString(),
+    });
+    expect(countRunningCodexChildren([edge], now)).toBe(1);
+  });
+
+  it("does not count a child just past the recent-create window", () => {
+    const pastEdge = agent({
+      lifecycle: "idle",
+      createdAt: new Date(NOW - 15 * 60 * 1000 - 1).toISOString(),
+    });
+    expect(countRunningCodexChildren([pastEdge], now)).toBe(0);
   });
 
   it("sums across several agents", () => {
     expect(
-      countRunningCodexChildren([
-        agent({ id: "a" }),
-        agent({ id: "b" }),
-        agent({ id: "c", provider: "claude" }),
-      ]),
+      countRunningCodexChildren(
+        [agent({ id: "a" }), agent({ id: "b" }), agent({ id: "c", provider: "claude" })],
+        now,
+      ),
     ).toBe(2);
+  });
+
+  it("defaults now to Date.now when not supplied", () => {
+    expect(countRunningCodexChildren([agent()])).toBe(1);
   });
 });
 
@@ -63,6 +115,7 @@ describe("CodexGuardSession", () => {
     const session = createCodexGuardSession({
       host: { emit: (msg) => emitted.push(msg) },
       listAgents: () => [agent(), agent({ id: "b", provider: "claude" })],
+      now,
     });
 
     await session.handleStatus(requestMsg());
@@ -85,6 +138,7 @@ describe("CodexGuardSession", () => {
     const session = createCodexGuardSession({
       host: { emit: (msg) => emitted.push(msg) },
       listAgents: () => [],
+      now,
     });
 
     await session.handleStatus(requestMsg());
@@ -100,6 +154,7 @@ describe("CodexGuardSession", () => {
     const session = createCodexGuardSession({
       host: { emit: (msg) => emitted.push(msg) },
       listAgents: () => [],
+      now,
     });
 
     await session.handleStatus(requestMsg());

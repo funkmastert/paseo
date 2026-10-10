@@ -1110,7 +1110,7 @@ export class Session {
     });
     this.codexGuardSession = createCodexGuardSession({
       host: { emit: (msg) => this.emit(msg) },
-      listAgents: () => this.agentManager.listAgentsForResourceMonitor(),
+      listAgents: () => this.agentManager.listAgentsForCodexGuardStatus(),
     });
     this.agentConfigSession = new AgentConfigSession({
       host: {

@@ -1265,6 +1265,79 @@ describe("createRoleRouter", () => {
       expect(result?.config.provider).not.toBe("codex");
       expect(result?.config.model).toBe("claude-sonnet-5");
     });
+
+    /**
+     * Code-review finding (round 1): a polled `runningChildren` is up to 60s stale, so a burst of
+     * back-to-back creates could all read "under the cap" off the same poll before any of them
+     * is ever reported back. `reserve()` closes that check-then-act gap -- this fake mirrors
+     * `codex-guard-availability.ts`'s real contract (`get()` adds unexpired reservations onto the
+     * polled count) without depending on that module directly.
+     */
+    function reservingCache(polledCount: number): {
+      get: () => { healthy: true; runningChildren: number };
+      reserve: () => void;
+    } {
+      let reservations = 0;
+      return {
+        get: () => ({ healthy: true, runningChildren: polledCount + reservations }),
+        reserve: () => {
+          reservations += 1;
+        },
+      };
+    }
+
+    it("reserves a slot when it routes to codex, so the very next create sees the incremented count", () => {
+      const cache = reservingCache(0);
+      const router = createRoleRouter(codexFirstOptions({ codexGuardCache: cache }));
+
+      router(request({ callerAgentId: "c1" }), fakeContext);
+
+      expect(cache.get().runningChildren).toBe(1);
+    });
+
+    it("never reserves when the create did not route to codex", () => {
+      const reserve = vi.fn();
+      const cache = { get: () => ({ healthy: false as const, runningChildren: 0 }), reserve };
+      const router = createRoleRouter(codexFirstOptions({ codexGuardCache: cache }));
+
+      const result = router(request({ callerAgentId: "c1" }), fakeContext);
+
+      expect(result?.config.provider).not.toBe("codex");
+      expect(reserve).not.toHaveBeenCalled();
+    });
+
+    it("three back-to-back creates: cap 3, polled count 2 -> only the first gets Codex", () => {
+      const policy = {
+        ...DEFAULT_POLICY,
+        roles: DEFAULT_POLICY.roles.map((role) =>
+          role.id === "worker" ? { ...role, models: ["codex/gpt-5.1", "claude-sonnet-5"] } : role,
+        ),
+        codex: { maxWindowPct: 60, maxReadingAgeHours: 2, maxChildren: 3 },
+      };
+      const cache = reservingCache(2);
+      const router = createRoleRouter(
+        codexFirstOptions({ policyCache: fakePolicyCache(policy), codexGuardCache: cache }),
+      );
+
+      const first = router(request({ callerAgentId: "c1" }), fakeContext);
+      const second = router(request({ callerAgentId: "c2" }), fakeContext);
+      const third = router(request({ callerAgentId: "c3" }), fakeContext);
+
+      expect(first?.config.provider).toBe("codex");
+      expect(second?.config.provider).not.toBe("codex");
+      expect(second?.config.model).toBe("claude-sonnet-5");
+      expect(third?.config.provider).not.toBe("codex");
+      expect(third?.config.model).toBe("claude-sonnet-5");
+    });
+
+    it("fires a fire-and-forget refresh on a codex pick, without blocking or throwing on its rejection", () => {
+      const refresh = vi.fn().mockRejectedValue(new Error("poll failed"));
+      const cache = { ...reservingCache(0), refresh };
+      const router = createRoleRouter(codexFirstOptions({ codexGuardCache: cache }));
+
+      expect(() => router(request({ callerAgentId: "c1" }), fakeContext)).not.toThrow();
+      expect(refresh).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("explicit model request precedence", () => {
