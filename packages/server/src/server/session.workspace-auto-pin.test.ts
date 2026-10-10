@@ -140,6 +140,8 @@ test("workspace.create.request auto-pins a brand new workspace over a client con
   const [record] = await workspaceRegistry.list();
   expect(record?.pinnedAt).toBeTruthy();
   expect(record?.pinSource).toBe("auto");
+  // R1: a client request with no caller agent is person-made (same rule as auto-pin).
+  expect(record?.createdBy).toBe("person");
 });
 
 test("workspace.create.request with a callerAgentId never auto-pins", async () => {
@@ -155,6 +157,8 @@ test("workspace.create.request with a callerAgentId never auto-pins", async () =
   const [record] = await workspaceRegistry.list();
   expect(record?.pinnedAt).toBeNull();
   expect(record?.pinSource).toBeUndefined();
+  // R1: a CLI call with PASEO_AGENT_ID (callerAgentId here) is agent-made.
+  expect(record?.createdBy).toBe("agent");
 });
 
 test("create_agent_request whose labels carry paseo.parent-agent-id does not pin, even with no callerAgentId", async () => {
