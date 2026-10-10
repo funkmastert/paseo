@@ -239,3 +239,44 @@ describe("the agent_model_policy tool — JEV's spawn hint", () => {
     expect(reply.result.content[0].text).not.toContain("Decided at create");
   });
 });
+
+describe("the agent_model_policy tool — arena ranking (U8, finding #2)", () => {
+  // Two same-shaped candidates (same thinking level across classes, via the flattened `thinking`
+  // block below) so neither class nor role would ask on their own — only arena ranking can make
+  // `work_kind` matter here, proving the preview actually simulates ranking rather than always
+  // treating it as off.
+  const rankedPolicy: RoleModelPolicy = {
+    ...DEFAULT_POLICY,
+    roles: DEFAULT_POLICY.roles.map((role) =>
+      role.id === "worker" ? { ...role, models: ["claude-haiku-4-5-20251001", "claude-sonnet-5"], mechanicalModels: [], hardModels: [] } : role,
+    ),
+    thinking: { leader: null, byTaskClass: { mechanical: "high", standard: "high", hard: "high" } },
+    arena: { enabled: true, shadow: false, roles: ["worker", "reviewer"], topTier: [], topTierMarginCi: 0, maxAgeHours: 72 },
+  };
+
+  // Same shape as rankedPolicy, minus the `arena` key — isolates ranking as the only variable
+  // that differs between the two tests below (same pool, same flattened thinking).
+  const { arena: _arena, ...unrankedPolicy } = rankedPolicy;
+
+  function rankedWorld(): ClassifierWorld {
+    return { ...world(), policy: rankedPolicy };
+  }
+  function unrankedWorld(): ClassifierWorld {
+    return { ...world(), policy: unrankedPolicy };
+  }
+
+  const call = { id: 1, method: "tools/call", params: { name: "agent_model_policy", arguments: { prompt: "Add a hover state to the submit button." } } };
+  const live = { active: true, reason: null, shadow: false, applyHard: false, applyRole: false, auditDeclared: false };
+
+  it("simulates ranking as live when policy.arena.enabled is true, asking work_kind and saying so", () => {
+    const reply = handleMcpMessage(call, rankedWorld, () => live) as { result: { content: { text: string }[] } };
+
+    expect(reply.result.content[0].text).toContain("Decided at create");
+  });
+
+  it("says nothing extra when policy.arena is absent: the no-effect skip is unchanged", () => {
+    const reply = handleMcpMessage(call, unrankedWorld, () => live) as { result: { content: { text: string }[] } };
+
+    expect(reply.result.content[0].text).not.toContain("Decided at create");
+  });
+});
