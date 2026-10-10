@@ -1,5 +1,9 @@
 import type { PluginBeforeRequests, PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { createAccountIdentity } from "./server/account-identity";
+import { createArenaRankingCache, type ArenaRankingCache } from "./server/arena-ranking-cache";
+import { startArenaRankingsPoller } from "./server/arena-rankings";
+import type { IntervalPoller } from "./server/interval-poller";
+import { resolvePaseoHome } from "./server/paseo-home";
 import { startClassifierToolServer, type ClassifierToolServer } from "./server/classifier-tool";
 import { echoed, echoedList } from "./server/echo";
 import { CE_PLUGIN_ID, createCompoundPolicyRouter, type CompoundPolicyEpisode, type ProviderEntryShape } from "./server/compound-policy";
@@ -64,6 +68,8 @@ export default function contribute(server: PluginServerContext) {
   let recentAgentTypes: RecentAgentTypes | null = null;
   let roleRouter: RoleCreateRouter | null = null;
   let jevAvailability: JevAvailability | null = null;
+  let arenaRankingsPoller: IntervalPoller<void> | null = null;
+  let arenaRankingCache: ArenaRankingCache | null = null;
   // stdout, not console.error: this is a record of every create, not a problem report.
   const decisionLog = createDecisionLog({ write: (line) => console.log(line) });
   let roleModelPolicyRpcHandlers: ReturnType<typeof createRoleModelPolicyRpcHandlers> | null = null;
@@ -110,6 +116,17 @@ export default function contribute(server: PluginServerContext) {
     // empty and nothing JEV runs.
     jevAvailability = createJevAvailability(paseo);
     const startedJevAvailability = jevAvailability;
+    // Daily LMArena refresh (U6, KTD-10). Started once per plugin process,
+    // fire-and-forget like jevAvailability's first poll: a slow or failing
+    // fetch must never delay a create, and the classifier treats a missing
+    // or stale file as today's order regardless of why.
+    arenaRankingsPoller = startArenaRankingsPoller(resolvePaseoHome());
+    // The plugin cache that feeds `ClassifierWorld.arenaRanking`, beside catalogCache/poolCache
+    // above (U8). Reads `arena.maxAgeHours` fresh off the policy cache on every poll.
+    arenaRankingCache = createArenaRankingCache(resolvePaseoHome(), {
+      getMaxAgeHours: () => startedPolicyCache.get().arena?.maxAgeHours ?? 72,
+    });
+    const startedArenaRankingCache = arenaRankingCache;
 
     // Both caches start empty/fail-open and otherwise wait for their 60s
     // interval tick. Without this, every create in the window after a
@@ -128,6 +145,7 @@ export default function contribute(server: PluginServerContext) {
       providerIds,
       parentProfiles,
       mcpGatewayCache,
+      arenaRankingCache,
       onDeclaredMcpUnknown: (episode) =>
         console.error(
           `[claude-account-pool] role-router: caller "${episode.callerAgentId}" asked for MCP servers ${echoedList(episode.values)} in paseo.mcp, which no mcpGateway server is called; created without them`,
@@ -280,6 +298,9 @@ export default function contribute(server: PluginServerContext) {
           startedUsagePoller.pollOnce().catch(() => undefined),
           // Before its first read every child keeps every MCP server.
           startedMcpGatewayCache.forceRefresh().catch(() => undefined),
+          // A local disk read, not a network call (unlike the daily refresh job above) — cheap
+          // enough to warm up like the other caches rather than running cold until the first tick.
+          startedArenaRankingCache.refresh().catch(() => undefined),
         ]).then(() => undefined);
         // Not part of the warm-up: a slow first `jev.status` must not delay a create. A create
         // before it answers runs as if JEV were absent.
@@ -355,6 +376,8 @@ export default function contribute(server: PluginServerContext) {
               },
               availability: availability?.spawnHint,
               paseo,
+              // Shadow counts too (KTD-13): shadow still wants the kind recorded for comparison.
+              rankingActive: policyCache.get().arena?.enabled === true,
             }),
         jevToolsWorldFor({
           availability,
@@ -606,6 +629,8 @@ export default function contribute(server: PluginServerContext) {
     catalogCache?.stop();
     parentProfiles?.stop();
     jevAvailability?.stop();
+    arenaRankingsPoller?.stop();
+    arenaRankingCache?.stop();
     classifierTool?.close();
   };
 }

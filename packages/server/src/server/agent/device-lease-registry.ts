@@ -8,7 +8,7 @@
  * lease whose device died stops filling one. See docs/device-leases.md.
  */
 
-import type { DevicePlatform, RunningDevice } from "./device-detection.js";
+import { containsWholeToken, type DevicePlatform, type RunningDevice } from "./device-detection.js";
 
 export type DeviceLeaseSource = "checkout" | "launch";
 
@@ -50,6 +50,14 @@ export interface DeviceLease {
    * simulator teardown shuts down booted ones only (docs/device-leases.md#shutdown).
    */
   booted?: true;
+  /**
+   * When R2's "used" was last seen for this lease: the holder mid-turn, a live shell under its
+   * root, or another process naming the device id. Set at bind, advanced by the owning manager's
+   * sweep and on a checkout or gate decision that touches this lease
+   * (docs/device-leases.md#a-lease-cannot-leak). Absent only for a lease created before this
+   * field existed; never un-set after a manager has touched it once.
+   */
+  lastUsedAtMs?: number;
 }
 
 export type DeviceLeaseReleaseReason =
@@ -57,7 +65,8 @@ export type DeviceLeaseReleaseReason =
   | "device-stopped"
   | "never-started"
   | "agent-gone"
-  | "expired";
+  | "expired"
+  | "idle";
 
 export interface DeviceLeaseRelease {
   lease: DeviceLease;
@@ -137,16 +146,6 @@ export function isPlatformFloorUnfilled(input: {
   leases: readonly DeviceLease[];
 }): boolean {
   return evaluateDeviceOccupancy(input).byPlatform[input.platform] === 0;
-}
-
-/**
- * Case-insensitive whole-token match of `needle` inside `haystack`, so a UDID or AVD name found
- * inside a longer sentence counts but a name that is merely a substring of a longer word does
- * not (`pixel` must not match `pixel_7a`).
- */
-function containsWholeToken(haystack: string, needle: string): boolean {
-  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(^|[^0-9A-Za-z_-])${escaped}([^0-9A-Za-z_-]|$)`, "i").test(haystack);
 }
 
 /**

@@ -204,6 +204,16 @@ export interface DeviceIdReference {
 }
 
 /**
+ * Case-insensitive whole-token match of `needle` inside `haystack`, so a UDID, AVD name or
+ * serial found inside a longer command line counts but a name that is merely a substring of a
+ * longer word does not (`pixel` must not match `pixel_7a`).
+ */
+export function containsWholeToken(haystack: string, needle: string): boolean {
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^0-9A-Za-z_-])${escaped}([^0-9A-Za-z_-]|$)`, "i").test(haystack);
+}
+
+/**
  * A booted device's `launchd_sim` argv ends in
  * `<set root>/<UDID>/data/var/run/launchd_bootstrap.plist`, which is the only place the set root
  * appears in a process listing at all. Anchored on the `/data/` structure rather than on the
@@ -214,8 +224,18 @@ const DEVICE_DATA_PATH =
   /(\/.*?)\/([0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})\/data\/var\/run\//;
 const ANY_DEVICE_UDID = /[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}/g;
 
+/**
+ * `knownDeviceIds` additionally matches an exact id as a whole token in argv — for an Android
+ * AVD name or adb serial, or an iOS physical device's devicectl identifier, none of which follow
+ * a fixed pattern a blind regex could scan for the way a simulator UDID can. Recorded under the
+ * id exactly as given (no case change), so a caller's lookup by that same id — a lease's
+ * `deviceId` — finds it. The device cap's idle-release check is why this exists
+ * (docs/device-leases.md#a-lease-cannot-leak); the physical install gate's ids are among the ones
+ * a caller passes in.
+ */
 export function collectDeviceIdReferences(
   rows: readonly ProcessSampleRow[],
+  knownDeviceIds?: Iterable<string>,
 ): Map<string, DeviceIdReference> {
   const references = new Map<string, DeviceIdReference>();
   const record = (deviceId: string, pid: number, setRoot?: string) => {
@@ -229,9 +249,13 @@ export function collectDeviceIdReferences(
     for (const match of row.command.matchAll(ANY_DEVICE_UDID)) {
       record(match[0].toUpperCase(), row.pid);
     }
-    if (basename(row.command.split(/\s+/)[0] ?? "") !== SIMULATOR_PROCESS) continue;
-    const booted = DEVICE_DATA_PATH.exec(row.command);
-    if (booted) record(booted[2].toUpperCase(), row.pid, booted[1]);
+    if (basename(row.command.split(/\s+/)[0] ?? "") === SIMULATOR_PROCESS) {
+      const booted = DEVICE_DATA_PATH.exec(row.command);
+      if (booted) record(booted[2].toUpperCase(), row.pid, booted[1]);
+    }
+    for (const deviceId of knownDeviceIds ?? []) {
+      if (containsWholeToken(row.command, deviceId)) record(deviceId, row.pid);
+    }
   }
   return references;
 }

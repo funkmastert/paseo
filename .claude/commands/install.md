@@ -380,11 +380,14 @@ On a non-zero exit, show the last 40 lines of that log and stop.
 
 Then ask whether to also build the desktop app installer. It takes about two
 minutes and produces a `.dmg` or `.exe` the user installs by hand; default to
-skipping it. If yes:
+skipping it. The three `-c.mac.*` overrides are required: `electron-builder.yml`
+sets `notarize: true` and `hardenedRuntime: true` for the signed release job, so
+without them a local build fails at notarization for want of an Apple Developer
+ID (docs/install.md#build). If yes:
 
 ```bash
 . "<ENV_FILE>"
-(cd "$BOZEO_REPO" && COREPACK_ENABLE_AUTO_PIN=0 npm run build:desktop -- --publish never > "$BOZEO_SRC/.dev/install-desktop.log" 2>&1; echo "build:desktop exit $?")
+(cd "$BOZEO_REPO" && COREPACK_ENABLE_AUTO_PIN=0 npm run build:desktop -- --publish never -c.mac.identity=- -c.mac.hardenedRuntime=false -c.mac.notarize=false > "$BOZEO_SRC/.dev/install-desktop.log" 2>&1; echo "build:desktop exit $?")
 ```
 
 After the builds, check the known trap: with Corepack's `yarn` shim on
@@ -509,17 +512,22 @@ not restart. If the list names any other path, stop and ask the user.
 
 For each `CLAUDE_CONFIG_DIR`, this step creates the directory, links its
 `projects/` to `~/.claude/projects` so a session can move between accounts,
-and links `CLAUDE.md` to `~/.claude/CLAUDE.md` if the user has one. First look,
-changing nothing:
+and links `CLAUDE.md` and `skills/` to `~/.claude/CLAUDE.md` and
+`~/.claude/skills` if the user has them. Doctor checks all three, so skipping
+`skills/` leaves every pooled account with a `no skills/` warning and a
+different skill set per account. First look, changing nothing:
 
 ```bash
 . "<ENV_FILE>"
 for d in "<abs dir 1>" "<abs dir 2>"; do
   if [ -e "$d" ]; then echo "$d: exists, $(ls -A "$d" | wc -l | tr -d ' ') entries"; else echo "$d: new"; fi
-  [ -L "$d/projects" ] && echo "  projects: already linked -> $(readlink "$d/projects")"
+  for name in projects CLAUDE.md skills; do
+    [ -L "$d/$name" ] && echo "  $name: already linked -> $(readlink "$d/$name")"
+  done
 done
 [ -d "$HOME/.claude/projects" ] && echo "~/.claude/projects: exists" || echo "~/.claude/projects: missing, will be created"
 [ -f "$HOME/.claude/CLAUDE.md" ] && echo "~/.claude/CLAUDE.md: exists" || echo "~/.claude/CLAUDE.md: none"
+[ -d "$HOME/.claude/skills" ] && echo "~/.claude/skills: exists" || echo "~/.claude/skills: none"
 ```
 
 If a directory exists with entries, ask before using it. Get a yes, then:
@@ -531,7 +539,7 @@ for d in "<abs dir 1>" "<abs dir 2>"; do
   case "$d" in /*|[A-Za-z]:/*) ;; *) echo "STOP: $d is not absolute"; continue ;; esac
   [ "$d" = "$HOME/.claude" ] && { echo "STOP: $d is ~/.claude itself"; continue; }
   mkdir -p "$d"
-  for name in projects CLAUDE.md; do
+  for name in projects CLAUDE.md skills; do
     target="$HOME/.claude/$name"
     [ -e "$target" ] || continue
     if [ -L "$d/$name" ]; then echo "$d/$name: already linked -> $(readlink "$d/$name")"
@@ -555,17 +563,41 @@ Then print, for the user to run in their own terminal, one line per directory.
 **Do not run it.** It opens a browser.
 
 ```bash
-CLAUDE_CONFIG_DIR="<abs dir>" claude /login
+CLAUDE_CONFIG_DIR="<abs dir>" claude auth login --email <that entry's email>
 ```
+
+Use the `auth login --email` form, not a bare `claude /login`: it pre-fills the
+address, and it is the form `paseo doctor` prints as the fix.
 
 On Windows, give the PowerShell form too, also untested:
 
 ```powershell
-$env:CLAUDE_CONFIG_DIR = "<abs dir>"; claude /login; Remove-Item Env:CLAUDE_CONFIG_DIR
+$env:CLAUDE_CONFIG_DIR = "<abs dir>"; claude auth login --email <email>; Remove-Item Env:CLAUDE_CONFIG_DIR
 ```
 
-Each directory signs in to a different Claude account. Wait for the user to
-say they are done, or to skip for now. Step 11 checks sign-in.
+Each directory signs in to a different Claude account. **Tell the user to sign
+out of claude.com, or use a private window, between accounts.** `--email` only
+pre-fills the page: with a live claude.com session the authorize step completes
+against that account without showing the page, and the directory ends up on the
+wrong login. Two of five sign-ins cross-signed this way while setting up two
+machines, each silently adopting the previous sign-in's account.
+
+Wait for the user after each directory, one at a time, and verify it before
+moving to the next. Compare `orgId`, not just `email`:
+
+```bash
+. "<ENV_FILE>"
+CLAUDE_CONFIG_DIR="<abs dir>" claude auth status | grep -E '"(email|orgId)"'
+```
+
+This prints an account name, not a credential, so it is fine to show. Distinct
+`orgId` values across the directories are the proof the pool has that many real
+accounts; two the same means fewer accounts than entries, and the pool then
+treats one budget as two. On a mismatch, run
+`CLAUDE_CONFIG_DIR="<abs dir>" claude auth logout` and sign that one in again —
+it leaves the other directories alone, even ones sharing a login.
+
+Step 11 checks sign-in.
 
 ### 10. Install the plugin — Fresh install, Isolated instance
 

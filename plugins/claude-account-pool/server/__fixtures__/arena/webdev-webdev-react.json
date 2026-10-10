@@ -1,0 +1,229 @@
+{
+  "rows": [
+    {
+      "row": {
+        "model_name": "claude-opus-5.5-max",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1862.5957294433972,
+        "rating_lower": 1843.048441093353,
+        "rating_upper": 1882.1430177934415,
+        "variance": 99.46650469904878,
+        "vote_count": 1576,
+        "rank": 1,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "claude-sonnet-5.5-xhigh",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1824.1536674115682,
+        "rating_lower": 1805.2055724313338,
+        "rating_upper": 1843.1017623918026,
+        "variance": 93.46196852244564,
+        "vote_count": 1469,
+        "rank": 2,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "gpt-6-astra-max",
+        "organization": "openai",
+        "license": "Proprietary",
+        "rating": 1810.966972814956,
+        "rating_lower": 1796.6779913513735,
+        "rating_upper": 1825.2559542785384,
+        "variance": 53.15037874848515,
+        "vote_count": 3044,
+        "rank": 3,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "claude-fable-5.1-max",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1792.9601041995027,
+        "rating_lower": 1781.3008904086676,
+        "rating_upper": 1804.6193179903378,
+        "variance": 35.3868862235613,
+        "vote_count": 4485,
+        "rank": 4,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "gpt-6.1-sol-max",
+        "organization": "openai",
+        "license": "Proprietary",
+        "rating": 1757.873236080525,
+        "rating_lower": 1738.857243281005,
+        "rating_upper": 1776.8892288800453,
+        "variance": 94.13298411619043,
+        "vote_count": 1306,
+        "rank": 5,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "claude-sonnet-5.5-high",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1748.783581947667,
+        "rating_lower": 1735.0741195541154,
+        "rating_upper": 1762.4930443412188,
+        "variance": 48.92655834489679,
+        "vote_count": 2574,
+        "rank": 6,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "claude-opus-5-max",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1714.055666561709,
+        "rating_lower": 1706.5044551910373,
+        "rating_upper": 1721.6068779323805,
+        "variance": 14.843525813002504,
+        "vote_count": 11288,
+        "rank": 7,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "gpt-6-sol-max",
+        "organization": "openai",
+        "license": "Proprietary",
+        "rating": 1693.1129026290816,
+        "rating_lower": 1677.9291647945286,
+        "rating_upper": 1708.296640463635,
+        "variance": 60.01519354743096,
+        "vote_count": 1955,
+        "rank": 8,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "qwen3.8-max-0902",
+        "organization": "alibaba",
+        "license": "Proprietary",
+        "rating": 1690.6742902021629,
+        "rating_lower": 1681.653534253454,
+        "rating_upper": 1699.6950461508718,
+        "variance": 21.18310821081863,
+        "vote_count": 7027,
+        "rank": 9,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "gemini-4-argon-high",
+        "organization": "google",
+        "license": "Proprietary",
+        "rating": 1689.826005799913,
+        "rating_lower": 1669.8522299089104,
+        "rating_upper": 1709.7997816909158,
+        "variance": 103.8542236076629,
+        "vote_count": 1089,
+        "rank": 10,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "qwen3.8-max",
+        "organization": "alibaba",
+        "license": "Proprietary",
+        "rating": 1682.329507365924,
+        "rating_lower": 1668.1314127858575,
+        "rating_upper": 1696.5276019459902,
+        "variance": 52.47638959932554,
+        "vote_count": 2506,
+        "rank": 11,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "claude-opus-5-high",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1677.1424713446468,
+        "rating_lower": 1670.5361274575453,
+        "rating_upper": 1683.748815231748,
+        "variance": 11.361251439044496,
+        "vote_count": 14705,
+        "rank": 12,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "muse-spark-1.3-max",
+        "organization": "meta",
+        "license": "Proprietary",
+        "rating": 1669.4826461222722,
+        "rating_lower": 1659.679631405404,
+        "rating_upper": 1679.2856608391403,
+        "variance": 25.01630292675352,
+        "vote_count": 5088,
+        "rank": 13,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "kimi-k3-max",
+        "organization": "moonshot",
+        "license": "Kimi K3 license",
+        "rating": 1669.0303183760036,
+        "rating_lower": 1661.7486005403769,
+        "rating_upper": 1676.3120362116304,
+        "variance": 13.802937142536852,
+        "vote_count": 11630,
+        "rank": 14,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "grok-4.7-xhigh",
+        "organization": "xai",
+        "license": "Proprietary",
+        "rating": 1661.1512856814932,
+        "rating_lower": 1647.562737645524,
+        "rating_upper": 1674.7398337174623,
+        "variance": 48.06732190675244,
+        "vote_count": 2416,
+        "rank": 15,
+        "category": "webdev-react",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    }
+  ]
+}

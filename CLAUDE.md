@@ -62,6 +62,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/doctor.md](docs/doctor.md)                                     | `paseo doctor` — read-only diagnosis of this fork's known failures, where checks run, credential and deadline gotchas            |
 | [docs/token-audit.md](docs/token-audit.md)                           | Token audit — the 7 measured items, `claude -p /context` for exact tokens, the weekly job, what escalates, the advisory agent    |
 | [docs/catastrophe-gate.md](docs/catastrophe-gate.md)                 | Catastrophe gate — the only two things agents may not do (rewrite main, wipe a disk), the shell walker, gaps, kill switch        |
+| [docs/ask-user-question.md](docs/ask-user-question.md)               | AskUserQuestion check — the `Stop` hook that blocks a plain-text question to Tyler, the detector's two signals, the config       |
 | [docs/device-leases.md](docs/device-leases.md)                       | Device cap — simulator/emulator slots, the process scan as the count, checkout queueing, the launch gate                         |
 | [docs/shared-builds.md](docs/shared-builds.md)                       | Shared builds — `share_build`, the expiring `/b/<token>/` links, making a debug APK or ad-hoc IPA, caps, the disk-low refusal    |
 | [docs/artifact-janitor.md](docs/artifact-janitor.md)                 | Artifact janitor — orphaned Xcode test simulator clones, cleanup obligations, the unowned sweep, the disk guard                  |
@@ -76,6 +77,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/remediation.md](docs/remediation.md)                           | Remediation ladder — remedy first, one bounded agent second, a person last; episodes, the agent contract, config                 |
 | [docs/refocus.md](docs/refocus.md)                                   | Refocus — restating an agent's assignment after growth or compaction, riding on prompts it already gets, cost, compaction        |
 | [docs/jev.md](docs/jev.md)                                           | JEV — the decision-model client, its fail-open rules, what leaves the machine, each feature's seam, questions and thresholds     |
+| [docs/arena-ranking.md](docs/arena-ranking.md)                       | Arena-ranked model pick — the LMArena data flow, the policy shape, the fail-open order, the labels, top-tier rarity              |
 | [docs/daemon-vitals.md](docs/daemon-vitals.md)                       | Daemon vitals — event-loop wedge detector, why suspension is not a wedge, slow-op recorder, shutdown receipt                     |
 | [docs/file-observation.md](docs/file-observation.md)                 | Recursive watcher ownership, Linux constraints, teardown invariants, and Parcel comparison                                       |
 | [docs/testing.md](docs/testing.md)                                   | TDD workflow, determinism, real dependencies over mocks, test organization                                                       |

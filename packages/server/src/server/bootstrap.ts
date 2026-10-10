@@ -279,6 +279,7 @@ import {
 import { listProcessesInside } from "./worktree-process-scan.js";
 import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
+import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { RemediationConfig } from "./remediation/config.js";
 import {
   createForwardingRemediationSink,
@@ -741,6 +742,8 @@ export interface PaseoDaemonConfig {
   refocus?: RefocusConfig;
   /** The catastrophe gate's kill switch (docs/catastrophe-gate.md). Absent means on. */
   catastropheGate?: MutableDaemonConfig["catastropheGate"];
+  /** The AskUserQuestion check's kill switch (docs/ask-user-question.md). Absent means on. */
+  askUserQuestion?: MutableDaemonConfig["askUserQuestion"];
   /** The native build gate (docs/resource-monitor.md). Absent means on, one build at a time. */
   buildGate?: MutableDaemonConfig["buildGate"];
   remediation?: RemediationConfig;
@@ -986,6 +989,14 @@ function withCatastropheGateConfig(
 ): Pick<MutableDaemonConfig, "catastropheGate"> {
   return config.catastropheGate !== undefined
     ? { catastropheGate: { ...config.catastropheGate } }
+    : {};
+}
+
+function withAskUserQuestionConfig(
+  config: Pick<PaseoDaemonConfig, "askUserQuestion">,
+): Pick<MutableDaemonConfig, "askUserQuestion"> {
+  return config.askUserQuestion !== undefined
+    ? { askUserQuestion: { ...config.askUserQuestion } }
     : {};
 }
 
@@ -1508,6 +1519,7 @@ export function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): Mut
     ...withAdmissionConfig(config),
     ...withRefocusConfig(config),
     ...withCatastropheGateConfig(config),
+    ...withAskUserQuestionConfig(config),
     ...withBuildGateConfig(config),
     ...withRemediationConfig(config),
     ...withDiskSweeperConfig(config),
@@ -2248,6 +2260,37 @@ export async function createPaseoDaemon(
   reportCatastropheGateMode();
   daemonConfigStore.onChange(reportCatastropheGateMode);
 
+  // The AskUserQuestion check (docs/ask-user-question.md). Read on every Stop, so a reload of
+  // `agents.askUserQuestion` reaches running agents without restarting them. `isRootAgent` reads
+  // the live agent manager the same way the read check's agent source does (`getAgentManager`
+  // below resolves once `agentManager` is assigned further down this function).
+  const readAskUserQuestionConfig = (): { enabled: boolean; mode: "enforce" | "log" } => {
+    const section = daemonConfigStore.get().askUserQuestion;
+    return {
+      enabled: section?.enabled !== false,
+      mode: section?.mode === "log" ? "log" : "enforce",
+    };
+  };
+  const isRootAgentForAskUserQuestion = (agentId: string): boolean => {
+    const agent = agentManager.getAgent(agentId);
+    return agent !== null && agent.labels[PARENT_AGENT_ID_LABEL] == null;
+  };
+  const askUserQuestionCheckMode = new MonitorModeLog(
+    logger.child({ module: "ask-user-question" }),
+  );
+  const reportAskUserQuestionCheckMode = () => {
+    const resolved = readAskUserQuestionConfig();
+    askUserQuestionCheckMode.report([
+      {
+        monitor: "ask-user-question",
+        enabled: resolved.enabled,
+        dryRun: resolved.mode === "log",
+      },
+    ]);
+  };
+  reportAskUserQuestionCheckMode();
+  daemonConfigStore.onChange(reportAskUserQuestionCheckMode);
+
   const agentProviderRuntime = await createAgentProviderRuntime({
     paseoHome: config.paseoHome,
     logger,
@@ -2260,6 +2303,10 @@ export async function createPaseoDaemon(
       deviceLaunchGate,
       isCatastropheGateEnabled,
       fileReadObserver: readCheckObserver.hooks,
+      askUserQuestionCheck: {
+        readConfig: readAskUserQuestionConfig,
+        isRootAgent: isRootAgentForAskUserQuestion,
+      },
       isDev: config.isDev === true,
       extraClients: config.agentClients,
     },
@@ -2292,6 +2339,15 @@ export async function createPaseoDaemon(
       workspaceGitService.onWorkspaceStateMayHaveChanged(cwd);
     },
     onAgentTurnFinished: (params) => handleAgentTurnFinished(params),
+    // R5, KTD-5 (docs/plans/2026-10-09-002-fix-device-idle-release-plan.md): archive and close
+    // both fire this, so a closed agent's devices free in this tick rather than on the next
+    // sweep (up to a minute for simulators) or the physical manager's next 15s reconcile.
+    onAgentClosed: (agentId) => {
+      void deviceLeaseManager.reconcileAgentGone().catch((error) => {
+        logger.warn({ err: error, agentId }, "Failed to reconcile the device cap on agent close");
+      });
+      physicalDeviceLeaseManager.detectionChanged();
+    },
     mcpAuthToken: agentMcpAuthToken,
     resolvePaseoToolPolicy: (provider) =>
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
@@ -3556,6 +3612,10 @@ export async function createPaseoDaemon(
               readFreeDiskBytes,
               // The build gate counts builds from this sweep's `ps` rather than its own.
               reportAttributedSample: (sample) => nativeBuildGate.observeSample(sample),
+              // The physical-device lease manager's only process evidence (docs/device-leases.md
+              // #physical-devices); its own detection is push-based, never a `ps` sample.
+              reportPhysicalDeviceSample: (sample) =>
+                physicalDeviceLeaseManager.reportProcessSample(sample),
               readDiskGrowth: () => worktreeDiskMonitor?.getLastGrowthReport() ?? null,
               readDaemonConfig: () => ({
                 resourceMonitor: daemonConfigStore.get().resourceMonitor,

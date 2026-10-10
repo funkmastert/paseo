@@ -1364,6 +1364,8 @@ describe("DeviceLeaseManager simulator teardown config", () => {
       agents: [IDLE_HOLDER],
     });
     await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    // The agent's own CLI process, present and idle, so the tree is attributable at all.
+    harness.state.rows.push(agentRootRow(850, "agent-1"));
 
     harness.state.nowMs += 6 * 60_000;
     await sweepRows(harness);
@@ -1377,6 +1379,7 @@ describe("DeviceLeaseManager simulator teardown config", () => {
       agents: [IDLE_HOLDER],
     });
     await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    harness.state.rows.push(agentRootRow(850, "agent-1"));
 
     harness.state.nowMs += 31 * 60_000;
     await sweepRows(harness);
@@ -1406,6 +1409,291 @@ describe("DeviceLeaseManager simulator teardown config", () => {
       { monitor: "simulator-teardown", enabled: true, dryRun: true },
       { monitor: "simulator-teardown", enabled: false, dryRun: false },
     ]);
+  });
+});
+
+describe("DeviceLeaseManager idle release", () => {
+  test("an emulator lease whose holder goes idle with no shell for 15 minutes is released, and the emulator keeps its slot", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    // Booted without checking out; adoptAttributedDevices leases it straight to the agent whose
+    // tree it sits in.
+    harness.state.rows = [agentRootRow(500, "agent-1"), emulatorRow(501, 500, "pixel_a")];
+    await sweepRows(harness);
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+
+    harness.state.nowMs += 15 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ platform: "android", deviceId: "pixel_a", reason: "idle" }),
+      "Device slot released",
+    );
+    const snapshot = await harness.manager.getSnapshot();
+    expect(snapshot.used).toBe(1);
+    expect(snapshot.devices[0]).toMatchObject({ deviceId: "pixel_a", attribution: "process" });
+  });
+
+  test("a holder mid-turn keeps its emulator lease past 15 minutes", async () => {
+    const harness = createManager({ agents: [{ ...IDLE_HOLDER, isRunning: true }] });
+    harness.state.rows = [agentRootRow(500, "agent-1"), emulatorRow(501, 500, "pixel_a")];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.logger.info.mock.calls.some(([, msg]) => msg === "Device slot released")).toBe(
+      false,
+    );
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("a live background shell (a Gradle build) keeps the lease past 15 minutes", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    harness.state.rows = [
+      agentRootRow(500, "agent-1"),
+      emulatorRow(501, 500, "pixel_a"),
+      childRow(502, 500, "/bin/zsh -c ./gradlew assembleDebug"),
+    ];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.logger.info.mock.calls.some(([, msg]) => msg === "Device slot released")).toBe(
+      false,
+    );
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("another process naming the device's id keeps the lease", async () => {
+    const harness = createManager({
+      agents: [IDLE_HOLDER, { agentId: "agent-2", provider: "claude", isRunning: false }],
+    });
+    harness.state.rows = [agentRootRow(500, "agent-1"), emulatorRow(501, 500, "fake_pixel_a")];
+    await sweepRows(harness);
+
+    harness.state.rows.push(
+      agentRootRow(700, "agent-2"),
+      childRow(701, 700, "/bin/zsh -c adb -s fake_pixel_a logcat"),
+      childRow(702, 701, "adb -s fake_pixel_a logcat"),
+    );
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.logger.info.mock.calls.some(([, msg]) => msg === "Device slot released")).toBe(
+      false,
+    );
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("a booted: true simulator lease is never idle-released; the teardown still shuts it down at its own limit", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    harness.state.rows.push(agentRootRow(850, "agent-1"));
+
+    harness.state.nowMs += 16 * 60_000;
+    await sweepRows(harness);
+    expect(
+      harness.logger.info.mock.calls.some(
+        ([fields, msg]) => msg === "Device slot released" && fields.reason === "idle",
+      ),
+    ).toBe(false);
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+
+    // Past the teardown's own 30-minute idle limit, it shuts the simulator down instead.
+    harness.state.nowMs += 15 * 60_000;
+    await sweepRows(harness);
+    expect(harness.shutdownExec).toHaveBeenCalledTimes(1);
+  });
+
+  test("a checkout decision resets the clock", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER], rows: [simulatorRow(1, UDID_A)] });
+    const first = await harness.manager.checkout({
+      agentId: "agent-1",
+      platform: "ios",
+      device: UDID_A,
+    });
+    expect(first.status).toBe("granted");
+    await sweepRows(harness);
+
+    harness.state.nowMs += 10 * 60_000;
+    const again = await harness.manager.checkout({
+      agentId: "agent-1",
+      platform: "ios",
+      device: UDID_A,
+    });
+    expect(again.status).toBe("granted");
+
+    harness.state.nowMs += 10 * 60_000;
+    await sweepRows(harness);
+    // 20 minutes since the lease was taken, but only 10 since the last checkout touched it.
+    expect(
+      harness.logger.info.mock.calls.some(
+        ([fields, msg]) => msg === "Device slot released" && fields.reason === "idle",
+      ),
+    ).toBe(false);
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("a launch-gate decision resets the clock", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    harness.state.rows = [agentRootRow(500, "agent-1"), emulatorRow(501, 500, "pixel_a")];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 10 * 60_000;
+    await harness.manager.gateLaunch({
+      agentId: "agent-1",
+      command: "npx expo run:android",
+    });
+
+    harness.state.nowMs += 10 * 60_000;
+    await sweepRows(harness);
+    expect(
+      harness.logger.info.mock.calls.some(
+        ([fields, msg]) => msg === "Device slot released" && fields.reason === "idle",
+      ),
+    ).toBe(false);
+  });
+
+  test("idleReleaseMinutes: 0 turns it off", async () => {
+    const harness = createManager({
+      config: { enabled: true, idleReleaseMinutes: 0 },
+      agents: [IDLE_HOLDER],
+    });
+    harness.state.rows = [agentRootRow(500, "agent-1"), emulatorRow(501, 500, "pixel_a")];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 60 * 60_000;
+    await sweepRows(harness);
+
+    expect(
+      harness.logger.info.mock.calls.some(
+        ([fields, msg]) => msg === "Device slot released" && fields.reason === "idle",
+      ),
+    ).toBe(false);
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("dry run logs and keeps the lease", async () => {
+    const harness = createManager({
+      config: { enabled: true, dryRun: true },
+      agents: [IDLE_HOLDER],
+    });
+    harness.state.rows = [agentRootRow(500, "agent-1"), emulatorRow(501, 500, "pixel_a")];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 15 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ dryRun: true, deviceId: "pixel_a" }),
+      "Would release an idle device lease",
+    );
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("a holder whose process tree can't be attributed (no callerAgentId marker, as on Codex or OpenCode) keeps its lease rather than reading as idle", async () => {
+    const harness = createManager({
+      agents: [IDLE_HOLDER],
+      rows: [emulatorRow(1, 0, "fake_pixel_b")],
+    });
+    const result = await harness.manager.checkout({
+      agentId: "agent-1",
+      platform: "android",
+      device: "fake_pixel_b",
+    });
+    expect(result.status).toBe("granted");
+    await sweepRows(harness);
+
+    // No agentRootRow is ever added for agent-1 — its provider never carries the marker
+    // attribution keys on, so its tree can never be found, in any sweep.
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(
+      harness.logger.info.mock.calls.some(
+        ([fields, msg]) => msg === "Device slot released" && fields.reason === "idle",
+      ),
+    ).toBe(false);
+  });
+
+  test("a launch command naming another agent's device does not reset that agent's idle clock", async () => {
+    const harness = createManager({
+      rows: [simulatorRow(1, UDID_A), agentRootRow(500, "agent-1")],
+      agents: [IDLE_HOLDER, { agentId: "agent-2", provider: "claude", isRunning: true }],
+    });
+    const first = await harness.manager.checkout({
+      agentId: "agent-1",
+      platform: "ios",
+      device: UDID_A,
+    });
+    expect(first.status).toBe("granted");
+    await sweepRows(harness);
+
+    harness.state.nowMs += 10 * 60_000;
+    // agent-2 names agent-1's device in a launch command — allowed (the device is already
+    // running), but must not touch agent-1's idle clock.
+    await harness.manager.gateLaunch({
+      agentId: "agent-2",
+      command: `xcrun simctl boot ${UDID_A}`,
+    });
+
+    harness.state.nowMs += 10 * 60_000;
+    await sweepRows(harness);
+
+    // 20 minutes since the lease was taken and never touched by its own holder.
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: UDID_A, reason: "idle" }),
+      "Device slot released",
+    );
+  });
+
+  test("a pending lease with no device yet is not idle-released before the never-started TTL", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    // Nothing of the platform is running: checkout grants a pending lease with no deviceId yet.
+    const result = await harness.manager.checkout({ agentId: "agent-1", platform: "android" });
+    expect(result.status).toBe("granted");
+    await sweepRows(harness);
+
+    // Past idleReleaseMinutes (15) but short of pendingTtlMinutes (25).
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(
+      harness.logger.info.mock.calls.some(
+        ([fields, msg]) => msg === "Device slot released" && fields.reason === "idle",
+      ),
+    ).toBe(false);
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+
+    // Past pendingTtlMinutes (25): never-started is the one backstop for a pending lease.
+    harness.state.nowMs += 6 * 60_000;
+    await sweepRows(harness);
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: "agent-1", reason: "never-started" }),
+      "Device slot released",
+    );
+  });
+});
+
+describe("DeviceLeaseManager reconcileAgentGone", () => {
+  test("releases a held lease in the same call, once the agent is no longer known", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+    });
+    const result = await harness.manager.checkout({ agentId: "agent-1", platform: "android" });
+    expect(result.status).toBe("granted");
+    expect((await harness.manager.getSnapshot()).used).toBe(1);
+
+    // The agent manager no longer knows this agent — archived or closed.
+    harness.state.agents = [];
+    await harness.manager.reconcileAgentGone();
+
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: "agent-1", reason: "agent-gone" }),
+      "Device slot released",
+    );
+    expect((await harness.manager.getSnapshot()).used).toBe(0);
   });
 });
 

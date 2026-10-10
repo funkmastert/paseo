@@ -62,13 +62,22 @@ export interface PhysicalDeviceLease {
    * hand a mid-session device to the next agent that asks.
    */
   disconnectedAtMs?: number;
+  /**
+   * When R2's "used" was last seen for this lease: the holder mid-turn, a live shell under its
+   * root, or another process naming the device id. Set at bind, advanced by the owning
+   * manager's sweep (the resource monitor's `ps` sample, the only process evidence a phone
+   * lease has) and on a checkout or install-gate decision that touches this lease
+   * (docs/device-leases.md#physical-devices).
+   */
+  lastUsedAtMs?: number;
 }
 
 export type PhysicalLeaseReleaseReason =
   | "released"
   | "device-disconnected"
   | "agent-gone"
-  | "expired";
+  | "expired"
+  | "idle";
 
 export interface PhysicalLeaseRelease {
   lease: PhysicalDeviceLease;

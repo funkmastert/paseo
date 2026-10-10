@@ -6938,6 +6938,48 @@ test("onAgentTurnFinished fires once per running->idle transition, even while tu
   expect(onAgentTurnFinished).toHaveBeenNthCalledWith(2, { agentId: snapshot.id, cwd: workdir });
 });
 
+test("onAgentClosed fires when an agent is closed", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-closed-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const onAgentClosed = vi.fn();
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentClosed,
+    idFactory: () => "00000000-0000-4000-8000-000000000215",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  await manager.closeAgent(snapshot.id);
+
+  expect(onAgentClosed).toHaveBeenCalledWith(snapshot.id);
+});
+
+test("onAgentClosed fires when an agent is archived, so devices free without waiting for a sweep", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-archived-closed-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const onAgentClosed = vi.fn();
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentClosed,
+    idFactory: () => "00000000-0000-4000-8000-000000000216",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  await manager.archiveAgent(snapshot.id);
+
+  expect(onAgentClosed).toHaveBeenCalledWith(snapshot.id);
+});
+
 test("onAgentTurnFinished does not fire for an idle->idle transition", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-finished-idle-"));
   const storagePath = join(workdir, "agents");

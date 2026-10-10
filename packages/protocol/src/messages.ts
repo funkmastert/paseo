@@ -533,6 +533,18 @@ const MutableCatastropheGateConfigSchema = z
 const MutableCatastropheGatePatchSchema = MutableCatastropheGateConfigSchema;
 
 // Live-toggleable like catastropheGate above — same mutable/patch split, same reason. On unless
+// `enabled` is false; `mode: "log"` logs what it would have blocked and lets the turn end. See
+// docs/ask-user-question.md.
+const MutableAskUserQuestionConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    mode: z.enum(["enforce", "log"]).optional(),
+  })
+  .passthrough();
+
+const MutableAskUserQuestionPatchSchema = MutableAskUserQuestionConfigSchema;
+
+// Live-toggleable like catastropheGate above — same mutable/patch split, same reason. On unless
 // `enabled` is false. See docs/resource-monitor.md, "The native build gate".
 const MutableBuildGateConfigSchema = z
   .object({
@@ -828,6 +840,8 @@ export const MutableDaemonConfigSchema = z
     refocus: MutableRefocusConfigSchema.optional(),
     // COMPAT(catastropheGate): additive optional config, nothing to remove.
     catastropheGate: MutableCatastropheGateConfigSchema.optional(),
+    // COMPAT(askUserQuestion): additive optional config, nothing to remove.
+    askUserQuestion: MutableAskUserQuestionConfigSchema.optional(),
     // COMPAT(buildGate): additive optional config, nothing to remove.
     buildGate: MutableBuildGateConfigSchema.optional(),
     // COMPAT(remediation): additive optional config, nothing to remove.
@@ -874,6 +888,7 @@ export const MutableDaemonConfigPatchSchema = z
     admission: MutableAdmissionPatchSchema.optional(),
     refocus: MutableRefocusPatchSchema.optional(),
     catastropheGate: MutableCatastropheGatePatchSchema.optional(),
+    askUserQuestion: MutableAskUserQuestionPatchSchema.optional(),
     buildGate: MutableBuildGatePatchSchema.optional(),
     remediation: MutableRemediationPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
