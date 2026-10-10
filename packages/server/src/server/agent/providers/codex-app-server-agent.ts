@@ -6392,7 +6392,12 @@ export class CodexAppServerAgentSession implements AgentSession {
     command: string,
     cwd: string | null,
   ): Promise<void> {
-    if (!callId) return;
+    // A completion with no callId can't be looked up in guardedApprovalSeenItemIds, so there is
+    // no way to confirm an approval request was ever seen for it -- treat it as unmatched rather
+    // than skipping the recheck outright (review finding #3). approvalRequestSeen defaults to
+    // false in that case, so the command is still re-judged against the real gates below; it only
+    // turns health red if a gate would actually have refused it.
+    const approvalRequestSeen = callId !== null && this.guardedApprovalSeenItemIds.has(callId);
     try {
       const result = await recheckCodexGuardCommandItem(
         {
@@ -6401,7 +6406,7 @@ export class CodexAppServerAgentSession implements AgentSession {
           agentId: this.agentId,
           deviceLaunchGate: this.deps.deviceLaunchGate,
           isCatastropheGateEnabled: this.deps.isCatastropheGateEnabled,
-          approvalRequestSeen: this.guardedApprovalSeenItemIds.has(callId),
+          approvalRequestSeen,
         },
         this.logger,
       );
@@ -6426,7 +6431,29 @@ export class CodexAppServerAgentSession implements AgentSession {
       });
       await this.interrupt();
     } catch (error) {
+      // Fail closed (review finding #4): a crash in the recheck itself must not look like a
+      // healthy guard. The opposite of the fail-open comment this mirrors in Claude's hook --
+      // guarded mode has no other layer, so an unprovable command stays unproven, not approved.
       this.logger.warn({ err: error }, "Codex guard live re-check failed");
+      setCodexGuardHealthState(
+        {
+          status: "red",
+          reason: `Codex guard live re-check failed: ${error instanceof Error ? error.message : String(error)}`,
+          codexVersion: getCodexGuardHealthState().codexVersion,
+        },
+        this.logger,
+      );
+      this.emitEvent({
+        type: "timeline",
+        provider: CODEX_PROVIDER,
+        item: {
+          type: "assistant_message",
+          text: formatOutOfBandStatusMessage(
+            "Paseo guard health just turned red: the live re-check failed. Stopping this turn.",
+          ),
+        },
+      });
+      await this.interrupt();
     }
   }
 

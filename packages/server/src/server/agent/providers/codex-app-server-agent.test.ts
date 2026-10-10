@@ -37,6 +37,7 @@ import {
   getCodexGuardHealthState,
   resetCodexGuardHealthStateForTests,
 } from "../codex-guard-health.js";
+import * as codexGuardHealthModule from "../codex-guard-health.js";
 
 describe("mapCodexPlanUpdateToTodo", () => {
   test("preserves checklist progress without creating a plan card", () => {
@@ -563,6 +564,106 @@ describe("Codex guarded mode approval handling", () => {
 
     await session.close();
     appServer.assertNoErrors();
+  });
+
+  test("treats a completion with no callId as unmatched and turns health red (review finding #3)", async () => {
+    resetCodexGuardHealthStateForTests();
+    let interrupted = false;
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+      "turn/interrupt": () => {
+        interrupted = true;
+        return {};
+      },
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    // The legacy `codex/event/exec_command_end` channel's call_id is optional (confirmed in its
+    // own zod schema) -- this is the real path a command completion can reach
+    // recheckGuardedCommandCompletion with no callId, unlike the canonical item/completed channel
+    // (whose CodexThreadItemSchema requires an id, so a missing id never produces a timeline item
+    // at all).
+    asInternals(session as unknown as CodexTestSession).handleNotification(
+      "codex/event/exec_command_end",
+      {
+        threadId: "thread-1",
+        msg: {
+          type: "exec_command_end",
+          command: "git push --force origin main",
+          exit_code: 0,
+          success: true,
+        },
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getCodexGuardHealthState().status).toBe("red");
+    expect(interrupted).toBe(true);
+
+    await session.close();
+  });
+
+  test("a no-callId completion of a safe command leaves health alone (review finding #3)", async () => {
+    resetCodexGuardHealthStateForTests();
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    asInternals(session as unknown as CodexTestSession).handleNotification(
+      "codex/event/exec_command_end",
+      {
+        threadId: "thread-1",
+        msg: {
+          type: "exec_command_end",
+          command: "ls",
+          exit_code: 0,
+          success: true,
+        },
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getCodexGuardHealthState().status).toBe("unknown");
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("fails closed (turns health red) when the live re-check itself throws (review finding #4)", async () => {
+    resetCodexGuardHealthStateForTests();
+    let interrupted = false;
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+      "turn/interrupt": () => {
+        interrupted = true;
+        return {};
+      },
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    // decideCodexGuardedCommand already fails closed on its own errors (its own try/catch wraps
+    // its entire body, turning any internal failure into a normal decline), so a throw can only
+    // reach recheckGuardedCommandCompletion's own catch from the dependency it calls directly.
+    // Spying on that one function, restored immediately after, is the narrowest way to exercise
+    // this specific catch block's fail-closed behavior (review finding #4).
+    const spy = vi
+      .spyOn(codexGuardHealthModule, "recheckCodexGuardCommandItem")
+      .mockRejectedValueOnce(new Error("live re-check exploded"));
+
+    appServer.completesCommand({
+      threadId: "thread-1",
+      callId: "unapproved-throws-1",
+      command: "npm test",
+      output: "",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getCodexGuardHealthState().status).toBe("red");
+    expect(interrupted).toBe(true);
+
+    spy.mockRestore();
+    await session.close();
   });
 });
 
