@@ -1224,7 +1224,7 @@ A leader is a root agent (`leaderSkipReason`, `away-reply/detect.ts`). The job s
 `detectWaiting` counts a leader as waiting in two cases:
 
 - **Its turn ended on its own words.** It is idle, nothing is in flight (the done janitor's `busy`), and the newest message in its timeline is its own.
-- **It has exactly one pending request**: a `question` (AskUserQuestion), a `plan` approval (ExitPlanMode) or a `tool` permission. The kinds are `AgentPermissionRequestKind` (`agent/agent-sdk-types.ts`); Claude assigns them in `resolvePermissionKind` (`agent/providers/claude/agent.ts`). Several pending requests, or a `mode` request, are left alone.
+- **It has exactly one pending request**: a `question` (AskUserQuestion), a `plan` approval (ExitPlanMode) or a `tool` permission. The kinds are `AgentPermissionRequestKind` (`agent/agent-sdk-types.ts`); Claude assigns them in `resolvePermissionKind` (`agent/providers/claude/agent.ts`). Several pending requests, or a `mode` request, are left alone. A leader that asks Tyler something as plain text instead of an AskUserQuestion call gets no `question` request to wait on here — see [ask-user-question.md](ask-user-question.md) for the `Stop` hook that pushes agents toward asking properly in the first place.
 
 The wait starts at the newest timeline row and must pass `thresholdMinutes`. A restart restarts every clock: the wait counts from the later of its start and the daemon's boot.
 

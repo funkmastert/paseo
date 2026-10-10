@@ -29,6 +29,7 @@ import {
   formatCatastropheDenial,
   resolveCurrentBranchWithGit,
 } from "../../catastrophe-gate.js";
+import { asksReaderForReplyInText } from "../../ask-in-text.js";
 import {
   mapClaudeCanceledToolCall,
   mapClaudeCompletedToolCall,
@@ -398,6 +399,14 @@ const CATASTROPHE_GATED_TOOLS = ["Bash", "Monitor"] as const;
  */
 const READ_CHECK_TIMEOUT_SECONDS = 3;
 
+/**
+ * The AskUserQuestion check's hook timeout (docs/ask-user-question.md). The detector and the
+ * config/root lookups are pure, in-memory and synchronous; this only bounds a lookup that throws
+ * unexpectedly. On timeout the SDK proceeds and the turn ends unblocked, the same fail-open every
+ * gate in this file takes on its own error.
+ */
+const ASK_USER_QUESTION_CHECK_TIMEOUT_SECONDS = 3;
+
 const REWIND_COMMAND_NAME = "rewind";
 const REWIND_COMMAND: AgentSlashCommand = {
   name: REWIND_COMMAND_NAME,
@@ -446,6 +455,24 @@ export interface ClaudeContentChunk {
   [key: string]: unknown;
 }
 
+/**
+ * The AskUserQuestion check (docs/ask-user-question.md): a `Stop` hook for root agents only that
+ * blocks a turn once when its final text asks Tyler something in plain text with no
+ * AskUserQuestion call. `isRootAgent` fails closed — false (never blocks) for an agent the daemon
+ * cannot resolve, not true.
+ */
+export interface AskUserQuestionCheckOptions {
+  /** `agents.askUserQuestion`, read live so a reload reaches running agents. */
+  readConfig: () => { enabled: boolean; mode: "enforce" | "log" };
+  /** True only for a resolvable agent with no `paseo.parent-agent-id` label. */
+  isRootAgent: (agentId: string) => boolean;
+}
+
+export const ASK_USER_QUESTION_BLOCK_REASON =
+  "You ended your turn asking Tyler something in plain text. Ask it with the AskUserQuestion " +
+  'tool instead (load it with ToolSearch "select:AskUserQuestion" if needed): 2–4 options, your ' +
+  "recommendation first. Do not repeat the question as text.";
+
 interface ClaudeAgentClientOptions {
   defaults?: { agents?: Record<string, AgentDefinition> };
   logger: Logger;
@@ -464,6 +491,8 @@ interface ClaudeAgentClientOptions {
   isCatastropheGateEnabled?: () => boolean;
   /** Feature 16. Absent: no read-check hook is registered and every read runs as today. */
   fileReadObserver?: FileReadObserver;
+  /** Absent: no AskUserQuestion check hook is registered and every turn ends as today. */
+  askUserQuestionCheck?: AskUserQuestionCheckOptions;
 }
 
 function resolveClaudeProviderParams(raw: unknown, logger: Logger): ClaudeProviderParams {
@@ -493,6 +522,7 @@ interface ClaudeAgentSessionOptions {
   deviceLaunchGate?: DeviceLaunchGate;
   isCatastropheGateEnabled?: () => boolean;
   fileReadObserver?: FileReadObserver;
+  askUserQuestionCheck?: AskUserQuestionCheckOptions;
 }
 
 type ClaudeThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -1596,6 +1626,7 @@ export class ClaudeAgentClient implements AgentClient {
   private readonly deviceLaunchGate?: DeviceLaunchGate;
   private readonly isCatastropheGateEnabled?: () => boolean;
   private readonly fileReadObserver?: FileReadObserver;
+  private readonly askUserQuestionCheck?: AskUserQuestionCheckOptions;
 
   constructor(options: ClaudeAgentClientOptions) {
     this.defaults = options.defaults;
@@ -1611,6 +1642,7 @@ export class ClaudeAgentClient implements AgentClient {
     this.deviceLaunchGate = options.deviceLaunchGate;
     this.isCatastropheGateEnabled = options.isCatastropheGateEnabled;
     this.fileReadObserver = options.fileReadObserver;
+    this.askUserQuestionCheck = options.askUserQuestionCheck;
   }
 
   resolveConfiguredModel(model: AgentModelDefinition): AgentModelDefinition {
@@ -1663,6 +1695,7 @@ export class ClaudeAgentClient implements AgentClient {
       deviceLaunchGate: this.deviceLaunchGate,
       isCatastropheGateEnabled: this.isCatastropheGateEnabled,
       fileReadObserver: this.fileReadObserver,
+      askUserQuestionCheck: this.askUserQuestionCheck,
     });
   }
 
@@ -1695,6 +1728,7 @@ export class ClaudeAgentClient implements AgentClient {
       deviceLaunchGate: this.deviceLaunchGate,
       isCatastropheGateEnabled: this.isCatastropheGateEnabled,
       fileReadObserver: this.fileReadObserver,
+      askUserQuestionCheck: this.askUserQuestionCheck,
     });
   }
 
@@ -2366,6 +2400,9 @@ class ClaudeAgentSession implements AgentSession {
   private readonly deviceLaunchGate?: DeviceLaunchGate;
   private readonly isCatastropheGateEnabled: () => boolean;
   private readonly fileReadObserver?: FileReadObserver;
+  private readonly askUserQuestionCheck?: AskUserQuestionCheckOptions;
+  /** Set by the AskUserQuestion-matched PreToolUse hook; read and reset by the Stop hook. */
+  private askedUserQuestionThisTurn = false;
 
   constructor(config: ClaudeAgentConfig, options: ClaudeAgentSessionOptions) {
     this.config = config;
@@ -2382,6 +2419,7 @@ class ClaudeAgentSession implements AgentSession {
     this.deviceLaunchGate = options.deviceLaunchGate;
     this.isCatastropheGateEnabled = options.isCatastropheGateEnabled ?? (() => true);
     this.fileReadObserver = options.fileReadObserver;
+    this.askUserQuestionCheck = options.askUserQuestionCheck;
     this.contextUsage = new ClaudeContextUsageState(
       findClaudeModel(this.config.model)?.contextWindowMaxTokens,
     );
@@ -5241,12 +5279,83 @@ class ClaudeAgentSession implements AgentSession {
           timeout: READ_CHECK_TIMEOUT_SECONDS,
         }))
       : [];
+    // The AskUserQuestion check (docs/ask-user-question.md): `enabled` is read once here, so a
+    // disabled check registers no Stop hook at all rather than registering one that always
+    // no-ops. A reload reaches running agents on their next turn, when this rebuilds.
+    const askUserQuestionCheckEnabled =
+      this.askUserQuestionCheck && this.agentId && this.askUserQuestionCheck.readConfig().enabled;
+    const askUserQuestionPre = askUserQuestionCheckEnabled
+      ? [{ matcher: "AskUserQuestion", hooks: [this.markAskUserQuestionCalled] }]
+      : [];
+    const askUserQuestionStop = askUserQuestionCheckEnabled
+      ? [
+          {
+            hooks: [this.checkAskInText],
+            timeout: ASK_USER_QUESTION_CHECK_TIMEOUT_SECONDS,
+          },
+        ]
+      : [];
     return {
       ...hooks,
-      PreToolUse: [...(hooks.PreToolUse ?? []), ...deviceGate, ...catastropheGate, ...readCheckPre],
+      PreToolUse: [
+        ...(hooks.PreToolUse ?? []),
+        ...deviceGate,
+        ...catastropheGate,
+        ...readCheckPre,
+        ...askUserQuestionPre,
+      ],
       PostToolUse: [...(hooks.PostToolUse ?? []), ...readCheckPost],
+      Stop: [...(hooks.Stop ?? []), ...askUserQuestionStop],
     };
   }
+
+  /** PreToolUse for `AskUserQuestion`: marks the turn as having asked properly. Never a subagent's
+   * own call — `agent_id` is present only when the hook fires from within one. */
+  private markAskUserQuestionCalled = async (input: unknown): Promise<Record<string, never>> => {
+    const hookInput = input as { agent_id?: unknown };
+    if (hookInput.agent_id === undefined) {
+      this.askedUserQuestionThisTurn = true;
+    }
+    return {};
+  };
+
+  /**
+   * The AskUserQuestion check's `Stop` hook (docs/ask-user-question.md, R1–R4). Blocks a root
+   * agent's turn once when its final text asks Tyler something in plain text and the turn made no
+   * AskUserQuestion call. Fails open on every uncertainty: an unresolvable agent, an unreadable
+   * config, or an error of its own all let the turn end.
+   */
+  private checkAskInText = async (input: unknown): Promise<Record<string, unknown>> => {
+    const allow: Record<string, unknown> = {};
+    const check = this.askUserQuestionCheck;
+    const agentId = this.agentId;
+    if (!check || !agentId) return allow;
+    // The turn is ending now unless this fires a block below; the next turn starts with a clean
+    // slate either way, and a second Stop this same turn (stop_hook_active) never reaches here
+    // with a stale `true` since that branch returns before any tool call could run.
+    const askedThisTurn = this.askedUserQuestionThisTurn;
+    this.askedUserQuestionThisTurn = false;
+    try {
+      const hookInput = input as { stop_hook_active?: unknown; last_assistant_message?: unknown };
+      if (hookInput.stop_hook_active === true || askedThisTurn) return allow;
+      const config = check.readConfig();
+      if (!config.enabled || !check.isRootAgent(agentId)) return allow;
+      const text =
+        typeof hookInput.last_assistant_message === "string"
+          ? hookInput.last_assistant_message
+          : "";
+      if (!text || !asksReaderForReplyInText(text)) return allow;
+      this.logger.warn(
+        { agentId, mode: config.mode },
+        "AskUserQuestion check: turn ended asking Tyler in plain text",
+      );
+      if (config.mode === "log") return allow;
+      return { decision: "block", reason: ASK_USER_QUESTION_BLOCK_REASON };
+    } catch (error) {
+      this.logger.warn({ err: error }, "AskUserQuestion check failed; the turn ends");
+      return allow;
+    }
+  };
 
   /**
    * Feature 16's PreToolUse (docs/jev.md, "Feature 16"). In shadow, the default, the observer
