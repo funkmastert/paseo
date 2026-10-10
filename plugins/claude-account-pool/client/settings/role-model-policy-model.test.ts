@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_TOOL_PROFILE } from "../../shared/tool-profiles";
 import {
+  DEFAULT_CODEX_POLICY,
   DEFAULT_POLICY,
   DEFAULT_THINKING_POLICY,
   MAX_ALIASES_PER_ROLE,
@@ -40,6 +41,7 @@ function fakeSavingWrite(): { write: RoleModelPolicyModelDeps["write"]; calls: u
         allowUnlistedModels: [],
         thinking: input.patch.thinking,
         childOutputStyle: "Concise",
+        codex: DEFAULT_CODEX_POLICY,
         revision: `rev-${counter}`,
       },
     };

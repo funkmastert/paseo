@@ -156,9 +156,10 @@ export interface ThinkingOverriddenEpisode {
    * "subagent-no-ultracode": a subagent asked for Ultra Code, which only a
    * leader runs. "not-advertised": the model doesn't offer the requested id,
    * so it was clamped. "no-thinking-options": the model offers none, so the
-   * request was removed.
+   * request was removed. "codex-max-effort": a Codex child asked for an
+   * effort above xhigh (or off Paseo's ladder entirely), capped to it.
    */
-  reason: "leader-rule" | "subagent-no-ultracode" | "not-advertised" | "no-thinking-options";
+  reason: "leader-rule" | "subagent-no-ultracode" | "not-advertised" | "no-thinking-options" | "codex-max-effort";
 }
 
 export interface RoleRouterOptions {
@@ -948,6 +949,12 @@ function routeRoleForCreateUnguarded(
   const nextConfig: AgentCreateConfig = { ...request.config, model: decision.model.model };
   if (decision.model.crossesRequestedFamily && decision.model.provider !== null) {
     nextConfig.provider = decision.model.provider as AgentCreateConfig["provider"];
+  }
+  // A routed Codex child always runs guarded (KTD-7, docs/catastrophe-gate.md): the daemon
+  // decides every approval itself, never a person. Set unconditionally -- an explicit request
+  // for some other Codex mode must not bypass the guard this classifier just routed it behind.
+  if (decision.model.provider === "codex") {
+    nextConfig.modeId = "guarded";
   }
   if (enforcement.providerOptions) {
     nextConfig.providerOptions = enforcement.providerOptions;

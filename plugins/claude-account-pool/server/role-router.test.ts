@@ -853,6 +853,27 @@ describe("createRoleRouter", () => {
   it("preserves other config fields (modeId, providerOptions, cwd) across the rewrite", () => {
     const router = createRoleRouter(
       baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerModels(["claude-opus-4"])),
+        catalogCache: fakeCatalogCache(catalog({ claude: ["claude-opus-4"] })),
+      }),
+    );
+
+    const result = router(
+      request({
+        callerAgentId: "c1",
+        config: { provider: "claude", model: "claude-sonnet", modeId: "default", providerOptions: { foo: "bar" }, cwd: "/tmp/work" },
+      }),
+      fakeContext,
+    );
+
+    expect(result?.config.modeId).toBe("default");
+    expect(result?.config.providerOptions).toEqual({ foo: "bar" });
+    expect(result?.config.cwd).toBe("/tmp/work");
+  });
+
+  it("forces guarded mode for a Codex child, overriding whatever modeId was requested", () => {
+    const router = createRoleRouter(
+      baseOptions({
         policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-5.1"])),
         catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
       }),
@@ -866,7 +887,10 @@ describe("createRoleRouter", () => {
       fakeContext,
     );
 
-    expect(result?.config.modeId).toBe("default");
+    expect(result?.config.model).toBe("gpt-5.1");
+    expect(result?.config.provider).toBe("codex");
+    expect(result?.config.modeId).toBe("guarded");
+    // Unrelated fields still pass through untouched.
     expect(result?.config.providerOptions).toEqual({ foo: "bar" });
     expect(result?.config.cwd).toBe("/tmp/work");
   });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_CODEX_POLICY,
   DEFAULT_POLICY,
   DEFAULT_THINKING_POLICY,
   type RoleModelPolicy,
@@ -155,6 +156,7 @@ const LIVE_POLICY: RoleModelPolicy = {
   // run Ultra Code, subagents take their task class's level.
   thinking: DEFAULT_THINKING_POLICY,
   childOutputStyle: "Concise",
+  codex: DEFAULT_CODEX_POLICY,
   revision: "live-fixture",
 };
 
@@ -1461,6 +1463,62 @@ describe("classifyAgent — thinking", () => {
       );
       expect(decision.model.outcome).toBe("unconfigured");
       expect(decision.thinking).toMatchObject({ outcome: "leader-rule", optionId: "xhigh", modelRef: "claude-sonnet-5" });
+    });
+  });
+
+  describe("a Codex child never thinks above xhigh (U5)", () => {
+    const codexWorld = () =>
+      world({ policy: DEFAULT_POLICY, catalog: new Map([["codex", new Set(["gpt-5"])]]) } as Partial<ClassifierWorld>);
+
+    it("asked for max, gets xhigh, and records the override", () => {
+      const decision = classifyAgent(
+        child({ requestedProvider: "codex", requestedModel: "gpt-5", requestedThinkingOptionId: "max" }),
+        codexWorld(),
+      );
+      expect(decision.thinking).toMatchObject({
+        optionId: "xhigh",
+        requested: "max",
+        override: { requested: "max", applied: "xhigh", reason: "codex-max-effort" },
+      });
+      expect(decision.thinking.reason).toContain("never think above");
+    });
+
+    it("asked for Codex's own ultra, gets xhigh", () => {
+      const decision = classifyAgent(
+        child({ requestedProvider: "codex", requestedModel: "gpt-5", requestedThinkingOptionId: "ultra" }),
+        codexWorld(),
+      );
+      expect(decision.thinking).toMatchObject({
+        optionId: "xhigh",
+        requested: "ultra",
+        override: { requested: "ultra", applied: "xhigh", reason: "codex-max-effort" },
+      });
+    });
+
+    it("asked for xhigh itself, runs it unclamped with no override", () => {
+      const decision = classifyAgent(
+        child({ requestedProvider: "codex", requestedModel: "gpt-5", requestedThinkingOptionId: "xhigh" }),
+        codexWorld(),
+      );
+      expect(decision.thinking).toMatchObject({ outcome: "requested", optionId: "xhigh", requested: "xhigh" });
+      expect(decision.thinking.override).toBeUndefined();
+    });
+
+    it("asked for low, runs it unclamped", () => {
+      const decision = classifyAgent(
+        child({ requestedProvider: "codex", requestedModel: "gpt-5", requestedThinkingOptionId: "low" }),
+        codexWorld(),
+      );
+      expect(decision.thinking).toMatchObject({ outcome: "requested", optionId: "low" });
+      expect(decision.thinking.override).toBeUndefined();
+    });
+
+    it("nothing requested, falls to the task class default", () => {
+      const decision = classifyAgent(
+        child({ requestedProvider: "codex", requestedModel: "gpt-5" }),
+        codexWorld(),
+      );
+      expect(decision.thinking.outcome).toBe("task-class-default");
     });
   });
 });

@@ -289,6 +289,23 @@ export const DEFAULT_THINKING_POLICY: ThinkingPolicy = {
   byTaskClass: { ...DEFAULT_THINKING_BY_TASK_CLASS },
 };
 
+/** Codex's budget reserve (KTD-9). See the `codex` field's doc comment on `RoleModelPolicySchema`. */
+export const CodexPolicySchema = z
+  .object({
+    maxWindowPct: z.number().int().min(1).max(100).default(60),
+    maxReadingAgeHours: z.number().min(0).default(2),
+    maxChildren: z.number().int().min(0).default(3),
+  })
+  .default({ maxWindowPct: 60, maxReadingAgeHours: 2, maxChildren: 3 });
+export type CodexPolicy = z.infer<typeof CodexPolicySchema>;
+
+/** `CodexPolicySchema` parsed with nothing supplied — the value every field of it defaults to. */
+export const DEFAULT_CODEX_POLICY: CodexPolicy = {
+  maxWindowPct: 60,
+  maxReadingAgeHours: 2,
+  maxChildren: 3,
+};
+
 /** Claude Code's own built-in concise style (added in 2.1.237). See `childOutputStyle`. */
 export const DEFAULT_CHILD_OUTPUT_STYLE = "Concise";
 
@@ -419,6 +436,16 @@ export const RoleModelPolicySchema = z
      * `thinking` above: absent from a stored document, it takes the default.
      */
     childOutputStyle: z.union([z.string().min(1).max(64), z.null()]).default(DEFAULT_CHILD_OUTPUT_STYLE),
+    /**
+     * Codex's budget reserve (KTD-9): a `codex/` ref is usable for a child only while the
+     * `codex` `session` window reading is under `maxWindowPct`, that reading is under
+     * `maxReadingAgeHours` old, and fewer than `maxChildren` Codex children are running.
+     * Optional with defaults, like `thinking` above, so a policy written before this field
+     * existed parses unchanged. Deliberately stricter than Claude's "no reading is fine" --
+     * Codex is the extra capacity, not the default, and Tyler's own Codex use draws on the
+     * same window, so the reserve is his.
+     */
+    codex: CodexPolicySchema,
     /** Opaque compare-and-swap token, bumped on every accepted write. */
     revision: z.string(),
   })
@@ -530,6 +557,7 @@ export const DEFAULT_POLICY: RoleModelPolicy = {
   allowUnlistedModels: [],
   thinking: DEFAULT_THINKING_POLICY,
   childOutputStyle: DEFAULT_CHILD_OUTPUT_STYLE,
+  codex: DEFAULT_CODEX_POLICY,
   agentTypeMappings: {
     worker: "worker",
     scout: "worker",

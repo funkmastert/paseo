@@ -13,6 +13,7 @@ import { DEFAULT_TOOL_PROFILE, profileDeniedTools, type ToolProfile } from "../s
 import {
   clampThinkingOption,
   THINKING_LEVEL_LABELS,
+  thinkingLevelRank,
   ULTRACODE_EFFORT_OPTION_ID,
   ULTRACODE_OPTION_ID,
   type ThinkingClampHow,
@@ -414,7 +415,12 @@ export interface ThinkingDecision {
   override?: {
     requested: string;
     applied: string | null;
-    reason: "leader-rule" | "subagent-no-ultracode" | "not-advertised" | "no-thinking-options";
+    reason:
+      | "leader-rule"
+      | "subagent-no-ultracode"
+      | "not-advertised"
+      | "no-thinking-options"
+      | "codex-max-effort";
   };
   reason: string;
 }
@@ -1048,6 +1054,66 @@ function resolveThinkingLevel(
 }
 
 /**
+ * Codex's thinking decision (U5): there is no catalog entry to verify against, so `wanted` is
+ * resolved the same way as the Claude path -- leader rule, then an explicit request, then the
+ * task class default -- and then capped to `xhigh` whenever it is not on Paseo's own ladder
+ * (`thinkingLevelRank`). That one check covers Codex's own `max` and `ultra`, Ultra Code, and
+ * anything unrecognized, uniformly. Leaders never route to Codex (KTD-1), so this never needs a
+ * leader exception.
+ */
+function decideCodexThinking(
+  input: ClassifierInput,
+  world: ClassifierWorld,
+  taskClass: TaskClassId | undefined,
+  role: RoleDecision,
+  asChild: boolean,
+  effective: EffectiveThinkingModel,
+): ThinkingDecision {
+  const requested = input.requestedThinkingOptionId;
+  const isLeaderTier = !asChild || role.role.id === LEADER_ROLE_ID;
+  const leaderLevel = world.policy.thinking.leader;
+
+  let outcome: "leader-rule" | "requested" | "task-class-default";
+  let wanted: string;
+  if (isLeaderTier && leaderLevel !== null) {
+    outcome = "leader-rule";
+    wanted = leaderLevel;
+  } else if (requested !== undefined) {
+    outcome = "requested";
+    wanted = requested;
+  } else {
+    outcome = "task-class-default";
+    wanted = world.policy.thinking.byTaskClass[taskClass ?? "standard"];
+  }
+
+  // `max` IS ranked on Paseo's own ladder (above xhigh, for a future Claude level) but Codex
+  // still caps to xhigh at it -- the plan names it explicitly alongside Codex's own `ultra` and
+  // anything unranked, so this compares against xhigh's rank rather than testing for undefined.
+  const wantedRank = thinkingLevelRank(wanted);
+  const xhighRank = thinkingLevelRank(ULTRACODE_EFFORT_OPTION_ID) as number;
+  const capped = wantedRank === undefined || wantedRank > xhighRank;
+  const optionId = capped ? ULTRACODE_EFFORT_OPTION_ID : wanted;
+  const override: ThinkingDecision["override"] =
+    requested !== undefined && requested !== optionId
+      ? { requested, applied: optionId, reason: "codex-max-effort" }
+      : undefined;
+
+  return {
+    outcome,
+    optionId,
+    modelRef: effective.modelRef,
+    wanted,
+    ...(requested !== undefined ? { requested } : {}),
+    ...(override ? { override } : {}),
+    reason: capped
+      ? `Capped to ${thinkingLabel(ULTRACODE_EFFORT_OPTION_ID)}: Codex children never think above it, and ${thinkingLabel(wanted)} is not on Paseo's ladder.`
+      : `${thinkingLabel(optionId)} is used, from ${
+          outcome === "leader-rule" ? "the leader rule" : outcome === "requested" ? "the request" : "the task class default"
+        }.`,
+  };
+}
+
+/**
  * The thinking half: which effort level `config.thinkingOptionId` becomes.
  * Decided AFTER the model, because every rung below reads the EFFECTIVE
  * model, not the one the caller asked for.
@@ -1090,6 +1156,15 @@ function decideThinking(
   const requestedField = requested !== undefined ? { requested } : {};
   const isSubagent = asChild;
   const effective = effectiveThinkingModel(input, world, model);
+
+  // Codex has no entry in `world.thinkingCatalog` (Claude is the only provider that reports
+  // thinking options through listModels), and Codex's own effort ladder -- low/medium/high/xhigh
+  // plus max and ultra -- is not Paseo's. A guarded Codex child never thinks above xhigh (U5):
+  // max, ultra, and anything else off Paseo's ladder all cap to it.
+  if (effective?.family === "codex") {
+    return decideCodexThinking(input, world, taskClass, role, asChild, effective);
+  }
+
   const entry = effective ? world.thinkingCatalog.get(effective.family)?.get(effective.modelId) : undefined;
 
   if (!effective || !entry) {

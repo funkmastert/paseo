@@ -68,6 +68,21 @@ The original guard design used a PreToolUse hook. No hook delivery path runs una
 
 If a later Codex release restores an `untrusted`-equivalent approval policy that asks even under `danger-full-access`, or adds an unattended-automation path for hook trust, re-run the checks above (and the guarded-mode proof) against the new version before changing this design.
 
+## Classifier plumbing for a routed Codex child
+
+A worker or reviewer the classifier routes to a `codex/` ref gets two things forced onto its create request (`role-router.ts`), unconditionally — an explicit request for some other Codex mode does not bypass either:
+
+- **`modeId: "guarded"`.** Set whenever the decided model's provider is `codex`, so a routed Codex child always runs behind the guard (above).
+- **The thinking clamp (`decideCodexThinking` in `classifier.ts`).** Codex has no entry in `world.thinkingCatalog` (Claude is the only provider that reports thinking options through `listModels`), and Codex's own effort ladder — `low`/`medium`/`high`/`xhigh` plus `max` and `ultra` — is not Paseo's. The requested (or leader-rule, or task-class-default) level is resolved the same way as the Claude path, then capped to `xhigh` whenever `thinkingLevelRank` returns undefined for it, or returns a rank above `xhigh`'s. That one check covers Codex's own `max` and `ultra`, Ultra Code, and anything unranked, uniformly. Recorded as an `override` with `reason: "codex-max-effort"`.
+
+### Not yet wired
+
+Three pieces from U5's design are **not implemented**. Don't rely on any of them:
+
+- **The budget gate (KTD-9).** `agentModelPolicy.codex` (`maxWindowPct` 60, `maxReadingAgeHours` 2, `maxChildren` 3) exists as a schema with defaults (`CodexPolicySchema`/`DEFAULT_CODEX_POLICY` in `shared/role-policy-schema.ts`), but nothing reads it yet. The `codex` `session` window reading likely already reaches the plugin through the existing provider-agnostic usage poller (`usage-poll.ts` → `HealthTracker.windowUtilization("codex", "session")`, fed from `paseo.providers.listUsage()`) without new RPC plumbing — that path wasn't verified end-to-end. The reading-age check and the running-children count have no investigated plumbing at all.
+- **Tool-profile Codex-awareness (KTD-8).** `applyToolProfile` (`shared/tool-profiles.ts`) always writes Claude-shaped `settings.permissions`/`disallowedTools`, regardless of target provider. For Codex, `read-only` should map to `sandbox_mode: "read-only"` instead, and a profile with denied tools that Codex has no way to express should make its `codex/` refs ineligible with a reason — neither exists yet.
+- **The usability seam in `role-availability.ts`'s `isRefUsable`.** This is the single place PR B's ranking was meant to read Codex's health/budget/profile eligibility from without its own code (see the plan's "Seam for PR B"). It is deliberately untouched rather than half-wired: a seam that silently always returns "usable" (no guard-health check, no budget check) for `family === "codex"` would be worse than no seam, since it would look like Codex gating exists when it does not. Build this only once the health RPC bridge and the budget/tool-profile pieces above actually exist to feed it.
+
 ## Limitations and future work
 
 - Guarding `apply_patch` and MCP calls awaits follow-up work.

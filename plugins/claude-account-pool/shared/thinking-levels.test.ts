@@ -5,6 +5,7 @@ import {
   ULTRACODE_EFFORT_OPTION_ID,
   ULTRACODE_OPTION_ID,
   clampThinkingOption,
+  thinkingLevelRank,
 } from "./thinking-levels";
 
 describe("THINKING_LEVEL_IDS / THINKING_LEVEL_LABELS", () => {
@@ -83,5 +84,23 @@ describe("clampThinkingOption", () => {
       optionId: "custom-reasoning-mode",
       how: "model-default",
     });
+  });
+});
+
+describe("thinkingLevelRank", () => {
+  it("ranks every level on Paseo's own ladder, off through max", () => {
+    expect(thinkingLevelRank("off")).toBe(0);
+    expect(thinkingLevelRank("minimal")).toBe(1);
+    expect(thinkingLevelRank("low")).toBe(2);
+    expect(thinkingLevelRank("medium")).toBe(3);
+    expect(thinkingLevelRank("high")).toBe(4);
+    expect(thinkingLevelRank("xhigh")).toBe(5);
+    expect(thinkingLevelRank("max")).toBe(6);
+  });
+
+  it("is undefined for ultracode, Codex's own ultra, and an unrecognized id", () => {
+    expect(thinkingLevelRank("ultracode")).toBeUndefined();
+    expect(thinkingLevelRank("ultra")).toBeUndefined();
+    expect(thinkingLevelRank("banana")).toBeUndefined();
   });
 });
