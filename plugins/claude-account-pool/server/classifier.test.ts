@@ -1770,6 +1770,33 @@ describe("classifyAgent — arena-ranked model pick (U8)", () => {
     expect(decision.model.override).toBeUndefined();
   });
 
+  it("live, no pin: an explicit request that already names the ranked winner is simply honored, no override", () => {
+    // claude-sonnet-5 is both the explicit request AND arena's winner (see arenaWorld's rankings
+    // above) — ranking and the request agree, so there is nothing to override.
+    const decision = classifyAgent(
+      child({ requestedModel: "claude-sonnet-5", jevHint: workKindHint("frontend") }),
+      arenaWorld(),
+    );
+    expect(decision.model.outcome).toBe("honored-request");
+    expect(decision.model.model).toBe("claude-sonnet-5");
+    expect(decision.model.ranking).toMatchObject({ outcome: "ranked", applied: true, ref: "claude-sonnet-5" });
+    expect(decision.model.override).toBeUndefined();
+  });
+
+  it("live, no pin, dated/undated alias: the same-model check still recognizes a self-match", () => {
+    // Arena's winning ref is the pool's own undated "claude-sonnet-5"; the request names the dated
+    // snapshot of the SAME base model — approved via the pool's undated entry (`sameModel`), exactly
+    // the "two spellings, one model" case `shared/model-identity.ts` exists for.
+    const decision = classifyAgent(
+      child({ requestedModel: "claude-sonnet-5-20251001", jevHint: workKindHint("frontend") }),
+      arenaWorld(),
+    );
+    expect(decision.model.outcome).toBe("honored-request");
+    expect(decision.model.model).toBe("claude-sonnet-5-20251001");
+    expect(decision.model.ranking).toMatchObject({ outcome: "ranked", applied: true, ref: "claude-sonnet-5" });
+    expect(decision.model.override).toBeUndefined();
+  });
+
   it("a ref the usability check rejects is never picked and does not count toward the two-candidate floor", () => {
     // Neither candidate is topTier, so this isolates the usability check: codex/gpt-6-sol is
     // ranked and would otherwise count, but it's absent from the catalog and not allowlisted.

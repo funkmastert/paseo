@@ -6,11 +6,14 @@ import {
   TASK_CLASS_IDS,
   LEADER_ROLE_ID,
   classModels,
+  modelRefFamily,
+  splitModelRef,
   type ArenaPolicy,
   type RoleModelPolicy,
   type RoleRecord,
   type TaskClassId,
 } from "../shared/role-policy-schema";
+import { sameModel } from "../shared/model-identity";
 import { DEFAULT_TOOL_PROFILE, profileDeniedTools, type ToolProfile } from "../shared/tool-profiles";
 import { WORK_KINDS, type ArenaRankingsFile, type WorkKind } from "../shared/arena-aliases";
 import { decideArenaPick, moveRefToFront, type ArenaPickDecision } from "./arena-model-pick";
@@ -688,6 +691,46 @@ function hasModelPinLabel(labels: Record<string, string> | undefined): boolean {
 }
 
 /**
+ * Whether U8's ranked ref names the SAME model (by family and `sameModel`'s
+ * dated/undated identity) as an explicit request — `decideArenaPick` ranks
+ * the whole pool independent of any request, so its winner can legitimately
+ * be exactly what the caller already asked for. That is not an override: the
+ * request and the ranked pick agree, so overriding would produce a
+ * `requestedRef === effectiveRef` override record and a self-contradictory
+ * "overrode it to X" log line for the single most common real case.
+ */
+function rankingMatchesRequestedModel(
+  ranking: ModelDecision["ranking"],
+  requestedFamily: string,
+  requestedModel: string,
+): boolean {
+  if (ranking?.outcome !== "ranked") {
+    return false;
+  }
+  const parsed = splitModelRef(ranking.ref);
+  return parsed !== null && modelRefFamily(parsed) === requestedFamily && sameModel(parsed.model, requestedModel);
+}
+
+/**
+ * `overrideNote`'s sentence for each override reason, kept as one switch
+ * rather than a nested ternary so a reason added later gets its own case
+ * instead of one more nesting level with no test pinning the existing
+ * branches' exact wording.
+ */
+function describeOverrideNote(override: NonNullable<ModelDecision["override"]>, slot: ModelPoolSlot, fellBack: boolean): string {
+  switch (override.reason) {
+    case "not-approved":
+      return ` ${override.requestedRef} was asked for, but ${poolPhrase(slot, fellBack)} does not approve it, so policy chose instead.`;
+    case "arena-ranked":
+      return ` ${override.requestedRef} was asked for and is approved, but ${override.effectiveRef} ranks higher for this kind of work on LMArena, so it runs instead. Label the create with paseo.model-pin to keep the requested model.`;
+    case "not-currently-selectable":
+      return override.missingFromCatalog
+        ? ` ${override.requestedRef} was asked for and is approved, but the provider's catalog does not list it and allowUnlistedModels does not name it, so policy chose instead. Add it there if the provider does accept the id.`
+        : ` ${override.requestedRef} was asked for and is approved, but is not selectable right now (capped or budget-gated), so policy chose instead.`;
+  }
+}
+
+/**
  * The model half: an explicit request first when it clears the same bar
  * ordered selection holds every other candidate to, then ordered selection.
  *
@@ -796,21 +839,25 @@ function decideModel(
     );
     if (evaluation.eligible) {
       // U8's ranked pick outranks an eligible explicit request too (the explicit-request gap PR B's
-      // review fix opened): live (not shadow) and not pinned, fall through to ordered selection below,
-      // which already reads the reordered `selectionRole` pool — so the ranked ref wins exactly as it
-      // would have for a request-free create. `paseo.model-pin` is the one thing that keeps "explicit
-      // beats inferred" meaning what it always meant for this one request.
+      // review fix opened): live (not shadow), not pinned, and not already the same model the ranked
+      // pick names, fall through to ordered selection below, which already reads the reordered
+      // `selectionRole` pool — so the ranked ref wins exactly as it would have for a request-free
+      // create. `paseo.model-pin` is the one thing that keeps "explicit beats inferred" meaning what
+      // it always meant for this one request.
       const pinned = hasModelPinLabel(input.labels);
-      if (ranking?.outcome === "ranked" && ranking.applied && !pinned) {
+      const selfMatch = rankingMatchesRequestedModel(ranking, requestedFamily, input.requestedModel);
+      if (ranking?.outcome === "ranked" && ranking.applied && !pinned && !selfMatch) {
         overrideReason = "arena-ranked";
       } else {
         const unverified = evaluation.unadvertised === true;
-        // Honoring the request never claims the ranked pick "applied": whatever `ranking` says here is
-        // a RECORD (shadow's would-be pick, or a pin keeping today's request), never a model that is
-        // actually running instead — the exact corruption PR B's review fix existed to prevent.
-        const requestRanking = ranking ? { ...ranking, applied: false as const } : undefined;
+        // Honoring the request never claims the ranked pick "applied" UNLESS it's a self-match: then
+        // the ranked model and the requested model are the same, so `ranking.applied` (true in live
+        // mode) stays truthful. Every other honored path — shadow's would-be pick, or a pin keeping a
+        // genuinely different request — is a RECORD, never a model that is actually running instead,
+        // which is the exact corruption PR B's review fix existed to prevent.
+        const requestRanking = ranking ? { ...ranking, applied: selfMatch ? ranking.applied : false } : undefined;
         const pinNote =
-          pinned && ranking?.outcome === "ranked"
+          pinned && !selfMatch && ranking?.outcome === "ranked"
             ? ` paseo.model-pin keeps it over the arena-ranked ${ranking.ref}.`
             : "";
         return {
@@ -849,17 +896,7 @@ function decideModel(
       ? { requestedRef, effectiveRef, reason: overrideReason, ...(missingFromCatalog ? { missingFromCatalog: true as const } : {}) }
       : undefined;
 
-  // Four different sentences, because they call for four different actions:
-  // fix the pool, pin the model, wait for capacity, or add the id to allowUnlistedModels.
-  const overrideNote = override
-    ? override.reason === "not-approved"
-      ? ` ${requestedRef} was asked for, but ${poolPhrase(slot, fellBack)} does not approve it, so policy chose instead.`
-      : override.reason === "arena-ranked"
-        ? ` ${requestedRef} was asked for and is approved, but ${effectiveRef} ranks higher for this kind of work on LMArena, so it runs instead. Label the create with paseo.model-pin to keep the requested model.`
-        : missingFromCatalog
-        ? ` ${requestedRef} was asked for and is approved, but the provider's catalog does not list it and allowUnlistedModels does not name it, so policy chose instead. Add it there if the provider does accept the id.`
-        : ` ${requestedRef} was asked for and is approved, but is not selectable right now (capped or budget-gated), so policy chose instead.`
-    : "";
+  const overrideNote = override ? describeOverrideNote(override, slot, fellBack) : "";
 
   const crossesRequestedFamily = outcome.provider !== null && outcome.provider !== requestedFamily;
   // A pool default the catalog doesn't list runs for EVERY spawn of this

@@ -116,24 +116,33 @@ entries, currently selectable) is not automatically exempt from ranking.
 - **Shadow** (`arena.shadow: true`, the default): the request is honored
   exactly as before U8 existed. The would-be pick is recorded on the decision
   (`model.ranking`, `applied: false`) and on `paseo.arena-pick`
-  (`applied=0`) — the same visibility an ordered-selection create gets, just
-  never applied against an honored request.
+  (`applied=0`) — the same visibility an ordered-selection create gets,
+  without ever applying against an honored request.
 - **Live** (`arena.shadow: false`): the ranked pick overrides the request,
   the same way it reorders today's pool order for a request-free create.
   `model.outcome` becomes `"selected"`, not `"honored-request"`, and
   `model.override.reason` is `"arena-ranked"` — visibly different from a
   `"not-approved"`/`"not-currently-selectable"` policy refusal, since the
-  request was never refused; a better-ranked candidate simply ran instead.
+  request was never refused; a better-ranked candidate ran instead.
 - **`paseo.model-pin`** (any non-empty value, caller-set): keeps the request
   over the ranked pick even in live mode. The decision still records the
-  would-be pick at `applied: false` — this is the one case besides shadow
-  where an honored request carries a `ranking` field at all.
+  would-be pick at `applied: false`.
+- **Self-match**: the ranked winner can legitimately be the exact model (or
+  its dated/undated `sameModel` alias) already requested — ranking reorders
+  the whole class pool independent of any one request. That is not an
+  override: `model.outcome` stays `"honored-request"` and no `override` is
+  produced, but `model.ranking.applied` stays truthful to whichever mode
+  picked it (`true` live, `false` shadow) rather than being forced to
+  `false` — the ranked model and the requested model are the same, so
+  nothing was overridden to claim.
 
-`decideModel` never returns `"honored-request"` with `ranking.applied: true` —
-that combination would mean the decision log and `paseo.arena-pick` claim a
-ranked model ran while a different, explicitly-requested model actually did.
-`decision-log.ts` and `role-router.ts`'s `applyArenaPickLabel` both also guard
-against it, belt-and-suspenders.
+Pin, shadow, and a self-match are the only cases where an honored request
+carries a `ranking` field at all. Outside a self-match, `decideModel` never
+returns `"honored-request"` with `ranking.applied: true` — that combination
+would otherwise mean the decision log and `paseo.arena-pick` claim a ranked
+model ran while a different, explicitly-requested model actually did.
+`decision-log.ts` and `role-router.ts`'s `applyArenaPickLabel` both also
+guard against that combination, belt-and-suspenders.
 
 ## Labels
 
@@ -169,10 +178,12 @@ with the would-be pick recorded alongside it rather than discarded.
 - `server/classifier.test.ts` ("arena-ranked model pick"): the full
   `decideModel` integration — the pool actually reorders, shadow leaves it
   untouched, a leader never carries a `ranking` field, an old policy without
-  `arena` behaves exactly as before, and the three explicit-request cases:
-  live overrides an eligible request with `outcome: "selected"` and
+  `arena` behaves exactly as before, and the explicit-request cases: live
+  overrides an eligible request with `outcome: "selected"` and
   `override.reason: "arena-ranked"`; shadow still honors it with the
-  would-be pick at `applied: false`; `paseo.model-pin` keeps it in live mode.
+  would-be pick at `applied: false`; `paseo.model-pin` keeps it in live mode;
+  and a self-match (including a dated/undated alias) stays `"honored-request"`
+  with no `override` and `ranking.applied` left truthful.
 - `server/decision-log.test.ts`, `server/role-router.test.ts`: `model.ranking`
   on the decision line; `paseo.arena-pick` written for a ranked outcome,
   including a shadowed or pinned honored request at `applied=0`, never for a
@@ -182,4 +193,7 @@ with the would-be pick recorded alongside it rather than discarded.
   `arenaRankingCache` the create hook uses, proving the settings preview and
   the agent-facing tool reflect a real ranked pick rather than always falling
   back to `"no-file"`.
+- `client/settings/explain-summary.test.ts`: `describeRequestedModel` renders
+  the `"arena-ranked"` override reason with its own explanation, not the
+  `"not-approved"` fallback text.
 - Verify: `cd plugins/claude-account-pool && npx vitest run server/arena-model-pick.test.ts server/arena-rankings.test.ts server/classifier.test.ts server/decision-log.test.ts server/role-router.test.ts server/classifier-tool.test.ts server/role-policy-rpc-handlers.test.ts --bail=1`.
