@@ -3,6 +3,7 @@ import type { ArenaRankingRow, ArenaRankingsFile } from "../shared/arena-aliases
 import {
   DEFAULT_POLICY,
   DEFAULT_THINKING_POLICY,
+  MODEL_PIN_LABEL,
   type ArenaPolicy,
   type RoleModelPolicy,
   type RoleRecord,
@@ -1725,16 +1726,48 @@ describe("classifyAgent — arena-ranked model pick (U8)", () => {
     expect(decision.model.ranking).toBeUndefined();
   });
 
-  it("an honored explicit request never carries a ranking, even when the ranked pick would be a different ref", () => {
+  it("live, no pin: U8's ranked pick overrides an eligible explicit request, with an arena-ranked override recorded", () => {
     // Arena would pick claude-sonnet-5 (see arenaWorld's rankings above), but this request
-    // explicitly asks for claude-haiku-4-5-20251001, which is approved and selectable.
+    // explicitly asks for claude-haiku-4-5-20251001, which is approved and selectable. Live mode
+    // (arenaWorld's default shadow: false) and no paseo.model-pin: the ranked pick wins.
     const decision = classifyAgent(
       child({ requestedModel: "claude-haiku-4-5-20251001", jevHint: workKindHint("frontend") }),
       arenaWorld(),
     );
+    expect(decision.model.outcome).toBe("selected");
+    expect(decision.model.model).toBe("claude-sonnet-5");
+    expect(decision.model.ranking).toMatchObject({ outcome: "ranked", applied: true, ref: "claude-sonnet-5" });
+    expect(decision.model.override).toMatchObject({
+      requestedRef: "claude/claude-haiku-4-5-20251001",
+      effectiveRef: "claude-sonnet-5",
+      reason: "arena-ranked",
+    });
+  });
+
+  it("shadow: an eligible explicit request is still honored, with the would-be pick recorded at applied 0", () => {
+    const decision = classifyAgent(
+      child({ requestedModel: "claude-haiku-4-5-20251001", jevHint: workKindHint("frontend") }),
+      arenaWorld({ policy: { ...arenaPool, arena: arenaPolicy({ shadow: true } ) } } as Partial<ClassifierWorld>),
+    );
     expect(decision.model.outcome).toBe("honored-request");
     expect(decision.model.model).toBe("claude-haiku-4-5-20251001");
-    expect(decision.model.ranking).toBeUndefined();
+    expect(decision.model.ranking).toMatchObject({ outcome: "ranked", applied: false, ref: "claude-sonnet-5" });
+    expect(decision.model.override).toBeUndefined();
+  });
+
+  it("live, paseo.model-pin set: the explicit request is kept, with the ranked pick recorded at applied 0", () => {
+    const decision = classifyAgent(
+      child({
+        requestedModel: "claude-haiku-4-5-20251001",
+        jevHint: workKindHint("frontend"),
+        labels: { [MODEL_PIN_LABEL]: "1" },
+      }),
+      arenaWorld(),
+    );
+    expect(decision.model.outcome).toBe("honored-request");
+    expect(decision.model.model).toBe("claude-haiku-4-5-20251001");
+    expect(decision.model.ranking).toMatchObject({ outcome: "ranked", applied: false, ref: "claude-sonnet-5" });
+    expect(decision.model.override).toBeUndefined();
   });
 
   it("a ref the usability check rejects is never picked and does not count toward the two-candidate floor", () => {

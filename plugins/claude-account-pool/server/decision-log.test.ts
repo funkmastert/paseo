@@ -401,5 +401,39 @@ describe("decision log", () => {
 
       expect(parse(lines[0]).model.ranking).toBeUndefined();
     });
+
+    it("an honored explicit request in shadow mode still records the would-be pick, at applied 0", () => {
+      const { lines, log } = harness();
+      const asked = request({
+        labels: { "paseo.agent-type": "worker" },
+        initialPrompt: "Add a hover state to the submit button.",
+        config: { provider: "claude", title: "button hover", cwd: "/repo", model: "claude-haiku-4-5" },
+      });
+      const decision = classifyAgent(
+        {
+          labels: asked.labels,
+          title: asked.config.title,
+          initialPrompt: asked.initialPrompt,
+          callerAgentId: asked.callerAgentId,
+          requestedProvider: asked.config.provider,
+          requestedModel: "claude-haiku-4-5",
+          jevHint: {
+            status: "answered",
+            callId: "jev-call-arena",
+            answers: { workKind: { choice: "frontend", confidence: 0.9 } },
+            proposal: {},
+            applyHard: false,
+            applyRole: false,
+            declaredAudit: false,
+          },
+        },
+        { ...arenaWorld, policy: { ...arenaWorld.policy, arena: { ...arenaWorld.policy.arena!, shadow: true } } },
+      );
+      log.note(asked, decision);
+      log.finish(tokenOf(log, asked), asked, asked);
+
+      expect(parse(lines[0]).model.outcome).toBe("honored-request");
+      expect(parse(lines[0]).model.ranking).toMatchObject({ outcome: "ranked", applied: false, ref: "claude-sonnet-5" });
+    });
   });
 });

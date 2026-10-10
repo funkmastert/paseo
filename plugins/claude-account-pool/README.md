@@ -1020,7 +1020,7 @@ The role router's precedence:
    (`requestedModelOverride: { requestedRef, honored, effectiveRef?,
    reason? }`).
 
-The override reason distinguishes two different situations:
+The override reason distinguishes three different situations:
 
 - `not-approved` — the requested ref was never one of the role's configured
   entries; the role forbids it outright.
@@ -1034,6 +1034,12 @@ The override reason distinguishes two different situations:
   approved model that's temporarily unavailable gets policy's live
   selection instead, with a message that says so — not the same message as
   a caller who asked for a model the role forbids.
+- `arena-ranked` — the requested ref is approved and selectable, but U8's
+  arena-ranked pick outranks it (live `arena` ranking, no `paseo.model-pin`
+  label on the create). The request wasn't refused; a better-ranked
+  candidate ran instead. Set `paseo.model-pin` to any non-empty value to
+  keep the explicit request over ranking. See `docs/arena-ranking.md`'s
+  "Explicit requests" section for the full shadow/live/pin matrix.
 
 #### A dated snapshot and its alias are one model
 

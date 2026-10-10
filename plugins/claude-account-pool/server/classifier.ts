@@ -1,5 +1,6 @@
 import {
   AGENT_TYPE_LABEL,
+  MODEL_PIN_LABEL,
   POOL_FAMILY,
   TASK_CLASS_LABEL,
   TASK_CLASS_IDS,
@@ -331,8 +332,15 @@ export interface ModelDecision {
   override?: {
     requestedRef: string;
     effectiveRef: string;
-    /** `not-approved`: never one of this (role, class)'s entries. `not-currently-selectable`: approved, but catalog-missing / no viable pool member / budget-gated. */
-    reason: "not-approved" | "not-currently-selectable";
+    /**
+     * `not-approved`: never one of this (role, class)'s entries.
+     * `not-currently-selectable`: approved, but catalog-missing / no viable
+     * pool member / budget-gated. `arena-ranked`: approved and selectable,
+     * but U8's ranked pick outranks it (live, no `paseo.model-pin`) — the
+     * one override reason that isn't policy refusing the request, but policy
+     * preferring a better one.
+     */
+    reason: "not-approved" | "not-currently-selectable" | "arena-ranked";
     /**
      * Set when the refusal is specifically "the catalog doesn't list it and
      * `allowUnlistedModels` doesn't name it" — the one refusal an operator can
@@ -673,6 +681,12 @@ function resolveWorkKind(jevHint: SpawnHint | undefined, role: RoleRecord): Work
   return role.id === "reviewer" ? "review" : undefined;
 }
 
+/** Any non-empty `paseo.model-pin` value keeps an eligible explicit request over U8's ranked pick. */
+function hasModelPinLabel(labels: Record<string, string> | undefined): boolean {
+  const value = labels?.[MODEL_PIN_LABEL];
+  return typeof value === "string" && value.length > 0;
+}
+
 /**
  * The model half: an explicit request first when it clears the same bar
  * ordered selection holds every other candidate to, then ordered selection.
@@ -768,7 +782,7 @@ function decideModel(
     };
   }
 
-  let overrideReason: "not-approved" | "not-currently-selectable" | undefined;
+  let overrideReason: "not-approved" | "not-currently-selectable" | "arena-ranked" | undefined;
   let missingFromCatalog = false;
   if (input.requestedModel) {
     const evaluation = evaluateRequestedModel(
@@ -781,25 +795,40 @@ function decideModel(
       selectionOptions,
     );
     if (evaluation.eligible) {
-      const unverified = evaluation.unadvertised === true;
-      // An honored explicit request never carries a ranking: explicit beats inferred, and `base`'s
-      // `ranking` (if any) was computed for the ordered-selection path, not this one. Spreading it
-      // in unconditionally would let the decision claim a ranked model "applied" while a different,
-      // explicitly-requested model actually runs.
-      const { ranking: _ignoredForHonoredRequest, ...baseWithoutRanking } = base;
-      return {
-        ...baseWithoutRanking,
-        outcome: "honored-request",
-        provider: input.requestedProvider ?? null,
-        model: input.requestedModel,
-        ...(unverified ? { unadvertised: { source: "explicit" as const, ref: requestedRef as string } } : {}),
-        reason: unverified
-          ? `${requestedRef} was asked for and ${poolPhrase(slot, fellBack)} approves it. The provider's catalog does not list it, so it is UNVERIFIED — it runs only because allowUnlistedModels names it.`
-          : `${requestedRef} was asked for, ${poolPhrase(slot, fellBack)} approves it, and it is selectable right now — so it runs as requested.`,
-      };
+      // U8's ranked pick outranks an eligible explicit request too (the explicit-request gap PR B's
+      // review fix opened): live (not shadow) and not pinned, fall through to ordered selection below,
+      // which already reads the reordered `selectionRole` pool — so the ranked ref wins exactly as it
+      // would have for a request-free create. `paseo.model-pin` is the one thing that keeps "explicit
+      // beats inferred" meaning what it always meant for this one request.
+      const pinned = hasModelPinLabel(input.labels);
+      if (ranking?.outcome === "ranked" && ranking.applied && !pinned) {
+        overrideReason = "arena-ranked";
+      } else {
+        const unverified = evaluation.unadvertised === true;
+        // Honoring the request never claims the ranked pick "applied": whatever `ranking` says here is
+        // a RECORD (shadow's would-be pick, or a pin keeping today's request), never a model that is
+        // actually running instead — the exact corruption PR B's review fix existed to prevent.
+        const requestRanking = ranking ? { ...ranking, applied: false as const } : undefined;
+        const pinNote =
+          pinned && ranking?.outcome === "ranked"
+            ? ` paseo.model-pin keeps it over the arena-ranked ${ranking.ref}.`
+            : "";
+        return {
+          ...base,
+          ...(requestRanking ? { ranking: requestRanking } : {}),
+          outcome: "honored-request",
+          provider: input.requestedProvider ?? null,
+          model: input.requestedModel,
+          ...(unverified ? { unadvertised: { source: "explicit" as const, ref: requestedRef as string } } : {}),
+          reason: unverified
+            ? `${requestedRef} was asked for and ${poolPhrase(slot, fellBack)} approves it. The provider's catalog does not list it, so it is UNVERIFIED — it runs only because allowUnlistedModels names it.${pinNote}`
+            : `${requestedRef} was asked for, ${poolPhrase(slot, fellBack)} approves it, and it is selectable right now — so it runs as requested.${pinNote}`,
+        };
+      }
+    } else {
+      overrideReason = evaluation.configured ? "not-currently-selectable" : "not-approved";
+      missingFromCatalog = evaluation.missingFromCatalog === true;
     }
-    overrideReason = evaluation.configured ? "not-currently-selectable" : "not-approved";
-    missingFromCatalog = evaluation.missingFromCatalog === true;
   }
 
   const outcome = selectModel(selectionRole, world.catalog, world.pool, world.health, selectionOptions);
@@ -820,12 +849,14 @@ function decideModel(
       ? { requestedRef, effectiveRef, reason: overrideReason, ...(missingFromCatalog ? { missingFromCatalog: true as const } : {}) }
       : undefined;
 
-  // Three different sentences, because they call for three different actions:
-  // fix the pool, wait for capacity, or add the id to allowUnlistedModels.
+  // Four different sentences, because they call for four different actions:
+  // fix the pool, pin the model, wait for capacity, or add the id to allowUnlistedModels.
   const overrideNote = override
     ? override.reason === "not-approved"
       ? ` ${requestedRef} was asked for, but ${poolPhrase(slot, fellBack)} does not approve it, so policy chose instead.`
-      : missingFromCatalog
+      : override.reason === "arena-ranked"
+        ? ` ${requestedRef} was asked for and is approved, but ${effectiveRef} ranks higher for this kind of work on LMArena, so it runs instead. Label the create with paseo.model-pin to keep the requested model.`
+        : missingFromCatalog
         ? ` ${requestedRef} was asked for and is approved, but the provider's catalog does not list it and allowUnlistedModels does not name it, so policy chose instead. Add it there if the provider does accept the id.`
         : ` ${requestedRef} was asked for and is approved, but is not selectable right now (capped or budget-gated), so policy chose instead.`
     : "";
