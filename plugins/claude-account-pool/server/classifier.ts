@@ -1206,6 +1206,35 @@ function resolveThinkingLevel(
  * anything unrecognized, uniformly. Leaders never route to Codex (KTD-1), so this never needs a
  * leader exception.
  */
+/**
+ * Which level is wanted before any model-specific clamp is applied, and why: the leader rule, an
+ * explicit request, or the task class's default. Shared between decideThinking and
+ * decideCodexThinking (review finding #7) -- the two providers clamp the result differently, but
+ * resolve the same unclamped "wanted" level the same way.
+ */
+function resolveWantedThinkingLevel(
+  input: ClassifierInput,
+  world: ClassifierWorld,
+  taskClass: TaskClassId | undefined,
+  role: RoleDecision,
+  asChild: boolean,
+): { outcome: "leader-rule" | "requested" | "task-class-default"; wanted: string } {
+  const requested = input.requestedThinkingOptionId;
+  const isLeaderTier = !asChild || role.role.id === LEADER_ROLE_ID;
+  const leaderLevel = world.policy.thinking.leader;
+
+  if (isLeaderTier && leaderLevel !== null) {
+    return { outcome: "leader-rule", wanted: leaderLevel };
+  }
+  if (requested !== undefined) {
+    return { outcome: "requested", wanted: requested };
+  }
+  return {
+    outcome: "task-class-default",
+    wanted: world.policy.thinking.byTaskClass[taskClass ?? "standard"],
+  };
+}
+
 function decideCodexThinking(
   input: ClassifierInput,
   world: ClassifierWorld,
@@ -1215,21 +1244,7 @@ function decideCodexThinking(
   effective: EffectiveThinkingModel,
 ): ThinkingDecision {
   const requested = input.requestedThinkingOptionId;
-  const isLeaderTier = !asChild || role.role.id === LEADER_ROLE_ID;
-  const leaderLevel = world.policy.thinking.leader;
-
-  let outcome: "leader-rule" | "requested" | "task-class-default";
-  let wanted: string;
-  if (isLeaderTier && leaderLevel !== null) {
-    outcome = "leader-rule";
-    wanted = leaderLevel;
-  } else if (requested !== undefined) {
-    outcome = "requested";
-    wanted = requested;
-  } else {
-    outcome = "task-class-default";
-    wanted = world.policy.thinking.byTaskClass[taskClass ?? "standard"];
-  }
+  const { outcome, wanted } = resolveWantedThinkingLevel(input, world, taskClass, role, asChild);
 
   // `max` IS ranked on Paseo's own ladder (above xhigh, for a future Claude level) but Codex
   // still caps to xhigh at it -- the plan names it explicitly alongside Codex's own `ultra` and
@@ -1357,21 +1372,7 @@ function decideThinking(
     };
   }
 
-  const isLeaderTier = !asChild || role.role.id === LEADER_ROLE_ID;
-  const leaderLevel = world.policy.thinking.leader;
-
-  let outcome: "leader-rule" | "requested" | "task-class-default";
-  let wanted: string;
-  if (isLeaderTier && leaderLevel !== null) {
-    outcome = "leader-rule";
-    wanted = leaderLevel;
-  } else if (requested !== undefined) {
-    outcome = "requested";
-    wanted = requested;
-  } else {
-    outcome = "task-class-default";
-    wanted = world.policy.thinking.byTaskClass[taskClass ?? "standard"];
-  }
+  const { outcome, wanted } = resolveWantedThinkingLevel(input, world, taskClass, role, asChild);
 
   const level = resolveThinkingLevel(wanted, entry.optionIds, entry.defaultOptionId, isSubagent);
   const override: ThinkingDecision["override"] =
