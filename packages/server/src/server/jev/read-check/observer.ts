@@ -1270,6 +1270,9 @@ export class ReadCheckObserver implements FileReadObserver {
         estimated: false,
         split: read.files.length > 1,
         subagent: input.hook.subagentId !== null,
+        // R4: a subagent read judged against the parent's task because its own brief could not
+        // be found.
+        briefMissing: input.hook.subagentId !== null && !input.event.subagentBrief,
         // D12: the subtree this read came from, or null for an ordinary one. The ledger counts
         // these apart, and they never count toward the shadow-to-live evidence rule.
         shadowOnly: eligibility.shadowOnly,
@@ -1637,6 +1640,12 @@ export class ReadCheckObserver implements FileReadObserver {
     if (!asked) return null;
     const state = this.stateFor(event.agentId);
     const now = this.now();
+    const subagentId = input.hook.subagentId;
+    // R4, KTD-4: a subagent whose brief could not be found was judged against a task the agent
+    // never got to see — never deny on that basis. A `named` read never reaches here (`ask()`
+    // already returned null for one), so this is a defensive restatement of that rule, not a new
+    // path to it.
+    const subagentBriefMissing = subagentId !== null && !event.subagentBrief;
     const decision = decideLiveDeny({
       answer: asked.answer,
       answered: asked.kind === "answered",
@@ -1646,12 +1655,15 @@ export class ReadCheckObserver implements FileReadObserver {
       deniesLastHour: state.denies.filter((t) => now - t < HOUR_MS).length,
       regretsLastHour: state.regrets.filter((t) => now - t < HOUR_MS).length,
       maxDeniesPerAgentPerHour: config.maxDeniesPerAgentPerHour,
+      subagentBriefMissing,
+      named: false,
     });
     const facts = {
       contextTokens: prepared.tokens,
       estimated: true,
       split: false,
-      subagent: input.hook.subagentId !== null,
+      subagent: subagentId !== null,
+      briefMissing: subagentBriefMissing,
       liveReason: decision.deny ? null : decision.reason,
     };
     if (!decision.deny) {

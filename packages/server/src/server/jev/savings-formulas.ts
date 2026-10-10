@@ -722,9 +722,14 @@ const EVIDENCE_COUNTERS: Partial<Record<JevSavingsFeature, CounterRule>> = {
     if (decision.wouldBe !== "would-skip" || !validation) return;
     if (T === null || T < READ_CHECK_LIVE_MIN_TOKENS) return;
     add("bigWouldSkip");
+    // R5: the same would-skips, split by reader, so a main agent's false-skip rate is visible
+    // beside a subagent's (docs/jev.md, Feature 16's problem frame) without changing the rule.
+    const reader = bool(facts, "subagent") === true ? "subagent" : "main";
+    add(`bigWouldSkip.${reader}`);
     const w = priceWeight(str(facts, "model")) ?? 0;
     if (validation.outcome === "false-skip") {
       add("bigWouldSkipFalse");
+      add(`bigWouldSkipFalse.${reader}`);
       const C = num(facts, "agentContextTokens") ?? JEV_FLEET_MEDIAN_CONTEXT_TOKENS;
       add("bigWouldSkipProjected", round(-extraStepTokens(C) * w));
     } else {
@@ -841,9 +846,17 @@ export function evaluateEvidence(
         shadowOnly === 0
           ? ""
           : `; shadow-only ${shadowOnly} judged, ${c("shadowOnlyWouldSkip")} would-skip, ${pct(c("shadowOnlyFalseSkip"), c("shadowOnlyWouldSkip"))} false`;
+      // R5: the same false-skip rate, split by reader, so a fix aimed at subagents (this plan)
+      // shows up here without a second rule to track.
+      const readerNote = (reader: "main" | "subagent"): string => {
+        const readerN = c(`bigWouldSkip.${reader}`);
+        return readerN === 0
+          ? ""
+          : `; ${reader} ${readerN} would-skip, ${pct(c(`bigWouldSkipFalse.${reader}`), readerN)} false`;
+      };
       return {
         rule: "shadow -> live: 200 would-skips of reads of 8,000 tokens or more, at most 30% false skips, a positive projected net",
-        observed: `${n} would-skips, ${pct(falseSkips, n)} false, projected net ${Math.round(net)}${shadowOnlyNote}`,
+        observed: `${n} would-skips, ${pct(falseSkips, n)} false, projected net ${Math.round(net)}${readerNote("main")}${readerNote("subagent")}${shadowOnlyNote}`,
         met: n < 200 ? null : falseSkips <= 0.3 * n && net > 0,
       };
     }

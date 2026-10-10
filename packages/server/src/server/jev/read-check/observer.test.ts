@@ -581,6 +581,30 @@ describe("ReadCheckObserver: live mode (D11)", () => {
     const outside = setup({ config: { readCheck: { ...LIVE.readCheck, liveShare: 0 } } });
     expect(outside.observer.preToolUse(pre("Read", { file_path: big }))).toBeNull();
   });
+
+  test("R4, KTD-4: a not_needed subagent read with a missing brief is never denied", async () => {
+    const { observer, savings } = setup({ config: LIVE });
+    const content = bigSource();
+    const file = writeRepoFile("src/session.ts", content);
+    const hold = observer.preToolUse({
+      agentId: AGENT,
+      agentCwd: repo,
+      input: {
+        hook_event_name: "PreToolUse",
+        tool_name: "Read",
+        tool_input: { file_path: file },
+        tool_use_id: `toolu_${++toolUseCounter}`,
+        cwd: repo,
+        agent_id: "sub-missing",
+      },
+      subagentBrief: null,
+    });
+    expect(await hold!.verdict).toBeNull();
+    expect(savings.records).toHaveLength(1);
+    expect(savings.records[0]).toMatchObject({ decision: { did: "read" } });
+    expect(savings.records[0]!.facts["liveReason"]).toBe("subagent-brief-missing");
+    expect(savings.records[0]!.facts["briefMissing"]).toBe(true);
+  });
 });
 
 describe("ReadCheckObserver: the shadow-only subtrees (D12)", () => {
@@ -769,7 +793,7 @@ describe("ReadCheckObserver: a subagent's own context (R1, R4, KTD-2)", () => {
   });
 
   test("an unknown subagent id is judged as today: the parent's task and timeline tail", async () => {
-    const { observer, jev } = setup();
+    const { observer, jev, savings } = setup();
     const content = bigSource();
     const file = writeRepoFile("src/template.hbs", content);
     observer.postToolUse({
@@ -784,6 +808,7 @@ describe("ReadCheckObserver: a subagent's own context (R1, R4, KTD-2)", () => {
       "Fix the login bug\nFind out why the login form rejects valid passwords and fix it.",
     );
     expect(state["recent"]).toEqual(["assistant: I will look at the session module next."]);
+    expect(savings.records[0]!.facts["briefMissing"]).toBe(true);
   });
 
   test("two concurrent subagents keep separate briefs and rings", async () => {
