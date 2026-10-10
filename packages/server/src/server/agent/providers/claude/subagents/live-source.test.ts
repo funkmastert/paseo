@@ -74,6 +74,20 @@ describe("ClaudeTaskProtocolSource", () => {
     expect(source.briefFor("unknown_task_id")).toBeUndefined();
   });
 
+  it("bounds the brief map: the oldest brief is evicted once the cap is exceeded (finding #3)", () => {
+    // `briefByTaskId` has no terminal-status signal to clear it on (unlike the status maps), so a
+    // session that fans out more subagents than the cap evicts the oldest rather than growing
+    // forever.
+    const source = new ClaudeTaskProtocolSource();
+    for (let index = 0; index <= 500; index += 1) {
+      source.observe(
+        taskStarted({ task_id: `task-${index}`, description: `d${index}`, prompt: `p${index}` }),
+      );
+    }
+    expect(source.briefFor("task-0")).toBeUndefined();
+    expect(source.briefFor("task-500")).toEqual({ description: "d500", prompt: "p500" });
+  });
+
   it("prefers the name the Task call gave over the agent type", () => {
     // The replay source titles a subagent `input.name ?? subagent_type`. Live reads the same
     // field from the same Task call, so one subagent is named identically on both paths.
@@ -354,12 +368,31 @@ describe("ClaudeTaskProtocolSource", () => {
     ]);
   });
 
+  it("never puts a workflow's raw JS-source prompt in its JEV brief", () => {
+    // Read-check Feature 16's brief map (R1) must never carry a workflow's script source: only
+    // a description, same as the timeline guard just above it.
+    const source = new ClaudeTaskProtocolSource();
+    source.observe(
+      taskStarted({
+        task_type: "local_workflow",
+        subagent_type: undefined,
+        description: "Runs one deterministic child and returns its structured result",
+        prompt: "export const meta = {}; const secretToken = 'sk-abc123';",
+      }),
+    );
+    expect(source.briefFor("a1730a6215e1f5cf6")).toEqual({
+      description: "Runs one deterministic child and returns its structured result",
+      prompt: null,
+    });
+  });
+
   it("adds a completed workflow result to its generic timeline", () => {
     const readWorkflowResult = vi.fn(() => "What Paseo is\nA local-first environment.");
     const source = new ClaudeTaskProtocolSource({ readWorkflowResult });
     source.observe(
       taskStarted({ task_type: "local_workflow", subagent_type: undefined, prompt: "SECRET" }),
     );
+    expect(source.briefFor("a1730a6215e1f5cf6")?.prompt).toBeNull();
 
     expect(source.observe(taskNotification("completed"))).toEqual([
       {

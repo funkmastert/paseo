@@ -2,6 +2,7 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import type { AgentMetadata } from "../../../agent-sdk-types.js";
 import type { ProviderSubagentStatus } from "../../../provider-subagents/store.js";
+import type { SubagentBrief } from "../../../../jev/read-check/observer.js";
 import { resolveObservedClaudeModelId } from "../models.js";
 import type { SubagentObservation } from "./observation.js";
 import {
@@ -45,6 +46,8 @@ interface TaskStartedMessage {
 const CLAUDE_SUBAGENT_TASK_TYPE = "local_agent";
 /** Workflow executions use the same announced task lifecycle as Task-tool subagents. */
 const CLAUDE_WORKFLOW_TASK_TYPE = "local_workflow";
+/** `briefByTaskId`'s bound: a session that fans out this many subagents without a `reset()` evicts the oldest brief first, rather than growing without limit. */
+const MAX_TRACKED_BRIEFS = 500;
 
 /**
  * Not every announced task belongs in the subagents track. Verified on the wire:
@@ -171,12 +174,11 @@ export class ClaudeTaskProtocolSource {
   /**
    * task_id (the hook `agent_id` of every call inside that subagent) -> its Task call's own
    * description and prompt, for feature 16's read check (docs/jev.md, Feature 16, R1): a
-   * subagent's read is judged against its own brief, not its parent's.
+   * subagent's read is judged against its own brief, not its parent's. Bounded at
+   * `MAX_TRACKED_BRIEFS`, oldest evicted first: this map, unlike the others above, has no
+   * terminal-status signal to clear it on, so a session that never resets runs it forever.
    */
-  private readonly briefByTaskId = new Map<
-    string,
-    { description: string | null; prompt: string | null }
-  >();
+  private readonly briefByTaskId = new Map<string, SubagentBrief>();
   /** Workflow invocations already own a real Workflow card in the parent timeline. */
   private readonly idsWithExistingParentToolCard = new Set<string>();
   /**
@@ -249,7 +251,7 @@ export class ClaudeTaskProtocolSource {
    * the same id a hook reports as `agent_id` (`observeHook`'s comment explains why those are one
    * id). Undefined when this source never declared that subagent.
    */
-  briefFor(taskId: string): { description: string | null; prompt: string | null } | undefined {
+  briefFor(taskId: string): SubagentBrief | undefined {
     return this.briefByTaskId.get(taskId);
   }
 
@@ -399,14 +401,20 @@ export class ClaudeTaskProtocolSource {
     this.canonicalIdByToolUseId.set(id, id);
     this.declaredIds.add(id);
     this.lastStatusById.set(id, "running");
-    this.briefByTaskId.set(message.task_id, {
-      description: readString(message.description) ?? null,
-      prompt: readString(message.prompt) ?? null,
-    });
 
     // An explicit `name` on the Task call wins over the agent type, matching how replay titles the
     // same subagent. Without it a fan-out of five Explores reads as five identical rows.
     const isWorkflow = message.task_type === CLAUDE_WORKFLOW_TASK_TYPE;
+    if (this.briefByTaskId.size >= MAX_TRACKED_BRIEFS) {
+      const oldest = this.briefByTaskId.keys().next().value;
+      if (oldest !== undefined) this.briefByTaskId.delete(oldest);
+    }
+    this.briefByTaskId.set(message.task_id, {
+      description: readString(message.description) ?? null,
+      // A workflow's `prompt` is its JavaScript source, not a user-authored task (same guard as
+      // the timeline consumer below): never put that in a brief a JEV call can read.
+      prompt: isWorkflow ? null : (readString(message.prompt) ?? null),
+    });
     if (isWorkflow || parentSubagentId) {
       this.idsWithExistingParentToolCard.add(id);
     }

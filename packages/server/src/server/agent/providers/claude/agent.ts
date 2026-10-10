@@ -23,6 +23,7 @@ import {
   READ_CHECK_POST_TOOLS,
   READ_CHECK_PRE_TOOLS,
   type FileReadObserver,
+  type SubagentBrief,
 } from "../../../jev/read-check/observer.js";
 import {
   checkCatastrophe,
@@ -5332,9 +5333,7 @@ class ClaudeAgentSession implements AgentSession {
    * Undefined when the hook fired on the main thread; null when it fired inside a subagent this
    * provider never declared (`brief: missing`).
    */
-  private subagentBriefFor(
-    input: unknown,
-  ): { description: string | null; prompt: string | null } | null | undefined {
+  private subagentBriefFor(input: unknown): SubagentBrief | null | undefined {
     const agentId =
       typeof input === "object" && input !== null
         ? (input as Record<string, unknown>)["agent_id"]
