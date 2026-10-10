@@ -309,7 +309,8 @@ export const JevSavingsFeatureSummarySchema = z.object({
   benefit: z.string(),
   asked: z.number(),
   // Keyed by reason: "below-floor" | "excluded" | "inactive" | "not-text" | "secret-path" |
-  // "outside-cwd" | "outside-repo" | "compound" | "saturated" | "dedup" | "repeat" | "changed"
+  // "outside-cwd" | "outside-repo" | "compound" | "saturated" | "dedup" | "repeat" | "changed" |
+  // "named"
   notAsked: z.record(z.string(), z.number()),
   live: JevSavingsModeTotalsSchema,
   shadow: JevSavingsModeTotalsSchema,

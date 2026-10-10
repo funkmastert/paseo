@@ -1463,7 +1463,13 @@ Every read is reported through `jev.savings.noteRead`. JEV is asked only when al
 
 Only then is the file opened, and what is sent is the file the checks saw (`changed` otherwise). The observer `lstat`s the real path before the first name check and opens it with `O_NOFOLLOW` (on Windows, after an `lstat`); device, inode, size, modification time and a single link must match before and after the read. A rename, a symlink swap or a write during the git runs sends nothing. A Bash read sends the range read this way, never the command's output. A `Read` sends the hook's text only when it equals the same lines read from disk, CRLF and a final newline aside: a path the CLI resolved differently from the observer, or a symlink swapped back after the tool opened it, sends nothing. The observer expands a leading `~` in `file_path` as the CLI does.
 
-A read inside an in-process subagent is judged against the parent agent's task, and its record says `subagent: true`.
+A read inside an in-process subagent is judged against that subagent's own task (R1, next section), and its record says `subagent: true`.
+
+### The `named` rule
+
+R2, KTD-3: a read whose path, or its file name, the reader was already told about or recently talked about is `needed` without a JEV call — asking would only confirm what code already knows. After the file is loaded and the state is built, `ask()` (`read-check/named.ts`) searches the reader's `task` (a subagent's brief, or the legacy title and assignment), the current turn's latest prompt and any `recent` line that starts `assistant: `, against three things: the path as the tool named it, the path relative to the agent's cwd, and the file's base name. The base name counts on its own only past 6 characters and off a short deny list (`index.ts`, `README.md`, `SKILL.md`, `package.json` and the like, case-insensitively) — a full path containing one of those still counts. `excerpt` and `outline` are never searched: a path the file's own content happens to mention says nothing about whether the agent already expected it, and searching them would make every self-referential file immune to a real skip.
+
+A match counts as the not-asked reason `named`, makes no JEV call, and opens no validation window — it never produces a record, same as every other not-asked reason. It is the only not-asked reason not yet discussed: 1–9 above all run before the file is read; `named` runs after, since it needs nothing the file holds and still needs to run before the one expensive step, the JEV call.
 
 ### The shadow-only subtrees
 
@@ -1484,11 +1490,16 @@ The record's facts carry `shadowOnly` (`skill-docs` or `ce-scratch`), which reac
 
 ### State and question
 
-The observer builds the state after the read ran, from the agent record, its timeline tail (`agentManager.fetchTimeline(id, { direction: "tail", limit: 16 })`, the read's own call removed and each tool call listed once) and what the read loaded (`read-check/state.ts`). At most 10,000 bytes; the excerpt shrinks first, then `recent`:
+The observer builds the state after the read ran (`read-check/state.ts`), from what the read loaded and from the reader's own context, which splits two ways:
+
+- **A main agent, or a subagent whose brief could not be found** (`brief: missing`, next section): the agent record, its timeline tail (`agentManager.fetchTimeline(id, { direction: "tail", limit: 16 })`, the read's own call removed and each tool call listed once), and R3's two additions: the newest `user_message` in that tail is appended to `task` after the assignment, and the search call (`rg`, `grep`, `find`, a Glob) whose matched files named this read's path is kept in `recent` even past the ordinary 16-row tail, as long as it is in the read's own turn — the observer scans a wider page (200 rows) to find that one line alone.
+- **A subagent whose own brief was found** (R1, next section): its own Agent/Task call's description and prompt, and its own ring of the last 16 Read, Bash and edit-tool calls it made — never the parent's.
+
+At most 10,000 bytes; the excerpt shrinks first, then `recent`:
 
 ```json
 {
-  "task": "<agent title>\n<first 800 characters of its assignment>",
+  "task": "<agent title>\n<first 800 characters of its assignment>\n<the current turn's latest prompt, when one landed mid-session>",
   "recent": [
     "assistant: <last assistant text, 600 characters>",
     "tool Read src/server/session.ts",
@@ -1499,6 +1510,15 @@ The observer builds the state after the read ran, from the agent record, its tim
   "size": "lines 1-1240 of 3100, about 14,300 tokens",
   "outline": "<declaration lines from the range: imports, exports, classes, functions, headings; 2,000 characters>",
   "excerpt": "<first 6,000 characters of the range>"
+}
+```
+
+A subagent with a found brief sends a different `task` — its own brief, then its parent kept to one line, never the parent's turn prompt:
+
+```json
+{
+  "task": "<the subagent's own Agent/Task description>\n<its own prompt, clipped to 800 characters>\n(parent task: <parent agent title>)",
+  "recent": ["tool Read docs/plans/persona-plan.md"]
 }
 ```
 
@@ -1522,6 +1542,14 @@ Enough of the file is the excerpt and the outline. Whether a file matters to a t
   }
 }
 ```
+
+### A subagent's own context
+
+Two-thirds of all judged reads come from inside an in-process subagent, and a third of all would-skip verdicts across the fleet are false skips — 52 of 58, 90%, from a subagent read judged against the parent's unrelated task (measured from `~/.paseo/jev/savings.jsonl` on 2026-10-09). R1 fixes the context, not the judgment: a subagent's read is judged against what the subagent was actually asked.
+
+- **The brief.** The Claude provider (`providers/claude/agent.ts`) asks `ClaudeTaskProtocolSource.briefFor(agentId)` for the subagent the hook fired inside: the Agent/Task call's own `description` and `prompt`, which the provider already reads off Claude's `task_started` announcement and keeps in a small per-session `task_id -> brief` map (`task_id` is the same id a hook reports as `agent_id`: `providers/claude/subagents/live-source.ts`). The brief rides the hook event beside `subagentId`, clipped to 800 characters like the legacy assignment (KTD-5).
+- **The ring.** The observer keeps its own per-subagent-id ring of the last 16 Read, Bash and edit-tool calls it sees (KTD-2), rendered through the same `recentLine` the legacy path uses — no second rendering to keep in sync. It is pushed after a read is judged, so a read never sees itself, and dropped on `SubagentStop`.
+- **A missing brief** — an `agent_id` this provider never declared — judges the read exactly as before this plan: the parent's task and timeline tail, with `briefMissing: true` on the record's facts so live mode knows never to deny it ([Live mode](#live-mode-d11)).
 
 ### Decision
 
@@ -1547,7 +1575,9 @@ The callback denies (`permissionDecision: "deny"`) only when all of these hold:
 - the call is a `Read`, or a Bash line that reads only this file;
 - this agent was not denied this path before in its session: the second read of a path always goes through, unchecked;
 - the agent has not edited the path in this session;
-- the agent had fewer than `maxDeniesPerAgentPerHour` (5) denials and fewer than 2 regrets in the last hour.
+- the agent had fewer than `maxDeniesPerAgentPerHour` (5) denials and fewer than 2 regrets in the last hour;
+- R4, KTD-4: this is not a subagent read whose own brief could not be found — it was judged against a task the agent never got to see, too uncertain a basis to deny on (`briefMissing: true`, `liveReason: "subagent-brief-missing"`);
+- KTD-4: the `named` rule did not already match this read — in practice it never reaches here, since `ask()` already returned before the JEV call, so this guards against a future caller that asks anyway (`liveReason: "named"`).
 
 The reason the agent reads:
 
@@ -1560,6 +1590,8 @@ It denies; it never substitutes. A PostToolUse `updatedToolOutput` replaces a re
 D1 holds everywhere else. No tool is removed (D2), the deny is advice one call overrules, and the catastrophe gate stays the only gate an agent cannot overrule.
 
 **Evidence for going live,** the rule the dashboard reports: at least 200 judged `would-skip`s of reads of 8,000 tokens or more, at most 30% of them false skips, and a positive projected net, which is the live formula applied to those shadow records. At 8,000 tokens a deny pays once more than 18% of denies are right (research 03 §3); allowing 30% false skips leaves room for shadow overcounting what agents did not use.
+
+R5: `evidence.observed` also reports the same would-skips split by reader — `bigWouldSkip.main`/`bigWouldSkipFalse.main` and `bigWouldSkip.subagent`/`bigWouldSkipFalse.subagent` (`savings-formulas.ts`), from the record's `subagent` fact — so this plan's effect on the subagent false-skip rate is visible beside the one rule, without a second rule to track it. The split is reporting only: it never changes `met`.
 
 ### Did the agent use it
 
@@ -1593,10 +1625,11 @@ In shadow nothing the check does can reach the read: the read has already run. I
 
 - `read-check/recognize.test.ts`: each reader and its flags; `cd` then a read; a pipe into `head`; `2>/dev/null`; a redirect, `rg`, `tail -f`, `sed -i`, a glob, an unnameable command, and a read mixed with any other command are not reads. `agent/shell-commands.test.ts`: the walker's `unresolvedCommand` and `inputRedirect`.
 - `read-check/paths.test.ts`: a file in an agent's checkout is not personal, while the daemon's state beside it is, including a directory not yet invented and a second spelling of Paseo's home; a sibling whose name starts with the cwd's; case, NFC and the data-volume firmlink; each shadow-only subtree and each spelling of tmp, with the credentials, settings, history, projects and `plugins/config.json` beside the cache still personal, `..` unable to climb out, and a Windows-shaped path on win32.
-- `read-check/decision.test.ts`: every row of the decision table and every live condition, including the second read of a path and the regret cooldown. `read-check/state.test.ts`: ranges, sizes, the outline and the state's 10,000-byte cap. `read-check/validation.test.ts`: each signal and the window's close by turns and by time.
+- `read-check/decision.test.ts`: every row of the decision table and every live condition, including the second read of a path, the regret cooldown, a brief-missing subagent and a `named` match never denying. `read-check/state.test.ts`: ranges, sizes, the outline, the state's 10,000-byte cap, a subagent's brief-based task and the pinned recent line. `read-check/validation.test.ts`: each signal and the window's close by turns and by time.
+- `read-check/named.test.ts`: the exact path, the display path and the base name each match; a short or generic base name alone does not; a full path containing one does; a path named only inside the content being judged does not.
 - `read-check/observer.egress.test.ts`: the adversarial review's probes, each proving nothing reaches the fake transport: compound Bash lines, a Bash read's excerpt taken from disk, secret-shaped names on any symlink hop, hard links, the shared secret list, personal locations with the cwd at the home directory, the daemon's state with the cwd at Paseo's home, files outside any repository; that an agent's checkout under Paseo's home is judged while a secret-shaped name in it, a file its git ignores, a name pointing out at the daemon's state, and a configured exclusion on it are not; and that live never holds a small read on git, a use while JEV answers is recorded, and a burst is bounded.
-- `read-check/observer.test.ts`, on the real service over the fake: a shadow-only read judged and its subtree on the record, a link out of the cache refused on both nets, and live mode asking, recording and never denying one while it still denies an ordinary repo read; each not-asked reason in order; an excluded file is never opened and nothing is sent; the state's fields; a repeat makes no call; each validation signal; the control arm answers shadow on a live feature; live denies once, settles a read that ran, and gives no late deny.
-- `providers/claude/agent.read-check.test.ts`: no observer, no matcher; the gates keep theirs; a shadow callback resolves `{}` before the observer's work starts; a throwing observer returns `{}`; live denies once and returns `{}` past its timeout; and the in-process latency arms.
+- `read-check/observer.test.ts`, on the real service over the fake: a shadow-only read judged and its subtree on the record, a link out of the cache refused on both nets, and live mode asking, recording and never denying one while it still denies an ordinary repo read; each not-asked reason in order; an excluded file is never opened and nothing is sent; the state's fields; a repeat makes no call; each validation signal; the control arm answers shadow on a live feature; live denies once, settles a read that ran, and gives no late deny; a subagent's found brief judged against itself with its own ring, a missing brief falling back to the parent, two concurrent subagents kept apart, the ring dropped on `SubagentStop`; a named path or base name asking nothing; a mid-session prompt added to a main agent's task, and a search call pinned past the ordinary tail within its own turn.
+- `providers/claude/agent.read-check.test.ts`: no observer, no matcher; the gates keep theirs; a shadow callback resolves `{}` before the observer's work starts; a throwing observer returns `{}`; live denies once and returns `{}` past its timeout; the in-process latency arms; a subagent's read carries its own brief, the main thread carries none, and an undeclared subagent gets `brief: missing`; `SubagentStop` drops its ring. `providers/claude/subagents/live-source.test.ts`: `briefFor` keyed by `task_id`, the same id a hook reports as `agent_id`.
 - Verify: `npx vitest run packages/server/src/server/jev/read-check packages/server/src/server/agent/providers/claude/agent.read-check.test.ts`.
 - Real CLI latency, which spends nothing (the CLI talks to a local fake of the Messages API): `env -i PATH=… HOME=<scratch> PASEO_READ_CHECK_LATENCY_CLAUDE_BIN=~/.local/share/claude/versions/<v> PASEO_READ_CHECK_LATENCY_OUT=<file> npx vitest run src/server/agent/providers/claude/agent.read-check.latency.e2e.test.ts` from `packages/server`.
 

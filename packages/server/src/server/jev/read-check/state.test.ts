@@ -6,6 +6,7 @@ import {
   buildReadCheckState,
   describeSize,
   estimateReadTokens,
+  hasSubagentBriefContent,
   outlineOf,
   READ_CHECK_MAX_STATE_BYTES,
   readToolCharacters,
@@ -118,6 +119,101 @@ describe("buildReadCheckState", () => {
     expect(state.recent).toEqual(["assistant: Reading the session code"]);
     expect(state.why).toBe("Show the session module");
     expect(state.excerpt.length).toBe(6000);
+  });
+
+  test("a subagent with a found brief is judged against its own brief, with the parent as one line", () => {
+    const state = buildReadCheckState({
+      title: "Fix login",
+      assignment: "Find why login fails",
+      subagentBrief: {
+        description: "Read the persona file, then the template",
+        prompt: "Read docs/plans/persona-plan.md, then src/templates/base.hbs",
+      },
+      recent: [{ type: "assistant_message", text: "Reading the template" }],
+      why: null,
+      displayPath: "src/templates/base.hbs",
+      size: "all 10 lines, about 50 tokens",
+      rangeText: "x".repeat(10),
+    });
+    expect(state.task).toBe(
+      "Read the persona file, then the template\n" +
+        "Read docs/plans/persona-plan.md, then src/templates/base.hbs\n" +
+        "(parent task: Fix login)",
+    );
+    expect(state.recent).toEqual(["assistant: Reading the template"]);
+  });
+
+  test("a subagent's brief is clipped to 800 characters like the legacy assignment", () => {
+    const state = buildReadCheckState({
+      title: "Fix login",
+      assignment: null,
+      subagentBrief: { description: "d".repeat(900), prompt: null },
+      recent: [],
+      why: null,
+      displayPath: "a.ts",
+      size: "s",
+      rangeText: "x",
+    });
+    expect(state.task).toBe(`${"d".repeat(800)}\n(parent task: Fix login)`);
+  });
+
+  test("a declared-but-content-free brief falls back to the legacy task (finding #5)", () => {
+    const state = buildReadCheckState({
+      title: "Fix login",
+      assignment: "Find why login fails",
+      subagentBrief: { description: null, prompt: null },
+      recent: [{ type: "assistant_message", text: "Reading the template" }],
+      why: null,
+      displayPath: "src/templates/base.hbs",
+      size: "all 10 lines, about 50 tokens",
+      rangeText: "x".repeat(10),
+    });
+    expect(state.task).toBe("Fix login\nFind why login fails");
+    expect(state.recent).toEqual(["assistant: Reading the template"]);
+  });
+
+  test("a blank-only brief (empty strings) is content-free too", () => {
+    expect(hasSubagentBriefContent({ description: "", prompt: "   " })).toBe(false);
+    expect(hasSubagentBriefContent({ description: null, prompt: null })).toBe(false);
+    expect(hasSubagentBriefContent(undefined)).toBe(false);
+    expect(hasSubagentBriefContent(null)).toBe(false);
+    expect(hasSubagentBriefContent({ description: "Read the docs", prompt: null })).toBe(true);
+  });
+
+  test("a main agent's task adds the current turn's latest prompt after the assignment", () => {
+    const state = buildReadCheckState({
+      title: "Fix login",
+      assignment: "Find why login fails",
+      latestPrompt: "Also check the session cookie expiry",
+      recent: [],
+      why: null,
+      displayPath: "a.ts",
+      size: "s",
+      rangeText: "x",
+    });
+    expect(state.task).toBe(
+      "Fix login\nFind why login fails\nAlso check the session cookie expiry",
+    );
+  });
+
+  test("a pinned recent line survives the row cap, oldest first", () => {
+    const recent = Array.from({ length: 8 }, (_, index) => ({
+      type: "assistant_message" as const,
+      text: `step ${index}`,
+    }));
+    const state = buildReadCheckState({
+      title: "t",
+      assignment: null,
+      recent,
+      pinnedRecentLine: "tool Grep `session cookie`",
+      why: null,
+      displayPath: "a.ts",
+      size: "s",
+      rangeText: "x",
+    });
+    expect(state.recent[0]).toBe("tool Grep `session cookie`");
+    expect(state.recent).toHaveLength(8);
+    expect(state.recent[state.recent.length - 1]).toBe("assistant: step 7");
   });
 
   test("never passes 10,000 bytes, however wide the content", () => {

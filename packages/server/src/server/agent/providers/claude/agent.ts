@@ -23,6 +23,7 @@ import {
   READ_CHECK_POST_TOOLS,
   READ_CHECK_PRE_TOOLS,
   type FileReadObserver,
+  type SubagentBrief,
 } from "../../../jev/read-check/observer.js";
 import {
   checkCatastrophe,
@@ -5295,6 +5296,10 @@ class ClaudeAgentSession implements AgentSession {
           },
         ]
       : [];
+    // KTD-2: drops a subagent's recent-calls ring once it ends.
+    const readCheckSubagentStop = readCheck
+      ? [{ hooks: [this.endFileReadSubagent], timeout: READ_CHECK_TIMEOUT_SECONDS }]
+      : [];
     return {
       ...hooks,
       PreToolUse: [
@@ -5306,6 +5311,7 @@ class ClaudeAgentSession implements AgentSession {
       ],
       PostToolUse: [...(hooks.PostToolUse ?? []), ...readCheckPost],
       Stop: [...(hooks.Stop ?? []), ...askUserQuestionStop],
+      SubagentStop: [...(hooks.SubagentStop ?? []), ...readCheckSubagentStop],
     };
   }
 
@@ -5367,7 +5373,12 @@ class ClaudeAgentSession implements AgentSession {
     const agentId = this.agentId;
     if (!observer || !agentId) return {};
     try {
-      const hold = observer.preToolUse({ agentId, agentCwd: this.config.cwd, input });
+      const hold = observer.preToolUse({
+        agentId,
+        agentCwd: this.config.cwd,
+        input,
+        subagentBrief: this.subagentBriefFor(input),
+      });
       if (!hold) return {};
       let timer: ReturnType<typeof setTimeout> | undefined;
       const deadline = new Promise<null>((resolve) => {
@@ -5396,12 +5407,49 @@ class ClaudeAgentSession implements AgentSession {
     const agentId = this.agentId;
     if (!observer || !agentId) return {};
     try {
-      observer.postToolUse({ agentId, agentCwd: this.config.cwd, input });
+      observer.postToolUse({
+        agentId,
+        agentCwd: this.config.cwd,
+        input,
+        subagentBrief: this.subagentBriefFor(input),
+      });
     } catch (error) {
       this.logger.debug({ err: error }, "Read check failed to note a result");
     }
     return {};
   };
+
+  /** SubagentStop: feature 16's own ring of that subagent's recent calls is dropped (KTD-2). */
+  private endFileReadSubagent = async (input: unknown): Promise<Record<string, never>> => {
+    const observer = this.fileReadObserver;
+    if (!observer) return {};
+    const subagentId =
+      typeof input === "object" && input !== null
+        ? (input as Record<string, unknown>)["agent_id"]
+        : undefined;
+    if (typeof subagentId !== "string") return {};
+    try {
+      observer.subagentEnd(subagentId);
+    } catch (error) {
+      this.logger.debug({ err: error }, "Read check failed to end a subagent's ring");
+    }
+    return {};
+  };
+
+  /**
+   * R1, R4 (docs/jev.md, Feature 16): the subagent's own Agent/Task brief, by the hook's own
+   * `agent_id` (`ClaudeTaskProtocolSource.briefFor` — the same id `task_started` calls `task_id`).
+   * Undefined when the hook fired on the main thread; null when it fired inside a subagent this
+   * provider never declared (`brief: missing`).
+   */
+  private subagentBriefFor(input: unknown): SubagentBrief | null | undefined {
+    const agentId =
+      typeof input === "object" && input !== null
+        ? (input as Record<string, unknown>)["agent_id"]
+        : undefined;
+    if (typeof agentId !== "string") return undefined;
+    return this.taskProtocolSource.briefFor(agentId) ?? null;
+  }
 
   /**
    * Refuses a shell command that rewrites or deletes `main` on a remote, or wipes a disk, a

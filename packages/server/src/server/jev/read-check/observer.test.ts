@@ -104,6 +104,7 @@ function setup(
     answers?: Record<string, JevScriptedAnswer>;
     behavior?: TestJevServiceOptions["behavior"];
     fs?: ReadCheckFileSystem;
+    now?: () => number;
   } = {},
 ) {
   const config = options.config ?? {};
@@ -128,6 +129,7 @@ function setup(
     logger: pino({ level: "silent" }),
     sweepIntervalMs: 0,
     ...(options.fs ? { fs: options.fs } : {}),
+    ...(options.now ? { now: options.now } : {}),
   });
   return { jev, savings, observer };
 }
@@ -581,6 +583,56 @@ describe("ReadCheckObserver: live mode (D11)", () => {
     const outside = setup({ config: { readCheck: { ...LIVE.readCheck, liveShare: 0 } } });
     expect(outside.observer.preToolUse(pre("Read", { file_path: big }))).toBeNull();
   });
+
+  test("R4, KTD-4: a not_needed subagent read with a missing brief is never denied", async () => {
+    const { observer, savings } = setup({ config: LIVE });
+    const content = bigSource();
+    const file = writeRepoFile("src/session.ts", content);
+    const hold = observer.preToolUse({
+      agentId: AGENT,
+      agentCwd: repo,
+      input: {
+        hook_event_name: "PreToolUse",
+        tool_name: "Read",
+        tool_input: { file_path: file },
+        tool_use_id: `toolu_${++toolUseCounter}`,
+        cwd: repo,
+        agent_id: "sub-missing",
+      },
+      subagentBrief: null,
+    });
+    expect(await hold!.verdict).toBeNull();
+    expect(savings.records).toHaveLength(1);
+    expect(savings.records[0]).toMatchObject({ decision: { did: "read" } });
+    expect(savings.records[0]!.facts["liveReason"]).toBe("subagent-brief-missing");
+    expect(savings.records[0]!.facts["briefMissing"]).toBe(true);
+  });
+
+  test("R4, finding #5: a not_needed subagent read with a content-free brief is never denied", async () => {
+    // A declared `task_started` with both fields blank, not an undeclared id: the container
+    // exists, but the never-deny guarantee must still treat it as missing.
+    const { observer, savings } = setup({ config: LIVE });
+    const content = bigSource();
+    const file = writeRepoFile("src/session.ts", content);
+    const hold = observer.preToolUse({
+      agentId: AGENT,
+      agentCwd: repo,
+      input: {
+        hook_event_name: "PreToolUse",
+        tool_name: "Read",
+        tool_input: { file_path: file },
+        tool_use_id: `toolu_${++toolUseCounter}`,
+        cwd: repo,
+        agent_id: "sub-empty",
+      },
+      subagentBrief: { description: null, prompt: null },
+    });
+    expect(await hold!.verdict).toBeNull();
+    expect(savings.records).toHaveLength(1);
+    expect(savings.records[0]).toMatchObject({ decision: { did: "read" } });
+    expect(savings.records[0]!.facts["liveReason"]).toBe("subagent-brief-missing");
+    expect(savings.records[0]!.facts["briefMissing"]).toBe(true);
+  });
 });
 
 describe("ReadCheckObserver: the shadow-only subtrees (D12)", () => {
@@ -727,5 +779,390 @@ describe("ReadCheckObserver: the shadow-only subtrees (D12)", () => {
     const hold = observer.preToolUse(pre("Read", { file_path: file }));
     expect((await hold!.verdict)?.denyReason).toContain("not needed for your task");
     expect(savings.records[0]).toMatchObject({ decision: { did: "deny" } });
+  });
+});
+
+describe("ReadCheckObserver: a subagent's own context (R1, R4, KTD-2)", () => {
+  // Deliberately never names `src/template.hbs` or its base name: a brief naming the path being
+  // read is the `named` rule's job (named.test.ts and the "named" describe block below), not
+  // this one's.
+  const BRIEF = {
+    description: "Read the persona file, then the template",
+    prompt: "Read docs/plans/persona-plan.md for background on the template format",
+  };
+
+  test("a found brief is judged against itself, with the parent kept to one line, and its own ring as `recent`", async () => {
+    const { observer, jev } = setup();
+    const smallFile = writeRepoFile("src/small.ts", "export const x = 1;\n");
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    // An earlier small read inside the same subagent builds its own ring; too small to judge.
+    observer.postToolUse({
+      ...readPost(smallFile, "export const x = 1;\n", { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["task"]).toBe(
+      "Read the persona file, then the template\n" +
+        "Read docs/plans/persona-plan.md for background on the template format\n" +
+        "(parent task: Fix the login bug)",
+    );
+    // The subagent's own ring, not the parent's timeline tail (`rows`, set up in `beforeEach`).
+    // `recognizeRead` renders the path as the command spelled it, home folded to `~`.
+    expect(state["recent"]).toEqual(["tool Read ~/projects/app/src/small.ts"]);
+  });
+
+  test("an unknown subagent id is judged as today: the parent's task and timeline tail", async () => {
+    const { observer, jev, savings } = setup();
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-missing" }),
+      subagentBrief: null,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["task"]).toBe(
+      "Fix the login bug\nFind out why the login form rejects valid passwords and fix it.",
+    );
+    expect(state["recent"]).toEqual(["assistant: I will look at the session module next."]);
+    expect(savings.records[0]!.facts["briefMissing"]).toBe(true);
+  });
+
+  test("two concurrent subagents keep separate briefs and rings", async () => {
+    const { observer, jev } = setup();
+    const content = bigSource();
+    const fileA = writeRepoFile("src/a.hbs", content);
+    const fileB = writeRepoFile("src/b.hbs", content);
+    const briefA = { description: "Work on A", prompt: "Investigate the A feature" };
+    const briefB = { description: "Work on B", prompt: "Investigate the B feature" };
+    observer.postToolUse({
+      ...readPost(
+        writeRepoFile("src/a-note.ts", "export const a = 1;\n"),
+        "export const a = 1;\n",
+        {
+          agent_id: "sub-a",
+        },
+      ),
+      subagentBrief: briefA,
+    });
+    observer.postToolUse({
+      ...readPost(
+        writeRepoFile("src/b-note.ts", "export const b = 1;\n"),
+        "export const b = 1;\n",
+        {
+          agent_id: "sub-b",
+        },
+      ),
+      subagentBrief: briefB,
+    });
+    await observer.idle();
+    observer.postToolUse({
+      ...readPost(fileA, content, { agent_id: "sub-a" }),
+      subagentBrief: briefA,
+    });
+    observer.postToolUse({
+      ...readPost(fileB, content, { agent_id: "sub-b" }),
+      subagentBrief: briefB,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(2);
+    const tasks = jev.transport.calls.map(
+      (call) => (call.state as Record<string, unknown>)["task"],
+    );
+    expect(tasks).toContain(
+      "Work on A\nInvestigate the A feature\n(parent task: Fix the login bug)",
+    );
+    expect(tasks).toContain(
+      "Work on B\nInvestigate the B feature\n(parent task: Fix the login bug)",
+    );
+  });
+
+  test("the ring is dropped when the subagent ends", async () => {
+    const { observer, jev } = setup();
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    observer.postToolUse({
+      ...readPost(writeRepoFile("src/note.ts", "export const x = 1;\n"), "export const x = 1;\n", {
+        agent_id: "sub-1",
+      }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+    observer.subagentEnd("sub-1");
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).toEqual([]);
+  });
+
+  test("the ring is evicted after 24h of inactivity, even without SubagentStop (finding #3)", async () => {
+    let now = Date.parse("2026-01-01T00:00:00Z");
+    const { observer, jev } = setup({ now: () => now });
+    observer.postToolUse({
+      ...readPost(writeRepoFile("src/note.ts", "export const x = 1;\n"), "export const x = 1;\n", {
+        agent_id: "sub-1",
+      }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+    // Past AGENT_IDLE_MS, with no SubagentStop: a crashed or killed subagent's ring still frees.
+    now += 25 * 60 * 60_000;
+    await observer.sweep();
+
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).toEqual([]);
+  });
+
+  test("a secret-shaped path read inside a subagent never reaches its ring (finding #4)", async () => {
+    const { observer, jev } = setup();
+    const secret = writeRepoFile(".env.production", "SECRET=1\n");
+    observer.postToolUse({
+      ...readPost(secret, "SECRET=1\n", { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).toEqual([]);
+  });
+
+  test("a secret-shaped path edited inside a subagent never reaches its ring (finding #4)", async () => {
+    const { observer, jev } = setup();
+    const secret = path.join(repo, ".env.production");
+    observer.preToolUse({
+      agentId: AGENT,
+      agentCwd: repo,
+      input: {
+        hook_event_name: "PreToolUse",
+        tool_name: "Write",
+        tool_input: { file_path: secret, content: "SECRET=1" },
+        tool_use_id: `toolu_${++toolUseCounter}`,
+        cwd: repo,
+        agent_id: "sub-1",
+      },
+    });
+    await observer.idle();
+
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).toEqual([]);
+  });
+
+  test("a compound Bash read inside a subagent adds one ring entry, not one per file (finding #8)", async () => {
+    const { observer, jev } = setup();
+    const fileA = writeRepoFile("src/a.ts", "export const a = 1;\n");
+    const fileB = writeRepoFile("src/b.ts", "export const b = 1;\n");
+    observer.postToolUse({
+      agentId: AGENT,
+      agentCwd: repo,
+      input: {
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command: `cat ${fileA} ${fileB}` },
+        tool_use_id: `toolu_${++toolUseCounter}`,
+        cwd: repo,
+        agent_id: "sub-1",
+        tool_response: { stdout: "a\nb\n", stderr: "", interrupted: false },
+      },
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    // Redaction folds the observer's home prefix to `~` on every string sent to JEV, the command
+    // text included.
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).toEqual([
+      "tool Bash `cat ~/projects/app/src/a.ts ~/projects/app/src/b.ts`",
+    ]);
+  });
+});
+
+describe("ReadCheckObserver: the `named` rule (R2, KTD-3)", () => {
+  test("a path named in recent assistant text is `needed`, with no JEV call", async () => {
+    const { observer, jev, savings } = setup();
+    rows.push({
+      seq: rows.length,
+      timestamp: new Date().toISOString(),
+      turnId: "turn-1",
+      item: { type: "assistant_message", text: "I'll check src/session.ts for the token logic." },
+    });
+    const content = bigSource();
+    const file = writeRepoFile("src/session.ts", content);
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+
+    expect(jev.transport.calls).toEqual([]);
+    expect(savings.notAsked).toContain("named");
+    expect(savings.records).toEqual([]);
+  });
+
+  test("a subagent's own brief naming the path is `needed`, with no JEV call", async () => {
+    const { observer, jev, savings } = setup();
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    const brief = {
+      description: "Read the template",
+      prompt: "Read src/template.hbs for the layout",
+    };
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-named" }),
+      subagentBrief: brief,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toEqual([]);
+    expect(savings.notAsked).toContain("named");
+    expect(savings.records).toEqual([]);
+  });
+
+  test("a path named only in the file's own content is not `named`: it is still judged", async () => {
+    const { observer, jev } = setup();
+    // The path string appears inside the excerpt it would load, never in task/recent — named.ts's
+    // own tests cover the rule in isolation; this proves the observer never feeds it the content.
+    const content = `// src/session.ts lives here too\n${bigSource()}`;
+    const file = writeRepoFile("src/session.ts", content);
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
+  });
+});
+
+describe("ReadCheckObserver: a main agent's turn context (R3)", () => {
+  test("a new prompt mid-session is added to task, after the assignment", async () => {
+    const { observer, jev } = setup();
+    rows.push({
+      seq: rows.length,
+      timestamp: new Date().toISOString(),
+      turnId: "turn-1",
+      item: { type: "user_message", text: "Also check the session cookie expiry" },
+    });
+    const content = bigSource();
+    const file = writeRepoFile("src/other.ts", content);
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["task"]).toBe(
+      "Fix the login bug\n" +
+        "Find out why the login form rejects valid passwords and fix it.\n" +
+        "Also check the session cookie expiry",
+    );
+  });
+
+  test("the search call that named this path stays in recent past the ordinary tail, within the turn", async () => {
+    const { observer, jev } = setup();
+    rows.push({
+      seq: rows.length,
+      timestamp: new Date().toISOString(),
+      turnId: "turn-1",
+      item: {
+        type: "tool_call",
+        callId: "search-1",
+        name: "Grep",
+        status: "completed",
+        error: null,
+        detail: { type: "search", query: "session cookie", filePaths: ["src/session.ts"] },
+      },
+    });
+    // 16 rows after the search call, still in the same turn, push it out of the ordinary tail.
+    for (let index = 0; index < 16; index += 1) {
+      rows.push({
+        seq: rows.length,
+        timestamp: new Date().toISOString(),
+        turnId: "turn-1",
+        item: { type: "assistant_message", text: `filler ${index}` },
+      });
+    }
+    const content = bigSource();
+    const file = writeRepoFile("src/session.ts", content);
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).toContain("tool Grep session cookie");
+  });
+
+  test("a search call from an earlier turn does not stay pinned", async () => {
+    const { observer, jev } = setup();
+    rows.push({
+      seq: rows.length,
+      timestamp: new Date().toISOString(),
+      turnId: "turn-0",
+      item: {
+        type: "tool_call",
+        callId: "search-1",
+        name: "Grep",
+        status: "completed",
+        error: null,
+        detail: { type: "search", query: "session cookie", filePaths: ["src/session.ts"] },
+      },
+    });
+    for (let index = 0; index < 16; index += 1) {
+      rows.push({
+        seq: rows.length,
+        timestamp: new Date().toISOString(),
+        turnId: "turn-1",
+        item: { type: "assistant_message", text: `filler ${index}` },
+      });
+    }
+    const content = bigSource();
+    const file = writeRepoFile("src/session.ts", content);
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).not.toContain("tool Grep session cookie");
   });
 });
