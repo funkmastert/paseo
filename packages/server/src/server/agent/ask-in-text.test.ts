@@ -19,6 +19,54 @@ const FIRES: Case[] = [
     text: "Options:\n- Option A: rebase onto main\n- Option B: merge as-is\nLet me know.",
   },
   { note: "your call", text: "Your call: ship now or wait?" },
+  {
+    note: "option list separated from closing 'let me know which' by a rationale paragraph",
+    text: "Options:\n- Rebase onto main\n- Merge as-is\n\nBoth are safe; rebase keeps history cleaner.\n\nLet me know which you'd prefer.",
+  },
+  {
+    note: "which one",
+    text: "Options:\n- Rebase\n- Merge\n\nWhich one works better for you.",
+  },
+  {
+    note: "which option",
+    text: "Options:\n- Rebase\n- Merge\n\nWhich option fits best.",
+  },
+  {
+    note: "which of these",
+    text: "Options:\n- Rebase\n- Merge\n\nWhich of these works.",
+  },
+  {
+    note: "which should i",
+    text: "Options:\n- Rebase\n- Merge\n\nWhich should I run.",
+  },
+  {
+    note: "which would you",
+    text: "Options:\n- Rebase\n- Merge\n\nWhich would you choose.",
+  },
+  {
+    note: "pick one",
+    text: "Options:\n- Rebase\n- Merge\n\nPick one and let's go.",
+  },
+  {
+    note: "choose between",
+    text: "Options:\n- Rebase\n- Merge\n\nChoose between them.",
+  },
+  {
+    note: "choose one",
+    text: "Options:\n- Rebase\n- Merge\n\nChoose one to proceed.",
+  },
+  {
+    note: "do you prefer",
+    text: "Options:\n- Rebase\n- Merge\n\nDo you prefer this approach.",
+  },
+  {
+    note: "would you prefer",
+    text: "Options:\n- Rebase\n- Merge\n\nWould you prefer this approach.",
+  },
+  {
+    note: "explicit A-or-B offer with no reader-address phrase",
+    text: "Options:\n- Rebase onto main\n- Merge as-is\n\nRebase or merge?",
+  },
 ];
 
 const DOES_NOT_FIRE: Case[] = [
@@ -40,6 +88,42 @@ const DOES_NOT_FIRE: Case[] = [
     text: "Changes made:\n- Fixed the parser\n- Updated the tests",
   },
   { note: "plain next-step statement", text: "Next I'll check X." },
+  {
+    note: "status report with a table and bullets, 'which' as a relative pronoun near a list",
+    text: [
+      "Three agents are running:",
+      "",
+      "| Agent | Doing |",
+      "|---|---|",
+      "| Codex PR A re-review | Confirming the two P0 holes are actually closed |",
+      "| Arena rate-limit fix | So all nine boards load |",
+      "| Explicit-request fix | So the ranking runs even though every spawn names a model |",
+      "",
+      "A background watch is also waiting for the first live workspace archives. When those land:",
+      "- merge PR A if the re-review passes;",
+      "- gate and merge the two arena fixes;",
+      "- one more deploy, which now reloads the plugin automatically;",
+      "- then check the arena shadow's picks over real spawns.",
+      "",
+      "Each agent reports back when done.",
+    ].join("\n"),
+  },
+  {
+    note: "which as a relative pronoun inside a list, no choice phrase",
+    text: "Changes:\n- Simplified the parser\n- Removed the old flag, which was unused\n\nDone.",
+  },
+  {
+    note: "numbered next-steps list with no question",
+    text: "Next steps:\n1. Deploy to staging\n2. Run smoke tests\n3. Promote to prod",
+  },
+  {
+    note: "local option list next to a standalone rhetorical '?' line, no reader-address phrase",
+    text: "Options:\n- Keep the current rate limiter\n- Swap to a token bucket\n\nWhy did it fail?\nThe cache was stale.",
+  },
+  {
+    note: "bare '?' line inside the list paragraph itself, no reader-address phrase",
+    text: "Options:\n- Keep the current rate limiter\n- Swap to a token bucket\nWhy?",
+  },
 ];
 
 describe("asksReaderForReplyInText", () => {

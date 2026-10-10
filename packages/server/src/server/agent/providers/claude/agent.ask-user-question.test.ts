@@ -197,6 +197,35 @@ describe("Claude AskUserQuestion check", () => {
     expect(await stop(stopInput("Fixed the bug and reran the suite. Done."))).toEqual({});
   });
 
+  test("judges only the SDK's last_assistant_message, not every text block of the turn (#18)", async () => {
+    const { hooks } = await launch(fakeCheck());
+    const stop = stopHook(hooks);
+    if (!stop) throw new Error("Expected a Stop hook");
+
+    // A multi-paragraph status report with a bulleted list and a relative "which" next to it —
+    // the false positive from #18. The SDK hands the Stop hook only this one field, so if the
+    // hook ever starts concatenating other turn text alongside it, this must still pass.
+    const statusReport = [
+      "Three agents are running:",
+      "",
+      "| Agent | Doing |",
+      "|---|---|",
+      "| Codex PR A re-review | Confirming the two P0 holes are actually closed |",
+      "| Arena rate-limit fix | So all nine boards load |",
+      "| Explicit-request fix | So the ranking runs even though every spawn names a model |",
+      "",
+      "A background watch is also waiting for the first live workspace archives. When those land:",
+      "- merge PR A if the re-review passes;",
+      "- gate and merge the two arena fixes;",
+      "- one more deploy, which now reloads the plugin automatically;",
+      "- then check the arena shadow's picks over real spawns.",
+      "",
+      "Each agent reports back when done.",
+    ].join("\n");
+
+    expect(await stop(stopInput(statusReport))).toEqual({});
+  });
+
   test("passes a cancelled turn with no final text", async () => {
     const { hooks } = await launch(fakeCheck());
     const stop = stopHook(hooks);
