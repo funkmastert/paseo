@@ -223,6 +223,7 @@ import {
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { WorkspaceTitleTracker } from "./workspace-title-tracker.js";
+import { migrateWorkspaceCreatedBy } from "./workspace-created-by-migration.js";
 import { migrateWorkspaceTitleSources } from "./workspace-title-source-migration.js";
 import { createTitleRefreshRecorder } from "./workspace-title-refresh-jev.js";
 import { resolveWorkspaceTitleRefreshConfig } from "./workspace-title-refresh-config.js";
@@ -2484,11 +2485,13 @@ export async function createPaseoDaemon(
     cwd: string,
     firstAgentContext?: FirstAgentContext,
   ): Promise<string> => {
+    // Only the agent-scoped create_agent/create_workspace MCP tools reach this, never a client
+    // connection (docs/done-janitor.md#manual-pin-vs-auto-pin).
     const workspace = await workspaceProvisioning.createWorkspaceForDirectory(
       cwd,
       resolveFirstAgentPromptTitle(firstAgentContext),
       undefined,
-      { titleSource: "auto" },
+      { titleSource: "auto", createdBy: "agent" },
     );
     if (firstAgentContext) {
       workspaceAutoName.scheduleForDirectory({
@@ -2581,6 +2584,15 @@ export async function createPaseoDaemon(
     logger,
   }).catch((error: unknown) => {
     logger.warn({ err: error }, "Workspace title provenance migration failed");
+  });
+  // One-time: backfill who made each workspace that predates createdBy (docs/done-janitor.md).
+  await migrateWorkspaceCreatedBy({
+    workspaceRegistry,
+    listAgents: () => agentStorage.list(),
+    markerPath: path.join(config.paseoHome, "projects", "workspace-created-by-migration.json"),
+    logger,
+  }).catch((error: unknown) => {
+    logger.warn({ err: error }, "Workspace createdBy backfill failed");
   });
   const workspaceTitleTracker = new WorkspaceTitleTracker({
     agentManager,
@@ -2682,21 +2694,27 @@ export async function createPaseoDaemon(
     input: Parameters<typeof createPaseoWorktreeWorkflow>[1],
     serviceOptions?: Parameters<typeof createPaseoWorktreeWorkflow>[2],
   ) => {
+    // Every caller of this dependency is the agent-scoped create_agent MCP tool, a schedule, or
+    // Hub — never a client connection — so the workspace it creates is always agent-made
+    // (docs/done-janitor.md#manual-pin-vs-auto-pin).
     return createPaseoWorktreeWorkflow(
       {
         paseoHome: config.paseoHome,
         worktreesRoot: config.worktreesRoot,
         createPaseoWorktree: async (workflowInput, workflowOptions) => {
-          return createRegisteredPaseoWorktree(workflowInput, {
-            github,
-            ...(workflowOptions?.resolveDefaultBranch
-              ? {
-                  resolveDefaultBranch: workflowOptions.resolveDefaultBranch,
-                }
-              : {}),
-            workspaceGitService,
-            workspaceProvisioning,
-          });
+          return createRegisteredPaseoWorktree(
+            { ...workflowInput, createdBy: "agent" },
+            {
+              github,
+              ...(workflowOptions?.resolveDefaultBranch
+                ? {
+                    resolveDefaultBranch: workflowOptions.resolveDefaultBranch,
+                  }
+                : {}),
+              workspaceGitService,
+              workspaceProvisioning,
+            },
+          );
         },
         warmWorkspaceGitData: async (workspace) => {
           await Promise.all(
@@ -2856,7 +2874,7 @@ export async function createPaseoDaemon(
       input.cwd,
       resolveFirstAgentPromptTitle(input.firstAgentContext),
       undefined,
-      { titleSource: "auto" },
+      { titleSource: "auto", createdBy: "agent" },
     );
     workspaceAutoName.scheduleForDirectory({
       workspaceId: workspace.workspaceId,
@@ -2988,7 +3006,7 @@ export async function createPaseoDaemon(
         title,
         projectId,
         // Only agents reach this (create_workspace), so the title tracker may refresh it.
-        title ? { titleSource: "auto" } : undefined,
+        { ...(title ? { titleSource: "auto" as const } : {}), createdBy: "agent" },
       );
       await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
       return workspace;

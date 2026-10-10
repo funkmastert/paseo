@@ -1918,6 +1918,8 @@ export class VoiceAssistantWebSocketServer {
         agentProfiles: true,
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: true,
+        // COMPAT(workspaceCreatedBy): added in v0.9.x, remove gate after 2027-10-09.
+        workspaceCreatedBy: true,
       },
     };
   }

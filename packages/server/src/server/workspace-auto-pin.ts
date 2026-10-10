@@ -17,10 +17,13 @@ import { readFile } from "node:fs/promises";
 
 import { z } from "zod";
 
+import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
+
 import { writeJsonFileAtomic } from "./atomic-file.js";
 import type { DoneJanitorAgentSummary } from "./agent/agent-manager.js";
 import type {
   PersistedWorkspaceRecord,
+  WorkspaceCreatedBy,
   WorkspaceMutationContext,
   WorkspaceRegistry,
 } from "./workspace-registry.js";
@@ -76,6 +79,27 @@ export function isWorkspaceActiveForAutoPin(input: {
   return input.agents.some(
     (agent) => agent.workspaceId === input.workspaceId && describeAgentWork(agent) !== null,
   );
+}
+
+/**
+ * A client request with no caller agent and no inherited `paseo.parent-agent-id` label came
+ * straight from a client connection (app or CLI), not on behalf of another agent — the same
+ * signal that gates auto-pin (docs/done-janitor.md#manual-pin-vs-auto-pin). Everything else
+ * (the agent-scoped MCP tools, schedules, Hub, remediation, restart recovery) is agent-made.
+ */
+export function isHumanAttributableCreate(input: {
+  callerAgentId?: string | null;
+  labels?: Record<string, string>;
+}): boolean {
+  return !input.callerAgentId && !getParentAgentIdFromLabels(input.labels);
+}
+
+/** `createdBy` for a workspace created by this request, using the same caller rule as auto-pin. */
+export function resolveWorkspaceCreatedBy(input: {
+  callerAgentId?: string | null;
+  labels?: Record<string, string>;
+}): WorkspaceCreatedBy {
+  return isHumanAttributableCreate(input) ? "person" : "agent";
 }
 
 /**
