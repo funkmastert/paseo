@@ -137,6 +137,23 @@ describe("describeRequestedModel", () => {
     expect(line).toContain("paseo.model-unadvertised=claude/claude-opus-5-5");
   });
 
+  it("says a better-ranked model won, not that the request isn't a pool member", () => {
+    const line = describeRequestedModel(
+      result({
+        requestedModelOverride: {
+          requestedRef: "claude/claude-haiku-4-5",
+          honored: false,
+          effectiveRef: "claude-sonnet-5",
+          reason: "arena-ranked",
+        },
+      }),
+    );
+    expect(line).toContain("overridden by policy → claude-sonnet-5");
+    expect(line).toContain("approved and selectable, but claude-sonnet-5 ranks higher for this kind of work on LMArena");
+    expect(line).toContain("paseo.model-pin");
+    expect(line).not.toContain("not a member of the pool");
+  });
+
   it("says a catalog-missing refusal is liftable, instead of blaming capacity", () => {
     const line = describeRequestedModel(
       result({

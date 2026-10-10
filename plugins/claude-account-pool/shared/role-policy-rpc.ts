@@ -238,8 +238,12 @@ export const RoleModelPolicyExplainResultSchema = z.object({
        * Omitted when `honored` is true. "not-approved": never one of the
        * role's configured entries. "not-currently-selectable": configured,
        * but catalog-missing, no viable pool member, or budget-gated.
+       * "arena-ranked": configured and selectable, but U8's arena-ranked
+       * pick (live, no paseo.model-pin) outranks it.
        */
-      reason: z.union([z.literal("not-approved"), z.literal("not-currently-selectable")]).optional(),
+      reason: z
+        .union([z.literal("not-approved"), z.literal("not-currently-selectable"), z.literal("arena-ranked")])
+        .optional(),
       /**
        * Present (true) only when `honored` is true because the catalog check
        * was waived: the model isn't in the provider's advertised catalog and

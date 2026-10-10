@@ -139,7 +139,9 @@ export function describeRequestedModel(result: RoleModelPolicyExplainResult): st
       ? override.missingFromCatalog
         ? "approved for this role, but the provider's catalog doesn't list it and allowUnlistedModels doesn't name it"
         : "approved for this role, but not selectable right now (capped, budget-gated, or no viable account)"
-      : "not a member of the pool this task class resolves to";
+      : override.reason === "arena-ranked"
+        ? `approved and selectable, but ${override.effectiveRef} ranks higher for this kind of work on LMArena — label the create with paseo.model-pin to keep the requested model`
+        : "not a member of the pool this task class resolves to";
   return `Explicit request ${override.requestedRef}: overridden by policy → ${override.effectiveRef} (${why}). A real agent would carry paseo.model-overridden-by-policy=${override.requestedRef}.`;
 }
 

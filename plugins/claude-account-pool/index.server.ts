@@ -181,9 +181,11 @@ export default function contribute(server: PluginServerContext) {
         const why =
           episode.reason === "not-approved"
             ? `which is not in ${pool}`
-            : episode.missingFromCatalog
-              ? `which ${pool} approves but the provider's model catalog doesn't list, and it isn't in agentModelPolicy.allowUnlistedModels (add "${episode.requestedRef.slice(episode.requestedRef.indexOf("/") + 1)}" there if the provider does accept it)`
-              : `which ${pool} approves but isn't currently selectable (no viable pool member, or budget-gated)`;
+            : episode.reason === "arena-ranked"
+              ? `which ${pool} approves, but ranks lower for this kind of work on LMArena than "${episode.effectiveRef}" (label the create with paseo.model-pin to keep the requested model)`
+              : episode.missingFromCatalog
+                ? `which ${pool} approves but the provider's model catalog doesn't list, and it isn't in agentModelPolicy.allowUnlistedModels (add "${episode.requestedRef.slice(episode.requestedRef.indexOf("/") + 1)}" there if the provider does accept it)`
+                : `which ${pool} approves but isn't currently selectable (no viable pool member, or budget-gated)`;
         console.error(
           `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", ${why}; policy overrode it to "${episode.effectiveRef}"`,
         );
@@ -221,6 +223,7 @@ export default function contribute(server: PluginServerContext) {
       recentAgentTypes,
       mcpGatewayCache,
       jevAvailability,
+      arenaRankingCache,
     });
     router = createRouter({
       poolCache,
@@ -502,6 +505,7 @@ export default function contribute(server: PluginServerContext) {
     const startedPoolCache = poolCache;
     const startedMcpGatewayCache = mcpGatewayCache;
     const startedJevAvailability = jevAvailability;
+    const startedArenaRankingCache = arenaRankingCache;
     classifierTool = startClassifierToolServer({
       spawnHintAvailability: () => startedJevAvailability?.get()?.spawnHint,
       world: () => ({
@@ -512,6 +516,9 @@ export default function contribute(server: PluginServerContext) {
         health,
         nowMs: Date.now(),
         mcpGateway: startedMcpGatewayCache?.get(),
+        // U8 (KTD-13): without this, the tool's preview always fell back to "no-file", the same gap
+        // `role-model-policy.explain` had below — neither wired the cache the create hook uses.
+        arenaRanking: startedArenaRankingCache?.get(),
       }),
     });
     return classifierTool;

@@ -118,8 +118,10 @@ export interface ExplicitModelOverriddenEpisode {
    * configured entries, but isn't selectable right now (catalog-missing, no
    * viable pool member, or gated by the model budget threshold) — the
    * caller asked for something approved that just isn't available.
+   * "arena-ranked": the requested ref is approved and selectable, but U8's
+   * arena-ranked pick (live, no paseo.model-pin) outranks it.
    */
-  reason: "not-approved" | "not-currently-selectable";
+  reason: "not-approved" | "not-currently-selectable" | "arena-ranked";
   /**
    * True when the refusal is specifically that the model is absent from the
    * advertised catalog and not in `allowUnlistedModels` — the one refusal an
@@ -674,10 +676,11 @@ function formatArenaPickLabel(ranking: NonNullable<AgentDecision["model"]["ranki
 
 /**
  * U8's `paseo.arena-pick` label (KTD-1, KTD-2, KTD-11, KTD-13): written only
- * for a `"ranked"` outcome, whether applied or shadowed — a fallback writes
- * nothing here, since the decision log alone records its reason. A leader
- * never reaches this: `decideModel` never evaluates ranking for one, so
- * `decision.model.ranking` is undefined.
+ * for a `"ranked"` outcome, whether applied, shadowed, or recorded against an
+ * honored explicit request (shadow, or a `paseo.model-pin`'d live request) —
+ * a fallback writes nothing here, since the decision log alone records its
+ * reason. A leader never reaches this: `decideModel` never evaluates ranking
+ * for one, so `decision.model.ranking` is undefined.
  */
 function applyArenaPickLabel(
   request: PluginBeforeRequests["agent.create"],
@@ -685,9 +688,11 @@ function applyArenaPickLabel(
   decision: AgentDecision | undefined,
 ): PluginBeforeRequests["agent.create"] | void {
   const ranking = decision?.model.ranking;
-  // Second layer, belt-and-suspenders: an honored explicit request must never carry this label even
-  // if a future regression lets `ranking` leak through onto that outcome again.
-  if (!ranking || ranking.outcome !== "ranked" || decision?.model.outcome === "honored-request") {
+  // Second layer, belt-and-suspenders: `decideModel` never returns `honored-request` with
+  // `ranking.applied` true (the exact corruption PR B's review fix exists to prevent — the label
+  // would claim a ranked model applied while a different, explicitly-requested model actually ran).
+  // Guard it here too in case a future regression lets that combination leak through.
+  if (!ranking || ranking.outcome !== "ranked" || (decision?.model.outcome === "honored-request" && ranking.applied)) {
     return routed;
   }
   const base = (routed ?? request) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
