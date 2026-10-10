@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { lstatSync, readlinkSync } from "node:fs";
 import nodePath from "node:path";
 
 import {
@@ -78,70 +78,92 @@ export function describeGuardedSensitiveFileChangePath(path: string): string | n
   return null;
 }
 
+// Verify re-review finding #2: resolving an already-dangling symlink (its target does not exist
+// yet) requires an lstat+readlink hop, not realpathSync -- realpathSync throws on the whole
+// chain the moment the final target is missing, with no way to recover the target it was
+// pointing at. A hop limit is the fail-closed backstop against a symlink cycle.
+const MAX_SYMLINK_RESOLUTION_HOPS = 40;
+
 /**
  * The sensitivity check above keys on the literal reported path string -- a symlink planted at
  * an ordinary in-workspace path (never itself gated, since in-workspace writes raise no approval
  * request at all) can redirect an always-accepted write into a sensitive location with a name
  * that never matches (review finding #2). Resolves to what the path will actually touch on disk
- * by realpath-ing the deepest existing ancestor and reapplying any remaining segments, which
- * follows a symlink at any point in the chain, including the target itself if it already exists.
- * Returns null when resolution fails for any reason -- the caller declines on an unresolved path
- * rather than assume it is safe.
+ * by lstat-ing each existing path component in order and following any symlink found -- reading
+ * its target via `readlinkSync` and resolving that target (relative to the symlink's own
+ * directory, or absolute) even when the target does not exist yet, which is exactly the "create
+ * a file through a dangling symlink" shape `apply_patch` takes. The first component that does
+ * not exist at all ends the walk; everything after it is appended literally, since nothing past
+ * that point can have redirected anything. Returns null when resolution fails for any reason, or
+ * exceeds the symlink-hop limit -- the caller declines on an unresolved path rather than assume
+ * it is safe.
  */
 export function resolveGuardedFileChangePath(rawPath: string, cwd: string): string | null {
   try {
-    let current = nodePath.isAbsolute(rawPath) ? rawPath : nodePath.resolve(cwd, rawPath);
-    const unresolvedSuffix: string[] = [];
-    for (;;) {
-      try {
-        const resolvedAncestor = realpathSync(current);
-        return unresolvedSuffix.length > 0
-          ? nodePath.join(resolvedAncestor, ...unresolvedSuffix.toReversed())
-          : resolvedAncestor;
-      } catch {
-        const parent = nodePath.dirname(current);
-        if (parent === current) {
-          return null;
-        }
-        unresolvedSuffix.push(nodePath.basename(current));
-        current = parent;
-      }
-    }
+    const absolute = nodePath.isAbsolute(rawPath) ? rawPath : nodePath.resolve(cwd, rawPath);
+    return resolveFollowingSymlinks(absolute, 0);
   } catch {
     return null;
   }
 }
 
-// Matches `alias.<name>`, `core.hooksPath`, `core.sshCommand`, or any `<section>.helper` key as a
-// `git config` argument -- the alias/hook/helper setters that can later turn an innocuous-looking
-// command (`git pf`, a plain `git fetch`) into one the catastrophe gate's shell parser never sees.
-const GIT_CONFIG_SENSITIVE_KEY_PATTERN =
-  /(?:^|[\s'"])(alias\.[^\s'"=]+|core\.hookspath|core\.sshcommand|[^\s'"=]+\.helper)(?=[\s'"=]|$)/i;
-
-/**
- * The catastrophe gate's shell parser resolves push/force/delete tokens literally and does not
- * resolve git aliases (docs/catastrophe-gate.md's documented gap). A guarded Codex child must not
- * be able to set up that blind spot in the first place: decline any `git config` invocation that
- * sets an alias, a hook path, an ssh command, or a credential/diff/merge helper, regardless of
- * what the alias or helper would do.
- */
-export function describeGuardedSensitiveGitConfigCommand(command: string): string | null {
-  if (!/\bgit\b/i.test(command) || !/\bconfig\b/i.test(command)) {
+function resolveFollowingSymlinks(absolutePath: string, hops: number): string | null {
+  if (hops > MAX_SYMLINK_RESOLUTION_HOPS) {
     return null;
   }
-  if (GIT_CONFIG_SENSITIVE_KEY_PATTERN.test(command)) {
-    return "a git config command that sets an alias, hook path, ssh command, or helper";
+  const { root } = nodePath.parse(absolutePath);
+  const segments = absolutePath
+    .slice(root.length)
+    .split(nodePath.sep)
+    .filter((segment) => segment.length > 0);
+  let resolvedSoFar = root;
+  for (let index = 0; index < segments.length; index++) {
+    const candidate = nodePath.join(resolvedSoFar, segments[index] ?? "");
+    let stat;
+    try {
+      stat = lstatSync(candidate);
+    } catch {
+      // Nothing exists here yet (the common case for a file apply_patch is about to create) --
+      // nothing past this point can be a symlink, so the rest of the path is literal.
+      return nodePath.join(resolvedSoFar, ...segments.slice(index));
+    }
+    if (!stat.isSymbolicLink()) {
+      resolvedSoFar = candidate;
+      continue;
+    }
+    const linkTarget = readlinkSync(candidate);
+    const resolvedTarget = nodePath.isAbsolute(linkTarget)
+      ? linkTarget
+      : nodePath.resolve(resolvedSoFar, linkTarget);
+    const resolvedBase = resolveFollowingSymlinks(resolvedTarget, hops + 1);
+    if (resolvedBase === null) {
+      return null;
+    }
+    const remaining = segments.slice(index + 1);
+    return remaining.length > 0 ? nodePath.join(resolvedBase, ...remaining) : resolvedBase;
   }
-  return null;
+  return resolvedSoFar;
 }
 
+/**
+ * Everything matching `isSensitiveGitConfigKey` below the alias/hook/helper setters that can
+ * later turn an innocuous-looking command (`git pf`, a plain `git fetch`) into one the
+ * catastrophe gate's shell parser never sees -- plus the config-based equivalents of running
+ * arbitrary code (`include.path`/`includeIf.*.path` load another config file wholesale;
+ * `url.*.insteadOf` silently rewrites a URL a later command uses) and `core.fsmonitor`, which
+ * git executes as a hook-shaped command on every status check once set.
+ */
 function isSensitiveGitConfigKey(key: string): boolean {
   const lower = key.trim().toLowerCase();
   return (
     lower.startsWith("alias.") ||
     lower === "core.hookspath" ||
     lower === "core.sshcommand" ||
-    lower.endsWith(".helper")
+    lower === "core.fsmonitor" ||
+    lower === "include.path" ||
+    lower.endsWith(".helper") ||
+    (lower.startsWith("includeif.") && lower.endsWith(".path")) ||
+    (lower.startsWith("url.") && lower.endsWith(".insteadof"))
   );
 }
 
@@ -196,6 +218,75 @@ function matchGitConfigOption(args: ExpandedWord[], index: number): GitConfigOpt
   return null;
 }
 
+// `git config`'s own location/value flags, which take a following argument that is not the key
+// (`--file <path>`, `--type <name>`, ...) -- skipped along with their value so the key search
+// below does not mistake one for the key.
+const GIT_CONFIG_VALUE_FLAGS = new Set(["--file", "-f", "--blob", "--type", "--default"]);
+
+// A read or a removal (`get`/`list`/`unset`/...) never introduces a new value, so neither is a
+// vector for this attack regardless of which key it names -- declining one anyway would be a
+// pure false positive, not a safety gap, but it's cheap to tell apart here. Covers both the new
+// subcommand-verb spelling (git 2.46+) and the long-standing dash-flag spelling of the same
+// operations.
+const GIT_CONFIG_READ_OR_REMOVE_SUBCOMMANDS = new Set([
+  "get",
+  "get-all",
+  "get-regexp",
+  "get-urlmatch",
+  "list",
+  "unset",
+  "unset-all",
+  "--get",
+  "--get-all",
+  "--get-regexp",
+  "--get-urlmatch",
+  "--list",
+  "--unset",
+  "--unset-all",
+  "-l",
+]);
+
+// Verb-shaped tokens that precede the key itself in the new `git config <verb> <key> ...` form
+// (git 2.46+) -- skipped so the key search lands on the actual key, not the verb.
+const GIT_CONFIG_WRITE_VERBS = new Set(["set", "add", "replace-all"]);
+
+/**
+ * The key `git config` (any subcommand form) would set, read, or remove, starting the search
+ * right after the `config` token itself; `"unresolvable"` when a token in the key's position
+ * can't be resolved (a substitution, an unexpanded variable) rather than a plain value; `null`
+ * when this is a pure read or removal (`get`/`list`/`unset`/...) with nothing to flag, or no key
+ * position is found
+ * at all.
+ */
+function findGitConfigSubcommandKey(
+  args: ExpandedWord[],
+  configIndex: number,
+): string | "unresolvable" | null {
+  for (let index = configIndex + 1; index < args.length; index++) {
+    const arg = args[index];
+    if (!arg) continue;
+    if (!arg.resolved) {
+      return "unresolvable";
+    }
+    const text = arg.text;
+    if (GIT_CONFIG_VALUE_FLAGS.has(text)) {
+      index++;
+      continue;
+    }
+    if (GIT_CONFIG_READ_OR_REMOVE_SUBCOMMANDS.has(text)) {
+      return null;
+    }
+    if (text.startsWith("-")) {
+      continue;
+    }
+    if (GIT_CONFIG_WRITE_VERBS.has(text)) {
+      continue;
+    }
+    return text;
+  }
+  return null;
+}
+
 export function describeGuardedSensitiveGitInvocation(command: string, cwd: string): string | null {
   let sensitiveReason: string | null = null;
   try {
@@ -209,6 +300,25 @@ export function describeGuardedSensitiveGitInvocation(command: string, cwd: stri
             return false;
           }
           for (let index = 1; index < args.length; index++) {
+            const arg = args[index];
+            // Review (re-review finding #1): `describeGuardedSensitiveGitConfigCommand`'s old
+            // raw-regex scan over the unparsed command text missed a quote-split key
+            // (`git config alia""s.pf ...`), which the shell resolves to `alias.pf` but no regex
+            // over the literal text ever matches. Routing through the same tokenizer as the
+            // `-c`/`--config-env` check below closes it: the key is read from the resolved word,
+            // not the raw text.
+            if (arg?.resolved && arg.text === "config") {
+              const key = findGitConfigSubcommandKey(args, index);
+              if (key === "unresolvable") {
+                sensitiveReason = "a git config command whose key could not be resolved";
+                return true;
+              }
+              if (key !== null && isSensitiveGitConfigKey(key)) {
+                sensitiveReason =
+                  "a git config command that sets an alias, hook path, ssh command, or helper";
+                return true;
+              }
+            }
             const match = matchGitConfigOption(args, index);
             if (!match) continue;
             if (match.value === null) {
@@ -289,7 +399,6 @@ export async function decideCodexGuardedCommand(
         return { decision: "decline", reason: formatCatastropheDenial(decision, input.command) };
       }
       const gitConfigReason =
-        describeGuardedSensitiveGitConfigCommand(input.command) ??
         describeGuardedSensitiveGitConfigEnv(input.command) ??
         describeGuardedSensitiveGitInvocation(input.command, input.cwd);
       if (gitConfigReason) {

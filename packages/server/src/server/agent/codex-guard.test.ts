@@ -1,4 +1,12 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -6,7 +14,6 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   decideCodexGuardedCommand,
   describeGuardedSensitiveFileChangePath,
-  describeGuardedSensitiveGitConfigCommand,
   describeGuardedSensitiveGitInvocation,
   resolveGuardedFileChangePath,
 } from "./codex-guard.js";
@@ -176,25 +183,61 @@ describe("describeGuardedSensitiveFileChangePath", () => {
   });
 });
 
-describe("describeGuardedSensitiveGitConfigCommand", () => {
+describe("describeGuardedSensitiveGitInvocation -- git config subcommand (verify finding #1)", () => {
   test.each([
-    "git config alias.pf 'push --force origin main'",
-    "git config --global alias.pf 'push --force origin main'",
-    "git config core.hooksPath /tmp/evil-hooks",
-    "git config core.sshCommand 'ssh -i /tmp/evil-key'",
-    "git config credential.helper '!/tmp/evil-helper'",
-    "git config diff.helper /tmp/evil-diff-helper",
-  ])("flags: %s", (command) => {
-    expect(describeGuardedSensitiveGitConfigCommand(command)).not.toBeNull();
+    ["legacy form", "git config alias.pf 'push --force origin main'"],
+    ["--global flag", "git config --global alias.pf 'push --force origin main'"],
+    ["core.hooksPath", "git config core.hooksPath /tmp/evil-hooks"],
+    ["core.sshCommand", "git config core.sshCommand 'ssh -i /tmp/evil-key'"],
+    ["core.fsmonitor", "git config core.fsmonitor /tmp/evil-fsmonitor"],
+    ["credential.helper", "git config credential.helper '!/tmp/evil-helper'"],
+    ["diff.helper", "git config diff.helper /tmp/evil-diff-helper"],
+    ["include.path", "git config include.path /tmp/evil-include"],
+    ["includeIf.*.path", "git config includeIf.onbranch:main.path /tmp/evil-include"],
+    ["url.*.insteadOf", "git config url.https://evil.example/.insteadOf https://github.com/"],
+    ["new `config set` subcommand form", "git config set alias.pf 'push --force origin main'"],
+    [
+      "quote-split key (re-review finding #1's confirmed bypass)",
+      `git config alia""s.pf 'push --force origin main'`,
+    ],
+    ["quote-split key, single quotes", `git config alia''s.pf 'push --force origin main'`],
+    ["case-variant key", "git config ALIAS.pf 'push --force origin main'"],
+    ["case-variant well-known key", "git config Core.HooksPath /tmp/evil-hooks"],
+  ])("flags: %s -- %s", (_label, command) => {
+    expect(describeGuardedSensitiveGitInvocation(command, REPO)).not.toBeNull();
   });
 
   test.each([
     "git status",
     "git config user.name test",
     "git config --get remote.origin.url",
+    "git config --get alias.pf",
+    "git config get alias.pf",
+    "git config --list",
+    "git config unset alias.pf",
     "npm config set registry https://example.com",
   ])("clears: %s", (command) => {
-    expect(describeGuardedSensitiveGitConfigCommand(command)).toBeNull();
+    expect(describeGuardedSensitiveGitInvocation(command, REPO)).toBeNull();
+  });
+
+  test("the quote-split bypass is declined end-to-end by decideCodexGuardedCommand", async () => {
+    const result = await decideCodexGuardedCommand({
+      command: `git config alia""s.pf 'push --force origin main'`,
+      cwd: REPO,
+      agentId: "agent-1",
+      deviceLaunchGate: undefined,
+      resolveCurrentBranch: fakeBranchResolver("main"),
+    });
+    expect(result.decision).toBe("decline");
+  });
+
+  test("a later plain invocation of an alias set this way is also declined on its own (defense in depth)", async () => {
+    // Even if the alias-setting step were somehow missed, checkCatastrophe's own pattern match
+    // never resolves aliases -- this asserts only that `git pf` alone, with no -c/config/alias
+    // setup in the same command, is NOT caught by this specific check (it relies on the setup
+    // step being declined, per docs/catastrophe-gate.md's documented gap). Documents the
+    // boundary rather than asserting a false guarantee.
+    expect(describeGuardedSensitiveGitInvocation("git pf", REPO)).toBeNull();
   });
 });
 
@@ -311,5 +354,56 @@ describe("resolveGuardedFileChangePath (re-review finding #2)", () => {
     );
     expect(resolved).toBe(gitConfig);
     expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
+  });
+
+  test("follows a dangling symlink to its not-yet-existing sensitive target (verify finding #2's confirmed bypass)", () => {
+    mkdirSync(nodePath.join(scratch, ".git", "hooks"), { recursive: true });
+    const hookTarget = nodePath.join(scratch, ".git", "hooks", "post-checkout");
+    // The hook file does not exist yet -- this is the exact bypass string from the verification
+    // report: `ln -s .git/hooks/post-checkout evil-hook-link.md` before the target exists, then
+    // apply_patch "creates" evil-hook-link.md, writing through the dangling link.
+    const link = nodePath.join(scratch, "evil-hook-link.md");
+    symlinkSync(".git/hooks/post-checkout", link);
+    expect(existsSync(hookTarget)).toBe(false);
+
+    const resolved = resolveGuardedFileChangePath("evil-hook-link.md", scratch);
+    expect(resolved).toBe(hookTarget);
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
+  });
+
+  test("follows a dangling symlink whose own directory does not exist yet either", () => {
+    // Nothing under scratch/.git exists at all -- the link, its target's directory, and its
+    // target are all dangling/non-existent, only the link itself is real.
+    const hookTarget = nodePath.join(scratch, ".git", "hooks", "post-checkout");
+    const link = nodePath.join(scratch, "evil-hook-link.md");
+    symlinkSync(".git/hooks/post-checkout", link);
+
+    const resolved = resolveGuardedFileChangePath("evil-hook-link.md", scratch);
+    expect(resolved).toBe(hookTarget);
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
+  });
+
+  test("the dangling-symlink bypass is declined end-to-end through describeGuardedSensitiveFileChangePath", () => {
+    mkdirSync(nodePath.join(scratch, ".ssh"), { recursive: true });
+    const sshConfigTarget = nodePath.join(scratch, ".ssh", "config");
+    const link = nodePath.join(scratch, "innocuous-notes.md");
+    symlinkSync(".ssh/config", link);
+    expect(existsSync(sshConfigTarget)).toBe(false);
+
+    const resolved = resolveGuardedFileChangePath("innocuous-notes.md", scratch);
+    expect(resolved).toBe(sshConfigTarget);
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
+    // The literal reported name alone -- what the old implementation fell back to -- is not
+    // sensitive; only resolution reveals it.
+    expect(describeGuardedSensitiveFileChangePath("innocuous-notes.md")).toBeNull();
+  });
+
+  test("returns null (declines) on a symlink cycle rather than looping forever", () => {
+    const linkA = nodePath.join(scratch, "a");
+    const linkB = nodePath.join(scratch, "b");
+    symlinkSync(linkB, linkA);
+    symlinkSync(linkA, linkB);
+
+    expect(resolveGuardedFileChangePath("a", scratch)).toBeNull();
   });
 });

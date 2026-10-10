@@ -520,6 +520,73 @@ describe("Codex guarded mode approval handling", () => {
     }
   });
 
+  test("declines an apply_patch request whose reported path is a dangling symlink into .git/hooks/ (verify finding #2)", async () => {
+    const scratch = realpathSync(
+      await mkdtemp(path.join(tmpdir(), "codex-guard-dangling-symlink-test-")),
+    );
+    try {
+      mkdirSync(path.join(scratch, ".git", "hooks"), { recursive: true });
+      const hookTarget = path.join(scratch, ".git", "hooks", "post-checkout");
+      // The hook file does not exist yet -- apply_patch is "creating" the link's name, the same
+      // shape as the verification report's confirmed bypass.
+      const link = path.join(scratch, "evil-hook-link.md");
+      symlinkSync(".git/hooks/post-checkout", link);
+      expect(existsSync(hookTarget)).toBe(false);
+
+      const appServer = createFakeCodexAppServer({
+        "turn/steer": () => ({ turn: { id: "native-A" } }),
+      });
+      const { session } = await startGuardedSession(appServer, {}, scratch);
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+
+      appServer.startsFileChange({
+        threadId: "thread-1",
+        itemId: "file-dangling-symlink",
+        changes: [{ path: link, kind: "add" }],
+      });
+      appServer.requestFileChangeApproval({
+        itemId: "file-dangling-symlink",
+        threadId: "thread-1",
+        turnId: "native-A",
+        reason: "Apply the patch",
+      });
+      const result = await appServer.waitForCommandApprovalDecision("file-dangling-symlink");
+
+      expect(result).toEqual({ decision: "decline" });
+      const assistantMessage = events.find(
+        (event) => event.type === "timeline" && event.item.type === "assistant_message",
+      );
+      expect(assistantMessage).toBeDefined();
+
+      await session.close();
+      appServer.assertNoErrors();
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test("declines a quote-split git config alias setup end-to-end (verify finding #1)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.requestCommandApproval({
+      itemId: "command-quote-split",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: `git config alia""s.pf 'push --force origin main'`,
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-quote-split");
+
+    expect(result).toEqual({ decision: "decline" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
   test("tracks file-change paths from the legacy patch_apply_started channel too (re-review finding #4)", async () => {
     const appServer = createFakeCodexAppServer({
       "turn/steer": () => ({ turn: { id: "native-A" } }),
