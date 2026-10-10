@@ -118,8 +118,13 @@ const MAX_SYMLINK_RESOLUTION_HOPS = 40;
  * request at all) can redirect an always-accepted write into a sensitive location with a name
  * that never matches (review finding #2). Resolves to what the path will actually touch on disk
  * with an explicit component-by-component walk: a queue of remaining path components, each
- * `lstat`-ed against the real location built up so far. A component that doesn't exist ends the
- * walk -- nothing past it can be a symlink, so the rest is appended literally. A component that
+ * `lstat`-ed against the real location built up so far. A component that doesn't exist is NOT
+ * treated as the end of the walk (an earlier version of this function returned early here,
+ * appending everything still queued as text -- wrong, because a later `..` can still pop back
+ * past a missing component to a real ancestor, and a later component can still be a real symlink
+ * that needs following: `newdir/../hooklink/x`, where `newdir` never exists and `hooklink` is a
+ * real symlink, must still follow `hooklink`). A missing component is pushed onto the resolved
+ * stack like any ordinary non-symlink name and the walk continues. A component that
  * is a symlink is `readlink`-ed, and the target's own components (absolute: restart from the
  * root; relative: resolved against the symlink's own directory, which is exactly the location
  * already built up) are pushed onto the FRONT of the queue, so every one of them -- and
@@ -163,17 +168,21 @@ function walkSegments(startResolved: string, segments: string[]): string | null 
       continue;
     }
     const candidate = nodePath.join(resolvedSoFar, segment);
+    // Verify finding #2 (round 4): a missing component must NOT end the walk early. A later `..`
+    // can still pop back past it to a real ancestor, and a later component can still be a real
+    // symlink that needs following -- `newdir/../hooklink/post-checkout` (newdir never existing,
+    // hooklink a real symlink to .git/hooks) must still follow hooklink. Earlier code returned
+    // here on a missing component, textually appending everything still queued -- exactly the
+    // same premature-text-collapse mistake finding #3 fixed for `..`, just for the "doesn't
+    // exist" case instead. A missing component is treated as an ordinary (non-symlink) name on
+    // the resolved stack: nothing special, just not a substitution target itself.
     let stat;
     try {
       stat = lstatSync(candidate);
     } catch {
-      // Nothing exists here yet (the common case for a file apply_patch is about to create) --
-      // nothing past this point can be a symlink, so the rest of the path is literal. Any
-      // trailing `..` here is safe to collapse textually: once nothing exists, there is no more
-      // symlink substitution left to lose.
-      return nodePath.join(candidate, ...remaining);
+      stat = null;
     }
-    if (!stat.isSymbolicLink()) {
+    if (!stat?.isSymbolicLink()) {
       resolvedSoFar = candidate;
       continue;
     }

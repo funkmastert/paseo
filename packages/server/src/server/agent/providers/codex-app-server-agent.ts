@@ -1454,24 +1454,48 @@ function normalizeCodexCommandValue(value: unknown): string | string[] | null {
  * real app-server protocol -- an object `{type: "update", move_path: "<dest>" | null}`. Only the
  * object form carries a destination at all; a bare-string `kind` (or none) never does.
  */
+function extractMovePath(record: Record<string, unknown>): string | undefined {
+  const raw = record.move_path ?? record.movePath;
+  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : undefined;
+}
+
+/**
+ * A rename's destination shows up in at least four different shapes across the two notification
+ * channels (review finding #2 round 3, finding #1 round 4):
+ *  - `kind: {type: "update", move_path: "<dest>"}` -- the object-shaped `kind` the modern
+ *    item/started array/single-record change forms use.
+ *  - `kind: "update"` (bare string) with no move info -- the common non-rename case.
+ *  - `{type: "update", move_path: "<dest>"}` -- move_path as a sibling of `type` at the TOP
+ *    level, not nested under `kind` at all. This is the real shape of an entry's VALUE in the
+ *    legacy patch_apply_begin channel's path-keyed map.
+ *  - `{update: {move_path: "<dest>"}}` -- an older form of the same map-entry value, where the
+ *    type name is itself the key wrapping an object that carries move_path, with no "type" or
+ *    "kind" field anywhere else on the entry.
+ * Checked in that order; the first shape that resolves wins.
+ */
 function resolveKindAndMovePath(record: Record<string, unknown>): {
   kind: string | undefined;
   movePath: string | undefined;
 } {
-  if (typeof record.kind === "string") {
-    return { kind: record.kind, movePath: undefined };
-  }
   const kindRecord = toObjectRecord(record.kind);
   if (kindRecord) {
     const kind = typeof kindRecord.type === "string" ? kindRecord.type : undefined;
-    const movePathRaw = kindRecord.move_path ?? kindRecord.movePath;
-    const movePath =
-      typeof movePathRaw === "string" && movePathRaw.trim().length > 0
-        ? movePathRaw.trim()
-        : undefined;
-    return { kind, movePath };
+    return { kind, movePath: extractMovePath(kindRecord) ?? extractMovePath(record) };
   }
-  return { kind: typeof record.type === "string" ? record.type : undefined, movePath: undefined };
+  if (typeof record.kind === "string") {
+    return { kind: record.kind, movePath: extractMovePath(record) };
+  }
+  if (typeof record.type === "string") {
+    return { kind: record.type, movePath: extractMovePath(record) };
+  }
+  for (const [key, value] of Object.entries(record)) {
+    const nested = toObjectRecord(value);
+    const movePath = nested ? extractMovePath(nested) : undefined;
+    if (movePath) {
+      return { kind: key, movePath };
+    }
+  }
+  return { kind: undefined, movePath: undefined };
 }
 
 function parseCodexPatchChanges(changes: unknown): CodexPatchFileChange[] {

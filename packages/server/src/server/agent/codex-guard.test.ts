@@ -482,6 +482,39 @@ describe("resolveGuardedFileChangePath (re-review finding #2)", () => {
     expect(resolved).toBe(gitDir);
     expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
   });
+
+  test("a missing component followed by `..` does not end the walk early -- a later real symlink is still followed (verify finding #2, round 4)", () => {
+    mkdirSync(nodePath.join(scratch, ".git", "hooks"), { recursive: true });
+    const hookTarget = nodePath.join(scratch, ".git", "hooks", "post-checkout");
+    const hooklink = nodePath.join(scratch, "hooklink");
+    symlinkSync(nodePath.join(scratch, ".git", "hooks"), hooklink);
+
+    // "newdir" never exists. The old (broken) code ended the walk right there, textually
+    // collapsing "newdir/.." via path.join and never reaching "hooklink" -- the real symlink --
+    // at all. The fix keeps walking: "newdir" goes on the resolved stack as an ordinary name,
+    // ".." pops it back off (landing on scratch, correctly), and "hooklink" is then lstat-ed
+    // and followed like any other component.
+    const resolved = resolveGuardedFileChangePath("newdir/../hooklink/post-checkout", scratch);
+    expect(resolved).toBe(hookTarget);
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
+  });
+
+  test("the newdir/../hooklink/x bypass is declined end-to-end -- the old early-stop would have accepted it (verify finding #2, round 4)", () => {
+    mkdirSync(nodePath.join(scratch, ".ssh"), { recursive: true });
+    const sshTarget = nodePath.join(scratch, ".ssh", "config");
+    const hooklink = nodePath.join(scratch, "hooklink");
+    symlinkSync(nodePath.join(scratch, ".ssh"), hooklink);
+
+    const resolved = resolveGuardedFileChangePath("newdir/../hooklink/config", scratch);
+    expect(resolved).toBe(sshTarget);
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
+
+    // What the old early-stop-on-missing-component code would have produced instead (textually
+    // collapsing "newdir/.." via path.join, then never lstat-ing "hooklink" at all) -- provably
+    // not sensitive, confirming this is a real verdict change.
+    const oldEarlyStopResult = nodePath.join(scratch, "newdir", "..", "hooklink", "config");
+    expect(describeGuardedSensitiveFileChangePath(oldEarlyStopResult)).toBeNull();
+  });
 });
 
 describe("resolveGuardedFileChangePath -- an earlier symlinked ancestor does not shadow a deeper attack symlink (verify finding #2, round 2)", () => {

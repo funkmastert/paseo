@@ -671,7 +671,7 @@ describe("Codex guarded mode approval handling", () => {
     appServer.assertNoErrors();
   });
 
-  test("tracks a rename's move_path destination from the legacy patch_apply_started channel too (verify finding #2, round 3)", async () => {
+  test("tracks a rename's move_path destination from the legacy patch_apply_started channel's real map-keyed shape (verify finding #1, round 4)", async () => {
     const appServer = createFakeCodexAppServer({
       "turn/steer": () => ({ turn: { id: "native-A" } }),
     });
@@ -686,12 +686,17 @@ describe("Codex guarded mode approval handling", () => {
         msg: {
           type: "patch_apply_begin",
           call_id: "legacy-rename-1",
-          changes: [
-            {
-              path: "/workspace/project/notes.md",
-              kind: { type: "update", move_path: "/workspace/project/.ssh/config" },
+          // The real legacy patch_apply_begin payload: a map keyed by path, with move_path as a
+          // TOP-LEVEL sibling of "type" on the entry's own value -- not nested under a "kind"
+          // field at all, and not an array of {path, kind} records (the v2 shape the earlier,
+          // wrong version of this test used).
+          changes: {
+            "/workspace/project/notes.md": {
+              type: "update",
+              unified_diff: "@@ -1 +1 @@\n-hello\n+goodbye\n",
+              move_path: "/workspace/project/.ssh/config",
             },
-          ],
+          },
         },
       },
     );
@@ -703,6 +708,88 @@ describe("Codex guarded mode approval handling", () => {
       reason: "Apply the patch",
     });
     const result = await appServer.waitForCommandApprovalDecision("legacy-rename-1");
+
+    expect(result).toEqual({ decision: "decline" });
+    const assistantMessage = events.find(
+      (event) => event.type === "timeline" && event.item.type === "assistant_message",
+    );
+    expect(assistantMessage).toBeDefined();
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("tracks a rename's move_path from the legacy channel's older {typeName: {move_path}} map-entry form (verify finding #1, round 4)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session as unknown as CodexTestSession).handleNotification(
+      "codex/event/patch_apply_begin",
+      {
+        threadId: "thread-1",
+        msg: {
+          type: "patch_apply_begin",
+          call_id: "legacy-rename-2",
+          // The older map-entry shape: no "type"/"kind" field anywhere on the entry itself --
+          // the type name ("update") is the key, wrapping an object that carries move_path.
+          changes: {
+            "/workspace/project/notes.md": {
+              update: { move_path: "/workspace/project/.gitattributes" },
+            },
+          },
+        },
+      },
+    );
+
+    appServer.requestFileChangeApproval({
+      itemId: "legacy-rename-2",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("legacy-rename-2");
+
+    expect(result).toEqual({ decision: "decline" });
+    const assistantMessage = events.find(
+      (event) => event.type === "timeline" && event.item.type === "assistant_message",
+    );
+    expect(assistantMessage).toBeDefined();
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("tracks a rename's top-level move_path (sibling of type, not nested under kind) from the modern item/started channel too (verify finding #1, round 4)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    appServer.startsFileChange({
+      threadId: "thread-1",
+      itemId: "file-rename-map",
+      // Map-keyed changes (not the v2 array-of-records form), with move_path at the top level
+      // of the entry's own value.
+      changes: {
+        "/workspace/project/notes.md": {
+          type: "update",
+          move_path: "/workspace/project/.git/hooks/post-checkout",
+        },
+      },
+    });
+    appServer.requestFileChangeApproval({
+      itemId: "file-rename-map",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("file-rename-map");
 
     expect(result).toEqual({ decision: "decline" });
     const assistantMessage = events.find(
