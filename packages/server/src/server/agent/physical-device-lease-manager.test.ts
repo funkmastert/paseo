@@ -1,6 +1,9 @@
 import { describe, expect, test, vi } from "vitest";
 import { PhysicalDeviceLeaseManager } from "./physical-device-lease-manager.js";
 import type { PhysicalDevice } from "./physical-device-registry.js";
+import type { DeviceLeaseAgentSummary } from "./device-lease-manager.js";
+import { attributeProcessTrees } from "./process-attribution.js";
+import type { ProcessSampleRow } from "./process-sampler.js";
 
 const MINUTE = 60_000;
 
@@ -9,7 +12,9 @@ function createManager(
     devices?: PhysicalDevice[];
     enabled?: boolean;
     dryRun?: boolean;
+    idleReleaseMinutes?: number;
     agentIds?: string[];
+    agents?: DeviceLeaseAgentSummary[];
     reservedIds?: string[];
     /** Emulators adb also sees — an untargeted adb command could mean any of them too. */
     emulatorCount?: number;
@@ -17,12 +22,21 @@ function createManager(
 ) {
   const state = {
     devices: options.devices ?? [],
-    config: { enabled: options.enabled ?? true, dryRun: options.dryRun ?? false },
-    agents: (options.agentIds ?? ["agent-1", "agent-2"]).map((agentId) => ({
-      agentId,
-      provider: "claude",
-      isRunning: true,
-    })),
+    config: {
+      enabled: options.enabled ?? true,
+      dryRun: options.dryRun ?? false,
+      ...(options.idleReleaseMinutes === undefined
+        ? {}
+        : { idleReleaseMinutes: options.idleReleaseMinutes }),
+    },
+    agents:
+      options.agents ??
+      (options.agentIds ?? ["agent-1", "agent-2"]).map((agentId) => ({
+        agentId,
+        provider: "claude",
+        isRunning: true,
+      })),
+    rows: [] as ProcessSampleRow[],
     nowMs: 1_000_000,
     reserved: new Set(options.reservedIds ?? []),
   };
@@ -42,6 +56,33 @@ function createManager(
     createLeaseId: () => `physical-lease-${++leaseCounter}`,
   });
   return { manager, state, logger };
+}
+
+/** One resource-monitor sweep over the harness's `ps` rows, the way agent-resource-monitor.ts
+ * hands it to `reportProcessSample`. */
+function sweepRows(harness: ReturnType<typeof createManager>): void {
+  const { manager, state } = harness;
+  const { agentTrees } = attributeProcessTrees(
+    state.rows,
+    state.agents.map((agent) => agent.agentId),
+  );
+  manager.reportProcessSample({ rows: state.rows, agentTrees });
+}
+
+function agentRootRow(pid: number, agentId: string): ProcessSampleRow {
+  return {
+    pid,
+    ppid: 1,
+    uid: 501,
+    rssKb: 100_000,
+    cpuPercent: 1,
+    etime: "10:00",
+    command: `claude --mcp-config {"url":"http://127.0.0.1:6767/mcp?callerAgentId=${agentId}"}`,
+  };
+}
+
+function childRow(pid: number, ppid: number, command: string): ProcessSampleRow {
+  return { pid, ppid, uid: 501, rssKb: 10_000, cpuPercent: 0, etime: "05:00", command };
 }
 
 const USB_PIXEL: PhysicalDevice = {
@@ -553,5 +594,150 @@ describe("PhysicalDeviceLeaseManager gateInstall", () => {
       transport: "network",
       connected: false,
     });
+  });
+});
+
+const IDLE_HOLDER: DeviceLeaseAgentSummary = {
+  agentId: "agent-1",
+  provider: "claude",
+  isRunning: false,
+};
+
+describe("PhysicalDeviceLeaseManager idle release", () => {
+  test("an install lease whose holder has been idle with no shell for 15 minutes is released idle", async () => {
+    const harness = createManager({ devices: [USB_PIXEL], agents: [IDLE_HOLDER] });
+    await harness.manager.gateInstall({
+      agentId: "agent-1",
+      command: `adb -s ${USB_PIXEL.id} install app.apk`,
+    });
+    sweepRows(harness);
+
+    harness.state.nowMs += 15 * MINUTE;
+    sweepRows(harness);
+
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: USB_PIXEL.id, reason: "idle" }),
+      "Physical device lease released",
+    );
+    const snapshot = await harness.manager.getSnapshot();
+    expect(snapshot.devices.find((device) => device.id === USB_PIXEL.id)?.agentId).toBeUndefined();
+  });
+
+  test("a holder with a live background install loop keeps the lease", async () => {
+    const harness = createManager({ devices: [USB_PIXEL], agents: [IDLE_HOLDER] });
+    await harness.manager.gateInstall({
+      agentId: "agent-1",
+      command: `adb -s ${USB_PIXEL.id} install app.apk`,
+    });
+    harness.state.rows = [
+      agentRootRow(500, "agent-1"),
+      childRow(501, 500, "/bin/zsh -c ./install-loop.sh"),
+    ];
+    sweepRows(harness);
+
+    harness.state.nowMs += 20 * MINUTE;
+    sweepRows(harness);
+
+    expect(
+      harness.logger.info.mock.calls.some(([, msg]) => msg === "Physical device lease released"),
+    ).toBe(false);
+  });
+
+  test("a process outside the holder's tree running adb -s <serial> keeps the lease", async () => {
+    const harness = createManager({
+      devices: [USB_PIXEL],
+      agents: [IDLE_HOLDER, { agentId: "agent-2", provider: "claude", isRunning: false }],
+    });
+    await harness.manager.gateInstall({
+      agentId: "agent-1",
+      command: `adb -s ${USB_PIXEL.id} install app.apk`,
+    });
+    harness.state.rows = [
+      agentRootRow(700, "agent-2"),
+      childRow(701, 700, `/bin/zsh -c adb -s ${USB_PIXEL.id} logcat`),
+      childRow(702, 701, `adb -s ${USB_PIXEL.id} logcat`),
+    ];
+    sweepRows(harness);
+
+    harness.state.nowMs += 20 * MINUTE;
+    sweepRows(harness);
+
+    expect(
+      harness.logger.info.mock.calls.some(([, msg]) => msg === "Physical device lease released"),
+    ).toBe(false);
+  });
+
+  test("an install-gate decision resets the clock", async () => {
+    const harness = createManager({ devices: [USB_PIXEL], agents: [IDLE_HOLDER] });
+    await harness.manager.gateInstall({
+      agentId: "agent-1",
+      command: `adb -s ${USB_PIXEL.id} install app.apk`,
+    });
+    sweepRows(harness);
+
+    harness.state.nowMs += 10 * MINUTE;
+    await harness.manager.gateInstall({
+      agentId: "agent-1",
+      command: `adb -s ${USB_PIXEL.id} install app2.apk`,
+    });
+
+    harness.state.nowMs += 10 * MINUTE;
+    sweepRows(harness);
+
+    expect(
+      harness.logger.info.mock.calls.some(([, msg]) => msg === "Physical device lease released"),
+    ).toBe(false);
+  });
+
+  test("a reserved device is unaffected (reservations are not leases)", async () => {
+    const harness = createManager({ devices: [USB_PIXEL], agents: [IDLE_HOLDER] });
+    harness.state.reserved.add(USB_PIXEL.id);
+    sweepRows(harness);
+
+    harness.state.nowMs += 60 * MINUTE;
+    sweepRows(harness);
+
+    expect(
+      harness.logger.info.mock.calls.some(([, msg]) => msg === "Physical device lease released"),
+    ).toBe(false);
+  });
+
+  test("dry run logs and keeps the lease", async () => {
+    const harness = createManager({ devices: [USB_PIXEL], agents: [IDLE_HOLDER], dryRun: true });
+    await harness.manager.gateInstall({
+      agentId: "agent-1",
+      command: `adb -s ${USB_PIXEL.id} install app.apk`,
+    });
+    sweepRows(harness);
+
+    harness.state.nowMs += 15 * MINUTE;
+    sweepRows(harness);
+
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ dryRun: true, deviceId: USB_PIXEL.id }),
+      "Would release an idle device lease",
+    );
+    const snapshot = await harness.manager.getSnapshot();
+    expect(snapshot.devices.find((device) => device.id === USB_PIXEL.id)?.agentId).toBe("agent-1");
+  });
+
+  test("idleReleaseMinutes: 0 turns it off", async () => {
+    const harness = createManager({
+      devices: [USB_PIXEL],
+      agents: [IDLE_HOLDER],
+      idleReleaseMinutes: 0,
+    });
+    await harness.manager.gateInstall({
+      agentId: "agent-1",
+      command: `adb -s ${USB_PIXEL.id} install app.apk`,
+    });
+    sweepRows(harness);
+
+    harness.state.nowMs += 60 * MINUTE;
+    sweepRows(harness);
+
+    expect(
+      harness.logger.info.mock.calls.some(([, msg]) => msg === "Physical device lease released"),
+    ).toBe(false);
   });
 });

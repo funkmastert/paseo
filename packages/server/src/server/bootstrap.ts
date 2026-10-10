@@ -3556,6 +3556,10 @@ export async function createPaseoDaemon(
               readFreeDiskBytes,
               // The build gate counts builds from this sweep's `ps` rather than its own.
               reportAttributedSample: (sample) => nativeBuildGate.observeSample(sample),
+              // The physical-device lease manager's only process evidence (docs/device-leases.md
+              // #physical-devices); its own detection is push-based, never a `ps` sample.
+              reportPhysicalDeviceSample: (sample) =>
+                physicalDeviceLeaseManager.reportProcessSample(sample),
               readDiskGrowth: () => worktreeDiskMonitor?.getLastGrowthReport() ?? null,
               readDaemonConfig: () => ({
                 resourceMonitor: daemonConfigStore.get().resourceMonitor,
