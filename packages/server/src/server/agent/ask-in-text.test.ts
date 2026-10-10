@@ -19,6 +19,54 @@ const FIRES: Case[] = [
     text: "Options:\n- Option A: rebase onto main\n- Option B: merge as-is\nLet me know.",
   },
   { note: "your call", text: "Your call: ship now or wait?" },
+  {
+    note: "option list separated from closing 'let me know which' by a rationale paragraph",
+    text: "Options:\n- Rebase onto main\n- Merge as-is\n\nBoth are safe; rebase keeps history cleaner.\n\nLet me know which you'd prefer.",
+  },
+  {
+    note: "which one",
+    text: "Options:\n- Rebase\n- Merge\n\nWhich one works better for you.",
+  },
+  {
+    note: "which option",
+    text: "Options:\n- Rebase\n- Merge\n\nWhich option fits best.",
+  },
+  {
+    note: "which of these",
+    text: "Options:\n- Rebase\n- Merge\n\nWhich of these works.",
+  },
+  {
+    note: "which should i",
+    text: "Options:\n- Rebase\n- Merge\n\nWhich should I run.",
+  },
+  {
+    note: "which would you",
+    text: "Options:\n- Rebase\n- Merge\n\nWhich would you choose.",
+  },
+  {
+    note: "pick one",
+    text: "Options:\n- Rebase\n- Merge\n\nPick one and let's go.",
+  },
+  {
+    note: "choose between",
+    text: "Options:\n- Rebase\n- Merge\n\nChoose between them.",
+  },
+  {
+    note: "choose one",
+    text: "Options:\n- Rebase\n- Merge\n\nChoose one to proceed.",
+  },
+  {
+    note: "do you prefer",
+    text: "Options:\n- Rebase\n- Merge\n\nDo you prefer this approach.",
+  },
+  {
+    note: "would you prefer",
+    text: "Options:\n- Rebase\n- Merge\n\nWould you prefer this approach.",
+  },
+  {
+    note: "explicit A-or-B offer with no reader-address phrase",
+    text: "Options:\n- Rebase onto main\n- Merge as-is\n\nRebase or merge?",
+  },
 ];
 
 const DOES_NOT_FIRE: Case[] = [
@@ -67,6 +115,14 @@ const DOES_NOT_FIRE: Case[] = [
   {
     note: "numbered next-steps list with no question",
     text: "Next steps:\n1. Deploy to staging\n2. Run smoke tests\n3. Promote to prod",
+  },
+  {
+    note: "local option list next to a standalone rhetorical '?' line, no reader-address phrase",
+    text: "Options:\n- Keep the current rate limiter\n- Swap to a token bucket\n\nWhy did it fail?\nThe cache was stale.",
+  },
+  {
+    note: "bare '?' line inside the list paragraph itself, no reader-address phrase",
+    text: "Options:\n- Keep the current rate limiter\n- Swap to a token bucket\nWhy?",
   },
 ];
 

@@ -45,6 +45,13 @@ const READER_ADDRESS_PATTERNS = READER_ADDRESS_PHRASES.map(
   (phrase) => new RegExp(`\\b${escapeRegExp(phrase)}\\b`),
 );
 
+/**
+ * A line that offers two options right at the question mark, e.g. "Rebase or merge?". Deliberately
+ * narrow to "or <one word>?" — a rhetorical question that merely contains "or" somewhere earlier
+ * ("Why did it fail, or was it something else?") must not count.
+ */
+const EXPLICIT_OFFER_PATTERN = /\bor\s+[\w'-]+\?$/i;
+
 /** Drops fenced code blocks and quoted (`>`) lines, so a `?` inside either is never judged. */
 function stripCodeAndQuotes(text: string): string {
   const withoutCodeBlocks = text.replace(/```[\s\S]*?```/g, "");
@@ -84,13 +91,22 @@ function countListItems(text: string): number {
   return text.split("\n").filter((line) => LIST_ITEM_PATTERN.test(line)).length;
 }
 
-function hasQuestionMarkLine(text: string): boolean {
-  return text.split("\n").some((line) => line.trim().endsWith("?"));
+/**
+ * A `?` line counts as a choice phrase only if it addresses the reader or explicitly offers the
+ * options — a standalone rhetorical "?" next to a local list ("Why did it fail?") must not reopen
+ * the false-positive class this signal exists to avoid.
+ */
+function lineAddressesReaderOrOffersChoice(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.endsWith("?")) return false;
+  const lower = trimmed.toLowerCase();
+  if (READER_ADDRESS_PATTERNS.some((pattern) => pattern.test(lower))) return true;
+  return EXPLICIT_OFFER_PATTERN.test(trimmed);
 }
 
 function hasQuestionShapedChoicePhrase(text: string): boolean {
   if (QUESTION_SHAPED_CHOICE_PATTERNS.some((pattern) => pattern.test(text))) return true;
-  return hasQuestionMarkLine(text);
+  return text.split("\n").some(lineAddressesReaderOrOffersChoice);
 }
 
 function findListParagraphIndices(paragraphs: string[]): number[] {
@@ -102,14 +118,25 @@ function findListParagraphIndices(paragraphs: string[]): number[] {
 
 /**
  * R2's option-list signal: a list of two or more options together with a choice phrase that is
- * actually asking. Both halves are kept local to the end of the message — the list lives in the
- * last two paragraphs, and the choice phrase must sit in the paragraph right before the list,
- * inside it, or in the message's last paragraph. A list and an unrelated choice word anywhere
- * else in a long message must never combine into a false positive (the bug behind #18, where "one
- * more deploy, which now reloads the plugin" supplied the "which" for a list several lines away).
+ * actually asking. Both halves are kept local to the end of the message — the choice phrase must
+ * sit in the paragraph right before the list, inside it, or in the message's last paragraph. A
+ * list and an unrelated choice word anywhere else in a long message must never combine into a
+ * false positive (the bug behind #18, where "one more deploy, which now reloads the plugin"
+ * supplied the "which" for a list several lines away).
+ *
+ * The list itself must live in the last two paragraphs — three when the final paragraph already
+ * carries a question-shaped choice phrase, so a genuine ask with one rationale paragraph between
+ * the list and a closing "Let me know which you'd prefer." still fires. Without a choice phrase
+ * already anchoring the end, three paragraphs back is too wide: it would let an unrelated list
+ * combine with a stray "?" line the same way #18 combined one with a stray "which".
  */
 function hasLocalOptionListWithChoicePhrase(paragraphs: string[]): boolean {
-  const tailStart = Math.max(0, paragraphs.length - 2);
+  const lastParagraph = paragraphs[paragraphs.length - 1] ?? "";
+  const lastParagraphHasChoicePhrase = QUESTION_SHAPED_CHOICE_PATTERNS.some((pattern) =>
+    pattern.test(lastParagraph),
+  );
+  const windowSize = lastParagraphHasChoicePhrase ? 3 : 2;
+  const tailStart = Math.max(0, paragraphs.length - windowSize);
   const tailParagraphs = paragraphs.slice(tailStart);
   const tailListItemCount = tailParagraphs.reduce((sum, p) => sum + countListItems(p), 0);
   if (tailListItemCount < 2) return false;
@@ -119,7 +146,6 @@ function hasLocalOptionListWithChoicePhrase(paragraphs: string[]): boolean {
   const firstListIndex = listIndices[0];
   const beforeList = firstListIndex > 0 ? paragraphs[firstListIndex - 1] : "";
   const insideList = listIndices.map((index) => paragraphs[index]).join("\n\n");
-  const lastParagraph = paragraphs[paragraphs.length - 1] ?? "";
 
   const candidate = [beforeList, insideList, lastParagraph].filter(Boolean).join("\n\n");
   return hasQuestionShapedChoicePhrase(candidate);
