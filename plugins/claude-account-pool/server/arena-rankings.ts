@@ -28,6 +28,16 @@ import { createIntervalPoller, type IntervalPoller } from "./interval-poller";
 /** How often the job refreshes the file (KTD-10: "one refresh a day"). */
 const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * How often (and how many times) a daily refresh's `failedBoards` get a
+ * short-cycle retry, merged into the existing file without re-fetching the
+ * boards that already succeeded. Give up until the next daily refresh after
+ * a few attempts rather than hammering a datasets-server that is still
+ * rate-limiting us.
+ */
+const FAILED_BOARD_RETRY_INTERVAL_MS = 45 * 60 * 1000;
+const MAX_FAILED_BOARD_RETRY_ATTEMPTS = 3;
+
 /** The minimum vote/observation count to include a row (KTD-10). */
 const VOTE_FLOOR = 5;
 
@@ -37,8 +47,39 @@ const HF_DATASET = "lmarena-ai/leaderboard-dataset";
 const HF_SPLIT = "latest";
 /** HF's hard cap on `/rows`' `length` parameter. */
 const HF_PAGE_SIZE = 100;
-/** Safety cap on pages scanned per board, so a dataset-shape change cannot loop forever. */
-const MAX_PAGES_PER_BOARD = 40;
+/** Safety cap on pages scanned per dataset config, so a dataset-shape change cannot loop forever. */
+const MAX_PAGES_PER_CONFIG = 40;
+/** Gap between consecutive HF requests, so a daily refresh doesn't burst the datasets-server. */
+const REQUEST_SPACING_MS = 1_500;
+/** Backoff schedule for a 429/5xx (or other transient error), honored unless `Retry-After` says otherwise. */
+const RETRY_BACKOFFS_MS = [5_000, 15_000, 45_000];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Parses `Retry-After` as either delta-seconds or an HTTP date; undefined when neither parses. */
+function parseRetryAfterMs(header: string | null): number | undefined {
+  if (!header) {
+    return undefined;
+  }
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+  const dateMs = Date.parse(header);
+  if (!Number.isNaN(dateMs)) {
+    return Math.max(0, dateMs - Date.now());
+  }
+  return undefined;
+}
+
+/** A 429 or 5xx from the datasets-server, carrying any `Retry-After` it sent. */
+class RetryableHfError extends Error {
+  constructor(status: number, config: string, offset: number, readonly retryAfterMs: number | undefined) {
+    super(`HF datasets-server returned ${status} for ${config} offset ${offset}`);
+  }
+}
 
 export interface TextRow {
   model_name: string;
@@ -132,7 +173,12 @@ interface HfRowsPage {
   num_rows_total: number;
 }
 
-/** One page fetch, with one retry and a short backoff on a transient error. */
+/**
+ * One page fetch. Retries on any error up to `RETRY_BACKOFFS_MS.length` extra
+ * times, backing off on the schedule — except a 429/5xx with a parseable
+ * `Retry-After` waits that long instead, since the server is telling us
+ * exactly when it'll accept another request.
+ */
 async function fetchHfPage(config: string, offset: number): Promise<HfRowsPage> {
   const url = new URL(`${HF_DATASETS_API}/rows`);
   url.searchParams.set("dataset", HF_DATASET);
@@ -142,7 +188,7 @@ async function fetchHfPage(config: string, offset: number): Promise<HfRowsPage> 
   url.searchParams.set("length", String(HF_PAGE_SIZE));
 
   let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt <= RETRY_BACKOFFS_MS.length; attempt++) {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 15_000);
@@ -151,6 +197,9 @@ async function fetchHfPage(config: string, offset: number): Promise<HfRowsPage> 
         resp = await fetch(url.toString(), { signal: controller.signal });
       } finally {
         clearTimeout(timeoutId);
+      }
+      if (resp.status === 429 || (resp.status >= 500 && resp.status < 600)) {
+        throw new RetryableHfError(resp.status, config, offset, parseRetryAfterMs(resp.headers.get("retry-after")));
       }
       if (!resp.ok) {
         throw new Error(`HF datasets-server returned ${resp.status} for ${config} offset ${offset}`);
@@ -162,8 +211,9 @@ async function fetchHfPage(config: string, offset: number): Promise<HfRowsPage> 
       return { rows: data.rows, num_rows_total: data.num_rows_total };
     } catch (e) {
       lastError = e;
-      if (attempt === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+      if (attempt < RETRY_BACKOFFS_MS.length) {
+        const retryAfterMs = e instanceof RetryableHfError ? e.retryAfterMs : undefined;
+        await sleep(retryAfterMs ?? RETRY_BACKOFFS_MS[attempt]);
       }
     }
   }
@@ -171,47 +221,63 @@ async function fetchHfPage(config: string, offset: number): Promise<HfRowsPage> 
 }
 
 /**
- * Page through one HF config from offset 0, collecting rows whose `category`
- * matches, and stopping once a collected run ends — categories sit in
- * contiguous blocks, so this never needs to know where a block starts.
+ * Page through one HF config from offset 0, bucketing rows by `category` for
+ * every category in `wantedCategories`, and stopping once every wanted
+ * category's contiguous block has ended (or the config runs out of rows).
+ * Several of our boards share one config — `text_style_control` alone covers
+ * five categories — so reading the config once here instead of once per
+ * category (the old per-board loop) cuts the request count sharply: the old
+ * code re-paged from offset 0 for every category sharing a config,
+ * re-reading every earlier category's block each time.
  */
-async function fetchBoardRawRows(config: string, category: string): Promise<LeaderboardRow[]> {
-  const collected: LeaderboardRow[] = [];
-  let collecting = false;
+async function fetchConfigCategoryRows(config: string, wantedCategories: ReadonlySet<string>): Promise<Map<string, LeaderboardRow[]>> {
+  const collected = new Map<string, LeaderboardRow[]>();
+  const finished = new Set<string>();
   let offset = 0;
+  let lastCategory: string | undefined;
 
-  for (let page = 0; page < MAX_PAGES_PER_BOARD; page++) {
+  for (let page = 0; page < MAX_PAGES_PER_CONFIG; page++) {
+    if (page > 0) {
+      await sleep(REQUEST_SPACING_MS);
+    }
     const { rows, num_rows_total } = await fetchHfPage(config, offset);
     if (rows.length === 0) {
       break;
     }
     for (const item of rows) {
-      if (item.row.category === category) {
-        collecting = true;
-        collected.push(item.row);
-      } else if (collecting) {
-        return collected; // The category's contiguous block ended.
+      const category = item.row.category;
+      if (lastCategory !== undefined && category !== lastCategory && wantedCategories.has(lastCategory)) {
+        finished.add(lastCategory); // The previous block ended.
+      }
+      lastCategory = category;
+      if (wantedCategories.has(category) && !finished.has(category)) {
+        const bucket = collected.get(category);
+        if (bucket) {
+          bucket.push(item.row);
+        } else {
+          collected.set(category, [item.row]);
+        }
       }
     }
     offset += rows.length;
     if (offset >= num_rows_total) {
       break;
     }
+    if ([...wantedCategories].every((c) => finished.has(c))) {
+      break;
+    }
   }
   return collected;
 }
 
-/** Fetch and normalize one `{config}/{category}` board. */
-async function fetchBoard(boardId: string): Promise<{ rows: ArenaRankingRow[]; unmatched: number }> {
-  const slashIndex = boardId.indexOf("/");
-  const config = boardId.slice(0, slashIndex);
-  const category = boardId.slice(slashIndex + 1);
-  const rawRows = await fetchBoardRawRows(config, category);
-  return normalizeBoardRows(rawRows);
-}
-
-/** Fetch and normalize every board KTD-11's table references. */
-async function fetchAllBoards(): Promise<{
+/**
+ * Fetch and normalize a set of `{config}/{category}` boards, grouping by
+ * config so each config is read at most once regardless of how many of its
+ * categories are wanted. Spaces requests between configs the same way
+ * `fetchConfigCategoryRows` spaces pages within one, so a refresh never
+ * bursts the datasets-server.
+ */
+async function fetchBoardsGroupedByConfig(boardIds: readonly string[]): Promise<{
   boards: Record<string, ArenaRankingRow[]>;
   unmatched: Record<string, number>;
   failedBoards: string[];
@@ -220,18 +286,55 @@ async function fetchAllBoards(): Promise<{
   const unmatched: Record<string, number> = {};
   const failedBoards: string[] = [];
 
-  for (const boardId of allBoardIds()) {
+  const entriesByConfig = new Map<string, Array<{ category: string; boardId: string }>>();
+  for (const boardId of boardIds) {
+    const slashIndex = boardId.indexOf("/");
+    const config = boardId.slice(0, slashIndex);
+    const category = boardId.slice(slashIndex + 1);
+    const entries = entriesByConfig.get(config);
+    if (entries) {
+      entries.push({ category, boardId });
+    } else {
+      entriesByConfig.set(config, [{ category, boardId }]);
+    }
+  }
+
+  const configs = [...entriesByConfig.keys()];
+  for (let i = 0; i < configs.length; i++) {
+    const config = configs[i];
+    const entries = entriesByConfig.get(config);
+    if (!entries) {
+      continue;
+    }
+    if (i > 0) {
+      await sleep(REQUEST_SPACING_MS);
+    }
     try {
-      const { rows, unmatched: boardUnmatched } = await fetchBoard(boardId);
-      boards[boardId] = rows;
-      unmatched[boardId] = boardUnmatched;
+      const wantedCategories = new Set(entries.map((e) => e.category));
+      const rowsByCategory = await fetchConfigCategoryRows(config, wantedCategories);
+      for (const { category, boardId } of entries) {
+        const { rows, unmatched: boardUnmatched } = normalizeBoardRows(rowsByCategory.get(category) ?? []);
+        boards[boardId] = rows;
+        unmatched[boardId] = boardUnmatched;
+      }
     } catch (e) {
-      console.error(`arena-rankings: failed to fetch board ${boardId}: ${e instanceof Error ? e.message : e}`);
-      failedBoards.push(boardId);
+      console.error(`arena-rankings: failed to fetch config ${config}: ${e instanceof Error ? e.message : e}`);
+      for (const { boardId } of entries) {
+        failedBoards.push(boardId);
+      }
     }
   }
 
   return { boards, unmatched, failedBoards };
+}
+
+/** Fetch and normalize every board KTD-11's table references. */
+async function fetchAllBoards(): Promise<{
+  boards: Record<string, ArenaRankingRow[]>;
+  unmatched: Record<string, number>;
+  failedBoards: string[];
+}> {
+  return fetchBoardsGroupedByConfig(allBoardIds());
 }
 
 function rankingsFilePath(paseoHome: string): string {
@@ -326,23 +429,72 @@ export async function loadArenaRankings(paseoHome: string, maxAgeHours = 72): Pr
 }
 
 /**
+ * Retries only `failedBoards` from the existing file — the boards that
+ * already succeeded are never re-fetched — and merges any recovered boards
+ * into the file atomically. Returns `"no-failed-boards"` when there is
+ * nothing to retry (no file yet, or the last refresh had none), so the
+ * poller's retry loop knows to reset its attempt counter.
+ */
+export async function retryFailedBoards(
+  paseoHome: string,
+): Promise<
+  | { status: "no-failed-boards" }
+  | { status: "merged"; recovered: string[]; stillFailed: string[] }
+  | { status: "no-recovery"; stillFailed: string[] }
+> {
+  const file = await readRankingsFile(paseoHome);
+  if (!file || file.failedBoards.length === 0) {
+    return { status: "no-failed-boards" };
+  }
+
+  const { boards, unmatched, failedBoards: stillFailed } = await fetchBoardsGroupedByConfig(file.failedBoards);
+  const recovered = file.failedBoards.filter((id) => !stillFailed.includes(id));
+  if (recovered.length === 0) {
+    return { status: "no-recovery", stillFailed };
+  }
+
+  const merged: ArenaRankingsFile = {
+    ...file,
+    boards: { ...file.boards, ...boards },
+    unmatched: { ...file.unmatched, ...unmatched },
+    failedBoards: stillFailed,
+  };
+  await writeRankingsFile(paseoHome, merged);
+  return { status: "merged", recovered, stillFailed };
+}
+
+/**
  * Starts the daily refresh job, following `jev-availability.ts`'s pattern:
  * one `createIntervalPoller` around the refresh, started at plugin startup
  * and run once immediately (fire-and-forget — a slow first fetch must not
  * delay plugin startup, the same reason `jevAvailability.refresh()` isn't
  * awaited there either). On failure the previous file is kept and the error
  * is logged; nothing here ever throws into the caller.
+ *
+ * Alongside it, a second poller retries that refresh's `failedBoards` on a
+ * shorter interval for a few attempts, merging any recovery into the file
+ * (`retryFailedBoards`) so a board that failed once isn't stuck for a full
+ * day. The attempt counter resets whenever a daily refresh runs (a fresh
+ * baseline of failures) or a retry finds nothing left to retry.
  */
 export function startArenaRankingsPoller(
   paseoHome: string,
-  options: { intervalMs?: number; setIntervalFn?: typeof setInterval; clearIntervalFn?: typeof clearInterval } = {},
+  options: {
+    intervalMs?: number;
+    retryIntervalMs?: number;
+    setIntervalFn?: typeof setInterval;
+    clearIntervalFn?: typeof clearInterval;
+  } = {},
 ): IntervalPoller<void> {
-  const poller = createIntervalPoller<void>({
+  let retryAttempts = 0;
+
+  const dailyPoller = createIntervalPoller<void>({
     intervalMs: options.intervalMs ?? REFRESH_INTERVAL_MS,
     setIntervalFn: options.setIntervalFn,
     clearIntervalFn: options.clearIntervalFn,
     run: async () => {
       const result = await refreshArenaRankings(paseoHome);
+      retryAttempts = 0;
       if (result.status === "failed") {
         console.error(`arena-rankings: daily refresh failed, keeping the previous file: ${result.error}`);
       } else {
@@ -351,6 +503,34 @@ export function startArenaRankingsPoller(
       }
     },
   });
-  void poller.runOnce();
-  return poller;
+
+  const retryPoller = createIntervalPoller<void>({
+    intervalMs: options.retryIntervalMs ?? FAILED_BOARD_RETRY_INTERVAL_MS,
+    setIntervalFn: options.setIntervalFn,
+    clearIntervalFn: options.clearIntervalFn,
+    run: async () => {
+      if (retryAttempts >= MAX_FAILED_BOARD_RETRY_ATTEMPTS) {
+        return;
+      }
+      const result = await retryFailedBoards(paseoHome);
+      if (result.status === "no-failed-boards") {
+        retryAttempts = 0;
+        return;
+      }
+      retryAttempts++;
+      if (result.status === "merged") {
+        console.log(`arena-rankings: recovered ${result.recovered.length} previously-failed board(s): ${result.recovered.join(", ")}`);
+      }
+    },
+  });
+
+  void dailyPoller.runOnce();
+
+  return {
+    runOnce: () => dailyPoller.runOnce(),
+    stop: () => {
+      dailyPoller.stop();
+      retryPoller.stop();
+    },
+  };
 }

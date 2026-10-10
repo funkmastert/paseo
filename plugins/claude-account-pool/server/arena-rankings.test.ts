@@ -19,6 +19,7 @@ import {
   normalizeBoardRows,
   normalizeRow,
   refreshArenaRankings,
+  retryFailedBoards,
   startArenaRankingsPoller,
   type AgentRow,
   type LeaderboardRow,
@@ -271,6 +272,23 @@ describe("loadArenaRankings", () => {
   });
 });
 
+/**
+ * Drives a fake-timers test: starts the call, flushes every scheduled timer, then awaits the
+ * result. `retryFailedBoards` reads the rankings file (real fs I/O) before it ever reaches a
+ * `setTimeout` — `vi.runAllTimersAsync()` called while zero timers are registered returns
+ * immediately, racing ahead of that read and leaving the later backoff timers (registered only
+ * once the read resolves) stuck on real wall-clock time. Yielding to the real event loop
+ * (`setImmediate`, left un-faked by `toFake` below) until a timer actually exists closes that race.
+ */
+async function runWithFakeTimers<T>(fn: () => Promise<T>): Promise<T> {
+  const resultPromise = fn();
+  for (let i = 0; i < 50 && vi.getTimerCount() === 0; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  await vi.runAllTimersAsync();
+  return resultPromise;
+}
+
 describe("refreshArenaRankings", () => {
   let tempDir: string;
   let originalFetch: typeof fetch;
@@ -278,9 +296,11 @@ describe("refreshArenaRankings", () => {
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "arena-rankings-test-"));
     originalFetch = global.fetch;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     global.fetch = originalFetch;
     await fs.rm(tempDir, { recursive: true }).catch(() => undefined);
   });
@@ -306,7 +326,7 @@ describe("refreshArenaRankings", () => {
   it("writes the file atomically on success", async () => {
     global.fetch = singlePageFetchMock() as unknown as typeof fetch;
 
-    const result = await refreshArenaRankings(tempDir);
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
     expect(result.status).toBe("success");
 
     const written = await loadArenaRankings(tempDir);
@@ -336,7 +356,7 @@ describe("refreshArenaRankings", () => {
       return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
     }) as unknown as typeof fetch;
 
-    const result = await refreshArenaRankings(tempDir);
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
     expect(result.status).toBe("success");
     expect(calls).toBeGreaterThan(1); // The retry happened.
   });
@@ -356,7 +376,7 @@ describe("refreshArenaRankings", () => {
       return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
     }) as unknown as typeof fetch;
 
-    const result = await refreshArenaRankings(tempDir);
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
     expect(result.status).toBe("success");
 
     const written = await loadArenaRankings(tempDir);
@@ -373,7 +393,7 @@ describe("refreshArenaRankings", () => {
 
     global.fetch = vi.fn().mockRejectedValue(new Error("network down")) as unknown as typeof fetch;
 
-    const result = await refreshArenaRankings(tempDir);
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
     expect(result.status).toBe("failed");
 
     const content = await fs.readFile(filePath, "utf-8");
@@ -392,7 +412,7 @@ describe("refreshArenaRankings", () => {
     // that proves nothing about writeRankingsFile's own atomicity.
     vi.mocked(fs.rename).mockRejectedValueOnce(new Error("simulated crash before rename"));
 
-    const result = await refreshArenaRankings(tempDir);
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
     expect(result.status).toBe("failed");
 
     const content = await fs.readFile(filePath, "utf-8");
@@ -412,9 +432,11 @@ describe("startArenaRankingsPoller", () => {
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "arena-rankings-poller-test-"));
     originalFetch = global.fetch;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     global.fetch = originalFetch;
     await fs.rm(tempDir, { recursive: true }).catch(() => undefined);
   });
@@ -428,7 +450,7 @@ describe("startArenaRankingsPoller", () => {
     const poller = startArenaRankingsPoller(tempDir, noInterval);
     // The initial run is fire-and-forget; runOnce() against the same in-flight call lets the test
     // wait for it without asserting anything about timing.
-    await poller.runOnce();
+    await runWithFakeTimers(() => poller.runOnce());
 
     expect(await loadArenaRankings(tempDir)).not.toBeNull();
     poller.stop();
@@ -437,7 +459,248 @@ describe("startArenaRankingsPoller", () => {
   it("stop() is safe to call without ever having refreshed successfully", async () => {
     global.fetch = vi.fn().mockRejectedValue(new Error("network down")) as unknown as typeof fetch;
     const poller = startArenaRankingsPoller(tempDir, noInterval);
-    await poller.runOnce();
+    await runWithFakeTimers(() => poller.runOnce());
     expect(() => poller.stop()).not.toThrow();
+  });
+
+});
+
+describe("retryFailedBoards", () => {
+  let tempDir: string;
+  let originalFetch: typeof fetch;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "arena-rankings-retry-test-"));
+    originalFetch = global.fetch;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    global.fetch = originalFetch;
+    await fs.rm(tempDir, { recursive: true }).catch(() => undefined);
+  });
+
+  const goodBoard = {
+    arenaName: "claude-sonnet-5.5-max",
+    ours: "claude-sonnet-5-5",
+    effort: "max",
+    rating: 0.12,
+    ratingLower: 0.11,
+    ratingUpper: 0.13,
+    votes: 150,
+  };
+
+  async function seedFile(failedBoards: string[]): Promise<void> {
+    await fs.writeFile(
+      path.join(tempDir, "arena-rankings.json"),
+      JSON.stringify({
+        fetchedAt: Date.now(),
+        publishDate: "2026-10-09",
+        boards: { "agent/overall": [goodBoard] },
+        unmatched: { "agent/overall": 2 },
+        failedBoards,
+      }),
+      "utf-8",
+    );
+  }
+
+  it("reports nothing to do when the file has no failed boards", async () => {
+    await seedFile([]);
+    const result = await runWithFakeTimers(() => retryFailedBoards(tempDir));
+    expect(result).toEqual({ status: "no-failed-boards" });
+  });
+
+  it("reports nothing to do when there is no file yet", async () => {
+    const result = await runWithFakeTimers(() => retryFailedBoards(tempDir));
+    expect(result).toEqual({ status: "no-failed-boards" });
+  });
+
+  it("retries only the failed board, merges it in, and leaves the good board untouched", async () => {
+    await seedFile(["text_style_control/hard_prompts"]);
+
+    const requestedConfigs: string[] = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      requestedConfigs.push(new URL(url).searchParams.get("config") ?? "");
+      const row = {
+        model_name: "claude-sonnet-5.5-high",
+        category: "hard_prompts",
+        rating: 1500,
+        rating_lower: 1490,
+        rating_upper: 1510,
+        vote_count: 200,
+        leaderboard_publish_date: "2026-10-09",
+      };
+      return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await runWithFakeTimers(() => retryFailedBoards(tempDir));
+    expect(result).toEqual({ status: "merged", recovered: ["text_style_control/hard_prompts"], stillFailed: [] });
+
+    // The good board's config is never requested again — only the previously-failed board's config is.
+    expect(requestedConfigs.every((c) => c === "text_style_control")).toBe(true);
+
+    const written = await loadArenaRankings(tempDir);
+    expect(written?.boards["agent/overall"]).toEqual([goodBoard]); // Untouched.
+    expect(written?.boards["text_style_control/hard_prompts"]).toMatchObject([{ ours: "claude-sonnet-5-5", effort: "high" }]);
+    expect(written?.failedBoards).toEqual([]);
+  });
+
+  it("leaves the file as-is when the retry fails again", async () => {
+    await seedFile(["text_style_control/hard_prompts"]);
+    global.fetch = vi.fn().mockRejectedValue(new Error("still down")) as unknown as typeof fetch;
+
+    const result = await runWithFakeTimers(() => retryFailedBoards(tempDir));
+    expect(result).toEqual({ status: "no-recovery", stillFailed: ["text_style_control/hard_prompts"] });
+
+    const written = await loadArenaRankings(tempDir);
+    expect(written?.boards["agent/overall"]).toEqual([goodBoard]);
+    expect(written?.failedBoards).toEqual(["text_style_control/hard_prompts"]);
+  });
+});
+
+describe("HF 429/5xx backoff", () => {
+  let tempDir: string;
+  let originalFetch: typeof fetch;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "arena-rankings-backoff-test-"));
+    originalFetch = global.fetch;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    global.fetch = originalFetch;
+    await fs.rm(tempDir, { recursive: true }).catch(() => undefined);
+  });
+
+  function okPage() {
+    const row = {
+      model_name: "claude-sonnet-5.5-high",
+      category: "overall",
+      rating: 1500,
+      rating_lower: 1490,
+      rating_upper: 1510,
+      vote_count: 200,
+      leaderboard_publish_date: "2026-10-09",
+    };
+    return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
+  }
+
+  it("retries a 429 after the first exponential backoff step (5s), not before", async () => {
+    let calls = 0;
+    global.fetch = vi.fn().mockImplementation(async () => {
+      calls++;
+      if (calls === 1) {
+        return new Response("rate limited", { status: 429 });
+      }
+      return okPage();
+    }) as unknown as typeof fetch;
+
+    const resultPromise = refreshArenaRankings(tempDir);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(calls).toBe(1); // Still waiting out the 5s backoff.
+
+    await vi.advanceTimersByTimeAsync(1);
+    // The retried call (and the rest of the refresh) can now proceed.
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+    expect(result.status).toBe("success");
+    expect(calls).toBeGreaterThan(1);
+  });
+
+  it("honors a numeric Retry-After header instead of the default backoff", async () => {
+    let calls = 0;
+    global.fetch = vi.fn().mockImplementation(async () => {
+      calls++;
+      if (calls === 1) {
+        return new Response("rate limited", { status: 429, headers: { "retry-after": "2" } });
+      }
+      return okPage();
+    }) as unknown as typeof fetch;
+
+    const resultPromise = refreshArenaRankings(tempDir);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(calls).toBe(1); // Retry-After said 2s, not the default 5s backoff.
+
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+    expect(result.status).toBe("success");
+    expect(calls).toBeGreaterThan(1);
+  });
+
+  it("backs off on a 5xx the same as a 429", async () => {
+    let calls = 0;
+    global.fetch = vi.fn().mockImplementation(async () => {
+      calls++;
+      if (calls === 1) {
+        return new Response("internal error", { status: 503 });
+      }
+      return okPage();
+    }) as unknown as typeof fetch;
+
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+    expect(result.status).toBe("success");
+    expect(calls).toBeGreaterThan(1);
+  });
+});
+
+describe("fetching a config shared by several categories", () => {
+  let tempDir: string;
+  let originalFetch: typeof fetch;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "arena-rankings-shared-config-test-"));
+    originalFetch = global.fetch;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    global.fetch = originalFetch;
+    await fs.rm(tempDir, { recursive: true }).catch(() => undefined);
+  });
+
+  it("reads text_style_control once instead of once per category it serves", async () => {
+    // text_style_control backs 5 of the 9 boards KIND_BOARD_PREFERENCE lists (coding, expert,
+    // hard_prompts, instruction_following, creative_writing). One page per category, in that
+    // dataset order, so the old per-board loop would re-page from offset 0 for every one of them:
+    // 1 (coding) + 2 (through hard_prompts) + 3 (through instruction_following) + 4 (through
+    // creative_writing) + 5 (through expert) = 15 requests for this config alone. The new
+    // config-grouped fetch reads each page exactly once: 5 requests.
+    const categoryOrder = ["coding", "hard_prompts", "instruction_following", "creative_writing", "expert"];
+    const textStyleControlCalls: number[] = [];
+    let otherConfigCalls = 0;
+
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      const config = u.searchParams.get("config");
+      const offset = Number(u.searchParams.get("offset"));
+      if (config !== "text_style_control") {
+        otherConfigCalls++;
+        const row = { model_name: "claude-sonnet-5.5-high", category: "overall", rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+        return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
+      }
+      textStyleControlCalls.push(offset);
+      if (offset >= categoryOrder.length) {
+        return new Response(JSON.stringify({ rows: [], num_rows_total: categoryOrder.length }), { status: 200 });
+      }
+      const category = categoryOrder[offset];
+      const row = { model_name: "claude-sonnet-5.5-high", category, rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+      return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: categoryOrder.length }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+    expect(result.status).toBe("success");
+
+    // One request per page of the config, not one full re-scan per category.
+    expect(textStyleControlCalls).toEqual([0, 1, 2, 3, 4]);
+
+    const written = await loadArenaRankings(tempDir);
+    for (const category of categoryOrder) {
+      expect(written?.boards[`text_style_control/${category}`]).toHaveLength(1);
+    }
   });
 });
