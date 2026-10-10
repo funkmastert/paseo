@@ -135,12 +135,22 @@ export function describeGuardedSensitiveFileChangePath(path: string): string | n
  * symlink must instead go to the PARENT OF WHATEVER THE SYMLINK'S TARGET RESOLVED TO. Splitting
  * without collapsing, and only ever resolving `..` against the real, already-substituted
  * location inside the walk below, is what keeps that distinction intact.
+ *
+ * Verify finding (round 6, P0): splits on `\` only when `platform` is `"win32"`. `\` is an
+ * ordinary filename character on POSIX, not a separator -- splitting on it unconditionally (an
+ * earlier version of this function did) let a single real component literally named
+ * `zz\..\..\..` be torn into four fake navigation segments ("zz", "..", "..", ".."), walking the
+ * resolver somewhere the real kernel -- which sees one opaque name with backslashes in it, and
+ * resolves the REAL `..` after it normally -- never goes. `platform` defaults to
+ * `process.platform` and is a parameter (not read directly) so a test can exercise the win32
+ * branch from any host.
  */
-function splitRawSegments(rawPath: string): string[] {
+function splitRawSegments(rawPath: string, platform: NodeJS.Platform): string[] {
   const { root } = nodePath.parse(rawPath);
+  const separators = platform === "win32" ? /[\\/]/ : /\//;
   return rawPath
     .slice(root.length)
-    .split(/[\\/]/)
+    .split(separators)
     .filter((segment) => segment.length > 0 && segment !== ".");
 }
 
@@ -179,22 +189,57 @@ const MAX_SYMLINK_RESOLUTION_HOPS = 40;
  * reason, or exceeds the symlink-hop limit -- the caller declines on an unresolved path rather
  * than assume it is safe.
  */
-export function resolveGuardedFileChangePath(rawPath: string, cwd: string): string | null {
+export function resolveGuardedFileChangePath(
+  rawPath: string,
+  cwd: string,
+  // Verify finding (round 6): injectable so a test can exercise the win32-only branches
+  // (backslash-as-separator, trailing-dot/space stripping) from any host.
+  platform: NodeJS.Platform = process.platform,
+): string | null {
   try {
     if (nodePath.isAbsolute(rawPath)) {
-      return walkSegments(nodePath.parse(rawPath).root, splitRawSegments(rawPath));
+      return walkSegments(
+        nodePath.parse(rawPath).root,
+        splitRawSegments(rawPath, platform),
+        platform,
+      );
     }
-    const resolvedCwd = walkSegments(nodePath.parse(cwd).root, splitRawSegments(cwd));
+    const resolvedCwd = walkSegments(
+      nodePath.parse(cwd).root,
+      splitRawSegments(cwd, platform),
+      platform,
+    );
     if (resolvedCwd === null) {
       return null;
     }
-    return walkSegments(resolvedCwd, splitRawSegments(rawPath));
+    return walkSegments(resolvedCwd, splitRawSegments(rawPath, platform), platform);
   } catch {
     return null;
   }
 }
 
-function walkSegments(startResolved: string, segments: string[]): string | null {
+/**
+ * Verify finding (round 6, P1): win32 drops a trailing dot or space when it opens a file --
+ * `hooklink.` and `hooklink` are the same file to the OS -- but `lstatSync`/`readlinkSync` read
+ * the literal name and get `ENOENT` for the dotted/spaced form, so the walker saw a "missing"
+ * component instead of the real symlink/junction underneath and never followed it. Stripped
+ * before every `lstat`/`readlink` call on win32, the same normalization Win32 itself applies.
+ * Left as-is if stripping would empty the segment entirely (an all-dots/all-spaces name is not
+ * what this is for).
+ */
+function stripWin32TrailingDotsAndSpaces(segment: string, platform: NodeJS.Platform): string {
+  if (platform !== "win32") {
+    return segment;
+  }
+  const stripped = segment.replace(/[. ]+$/, "");
+  return stripped.length > 0 ? stripped : segment;
+}
+
+function walkSegments(
+  startResolved: string,
+  segments: string[],
+  platform: NodeJS.Platform,
+): string | null {
   let resolvedSoFar = startResolved;
   const remaining = [...segments];
   let hops = 0;
@@ -206,7 +251,8 @@ function walkSegments(startResolved: string, segments: string[]): string | null 
       resolvedSoFar = nodePath.dirname(resolvedSoFar);
       continue;
     }
-    const candidate = nodePath.join(resolvedSoFar, segment);
+    const effectiveSegment = stripWin32TrailingDotsAndSpaces(segment, platform);
+    const candidate = nodePath.join(resolvedSoFar, effectiveSegment);
     // Verify finding #2 (round 4): a missing component must NOT end the walk early. A later `..`
     // can still pop back past it to a real ancestor, and a later component can still be a real
     // symlink that needs following -- `newdir/../hooklink/post-checkout` (newdir never existing,
@@ -231,7 +277,7 @@ function walkSegments(startResolved: string, segments: string[]): string | null 
     // short-name aliases and reparse points (symlinks/junctions) in the same call. Tried only
     // when the component already exists (it cannot do anything for a not-yet-existing target);
     // falls through to the manual lstat/readlink handling below on any failure.
-    if (process.platform === "win32") {
+    if (platform === "win32") {
       try {
         resolvedSoFar = realpathSync.native(candidate);
         continue;
@@ -254,7 +300,7 @@ function walkSegments(startResolved: string, segments: string[]): string | null 
     // A relative target resolves against the symlink's own directory -- resolvedSoFar, right
     // now, before this hop, is exactly that directory (fully resolved already, with every
     // component already verified real) -- so it needs no change for that case.
-    remaining.unshift(...splitRawSegments(linkTarget));
+    remaining.unshift(...splitRawSegments(linkTarget, platform));
   }
   return resolvedSoFar;
 }

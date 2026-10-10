@@ -545,6 +545,110 @@ describe("resolveGuardedFileChangePath (re-review finding #2)", () => {
     const oldEarlyStopResult = nodePath.join(scratch, "newdir", "..", "hooklink", "config");
     expect(describeGuardedSensitiveFileChangePath(oldEarlyStopResult)).toBeNull();
   });
+
+  test("a real component whose literal POSIX name contains backslashes is not torn into fake navigation segments (verify finding #1, round 6, P0)", () => {
+    mkdirSync(nodePath.join(scratch, ".git", "hooks"), { recursive: true });
+    const hookTarget = nodePath.join(scratch, ".git", "hooks", "post-checkout");
+    // `\` is an ordinary filename character on POSIX, not a separator -- this directory's own
+    // name literally contains backslash-dot-dot sequences, which is legal.
+    const weirdName = "zz\\..\\..\\..";
+    mkdirSync(nodePath.join(scratch, ".git", "hooks", weirdName));
+
+    // The exact PoC shape: a `/`-separated path whose third component happens to contain
+    // backslash-dot-dot text, followed by a real `../post-checkout`. Split on "/" only (the
+    // real POSIX separator), this is [".git", "hooks", weirdName, "..", "post-checkout"] -- the
+    // real kernel descends into weirdName then pops back up to "hooks" via the genuine "..",
+    // landing on .git/hooks/post-checkout. Splitting on "\" too (the bug) tears weirdName into
+    // four fake navigation segments instead, walking somewhere the kernel never goes.
+    const resolved = resolveGuardedFileChangePath(
+      ".git/hooks/zz\\..\\..\\../../post-checkout",
+      scratch,
+    );
+    expect(resolved).toBe(hookTarget);
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
+  });
+
+  test("the backslash bypass also reaches .git/config and .ssh/authorized_keys the same way (verify finding #1, round 6, P0)", () => {
+    // Each weird directory name is followed by a GENUINE "/../" (a real, standalone ".."
+    // segment after splitting on "/" only) -- the embedded "\.." inside the name itself does
+    // no navigation at all; it's the real ".." afterward that pops back up, and only on POSIX,
+    // where "\" is not a separator, does the kernel see it this way.
+    mkdirSync(nodePath.join(scratch, ".git"), { recursive: true });
+    const gitConfigTarget = nodePath.join(scratch, ".git", "config");
+    mkdirSync(nodePath.join(scratch, ".git", "zz\\.."));
+
+    const resolvedGitConfig = resolveGuardedFileChangePath(".git/zz\\../../config", scratch);
+    expect(resolvedGitConfig).toBe(gitConfigTarget);
+    expect(describeGuardedSensitiveFileChangePath(resolvedGitConfig ?? "")).not.toBeNull();
+
+    mkdirSync(nodePath.join(scratch, ".ssh"), { recursive: true });
+    const sshKeysTarget = nodePath.join(scratch, ".ssh", "authorized_keys");
+    mkdirSync(nodePath.join(scratch, ".ssh", "zz\\.."));
+
+    const resolvedSshKeys = resolveGuardedFileChangePath(".ssh/zz\\../../authorized_keys", scratch);
+    expect(resolvedSshKeys).toBe(sshKeysTarget);
+    expect(describeGuardedSensitiveFileChangePath(resolvedSshKeys ?? "")).not.toBeNull();
+  });
+
+  test("declines on win32 the same as on POSIX -- the win32 branch still splits on both separators (platform injection)", () => {
+    mkdirSync(nodePath.join(scratch, ".git", "hooks"), { recursive: true });
+    const hooklink = nodePath.join(scratch, "hooklink");
+    symlinkSync(nodePath.join(scratch, ".git", "hooks"), hooklink);
+
+    // On win32, `\` legitimately IS the separator -- this is an ordinary, non-adversarial
+    // Windows-style path, not the POSIX backslash-in-a-filename trick above.
+    const resolved = resolveGuardedFileChangePath("hooklink\\post-checkout", scratch, "win32");
+    expect(resolved).toBe(nodePath.join(scratch, ".git", "hooks", "post-checkout"));
+  });
+});
+
+describe("resolveGuardedFileChangePath -- win32 drops a trailing dot/space before opening a file (verify finding #2, round 6, P1)", () => {
+  let scratch: string;
+
+  beforeEach(() => {
+    scratch = realpathSync(mkdtempSync(nodePath.join(os.tmpdir(), "codex-guard-win32-trailing-")));
+  });
+
+  afterEach(() => {
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  test("follows a symlink/junction component whose reported name carries a trailing dot, on win32", () => {
+    mkdirSync(nodePath.join(scratch, ".git", "hooks"), { recursive: true });
+    const hookTarget = nodePath.join(scratch, ".git", "hooks", "post-checkout");
+    // The real stored name has no trailing dot -- Windows itself would have dropped it there
+    // too, so there is only ever one real underlying entry, "hooklink". The INPUT path below
+    // reports it with a trailing dot, the way a Win32 API caller can address it.
+    const hooklink = nodePath.join(scratch, "hooklink");
+    symlinkSync(nodePath.join(scratch, ".git", "hooks"), hooklink);
+
+    const resolved = resolveGuardedFileChangePath("hooklink./post-checkout", scratch, "win32");
+    expect(resolved).toBe(hookTarget);
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
+  });
+
+  test("a dangling symlink target reported with a trailing space is still followed, on win32", () => {
+    mkdirSync(nodePath.join(scratch, ".ssh"), { recursive: true });
+    const sshTarget = nodePath.join(scratch, ".ssh", "config");
+    const link = nodePath.join(scratch, "evil-hook-link");
+    symlinkSync(nodePath.join(scratch, ".ssh", "config"), link);
+
+    const resolved = resolveGuardedFileChangePath("evil-hook-link ", scratch, "win32");
+    expect(resolved).toBe(sshTarget);
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
+  });
+
+  test("without the win32 platform, the same trailing-dot report is treated as a missing component instead (confirms the fix is platform-gated)", () => {
+    mkdirSync(nodePath.join(scratch, ".git", "hooks"), { recursive: true });
+    const hooklink = nodePath.join(scratch, "hooklink");
+    symlinkSync(nodePath.join(scratch, ".git", "hooks"), hooklink);
+
+    const resolved = resolveGuardedFileChangePath("hooklink./post-checkout", scratch, "darwin");
+    // Treated as a missing component (no stripping off-win32): the literal, unresolved path,
+    // never having followed "hooklink" at all.
+    expect(resolved).toBe(nodePath.join(scratch, "hooklink.", "post-checkout"));
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).toBeNull();
+  });
 });
 
 describe("resolveGuardedFileChangePath -- an earlier symlinked ancestor does not shadow a deeper attack symlink (verify finding #2, round 2)", () => {
