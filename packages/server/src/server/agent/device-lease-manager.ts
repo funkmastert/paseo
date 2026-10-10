@@ -1448,8 +1448,10 @@ export class DeviceLeaseManager {
         : undefined;
       if (existing) {
         // Launching again against a device already leased — most often this agent's own, on a
-        // rebuild loop that names it explicitly. Still a use of the lease.
-        existing.lastUsedAtMs = this.now();
+        // rebuild loop that names it explicitly. Still a use of the lease, but only that lease's:
+        // another agent naming a device it doesn't hold is not evidence the real holder is doing
+        // anything, and must not pin that holder's idle clock.
+        if (existing.agentId === agentId) existing.lastUsedAtMs = this.now();
       } else if (
         device &&
         !this.reservations.isReserved(device.deviceId) &&
