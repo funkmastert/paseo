@@ -298,6 +298,28 @@ describe("createRoleRouter", () => {
       const policy = {
         ...policyWithWorkerProfile({ kind: "read-only" }),
         roles: policyWithWorkerProfile({ kind: "read-only" }).roles.map((role) =>
+          role.id === "worker" ? { ...role, models: ["claude/claude-opus-4"] } : role,
+        ),
+      };
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policy),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-opus-4"] })),
+        }),
+      );
+
+      const result = router(declaredWorker(), fakeContext);
+
+      expect(result?.config.model).toBe("claude-opus-4");
+      const options = result?.config.providerOptions as { disallowedTools: string[] };
+      expect(options.disallowedTools).toContain("Write");
+      expect(options.disallowedTools).not.toContain("Read");
+    });
+
+    it("on Codex, a read-only profile maps to sandbox_mode instead of disallowedTools (KTD-8)", () => {
+      const policy = {
+        ...policyWithWorkerProfile({ kind: "read-only" }),
+        roles: policyWithWorkerProfile({ kind: "read-only" }).roles.map((role) =>
           role.id === "worker" ? { ...role, models: ["codex/gpt-5.1"] } : role,
         ),
       };
@@ -311,9 +333,9 @@ describe("createRoleRouter", () => {
       const result = router(declaredWorker(), fakeContext);
 
       expect(result?.config.model).toBe("gpt-5.1");
-      const options = result?.config.providerOptions as { disallowedTools: string[] };
-      expect(options.disallowedTools).toContain("Write");
-      expect(options.disallowedTools).not.toContain("Read");
+      const options = result?.config.providerOptions as { sandbox_mode?: string; disallowedTools?: string[] };
+      expect(options.sandbox_mode).toBe("read-only");
+      expect(options.disallowedTools).toBeUndefined();
     });
 
     it("never weakens a restriction the caller already set", () => {

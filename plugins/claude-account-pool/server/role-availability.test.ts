@@ -41,22 +41,22 @@ describe("selectModel", () => {
 
   it("selects the first catalog-present, non-claude model in order", () => {
     const result = selectModel(
-      role({ models: ["codex/gpt-5.1", "codex/gpt-4"] }),
-      catalog({ codex: ["gpt-5.1", "gpt-4"] }),
+      role({ models: ["gemini/gemini-5.1", "gemini/gemini-4"] }),
+      catalog({ gemini: ["gemini-5.1", "gemini-4"] }),
       EMPTY_POOL,
       createHealthTracker(),
     );
-    expect(result).toEqual({ outcome: "selected", provider: "codex", model: "gpt-5.1" });
+    expect(result).toEqual({ outcome: "selected", provider: "gemini", model: "gemini-5.1" });
   });
 
   it("skips a model missing from the live catalog and advances to the next", () => {
     const result = selectModel(
-      role({ models: ["codex/gpt-does-not-exist", "codex/gpt-4"] }),
-      catalog({ codex: ["gpt-4"] }),
+      role({ models: ["gemini/gemini-does-not-exist", "gemini/gemini-4"] }),
+      catalog({ gemini: ["gemini-4"] }),
       EMPTY_POOL,
       createHealthTracker(),
     );
-    expect(result).toEqual({ outcome: "selected", provider: "codex", model: "gpt-4" });
+    expect(result).toEqual({ outcome: "selected", provider: "gemini", model: "gemini-4" });
   });
 
   it("catalog presence is the whole check for non-claude families (no pool/health involvement)", () => {
@@ -74,12 +74,12 @@ describe("selectModel", () => {
     health.reportTurnFailure("worker-a", "hit your limit"); // caps the account window
     health.reportTurnFailure("leader", "hit your limit");
     const result = selectModel(
-      role({ models: ["claude/claude-opus-4", "codex/gpt-4"] }),
-      catalog({ claude: ["claude-opus-4"], codex: ["gpt-4"] }),
+      role({ models: ["claude/claude-opus-4", "gemini/gemini-4"] }),
+      catalog({ claude: ["claude-opus-4"], gemini: ["gemini-4"] }),
       ONE_WORKER_POOL,
       health,
     );
-    expect(result).toEqual({ outcome: "selected", provider: "codex", model: "gpt-4" });
+    expect(result).toEqual({ outcome: "selected", provider: "gemini", model: "gemini-4" });
   });
 
   it("claude-family: eligible when a worker is healthy for the model", () => {
@@ -121,12 +121,12 @@ describe("selectModel", () => {
 
   it("order-preserving: an eligible earlier entry wins over a later, also-eligible entry", () => {
     const result = selectModel(
-      role({ models: ["codex/gpt-4", "codex/gpt-5.1"] }),
-      catalog({ codex: ["gpt-4", "gpt-5.1"] }),
+      role({ models: ["gemini/gemini-4", "gemini/gemini-5.1"] }),
+      catalog({ gemini: ["gemini-4", "gemini-5.1"] }),
       EMPTY_POOL,
       createHealthTracker(),
     );
-    expect(result).toEqual({ outcome: "selected", provider: "codex", model: "gpt-4" });
+    expect(result).toEqual({ outcome: "selected", provider: "gemini", model: "gemini-4" });
   });
 
   it("UNAVAILABLE: nothing eligible falls back to models[0] rather than skipping the request", () => {
@@ -328,12 +328,12 @@ describe("selectModel", () => {
       health.reportTurnFailure("worker-a", "hit your limit");
       health.reportTurnFailure("leader", "hit your limit");
       const result = selectModel(
-        role({ models: ["claude-opus-4", "codex/gpt-4"] }),
-        catalog({ claude: ["claude-opus-4"], codex: ["gpt-4"] }),
+        role({ models: ["claude-opus-4", "gemini/gemini-4"] }),
+        catalog({ claude: ["claude-opus-4"], gemini: ["gemini-4"] }),
         ONE_WORKER_POOL,
         health,
       );
-      expect(result).toEqual({ outcome: "selected", provider: "codex", model: "gpt-4" });
+      expect(result).toEqual({ outcome: "selected", provider: "gemini", model: "gemini-4" });
     });
   });
 });
@@ -582,8 +582,10 @@ describe("isModelRefUsable", () => {
     expect(isModelRefUsable("claude-fable-5-1", catalog({ claude: ["claude-fable-5-1"] }), ONE_WORKER_POOL, health)).toBe(false);
   });
 
-  it("usable: a non-pool-family ref (codex/...) is never Fable-budget-gated", () => {
-    expect(isModelRefUsable("codex/gpt-6-sol", catalog({ codex: ["gpt-6-sol"] }), EMPTY_POOL, createHealthTracker())).toBe(true);
+  it("usable: a non-pool-family, non-codex ref (gemini/...) is never Fable-budget-gated", () => {
+    expect(isModelRefUsable("gemini/gemini-pro", catalog({ gemini: ["gemini-pro"] }), EMPTY_POOL, createHealthTracker())).toBe(
+      true,
+    );
   });
 
   it("unusable: an unparseable ref", () => {
@@ -594,5 +596,87 @@ describe("isModelRefUsable", () => {
     expect(isModelRefUsable("claude-sonnet-5", catalog({ claude: ["claude-sonnet-5"] }), EMPTY_POOL, createHealthTracker())).toBe(
       false,
     );
+  });
+});
+
+describe("isModelRefUsable — Codex's own usability gate (KTD-9, KTD-3)", () => {
+  const CODEX_CATALOG = catalog({ codex: ["gpt-6-sol"] });
+
+  function healthyCodexReading(): ReturnType<typeof createHealthTracker> {
+    const health = createHealthTracker();
+    health.reportUsage("codex", [{ window: "session", usedPct: 10 }]);
+    return health;
+  }
+
+  it("usable: guard healthy, window under budget and fresh, no children running", () => {
+    expect(
+      isModelRefUsable("codex/gpt-6-sol", CODEX_CATALOG, EMPTY_POOL, healthyCodexReading(), {
+        codex: { isGuardHealthy: () => true },
+      }),
+    ).toBe(true);
+  });
+
+  it("unusable: no codex options supplied at all (the not-yet-wired default)", () => {
+    expect(isModelRefUsable("codex/gpt-6-sol", CODEX_CATALOG, EMPTY_POOL, healthyCodexReading())).toBe(false);
+  });
+
+  it("unusable: guard health reports unhealthy", () => {
+    expect(
+      isModelRefUsable("codex/gpt-6-sol", CODEX_CATALOG, EMPTY_POOL, healthyCodexReading(), {
+        codex: { isGuardHealthy: () => false },
+      }),
+    ).toBe(false);
+  });
+
+  it("unusable: no usage reading at all for the session window", () => {
+    expect(
+      isModelRefUsable("codex/gpt-6-sol", CODEX_CATALOG, EMPTY_POOL, createHealthTracker(), {
+        codex: { isGuardHealthy: () => true },
+      }),
+    ).toBe(false);
+  });
+
+  it("unusable: the session window reading is at or above maxWindowPct", () => {
+    const health = createHealthTracker();
+    health.reportUsage("codex", [{ window: "session", usedPct: 60 }]);
+    expect(
+      isModelRefUsable("codex/gpt-6-sol", CODEX_CATALOG, EMPTY_POOL, health, { codex: { isGuardHealthy: () => true } }),
+    ).toBe(false);
+  });
+
+  it("unusable: the reading is older than maxReadingAgeHours", () => {
+    let hours = 0;
+    const health = createHealthTracker({ now: () => new Date(hours * 60 * 60 * 1000) });
+    health.reportUsage("codex", [{ window: "session", usedPct: 10 }]);
+    hours = 3; // past the 2-hour default
+    expect(
+      isModelRefUsable("codex/gpt-6-sol", CODEX_CATALOG, EMPTY_POOL, health, { codex: { isGuardHealthy: () => true } }),
+    ).toBe(false);
+  });
+
+  it("unusable: maxChildren are already running", () => {
+    expect(
+      isModelRefUsable("codex/gpt-6-sol", CODEX_CATALOG, EMPTY_POOL, healthyCodexReading(), {
+        codex: { isGuardHealthy: () => true, runningChildren: 3 },
+      }),
+    ).toBe(false);
+  });
+
+  it("usable: fewer than maxChildren are running", () => {
+    expect(
+      isModelRefUsable("codex/gpt-6-sol", CODEX_CATALOG, EMPTY_POOL, healthyCodexReading(), {
+        codex: { isGuardHealthy: () => true, runningChildren: 2 },
+      }),
+    ).toBe(true);
+  });
+
+  it("respects a custom codex policy's thresholds", () => {
+    const health = createHealthTracker();
+    health.reportUsage("codex", [{ window: "session", usedPct: 50 }]);
+    expect(
+      isModelRefUsable("codex/gpt-6-sol", CODEX_CATALOG, EMPTY_POOL, health, {
+        codex: { isGuardHealthy: () => true, policy: { maxWindowPct: 80, maxReadingAgeHours: 2, maxChildren: 3 } },
+      }),
+    ).toBe(true);
   });
 });

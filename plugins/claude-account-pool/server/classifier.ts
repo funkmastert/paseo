@@ -10,7 +10,12 @@ import {
   type RoleRecord,
   type TaskClassId,
 } from "../shared/role-policy-schema";
-import { DEFAULT_TOOL_PROFILE, profileDeniedTools, type ToolProfile } from "../shared/tool-profiles";
+import {
+  DEFAULT_TOOL_PROFILE,
+  isToolProfileExpressibleOnCodex,
+  profileDeniedTools,
+  type ToolProfile,
+} from "../shared/tool-profiles";
 import { WORK_KINDS, type ArenaRankingsFile, type WorkKind } from "../shared/arena-aliases";
 import { decideArenaPick, moveRefToFront, type ArenaPickDecision } from "./arena-model-pick";
 import {
@@ -185,6 +190,21 @@ interface ClassifierWorldBase {
    * so this is always a snapshot already on disk, never a live fetch.
    */
   arenaRanking?: ArenaRankingsFile;
+  /**
+   * Codex guard health (docs/catastrophe-gate.md, KTD-6), read fresh for each decision rather
+   * than cached on the world the way `arenaRanking` is: guard health can flip red mid-session.
+   * Omitted means not wired -- role-availability.ts's `isCodexRefUsable` treats that the same as
+   * an explicit `false` (guards-first, KTD-3), so no `codex/` ref is ever usable until a caller
+   * supplies this.
+   */
+  isCodexGuardHealthy?: () => boolean;
+  /**
+   * Currently-running Codex children, for `policy.codex.maxChildren` (KTD-9). Omitted means not
+   * wired, which role-availability.ts treats as zero -- permissive on its own, but moot while
+   * `isCodexGuardHealthy` above is also omitted, since that already makes every `codex/` ref
+   * unusable.
+   */
+  runningCodexChildren?: number;
 }
 
 /** What the role hook knows about the JEV agent tools at create. Data, like pool health. */
@@ -714,10 +734,27 @@ function decideModel(
   // One options object for both eligibility calls below, so an explicit
   // request and ordered selection are held to the same bar by construction —
   // including `allowUnlistedModels`, which either path can act on.
+  //
+  // Leaders never use Codex (Scope Boundaries) -- an absolute rule, not conditioned on arena
+  // ranking being enabled. Forcing the guard-health check to false here is a hard refusal for
+  // the leader role no matter what the world's actual guard health says, exactly the same as an
+  // unwired isCodexGuardHealthy reads for every other role.
+  //
+  // A role whose tool profile Codex cannot express (KTD-8) is refused the same way: Codex has no
+  // per-tool denial mechanism, so routing it there would silently drop the restriction rather than
+  // enforce it. This checks only the role's own configured profile, not denials inherited from a
+  // caller -- `decideModel` has no access to that half of the tool decision.
+  const codexIneligible = role.id === LEADER_ROLE_ID || !isToolProfileExpressibleOnCodex(role.toolProfile);
+  const codexAvailability = {
+    policy: world.policy.codex,
+    isGuardHealthy: codexIneligible ? () => false : world.isCodexGuardHealthy,
+    runningChildren: world.runningCodexChildren,
+  };
   const selectionOptions = {
     modelBudgetThresholdPct: world.policy.modelBudgetThresholdPct,
     allowUnlistedModels: world.policy.allowUnlistedModels,
     taskClass,
+    codex: codexAvailability,
   };
 
   // U8's arena-ranked pick (KTD-1, KTD-2, KTD-11, KTD-13): evaluated whenever `policy.arena` exists
@@ -742,6 +779,7 @@ function decideModel(
         isModelRefUsable(ref, world.catalog, world.pool, world.health, {
           modelBudgetThresholdPct: world.policy.modelBudgetThresholdPct,
           allowUnlistedModels: world.policy.allowUnlistedModels,
+          codex: codexAvailability,
         }),
       arena,
       rankings: world.arenaRanking,

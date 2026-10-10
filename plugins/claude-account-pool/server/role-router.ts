@@ -322,15 +322,20 @@ function enforceToolDecision(
   tools: AgentDecision["tools"],
   outputStyle: AgentDecision["outputStyle"],
   jevTools: AgentDecision["jevTools"],
+  targetFamily?: string,
 ): ToolEnforcement {
   const extended = request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
   const restriction = restrictionNotice(tools.deniedTools, { inherited: tools.inheritedTools.length > 0 });
   const hint = jevTools?.arm === "on" ? JEV_TOOLS_DISCOVERY_HINT : undefined;
   const notice = restriction && hint ? `${restriction}\n\n${hint}` : restriction ?? hint;
   return {
-    providerOptions: applyToolProfile(request.config.providerOptions, tools.profile, tools.inheritedTools, notice) as
-      | ProviderOptionsValue
-      | undefined,
+    providerOptions: applyToolProfile(
+      request.config.providerOptions,
+      tools.profile,
+      tools.inheritedTools,
+      notice,
+      targetFamily,
+    ) as ProviderOptionsValue | undefined,
     labels: toolDenialLabels(extended.labels, tools.deniedTools),
     // Written on every path that writes tool enforcement, and only when it changes something.
     outputStyle:
@@ -917,7 +922,24 @@ function routeRoleForCreateUnguarded(
     });
   };
 
-  const enforcement = enforceToolDecision(request, decision.tools, decision.outputStyle, decision.jevTools);
+  // Tool enforcement's target family must match what will actually run, not just the
+  // classifier's tentative pick: a cross-family rewrite the registry check below rejects falls
+  // back to the request's own provider, and enforcement has to follow it there rather than stay
+  // aimed at the family the rewrite gave up on.
+  let enforcementProvider = decision.model.provider;
+  if (decision.model.crossesRequestedFamily) {
+    const registeredProviderIds = options.providerIds?.get();
+    if (registeredProviderIds && !registeredProviderIds.has(decision.model.provider as string)) {
+      enforcementProvider = request.config.provider ?? null;
+    }
+  }
+  const enforcement = enforceToolDecision(
+    request,
+    decision.tools,
+    decision.outputStyle,
+    decision.jevTools,
+    enforcementProvider ?? undefined,
+  );
 
   // Tool enforcement is independent of model selection: a role can have no
   // configured models (so no rewrite) and still be restricted to reading, or

@@ -299,6 +299,24 @@ export function profileAllowedTools(profile: ToolProfile): string[] {
 }
 
 /**
+ * Whether a role's tool profile can be enforced on Codex at all (KTD-8). `read-only` always can:
+ * it maps to `sandbox_mode: "read-only"` instead of Claude's `settings.permissions`. Every other
+ * profile can only when it denies nothing -- Codex has no per-tool denial mechanism this codebase
+ * knows of, so a profile (or an inherited restriction) that denies even one tool cannot be
+ * expressed. A caller that routes to Codex anyway must treat that as ineligible rather than
+ * silently drop the restriction; see role-availability.ts's Codex usability gate.
+ */
+export function isToolProfileExpressibleOnCodex(
+  profile: ToolProfile,
+  additionalDenied: readonly string[] = [],
+): boolean {
+  if (profile.kind === "read-only") {
+    return true;
+  }
+  return profileDeniedTools(profile).length === 0 && additionalDenied.length === 0;
+}
+
+/**
  * A permission rule denying/allowing every call of one tool. `Tool(*)` is the
  * spelling the fork's real end-to-end provider-policy test proves works.
  */
@@ -339,13 +357,24 @@ function union(existing: readonly string[], added: readonly string[]): string[] 
  * whatever the caller already denied stays denied, because a plugin that can
  * silently widen a caller's own sandbox is a worse bug than an unenforced
  * role.
+ *
+ * `targetFamily === "codex"` takes a completely different path (KTD-8):
+ * Claude-shaped `settings.permissions`/`disallowedTools` mean nothing to Codex, so
+ * `applyCodexToolProfile` is used instead. Callers that route to Codex are expected to have
+ * already checked `isToolProfileExpressibleOnCodex` before getting here (see
+ * role-availability.ts) -- this function does not re-derive ineligibility, it just never writes
+ * a Claude-shaped key into a Codex request.
  */
 export function applyToolProfile(
   providerOptions: unknown,
   profile: ToolProfile,
   additionalDenied: readonly string[] = [],
   appendSystemPrompt?: string,
+  targetFamily?: string,
 ): Record<string, unknown> | undefined {
+  if (targetFamily === "codex") {
+    return applyCodexToolProfile(providerOptions, profile, appendSystemPrompt);
+  }
   const deniedTools = [...new Set([...profileDeniedTools(profile), ...additionalDenied])];
   const allowedTools = profileAllowedTools(profile);
   if (deniedTools.length === 0 && allowedTools.length === 0 && !appendSystemPrompt) {
@@ -380,6 +409,37 @@ export function applyToolProfile(
   }
   if (deniedTools.length > 0) {
     next.disallowedTools = union(stringArray(current.disallowedTools), deniedTools);
+  }
+  if (appendSystemPrompt) {
+    const currentAppend = typeof current.appendSystemPrompt === "string" ? current.appendSystemPrompt : undefined;
+    next.appendSystemPrompt = currentAppend ? `${currentAppend}\n\n${appendSystemPrompt}` : appendSystemPrompt;
+  }
+  return next;
+}
+
+/**
+ * Codex's half of `applyToolProfile` (KTD-8). `read-only` maps to `sandbox_mode: "read-only"` --
+ * Codex's own investigate-only mode -- rather than a tool-name deny list. Every other profile
+ * writes nothing but `appendSystemPrompt`: a profile with real denials reaching here means the
+ * caller skipped the `isToolProfileExpressibleOnCodex` eligibility check, and this function has
+ * no Claude-shaped key to express them in anyway.
+ */
+function applyCodexToolProfile(
+  providerOptions: unknown,
+  profile: ToolProfile,
+  appendSystemPrompt?: string,
+): Record<string, unknown> | undefined {
+  const wantsReadOnly = profile.kind === "read-only";
+  if (!wantsReadOnly && !appendSystemPrompt) {
+    return undefined;
+  }
+  const current: ProviderOptionsShape =
+    typeof providerOptions === "object" && providerOptions !== null
+      ? (providerOptions as ProviderOptionsShape)
+      : {};
+  const next: Record<string, unknown> = { ...current };
+  if (wantsReadOnly) {
+    next.sandbox_mode = "read-only";
   }
   if (appendSystemPrompt) {
     const currentAppend = typeof current.appendSystemPrompt === "string" ? current.appendSystemPrompt : undefined;

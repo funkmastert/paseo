@@ -108,6 +108,13 @@ export interface HealthTracker {
    */
   windowUtilization(providerId: string, window: string): number | undefined;
   /**
+   * Hours since the last usage reading covered this (provider, window), or undefined when none
+   * ever has. Codex's budget reserve (KTD-9) treats a stale reading as no reading at all --
+   * deliberately stricter than the per-model budget gate above, which treats "no reading" as
+   * within budget.
+   */
+  windowReadingAgeHours(providerId: string, window: string): number | undefined;
+  /**
    * The settled state of one (provider, window), or undefined when nothing has ever been
    * observed for it. Unlike `windowUtilization` it also answers "when does this come back",
    * which is what headroom scoring needs to tell a window resetting within the hour apart from
@@ -137,6 +144,8 @@ interface InternalWindowState {
   /** probation -> healthy deadline, set when entering probation. */
   probationExpiry?: Date;
   utilizationPct?: number;
+  /** When `utilizationPct` was last set by a usage reading. */
+  lastReadingAt?: Date;
   /**
    * True when the current/last cap was an auth failure (see classify.ts).
    * Drives settle(): an auth-failure cap's probation stage has no
@@ -307,6 +316,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
       }
       const state = getSettled(providerId, reading.window);
       state.utilizationPct = reading.usedPct;
+      state.lastReadingAt = now();
       if (reading.resetsAt) {
         state.resetsAt = reading.resetsAt;
       }
@@ -387,6 +397,14 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     return windowsByProvider.get(providerId)?.get(window)?.utilizationPct;
   }
 
+  function windowReadingAgeHours(providerId: string, window: string): number | undefined {
+    const lastReadingAt = windowsByProvider.get(providerId)?.get(window)?.lastReadingAt;
+    if (!lastReadingAt) {
+      return undefined;
+    }
+    return (now().getTime() - lastReadingAt.getTime()) / (60 * 60 * 1000);
+  }
+
   function describeWindow(providerId: string, window: string): WindowSnapshot | undefined {
     const state = windowsByProvider.get(providerId)?.get(window);
     if (!state) {
@@ -438,6 +456,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     isExhaustedFor,
     isHealthyForAllWindows,
     windowUtilization,
+    windowReadingAgeHours,
     describeWindow,
     windowIds,
     snapshot,

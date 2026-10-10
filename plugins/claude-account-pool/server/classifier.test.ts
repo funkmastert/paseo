@@ -1716,6 +1716,9 @@ describe("classifyAgent — arena-ranked model pick (U8)", () => {
             row({ ours: "codex/gpt-6-sol", rating: 1688, ratingLower: 1670, ratingUpper: 1700 }),
           ],
         }),
+        // Codex/gpt-6-sol must itself be usable for operator order to be able to pick it (KTD-9).
+        health: healthyHealth({ windowUtilization: () => 10, windowReadingAgeHours: () => 0 }),
+        isCodexGuardHealthy: () => true,
       } as Partial<ClassifierWorld>),
     );
     // Today's order (operator order) still wins: codex/gpt-6-sol is first in the pool.
@@ -1773,6 +1776,9 @@ describe("classifyAgent — arena-ranked model pick (U8)", () => {
         arenaRanking: rankings({
           "text_style_control/hard_prompts": [row({ ours: "claude-sonnet-5", rating: 1500 }), row({ ours: "codex/gpt-6-sol", rating: 1400 })],
         }),
+        // Codex/gpt-6-sol must itself be usable to count toward KTD-11's two-candidate floor.
+        health: healthyHealth({ windowUtilization: () => 10, windowReadingAgeHours: () => 0 }),
+        isCodexGuardHealthy: () => true,
       } as Partial<ClassifierWorld>),
     );
     expect(decision.model.ranking).toMatchObject({ outcome: "ranked", board: "text_style_control/hard_prompts" });
@@ -1810,5 +1816,100 @@ describe("classifyAgent — arena-ranked model pick (U8)", () => {
       } as Partial<ClassifierWorld>),
     );
     expect(decision.model.ranking).toMatchObject({ outcome: "fallback", reason: "no-ranked-board" });
+  });
+});
+
+describe("classifyAgent — Codex's usability gates reach ordered selection (U5, KTD-9)", () => {
+  function codexFirstPool(): RoleModelPolicy {
+    return withRole(DEFAULT_POLICY, "worker", { models: ["codex/gpt-6-sol", "claude-sonnet-5"] });
+  }
+  function codexWorld(worldOverrides: Partial<ClassifierWorld> = {}): ClassifierWorld {
+    return world({
+      policy: codexFirstPool(),
+      catalog: new Map([
+        ["claude", new Set(["claude-sonnet-5"])],
+        ["codex", new Set(["gpt-6-sol"])],
+      ]),
+      health: healthyHealth({ windowUtilization: () => 10, windowReadingAgeHours: () => 0 }),
+      isCodexGuardHealthy: () => true,
+      ...worldOverrides,
+    } as Partial<ClassifierWorld>);
+  }
+
+  it("picks codex/gpt-6-sol when the guard is healthy and the window is fresh and under budget", () => {
+    const decision = classifyAgent(child({ labels: { "paseo.agent-type": "worker" } }), codexWorld());
+    expect(decision.model).toMatchObject({ outcome: "selected", provider: "codex", model: "gpt-6-sol" });
+  });
+
+  it("skips codex when guard health is red, and the next ref wins", () => {
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker" } }),
+      codexWorld({ isCodexGuardHealthy: () => false }),
+    );
+    expect(decision.model).toMatchObject({ outcome: "selected", provider: null, model: "claude-sonnet-5" });
+  });
+
+  it("skips codex when isCodexGuardHealthy is never wired at all (the safe default)", () => {
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker" } }),
+      codexWorld({ isCodexGuardHealthy: undefined }),
+    );
+    expect(decision.model).toMatchObject({ outcome: "selected", provider: null, model: "claude-sonnet-5" });
+  });
+
+  it("skips codex at 60% window use (the default maxWindowPct)", () => {
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker" } }),
+      codexWorld({ health: healthyHealth({ windowUtilization: () => 60, windowReadingAgeHours: () => 0 }) }),
+    );
+    expect(decision.model).toMatchObject({ outcome: "selected", provider: null, model: "claude-sonnet-5" });
+  });
+
+  it("skips codex when the reading is over 2 hours old (the default maxReadingAgeHours)", () => {
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker" } }),
+      codexWorld({ health: healthyHealth({ windowUtilization: () => 10, windowReadingAgeHours: () => 2.5 }) }),
+    );
+    expect(decision.model).toMatchObject({ outcome: "selected", provider: null, model: "claude-sonnet-5" });
+  });
+
+  it("skips codex with 3 children already running (the default maxChildren)", () => {
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker" } }),
+      codexWorld({ runningCodexChildren: 3 }),
+    );
+    expect(decision.model).toMatchObject({ outcome: "selected", provider: null, model: "claude-sonnet-5" });
+  });
+
+  it("a leader is never routed to codex even when the pool names it first", () => {
+    const decision = classifyAgent(
+      { title: "lead this" },
+      codexWorld({ policy: withRole(codexFirstPool(), "leader", { models: ["codex/gpt-6-sol", "claude-sonnet-5"] }) }),
+    );
+    expect(decision.model.provider).not.toBe("codex");
+  });
+
+  it("skips codex when the role's tool profile denies tools Codex cannot express (KTD-8)", () => {
+    const orchestratorPool = withRole(codexFirstPool(), "worker", {
+      models: ["codex/gpt-6-sol", "claude-sonnet-5"],
+      toolProfile: { kind: "orchestrator" },
+    });
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker" } }),
+      codexWorld({ policy: orchestratorPool }),
+    );
+    expect(decision.model).toMatchObject({ outcome: "selected", provider: null, model: "claude-sonnet-5" });
+  });
+
+  it("still routes to codex when the role's profile is read-only, which Codex can express", () => {
+    const readOnlyPool = withRole(codexFirstPool(), "worker", {
+      models: ["codex/gpt-6-sol", "claude-sonnet-5"],
+      toolProfile: { kind: "read-only" },
+    });
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker" } }),
+      codexWorld({ policy: readOnlyPool }),
+    );
+    expect(decision.model).toMatchObject({ outcome: "selected", provider: "codex", model: "gpt-6-sol" });
   });
 });

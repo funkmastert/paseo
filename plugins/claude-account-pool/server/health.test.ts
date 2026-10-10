@@ -498,3 +498,26 @@ describe("windowUtilization (drives the per-model budget gate)", () => {
     expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
   });
 });
+
+describe("windowReadingAgeHours (Codex's budget reserve, KTD-9)", () => {
+  it("is undefined until a usage reading covers the window", () => {
+    const tracker = createHealthTracker();
+    expect(tracker.windowReadingAgeHours(PROVIDER, "session")).toBeUndefined();
+  });
+
+  it("is zero right after a reading, and grows as time passes", () => {
+    const { tracker, advance } = trackerAt("2026-09-10T10:00:00Z");
+    tracker.reportUsage(PROVIDER, [{ window: "session", usedPct: 10, resetsAt: null }]);
+    expect(tracker.windowReadingAgeHours(PROVIDER, "session")).toBe(0);
+    advance(90 * 60 * 1000);
+    expect(tracker.windowReadingAgeHours(PROVIDER, "session")).toBe(1.5);
+  });
+
+  it("resets to zero on a fresh reading for the same window", () => {
+    const { tracker, advance } = trackerAt("2026-09-10T10:00:00Z");
+    tracker.reportUsage(PROVIDER, [{ window: "session", usedPct: 10, resetsAt: null }]);
+    advance(3 * 60 * 60 * 1000);
+    tracker.reportUsage(PROVIDER, [{ window: "session", usedPct: 20, resetsAt: null }]);
+    expect(tracker.windowReadingAgeHours(PROVIDER, "session")).toBe(0);
+  });
+});

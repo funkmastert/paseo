@@ -1,9 +1,11 @@
 import {
+  DEFAULT_CODEX_POLICY,
   DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   POOL_FAMILY,
   classModels,
   modelRefFamily,
   splitModelRef,
+  type CodexPolicy,
   type RoleRecord,
   type TaskClassId,
 } from "../shared/role-policy-schema";
@@ -25,6 +27,56 @@ export interface AvailabilityHealth {
   isHealthyFor(providerId: string, modelId: string): boolean;
   isLastResortEligible(providerId: string, modelId?: string): boolean;
   windowUtilization(providerId: string, window: string): number | undefined;
+  /**
+   * Hours since the last usage reading for (providerId, window), or undefined when none ever
+   * has. Optional: only Codex's budget reserve (below) reads it, and callers outside this PR
+   * (classifier.ts's own `AvailabilityHealth`-shaped fakes) don't need to grow a new method.
+   */
+  windowReadingAgeHours?(providerId: string, window: string): number | undefined;
+}
+
+/**
+ * The window id Codex's quota fetcher reports its primary usage window under
+ * (`services/quota-fetcher/providers/codex.ts`), read here by the same name
+ * KTD-9 uses: the `codex` `session` window.
+ */
+const CODEX_PROVIDER_ID = "codex";
+const CODEX_SESSION_WINDOW = "session";
+
+/**
+ * Codex's own usability inputs (KTD-9), beyond what `AvailabilityHealth`'s window reading
+ * already covers. Both default to the safe, not-yet-wired state: no guard-health source means
+ * unhealthy (guards-first, KTD-3), and no running-children count means none counted.
+ */
+export interface CodexAvailabilityOptions {
+  policy?: CodexPolicy;
+  /** Guard health (docs/catastrophe-gate.md, KTD-6). Absent means unhealthy. */
+  isGuardHealthy?: () => boolean;
+  /** Currently-running Codex children, for `policy.maxChildren`. Absent means zero. */
+  runningChildren?: number;
+}
+
+/**
+ * Codex's usability gate (KTD-9, KTD-3): the guard must be healthy, the `session` window must be
+ * under budget AND recently read, and fewer than `maxChildren` Codex children may already be
+ * running. Every condition fails closed on missing data -- a `codex/` ref is the one place this
+ * file treats "no reading" as unusable rather than within budget, because Codex is the extra
+ * capacity being reserved from, not the default.
+ */
+function isCodexRefUsable(health: AvailabilityHealth, codex: CodexAvailabilityOptions | undefined): boolean {
+  const policy = codex?.policy ?? DEFAULT_CODEX_POLICY;
+  if (!(codex?.isGuardHealthy?.() ?? false)) {
+    return false;
+  }
+  const usedPct = health.windowUtilization(CODEX_PROVIDER_ID, CODEX_SESSION_WINDOW);
+  if (usedPct === undefined || usedPct >= policy.maxWindowPct) {
+    return false;
+  }
+  const ageHours = health.windowReadingAgeHours?.(CODEX_PROVIDER_ID, CODEX_SESSION_WINDOW);
+  if (ageHours === undefined || ageHours > policy.maxReadingAgeHours) {
+    return false;
+  }
+  return (codex?.runningChildren ?? 0) < policy.maxChildren;
 }
 
 /**
@@ -132,6 +184,8 @@ export interface SelectModelOptions {
    * task-class dimension purely additive for every existing caller.
    */
   taskClass?: TaskClassId;
+  /** Codex's own usability inputs (KTD-9). See `CodexAvailabilityOptions`. */
+  codex?: CodexAvailabilityOptions;
 }
 
 /** The id the catalog lists for this model, whichever spelling asked. See `findCatalogId`. */
@@ -158,7 +212,11 @@ function isRefUsable(
   pool: AvailabilityPool,
   health: AvailabilityHealth,
   thresholdPct: number,
+  codex?: CodexAvailabilityOptions,
 ): boolean {
+  if (family === "codex") {
+    return isCodexRefUsable(health, codex);
+  }
   if (family !== POOL_FAMILY) {
     return true;
   }
@@ -180,9 +238,12 @@ function isRefCurrentlySelectable(
   health: AvailabilityHealth,
   thresholdPct: number,
   allowUnlisted: readonly string[],
+  codex?: CodexAvailabilityOptions,
 ): boolean {
   const present = isListedInCatalog(family, model, catalog) || isAllowlisted(allowUnlisted, family, model);
-  return present && isRefUsable(family, catalogIdFor(family, model, catalog) ?? model, pool, health, thresholdPct);
+  return (
+    present && isRefUsable(family, catalogIdFor(family, model, catalog) ?? model, pool, health, thresholdPct, codex)
+  );
 }
 
 /**
@@ -209,7 +270,16 @@ export function isModelRefUsable(
   }
   const family = modelRefFamily(parsed);
   const thresholdPct = options.modelBudgetThresholdPct ?? DEFAULT_MODEL_BUDGET_THRESHOLD_PCT;
-  return isRefCurrentlySelectable(family, parsed.model, catalog, pool, health, thresholdPct, options.allowUnlistedModels ?? []);
+  return isRefCurrentlySelectable(
+    family,
+    parsed.model,
+    catalog,
+    pool,
+    health,
+    thresholdPct,
+    options.allowUnlistedModels ?? [],
+    options.codex,
+  );
 }
 
 /** Renders a selection back into the ref spelling the operator configured, for logs/notifications. */
@@ -319,14 +389,17 @@ export function evaluateRequestedModel(
   }
   const thresholdPct = options.modelBudgetThresholdPct ?? DEFAULT_MODEL_BUDGET_THRESHOLD_PCT;
   if (isListedInCatalog(requestedFamily, requestedModel, catalog)) {
-    return { configured: true, eligible: isRefUsable(requestedFamily, requestedModel, pool, health, thresholdPct) };
+    return {
+      configured: true,
+      eligible: isRefUsable(requestedFamily, requestedModel, pool, health, thresholdPct, options.codex),
+    };
   }
   if (!isAllowlisted(options.allowUnlistedModels ?? [], requestedFamily, requestedModel)) {
     // Not usable-checked: it is refused either way, and `missingFromCatalog`
     // is only a hint that the catalog is the reason.
     return { configured: true, eligible: false, missingFromCatalog: true };
   }
-  if (!isRefUsable(requestedFamily, requestedModel, pool, health, thresholdPct)) {
+  if (!isRefUsable(requestedFamily, requestedModel, pool, health, thresholdPct, options.codex)) {
     return { configured: true, eligible: false };
   }
   return { configured: true, eligible: true, unadvertised: true };
@@ -386,7 +459,9 @@ export function selectModel(
       continue; // Defensive: schema validation already prevents malformed refs from being stored.
     }
     const family = modelRefFamily(parsed);
-    if (!isRefCurrentlySelectable(family, parsed.model, catalog, pool, health, thresholdPct, allowUnlisted)) {
+    if (
+      !isRefCurrentlySelectable(family, parsed.model, catalog, pool, health, thresholdPct, allowUnlisted, options.codex)
+    ) {
       continue;
     }
     const listedId = catalogIdFor(family, parsed.model, catalog);

@@ -424,7 +424,7 @@ describe("role-model-policy RPC handlers", () => {
       expect(result.reasons.role).toContain("agent-type mapping");
     });
 
-    it("reports SELECTED with the chosen provider/model when the role is configured and catalog-eligible", async () => {
+    it("reports UNAVAILABLE for a codex/ ref: this preview has no path to supply guard health (KTD-9)", async () => {
       const policy: RoleModelPolicy = {
         ...DEFAULT_POLICY,
         roles: DEFAULT_POLICY.roles.map((r) => (r.id === "worker" ? { ...r, models: ["codex/gpt-5.1"] } : r)),
@@ -436,11 +436,14 @@ describe("role-model-policy RPC handlers", () => {
 
       const result = await handlers.explain({ agentType: "worker" }, context(fakePaseo({})));
 
+      // Not yet usable anywhere isCodexGuardHealthy isn't explicitly wired (docs/codex-workers.md)
+      // -- this preview RPC has no path to supply it, so it correctly reports the ref as
+      // unavailable rather than claiming a model that cannot actually be routed to.
       expect(result).toMatchObject({
         roleId: "worker",
         roleName: "worker",
         tier: 1,
-        outcome: "selected",
+        outcome: "unavailable",
         provider: "codex",
         model: "gpt-5.1",
         pool: ["codex/gpt-5.1"],
