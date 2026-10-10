@@ -24,7 +24,11 @@ import {
   type JevDashboardFeatureRow,
   type JevDashboardTile,
 } from "@/jev/jev-dashboard-model";
+import { OPUS_55_INPUT_USD_PER_TOKEN } from "@getpaseo/protocol/jev/pricing";
 import type { JevSavingsEvent, JevSavingsRange, JevSavingsSummary } from "@/jev/jev-savings-types";
+
+/** The list price the ≈ dollar lines use, for the caption: "$4". */
+const OPUS_55_USD_PER_MILLION = `$${OPUS_55_INPUT_USD_PER_TOKEN * 1_000_000}`;
 
 /**
  * The dashboard's presentational pieces: no `expo-router`, no host-runtime hooks. A capture (or
@@ -240,8 +244,8 @@ function TilesRow({ tiles }: { tiles: JevDashboardTile[] }) {
       <Text style={styles.unitCaption}>
         Opus-equivalent tokens: weighted tokens at Opus 5.5 prices; Opus 5.5 cache reads count
         double, so figures from Opus 5.5 agents run high. The ≈ dollar figures are those tokens at
-        Opus 5.5 API list prices ($4 per million); your subscriptions are not billed per token. JEV
-        cost is real spend.
+        Opus 5.5 API list prices ({OPUS_55_USD_PER_MILLION} per million); your subscriptions are not
+        billed per token. JEV cost is real spend.
       </Text>
     </View>
   );

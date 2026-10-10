@@ -116,6 +116,13 @@ describe("buildJevDashboardTiles", () => {
     }
   });
 
+  it("carries a negative net into its dollar line with the sign kept", () => {
+    const tiles = buildJevDashboardTiles(summary({ net: { live: -50_000, ifLive: -10_000 } }));
+    const net = tiles.find((tile) => tile.id === "net");
+    expect(net?.usd).toBeCloseTo(-0.2, 6);
+    expect(net && formatTileUsd(net)).toBe("≈ -$0.20 at API prices");
+  });
+
   it("names the estimated share in the caption, summed across every feature", () => {
     const tiles = buildJevDashboardTiles(
       summary({
