@@ -168,6 +168,15 @@ export class ClaudeTaskProtocolSource {
   private readonly workflowTaskIds = new Set<string>();
   /** Last result emitted per workflow task, so duplicate terminal notifications stay idempotent. */
   private readonly lastWorkflowResultByTaskId = new Map<string, string>();
+  /**
+   * task_id (the hook `agent_id` of every call inside that subagent) -> its Task call's own
+   * description and prompt, for feature 16's read check (docs/jev.md, Feature 16, R1): a
+   * subagent's read is judged against its own brief, not its parent's.
+   */
+  private readonly briefByTaskId = new Map<
+    string,
+    { description: string | null; prompt: string | null }
+  >();
   /** Workflow invocations already own a real Workflow card in the parent timeline. */
   private readonly idsWithExistingParentToolCard = new Set<string>();
   /**
@@ -235,6 +244,15 @@ export class ClaudeTaskProtocolSource {
     return canonicalId && this.declaredIds.has(canonicalId) ? canonicalId : undefined;
   }
 
+  /**
+   * The Task/Agent/Workflow call's own description and prompt for the subagent `taskId` names —
+   * the same id a hook reports as `agent_id` (`observeHook`'s comment explains why those are one
+   * id). Undefined when this source never declared that subagent.
+   */
+  briefFor(taskId: string): { description: string | null; prompt: string | null } | undefined {
+    return this.briefByTaskId.get(taskId);
+  }
+
   /** Whether Claude's task protocol declared this task as a provider subagent. */
   isDeclaredTask(taskId: string): boolean {
     const subagentId = this.subagentIdByTaskId.get(taskId);
@@ -284,6 +302,7 @@ export class ClaudeTaskProtocolSource {
     this.declaredIds.clear();
     this.workflowTaskIds.clear();
     this.lastWorkflowResultByTaskId.clear();
+    this.briefByTaskId.clear();
     this.idsWithExistingParentToolCard.clear();
     this.backgroundedIds.clear();
     this.lastStatusById.clear();
@@ -380,6 +399,10 @@ export class ClaudeTaskProtocolSource {
     this.canonicalIdByToolUseId.set(id, id);
     this.declaredIds.add(id);
     this.lastStatusById.set(id, "running");
+    this.briefByTaskId.set(message.task_id, {
+      description: readString(message.description) ?? null,
+      prompt: readString(message.prompt) ?? null,
+    });
 
     // An explicit `name` on the Task call wins over the agent type, matching how replay titles the
     // same subagent. Without it a fan-out of five Explores reads as five identical rows.

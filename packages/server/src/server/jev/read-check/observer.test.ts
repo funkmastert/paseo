@@ -729,3 +729,126 @@ describe("ReadCheckObserver: the shadow-only subtrees (D12)", () => {
     expect(savings.records[0]).toMatchObject({ decision: { did: "deny" } });
   });
 });
+
+describe("ReadCheckObserver: a subagent's own context (R1, R4, KTD-2)", () => {
+  const BRIEF = {
+    description: "Read the persona file, then the template",
+    prompt: "Read docs/plans/persona-plan.md, then src/template.hbs",
+  };
+
+  test("a found brief is judged against itself, with the parent kept to one line, and its own ring as `recent`", async () => {
+    const { observer, jev } = setup();
+    const smallFile = writeRepoFile("src/small.ts", "export const x = 1;\n");
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    // An earlier small read inside the same subagent builds its own ring; too small to judge.
+    observer.postToolUse({
+      ...readPost(smallFile, "export const x = 1;\n", { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["task"]).toBe(
+      "Read the persona file, then the template\n" +
+        "Read docs/plans/persona-plan.md, then src/template.hbs\n" +
+        "(parent task: Fix the login bug)",
+    );
+    // The subagent's own ring, not the parent's timeline tail (`rows`, set up in `beforeEach`).
+    // `recognizeRead` renders the path as the command spelled it, home folded to `~`.
+    expect(state["recent"]).toEqual(["tool Read ~/projects/app/src/small.ts"]);
+  });
+
+  test("an unknown subagent id is judged as today: the parent's task and timeline tail", async () => {
+    const { observer, jev } = setup();
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-missing" }),
+      subagentBrief: null,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["task"]).toBe(
+      "Fix the login bug\nFind out why the login form rejects valid passwords and fix it.",
+    );
+    expect(state["recent"]).toEqual(["assistant: I will look at the session module next."]);
+  });
+
+  test("two concurrent subagents keep separate briefs and rings", async () => {
+    const { observer, jev } = setup();
+    const content = bigSource();
+    const fileA = writeRepoFile("src/a.hbs", content);
+    const fileB = writeRepoFile("src/b.hbs", content);
+    const briefA = { description: "Work on A", prompt: "Read src/a.hbs" };
+    const briefB = { description: "Work on B", prompt: "Read src/b.hbs" };
+    observer.postToolUse({
+      ...readPost(
+        writeRepoFile("src/a-note.ts", "export const a = 1;\n"),
+        "export const a = 1;\n",
+        {
+          agent_id: "sub-a",
+        },
+      ),
+      subagentBrief: briefA,
+    });
+    observer.postToolUse({
+      ...readPost(
+        writeRepoFile("src/b-note.ts", "export const b = 1;\n"),
+        "export const b = 1;\n",
+        {
+          agent_id: "sub-b",
+        },
+      ),
+      subagentBrief: briefB,
+    });
+    await observer.idle();
+    observer.postToolUse({
+      ...readPost(fileA, content, { agent_id: "sub-a" }),
+      subagentBrief: briefA,
+    });
+    observer.postToolUse({
+      ...readPost(fileB, content, { agent_id: "sub-b" }),
+      subagentBrief: briefB,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(2);
+    const tasks = jev.transport.calls.map(
+      (call) => (call.state as Record<string, unknown>)["task"],
+    );
+    expect(tasks).toContain("Work on A\nRead src/a.hbs\n(parent task: Fix the login bug)");
+    expect(tasks).toContain("Work on B\nRead src/b.hbs\n(parent task: Fix the login bug)");
+  });
+
+  test("the ring is dropped when the subagent ends", async () => {
+    const { observer, jev } = setup();
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    observer.postToolUse({
+      ...readPost(writeRepoFile("src/note.ts", "export const x = 1;\n"), "export const x = 1;\n", {
+        agent_id: "sub-1",
+      }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+    observer.subagentEnd("sub-1");
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).toEqual([]);
+  });
+});

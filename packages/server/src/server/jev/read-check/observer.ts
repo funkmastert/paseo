@@ -78,6 +78,12 @@ export interface FileReadHookEvent {
   agentCwd: string;
   /** The SDK's hook input, as received. */
   input: unknown;
+  /**
+   * The subagent's own Agent/Task brief (R1), when the hook fired inside one: its tool call's
+   * description and prompt, as the provider found them. Undefined outside a subagent; null when
+   * the hook carries a subagent id this provider never declared (R4, `brief: missing`).
+   */
+  subagentBrief?: { description: string | null; prompt: string | null } | null;
 }
 
 /** A live read held for its verdict. The callback denies with `denyReason`, or lets it run. */
@@ -92,6 +98,8 @@ export interface FileReadObserver {
   preToolUse(event: FileReadHookEvent): FileReadHold | null;
   /** PostToolUse for `Read` and `Bash`. Never throws and never waits. */
   postToolUse(event: FileReadHookEvent): void;
+  /** SubagentStop (KTD-2): drops that subagent's recent-calls ring. Never throws. */
+  subagentEnd(subagentId: string): void;
 }
 
 /** The tools the observer's PreToolUse matchers cover. */
@@ -181,6 +189,8 @@ const AGENT_IDLE_MS = 24 * 60 * 60_000;
 const HOUR_MS = 60 * 60_000;
 const RECENT_TAIL_ROWS = 16;
 const SCAN_ROWS = 200;
+/** KTD-2: a subagent's own ring of recent Read, Bash and edit-tool calls. */
+const SUBAGENT_RING_ROWS = 16;
 /** A file larger than this is never read whole by the observer; its estimate is from its size. */
 const MAX_OBSERVER_FILE_BYTES = 8 * 1024 * 1024;
 const BINARY_PROBE_BYTES = 8192;
@@ -350,6 +360,34 @@ function measure(read: RecognizedRead, response: unknown): Measured | null {
   return read.tool === "Read"
     ? measureReadTool(read, record(response))
     : measureBash(read, response);
+}
+
+/** KTD-2: one read, rendered the same shape `recentLine` already knows how to show. */
+function readRingItem(
+  hook: HookFields,
+  read: RecognizedRead,
+  file: RecognizedFile,
+): AgentTimelineItem {
+  const callId = hook.toolUseId ?? "";
+  if (read.tool === "Bash") {
+    const command = record(hook.toolInput)?.["command"];
+    return {
+      type: "tool_call",
+      callId,
+      name: "Bash",
+      status: "completed",
+      error: null,
+      detail: { type: "shell", command: typeof command === "string" ? command : "" },
+    };
+  }
+  return {
+    type: "tool_call",
+    callId,
+    name: "Read",
+    status: "completed",
+    error: null,
+    detail: { type: "read", filePath: file.path },
+  };
 }
 
 /** A tool call appears once per state it went through; `recent` keeps only its newest row. */
@@ -545,6 +583,8 @@ export class ReadCheckObserver implements FileReadObserver {
   private readonly validation: ReadCheckValidation;
   private readonly agents = new Map<string, AgentReadState>();
   private readonly pending = new Map<string, PendingRead>();
+  /** KTD-2: per-subagent-id ring of its own recent Read, Bash and edit-tool calls. */
+  private readonly subagentRings = new Map<string, AgentTimelineItem[]>();
   private readonly personal: PersonalPathRules;
   private readonly runGit: (args: string[], options: JevGitOptions) => Promise<JevGitResult>;
   /** Paths written by a copy or move of a secret file, folded, to when they stop being refused. */
@@ -719,6 +759,24 @@ export class ReadCheckObserver implements FileReadObserver {
     return state;
   }
 
+  /** SubagentStop (KTD-2): the ring is dropped when the subagent ends. */
+  subagentEnd(subagentId: string): void {
+    try {
+      this.subagentRings.delete(subagentId);
+    } catch (error) {
+      this.logger.debug({ err: error }, "read check: subagent end failed");
+    }
+  }
+
+  /** KTD-2: appends one rendered-ready call to `subagentId`'s own ring, capped at 16. */
+  private pushRing(subagentId: string | null, item: AgentTimelineItem): void {
+    if (!subagentId) return;
+    const ring = this.subagentRings.get(subagentId) ?? [];
+    ring.push(item);
+    if (ring.length > SUBAGENT_RING_ROWS) ring.shift();
+    this.subagentRings.set(subagentId, ring);
+  }
+
   private assignmentOf(agentId: string, state: AgentReadState): string | null {
     if (state.assignment === undefined) {
       try {
@@ -768,6 +826,14 @@ export class ReadCheckObserver implements FileReadObserver {
     const real = await this.realpathOf(target);
     this.stateFor(event.agentId).edited.add(real);
     this.validation.noteEdit(event.agentId, real, at);
+    this.pushRing(hook.subagentId, {
+      type: "tool_call",
+      callId: hook.toolUseId ?? "",
+      name: hook.toolName,
+      status: "completed",
+      error: null,
+      detail: { type: hook.toolName === "Write" ? "write" : "edit", filePath: target },
+    });
   }
 
   private onWindowClose(close: ReadCheckWindowClose): void {
@@ -1070,28 +1136,29 @@ export class ReadCheckObserver implements FileReadObserver {
       const signalMark = this.validation.mark();
       if (liveSavingsId && read.files.length === 1) {
         this.settle(liveSavingsId, { contextTokens, estimated: false });
-        continue;
-      }
-      if (pending?.retryOfDeny) continue;
-      // Its output may hold more than one file's text: counted once, never judged.
-      if (read.compound) {
+      } else if (pending?.retryOfDeny) {
+        // Goes through unchecked: nothing to judge.
+      } else if (read.compound) {
+        // Its output may hold more than one file's text: counted once, never judged.
         if (!compoundCounted) this.countNotAsked("compound");
         compoundCounted = true;
-        continue;
+      } else {
+        await this.judgeShadow({
+          event,
+          at,
+          hook,
+          read,
+          file,
+          realPath,
+          measured,
+          contextTokens,
+          config,
+          state,
+          signalMark,
+        });
       }
-      await this.judgeShadow({
-        event,
-        at,
-        hook,
-        read,
-        file,
-        realPath,
-        measured,
-        contextTokens,
-        config,
-        state,
-        signalMark,
-      });
+      // KTD-2: pushed after this file is judged, so it never appears in its own `recent`.
+      this.pushRing(hook.subagentId, readRingItem(hook, read, file));
     }
   }
 
@@ -1138,6 +1205,7 @@ export class ReadCheckObserver implements FileReadObserver {
       slice,
       tokens,
       toolUseId: input.hook.toolUseId,
+      subagentId: input.hook.subagentId,
       deadlineMs: input.config?.timeoutMs ?? 5000,
       live: false,
     });
@@ -1237,15 +1305,22 @@ export class ReadCheckObserver implements FileReadObserver {
     toolUseId: string | null;
     deadlineMs: number;
     live: boolean;
+    /** The SDK's own id for the subagent this read ran inside, or null for a main agent (R1). */
+    subagentId: string | null;
   }): Promise<Asked | null> {
-    const { event, realPath, slice } = input;
+    const { event, realPath, slice, subagentId } = input;
     const agent = this.options.agents.agent(event.agentId);
     const around = this.timelineAround(event.agentId, input.toolUseId);
     const displayPath = displayPathOf(realPath, event.agentCwd);
+    // R1, R4: a subagent whose brief was found is judged against its own brief and its own
+    // recent calls. A subagent whose brief could not be found falls back to the parent's, exactly
+    // as before this plan (`brief: missing`).
+    const brief = subagentId ? (event.subagentBrief ?? null) : null;
     const state = buildReadCheckState({
       title: agent?.title ?? null,
       assignment: this.assignmentOf(event.agentId, this.stateFor(event.agentId)),
-      recent: around.recent,
+      ...(brief ? { subagentBrief: brief } : {}),
+      recent: brief ? (this.subagentRings.get(subagentId!) ?? []) : around.recent,
       why: input.read.why,
       displayPath,
       size: describeSize({ ...slice, tokens: input.tokens }),
@@ -1472,6 +1547,7 @@ export class ReadCheckObserver implements FileReadObserver {
       slice: prepared.slice,
       tokens: prepared.tokens,
       toolUseId: null,
+      subagentId: input.hook.subagentId,
       deadlineMs: Math.max(1, config.liveTimeoutMs - (this.now() - startedAt)),
       live: true,
     });

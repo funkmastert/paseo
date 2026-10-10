@@ -64,6 +64,16 @@ describe("ClaudeTaskProtocolSource", () => {
     ]);
   });
 
+  it("keeps the Task call's description and prompt, keyed by its task_id", () => {
+    const source = new ClaudeTaskProtocolSource();
+    source.observe(taskStarted({ prompt: "Read the persona file, then the template." }));
+    expect(source.briefFor("a1730a6215e1f5cf6")).toEqual({
+      description: "Summarize hover and unistyles docs",
+      prompt: "Read the persona file, then the template.",
+    });
+    expect(source.briefFor("unknown_task_id")).toBeUndefined();
+  });
+
   it("prefers the name the Task call gave over the agent type", () => {
     // The replay source titles a subagent `input.name ?? subagent_type`. Live reads the same
     // field from the same Task call, so one subagent is named identically on both paths.
@@ -139,6 +149,12 @@ describe("ClaudeTaskProtocolSource", () => {
     expect(source.resolveSubagentId("toolu_original")).toBe("toolu_original");
     expect(source.resolveSubagentId("toolu_resumed")).toBe("toolu_original");
     expect(source.resolveSubagentId("unknown_tool")).toBeUndefined();
+    // The first declaration's brief, not the resumed one's: `briefFor` is keyed by task_id, which
+    // stays the one `task_id` the whole task lives under.
+    expect(source.briefFor("a1730a6215e1f5cf6")).toEqual({
+      description: "Summarize hover and unistyles docs",
+      prompt: "First prompt",
+    });
     expect(
       source.observeSidechainFrame(
         {

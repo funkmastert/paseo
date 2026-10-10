@@ -184,14 +184,56 @@ export function recentLine(item: AgentTimelineItem): string | null {
 export interface ReadCheckStateInput {
   title: string | null;
   assignment: string | null;
-  /** The agent's timeline tail, oldest first; the read's own tool call already removed. */
+  /**
+   * Present when this read is inside a subagent whose own brief was found (R1): its Agent/Task
+   * call's own description and prompt. Absent for a main agent's read, and for a subagent's read
+   * whose brief could not be found — both fall back to the legacy task below (R4, "judged as
+   * today").
+   */
+  subagentBrief?: { description: string | null; prompt: string | null };
+  /**
+   * The current turn's latest prompt from the leader or Tyler (R3), added after a main agent's
+   * assignment. Ignored for a subagent read: R1 keeps the parent's task to one line.
+   */
+  latestPrompt?: string | null;
+  /**
+   * The agent's timeline tail, oldest first; the read's own tool call already removed. For a
+   * subagent read with a brief, this is the subagent's own recent tool calls (R1), not the
+   * parent's.
+   */
   recent: readonly AgentTimelineItem[];
+  /** A line kept in `recent` past the row cap: the search call that named this read's path (R3). */
+  pinnedRecentLine?: string | null;
   why: string | null;
   /** Relative to the agent's cwd. */
   displayPath: string;
   size: string;
   /** The text of the range being read. */
   rangeText: string;
+}
+
+/**
+ * `task`, by reader (docs/jev.md, Feature 16, R1 and R3). A subagent whose brief was found is
+ * judged against that brief, with its parent's title kept as one line of context. Everyone else —
+ * a main agent, or a subagent whose brief could not be found — keeps the legacy task: title,
+ * assignment, and (R3) the current turn's latest prompt.
+ */
+function buildTask(input: ReadCheckStateInput): string {
+  if (input.subagentBrief) {
+    const brief = [input.subagentBrief.description, input.subagentBrief.prompt]
+      .filter((part): part is string => Boolean(part))
+      .join("\n")
+      .slice(0, TASK_ASSIGNMENT_CHARS);
+    const parentLine = input.title?.trim() ? `(parent task: ${input.title.trim()})` : null;
+    return [brief, parentLine].filter((part): part is string => Boolean(part)).join("\n");
+  }
+  return [
+    input.title?.trim() || "(untitled agent)",
+    input.assignment?.slice(0, TASK_ASSIGNMENT_CHARS),
+    input.latestPrompt?.slice(0, TASK_ASSIGNMENT_CHARS),
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join("\n");
 }
 
 export interface ReadCheckState {
@@ -210,16 +252,17 @@ function stateBytes(state: ReadCheckState): number {
 
 /** The state, at most `READ_CHECK_MAX_STATE_BYTES`: the excerpt shrinks first, then `recent`. */
 export function buildReadCheckState(input: ReadCheckStateInput): ReadCheckState {
-  const task = [
-    input.title?.trim() || "(untitled agent)",
-    input.assignment?.slice(0, TASK_ASSIGNMENT_CHARS),
-  ]
-    .filter((part): part is string => Boolean(part))
-    .join("\n");
+  const task = buildTask(input);
   const recent = input.recent
     .map(recentLine)
     .filter((line): line is string => line !== null)
     .slice(-RECENT_ROWS);
+  if (input.pinnedRecentLine && !recent.includes(input.pinnedRecentLine)) {
+    recent.unshift(input.pinnedRecentLine);
+    // Keeps the pinned line and the newest rows; the next-oldest ordinary row is what the cap
+    // would have dropped anyway.
+    if (recent.length > RECENT_ROWS) recent.splice(1, 1);
+  }
   const state: ReadCheckState = {
     task,
     recent,
