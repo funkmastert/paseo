@@ -116,12 +116,19 @@ export const PersistedWorkspaceRecordSchema = z.object({
   pinSource: z.enum(["auto", "manual"]).optional(),
   labels: z.array(z.string()).optional(),
   untrustedSource: UntrustedWorkspaceSourceSchema.optional(),
+  // COMPAT(workspaceCreatedBy): added in v0.9.x, remove optional after 2027-10-09.
+  // Who made this workspace: "person" for a client request with no caller agent and no
+  // inherited paseo.parent-agent-id label (docs/done-janitor.md#manual-pin-vs-auto-pin); "agent"
+  // for everything else. Absent predates the field, or is a record an older daemon wrote; it is
+  // backfilled once (workspace-created-by-migration.ts) and otherwise reads as "person".
+  createdBy: z.enum(["person", "agent"]).optional(),
 });
 
 export type PersistedProjectRecord = z.infer<typeof PersistedProjectRecordSchema>;
 export type PersistedWorkspaceRecord = z.infer<typeof PersistedWorkspaceRecordSchema>;
 export type WorkspaceTitleSource = NonNullable<PersistedWorkspaceRecord["titleSource"]>;
 export type WorkspacePinSource = NonNullable<PersistedWorkspaceRecord["pinSource"]>;
+export type WorkspaceCreatedBy = NonNullable<PersistedWorkspaceRecord["createdBy"]>;
 
 /**
  * Whether Paseo may rewrite this workspace's title. A title Paseo generated or an agent
@@ -722,6 +729,7 @@ export function createPersistedWorkspaceRecord(input: {
   pinSource?: WorkspacePinSource;
   labels?: string[];
   untrustedSource?: UntrustedWorkspaceSource;
+  createdBy?: WorkspaceCreatedBy;
 }): PersistedWorkspaceRecord {
   const title = input.title ?? null;
   return PersistedWorkspaceRecordSchema.parse({

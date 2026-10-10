@@ -25,9 +25,9 @@ It never fires:
 `asksReaderForReplyInText` (`packages/server/src/server/agent/ask-in-text.ts`) strips fenced code blocks and quoted (`>`) lines first, so a `?` inside either is never judged. It fires when either holds:
 
 - the **last paragraph** contains a sentence ending in `?` that addresses the reader: "should i", "do you want", "want me to", "which", "would you", "can you", "let me know", "your call", "or should";
-- the text has a **list of two or more options** (bulleted, numbered, or a bare `Option A`/`Option B` line) together with a **choice phrase**: "which", "pick", "choose", "prefer", "let me know".
+- the text has a **list of two or more options** (bulleted, numbered, or a bare `Option A`/`Option B` line) **local to the end of the message** — in the last two paragraphs — together with a **question-shaped choice phrase** sitting in the paragraph right before the list, inside it, or in the message's last paragraph: "which one/option/of these", "which do you/would you/should I", "pick one", "choose between/one", "do/would you prefer", "let me know", or a line ending in `?`.
 
-Deliberately narrow: a status report that happens to end with a rhetorical question ("Why did it fail? The cache was stale.") is a false positive worth avoiding, so a lone `?` is never enough on its own — it must address the reader, or sit beside a real list of options. The table in `ask-in-text.test.ts` is the source of truth for both the fires and the does-not-fire cases.
+Deliberately narrow: a status report that happens to end with a rhetorical question ("Why did it fail? The cache was stale.") is a false positive worth avoiding, so a lone `?` is never enough on its own — it must address the reader, or sit beside a real list of options. Both halves of the option-list signal are kept local on purpose: a bare relative "which" ("one more deploy, which now reloads the plugin automatically") next to an unrelated bulleted list used to combine into a false positive — a status report blocked a leader's turn over a list of agent tasks that had nothing to do with "which" (#18). "which"/"pick"/"choose"/"prefer" only count in their question forms now; a bare relative "which" never does. The table in `ask-in-text.test.ts` is the source of truth for both the fires and the does-not-fire cases.
 
 ## Where it runs
 

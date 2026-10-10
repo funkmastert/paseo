@@ -13,10 +13,40 @@ import {
   AUTO_PIN_RECENT_USE_MS,
   AutoPinExpiry,
   autoPinWorkspaceOnSessionStart,
+  isHumanAttributableCreate,
   isProtectivePin,
   isWorkspaceActiveForAutoPin,
+  resolveWorkspaceCreatedBy,
 } from "./workspace-auto-pin.js";
 import type { PersistedWorkspaceRecord } from "./workspace-registry.js";
+
+describe("isHumanAttributableCreate / resolveWorkspaceCreatedBy", () => {
+  test("no caller agent and no labels is human-attributable", () => {
+    expect(isHumanAttributableCreate({})).toBe(true);
+    expect(resolveWorkspaceCreatedBy({})).toBe("person");
+  });
+
+  test("a caller agent is never human-attributable", () => {
+    expect(isHumanAttributableCreate({ callerAgentId: "agent-1" })).toBe(false);
+    expect(resolveWorkspaceCreatedBy({ callerAgentId: "agent-1" })).toBe("agent");
+  });
+
+  test("an inherited parent-agent-id label is never human-attributable, even with no caller", () => {
+    expect(isHumanAttributableCreate({ labels: { "paseo.parent-agent-id": "agent-1" } })).toBe(
+      false,
+    );
+    expect(resolveWorkspaceCreatedBy({ labels: { "paseo.parent-agent-id": "agent-1" } })).toBe(
+      "agent",
+    );
+  });
+
+  test("a label other than the parent-agent-id one does not affect the create-time rule", () => {
+    // paseo.remediation marks a fixer's workspace for the one-time backfill
+    // (workspace-created-by-migration.ts), not the create-time rule.
+    expect(isHumanAttributableCreate({ labels: { "paseo.remediation": "true" } })).toBe(true);
+    expect(isHumanAttributableCreate({ labels: { "some.other.label": "x" } })).toBe(true);
+  });
+});
 
 describe("isProtectivePin", () => {
   test("a manual pin is protective", () => {

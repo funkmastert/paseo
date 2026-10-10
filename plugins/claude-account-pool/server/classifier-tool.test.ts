@@ -248,7 +248,9 @@ describe("the agent_model_policy tool — arena ranking (U8, finding #2)", () =>
   const rankedPolicy: RoleModelPolicy = {
     ...DEFAULT_POLICY,
     roles: DEFAULT_POLICY.roles.map((role) =>
-      role.id === "worker" ? { ...role, models: ["claude-haiku-4-5-20251001", "claude-sonnet-5"], mechanicalModels: [], hardModels: [] } : role,
+      role.id === "worker" || role.id === "reviewer"
+        ? { ...role, models: ["claude-haiku-4-5-20251001", "claude-sonnet-5"], mechanicalModels: [], hardModels: [] }
+        : role,
     ),
     thinking: { leader: null, byTaskClass: { mechanical: "high", standard: "high", hard: "high" } },
     arena: { enabled: true, shadow: false, roles: ["worker", "reviewer"], topTier: [], topTierMarginCi: 0, maxAgeHours: 72 },
@@ -278,5 +280,41 @@ describe("the agent_model_policy tool — arena ranking (U8, finding #2)", () =>
     const reply = handleMcpMessage(call, unrankedWorld, () => live) as { result: { content: { text: string }[] } };
 
     expect(reply.result.content[0].text).not.toContain("Decided at create");
+  });
+
+  // A reviewer with no work_kind answer defaults to the "review" kind (classifier.ts's
+  // `resolveWorkKind`), so this isolates the cache-wiring gap from whether the tool ever asks JEV:
+  // before `index.server.ts` wired `arenaRankingCache` into this tool's `world()`, `arenaRanking`
+  // was always undefined here, and `decideArenaPick` always fell back to "no-file" — the agent-facing
+  // preview never showed a ranked pick even when ranking was live at create.
+  function rankedWorldWithRanking(): ClassifierWorld {
+    return {
+      ...rankedWorld(),
+      arenaRanking: {
+        fetchedAt: Date.now(),
+        publishDate: "2026-10-08",
+        boards: {
+          "text_style_control/hard_prompts": [
+            { arenaName: "claude-sonnet-5-high", ours: "claude-sonnet-5", effort: "high", rating: 1700, ratingLower: 1680, ratingUpper: 1720, votes: 500 },
+            { arenaName: "claude-haiku-4-5-20251001-high", ours: "claude-haiku-4-5-20251001", effort: "high", rating: 1400, ratingLower: 1380, ratingUpper: 1420, votes: 500 },
+          ],
+        },
+        unmatched: {},
+        failedBoards: [],
+      },
+    };
+  }
+  const reviewerCall = { id: 1, method: "tools/call", params: { name: "agent_model_policy", arguments: { agentRole: "reviewer" } } };
+
+  it("with the ranking cache wired, the preview reflects the ranked pick for a reviewer", () => {
+    const reply = handleMcpMessage(reviewerCall, rankedWorldWithRanking, () => live) as { result: { content: { text: string }[] } };
+
+    expect(reply.result.content[0].text).toContain("claude-sonnet-5");
+  });
+
+  it("without the cache wired (arenaRanking undefined), the preview falls back to today's pool order", () => {
+    const reply = handleMcpMessage(reviewerCall, rankedWorld, () => live) as { result: { content: { text: string }[] } };
+
+    expect(reply.result.content[0].text).toContain("claude-haiku-4-5-20251001");
   });
 });

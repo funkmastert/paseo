@@ -29,6 +29,7 @@ const testTheme = {
       red: { 300: "#fca5a5" },
       teal: { 200: "#99f6e4" },
       white: "#ffffff",
+      zinc: { 400: "#a1a1aa", 500: "#71717a", 600: "#52525b" },
     },
   },
   borderWidth: { 1: 1 },

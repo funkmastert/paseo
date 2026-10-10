@@ -124,6 +124,32 @@ export interface AttributeProcessTreesOptions {
   extraRoots?: ReadonlyMap<string, readonly number[]>;
 }
 
+/**
+ * Whether `pid` is the daemon's own child — a `tea`/`git`/`gh` forge poll the daemon spawned
+ * directly, say — rather than an agent's. "Directly" is load-bearing: this checks `pid`'s
+ * immediate `ppid`, not an arbitrary ancestor. The daemon also forks a handful of long-lived
+ * shared services of its own — the terminal worker (`worker-terminal-manager.ts`'s
+ * `forkTerminalWorker`) is one — that are themselves direct children of the daemon but host
+ * unrelated work for many workspaces at once; a user's terminal shell is that worker's child,
+ * one hop further out, and must never inherit the worker's own daemon-owned-ness just because
+ * the daemon sits two hops up its ppid chain. Walking arbitrarily far up would misclassify that
+ * shell as a forge poll and let the sweep treat an occupied worktree as empty
+ * (docs/done-janitor.md, "The sweep never counts the daemon's own child processes"). A pid
+ * already in `attributedPids` is an agent's, full stop. Matches on the process tree, never on a
+ * command name.
+ */
+export function isDaemonOwnChildPid(input: {
+  pid: number;
+  rows: readonly ProcessSampleRow[];
+  daemonPid: number;
+  attributedPids: ReadonlySet<number>;
+}): boolean {
+  const { pid, rows, daemonPid, attributedPids } = input;
+  if (attributedPids.has(pid)) return false;
+  const row = rows.find((candidate) => candidate.pid === pid);
+  return row !== undefined && row.ppid === daemonPid;
+}
+
 export function attributeProcessTrees(
   rows: readonly ProcessSampleRow[],
   agentIds: readonly string[],

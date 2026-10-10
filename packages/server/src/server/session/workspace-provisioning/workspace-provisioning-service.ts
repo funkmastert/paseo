@@ -12,6 +12,7 @@ import {
   type PersistedProjectRecord,
   type PersistedWorkspaceRecord,
   type ProjectRegistry,
+  type WorkspaceCreatedBy,
   type WorkspaceRegistry,
   type WorkspaceTitleSource,
 } from "../../workspace-registry.js";
@@ -27,6 +28,7 @@ export interface ResolveOrCreateWorkspaceIdInput {
   cwd: string;
   initialTitle: string | null;
   initialTitleSource?: WorkspaceTitleSource;
+  createdBy?: WorkspaceCreatedBy;
 }
 
 export interface ImportWorkspaceInput {
@@ -52,6 +54,7 @@ export interface CreateWorktreeWorkspaceInput {
   titleSource?: WorkspaceTitleSource;
   expectsInitialAgent?: boolean;
   untrustedSource?: UntrustedWorkspaceSource;
+  createdBy?: WorkspaceCreatedBy;
 }
 
 export interface WorkspaceProvisioningService {
@@ -65,7 +68,11 @@ export interface WorkspaceProvisioningService {
     cwd: string,
     title?: string | null,
     projectId?: string,
-    context?: { expectsInitialAgent?: boolean; titleSource?: WorkspaceTitleSource },
+    context?: {
+      expectsInitialAgent?: boolean;
+      titleSource?: WorkspaceTitleSource;
+      createdBy?: WorkspaceCreatedBy;
+    },
   ): Promise<PersistedWorkspaceRecord>;
   createWorkspaceForWorktree(
     input: CreateWorktreeWorkspaceInput,
@@ -205,7 +212,11 @@ export function createWorkspaceProvisioningService(deps: {
     cwd: string,
     title?: string | null,
     projectId?: string,
-    context?: { expectsInitialAgent?: boolean; titleSource?: WorkspaceTitleSource },
+    context?: {
+      expectsInitialAgent?: boolean;
+      titleSource?: WorkspaceTitleSource;
+      createdBy?: WorkspaceCreatedBy;
+    },
   ): Promise<PersistedWorkspaceRecord> {
     const normalizedCwd = resolve(cwd);
     const checkout = await workspaceGitService.getCheckout(normalizedCwd);
@@ -220,6 +231,7 @@ export function createWorkspaceProvisioningService(deps: {
       ...initialWorkspacePlacement({ source: "checkout", cwd: normalizedCwd, checkout }),
       title: title?.trim() || null,
       ...(context?.titleSource ? { titleSource: context.titleSource } : {}),
+      createdBy: context?.createdBy,
       createdAt: timestamp,
       updatedAt: timestamp,
     });
@@ -254,6 +266,7 @@ export function createWorkspaceProvisioningService(deps: {
       }),
       title: input.title,
       ...(input.titleSource ? { titleSource: input.titleSource } : {}),
+      createdBy: input.createdBy,
       createdAt: timestamp,
       updatedAt: timestamp,
       ...(input.untrustedSource ? { untrustedSource: input.untrustedSource } : {}),
@@ -344,6 +357,7 @@ export function createWorkspaceProvisioningService(deps: {
       await createWorkspaceForDirectory(input.cwd, input.initialTitle, undefined, {
         expectsInitialAgent: true,
         ...(input.initialTitleSource ? { titleSource: input.initialTitleSource } : {}),
+        createdBy: input.createdBy,
       })
     ).workspaceId;
   }

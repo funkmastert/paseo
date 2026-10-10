@@ -32,6 +32,13 @@ export const REMEDIATION_LABEL = "paseo.remediation";
 export const FIXER_SETTLE_MS = 10 * 60_000;
 
 /**
+ * How long an agent-made workspace waits, once every agent in it is archived, before the
+ * `agent-done` rule takes it (R6, docs/done-janitor.md). Short because nothing here is waiting
+ * for a person to come back to it the way a workspace Tyler made might be.
+ */
+export const AGENT_DONE_SETTLE_MS = 60 * 60_000;
+
+/**
  * The regenerable allowlist, part (c) of the deletion invariant: directories a build, an install
  * or a test run recreates. An ignored path counts only when a directory on its way is one of
  * these, at the worktree root or beside a build manifest (`isBuildManifest`). Anything else
@@ -107,6 +114,7 @@ export interface DoneJanitorWorkspaceSweepConfig {
   maxArchivesPerSweep?: number;
   projectGraceHours?: number;
   maxProjectRemovalsPerSweep?: number;
+  keptCooldownHours?: number;
 }
 
 export interface ResolvedWorkspaceSweepConfig {
@@ -125,6 +133,9 @@ export interface ResolvedWorkspaceSweepConfig {
   /** How long a project stays after its last active workspace goes. */
   projectGraceMs: number;
   maxProjectRemovalsPerSweep: number;
+  /** How long a workspace kept for a reason that will not change within the hour (R5) waits
+   * before the sweep spends budget checking it again. */
+  keptCooldownMs: number;
 }
 
 export function resolveWorkspaceSweepConfig(janitor: {
@@ -140,6 +151,7 @@ export function resolveWorkspaceSweepConfig(janitor: {
     maxArchivesPerSweep: sweep?.maxArchivesPerSweep ?? 10,
     projectGraceMs: (sweep?.projectGraceHours ?? 24) * HOUR_MS,
     maxProjectRemovalsPerSweep: sweep?.maxProjectRemovalsPerSweep ?? 10,
+    keptCooldownMs: (sweep?.keptCooldownHours ?? 6) * HOUR_MS,
   };
 }
 
@@ -163,7 +175,7 @@ export interface WorkspaceSweepFacts {
   signals: WorkspaceActivitySignals | null;
 }
 
-export type WorkspaceSweepRule = "fixer" | "idle" | "empty";
+export type WorkspaceSweepRule = "fixer" | "agent-done" | "idle" | "empty";
 
 export type WorkspaceSweepVerdict =
   | { kind: "active"; reason: string }
@@ -175,9 +187,12 @@ export type WorkspaceSweepVerdict =
  * - `fixer`: every agent it ever held was started by the remediation ladder and none is at work.
  *   It goes once they settle, whatever its directory does: a fixer's directory is the home
  *   directory, whose mtime moves all day.
- * - `idle`: it has an unarchived agent or is a git checkout, and nothing moved for `idleMs`.
- *   An archived agent's last activity and its archive time both count as movement.
- * - `empty`: neither, and nothing moved for `emptyIdleMs`.
+ * - `agent-done` (R6): `createdBy: "agent"`, not a fixer, and every agent in it is archived. It
+ *   goes `AGENT_DONE_SETTLE_MS` after the last one was, in place of `idle`/`empty` — nothing here
+ *   is waiting for a person the way a workspace Tyler made might be.
+ * - `idle`: a person-made workspace with an unarchived agent or a git checkout, and nothing moved
+ *   for `idleMs`. An archived agent's last activity and its archive time both count as movement.
+ * - `empty`: a person-made workspace with neither, and nothing moved for `emptyIdleMs`.
  */
 export function classifyWorkspace(
   facts: WorkspaceSweepFacts,
@@ -196,6 +211,7 @@ export function classifyWorkspace(
     };
   }
   if (isFixerWorkspace(facts.agents)) return classifyFixer(facts.agents, unarchived, nowMs);
+  if (facts.workspace.createdBy === "agent") return classifyAgentDone(facts, unarchived, nowMs);
 
   // Every agent it ever held, archived ones included, and the moment each was archived: an
   // archive is the last thing that happened to the workspace, not proof that it is abandoned.
@@ -250,6 +266,37 @@ function classifyFixer(
     rule: "fixer",
     idleForMs: newest === null ? 0 : Math.max(0, nowMs - newest),
     reason: "a self-heal fixer's workspace, and every fixer in it is finished",
+  };
+}
+
+/**
+ * R6: a `createdBy: "agent"` workspace (not a fixer's) goes once every agent it ever held is
+ * archived and `AGENT_DONE_SETTLE_MS` has passed since the last one was. `workspaceBusyReason`
+ * already refused a live terminal or running script before this runs.
+ */
+function classifyAgentDone(
+  facts: WorkspaceSweepFacts,
+  unarchived: readonly DoneJanitorAgentView[],
+  nowMs: number,
+): WorkspaceSweepVerdict {
+  if (unarchived.length > 0) {
+    return { kind: "active", reason: "not every agent in it is archived yet" };
+  }
+  const newest = newestOf([
+    parseStamp(facts.workspace.createdAt),
+    parseStamp(facts.workspace.updatedAt),
+    ...facts.agents.map((agent) => agent.archivedAtMs ?? null),
+  ]);
+  if (newest === null) return { kind: "active", reason: "it has no usable activity signal" };
+  const idleForMs = nowMs - newest;
+  if (idleForMs < AGENT_DONE_SETTLE_MS) {
+    return { kind: "active", reason: describeRecent(idleForMs, AGENT_DONE_SETTLE_MS) };
+  }
+  return {
+    kind: "idle",
+    rule: "agent-done",
+    idleForMs,
+    reason: `an agent made it, and every agent in it has been archived for ${formatDuration(idleForMs)}`,
   };
 }
 
@@ -352,7 +399,16 @@ export type CoverageBasis =
   /** Against a snapshot whose backup the caller verified: nothing may differ from it. */
   | "snapshot";
 
-export type DeletionInvariant = { holds: true; detail: string } | { holds: false; reason: string };
+/**
+ * `category` marks the one failure the sweep's cooldown treats as permanent within the hour
+ * (R5, docs/done-janitor.md): an ignored, non-regenerable path a backup cannot cover either. Every
+ * other failure — an unreadable directory, a hidden change, an LFS file, a nested repository, an
+ * unpushed commit — is left uncategorized; it may clear on its own (a push, a rebase) sooner than
+ * the cooldown would allow re-checking.
+ */
+export type DeletionInvariant =
+  | { holds: true; detail: string }
+  | { holds: false; reason: string; category?: "ignored-path" };
 
 /**
  * The deletion invariant (docs/done-janitor.md): a worktree's directory goes only when every file
@@ -375,6 +431,7 @@ export function checkDeletionInvariant(
     return {
       holds: false,
       reason: `${kept.length} ignored path(s) that are not regenerable and no backup holds (${listSome(kept)})`,
+      category: "ignored-path",
     };
   }
   const nested = listNestedRepositories(coverage);

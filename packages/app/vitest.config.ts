@@ -64,9 +64,22 @@ export default defineConfig({
   // (`findHostInstance.web.js`). Vite's dependency optimizer does not apply `resolve.extensions`,
   // so it scans the native files and dies on imports react-native-web has no answer for.
   // Unbundled, the same imports go through the resolver below and land on the web files.
+  // react-native-gesture-handler (pulled in by react-native-draggable-flatlist, used by the
+  // sidebar's draggable lists) hits the same scan-time failure: its non-web specs `require`
+  // `react-native/Libraries/...` paths the alias below only redirects for normal, per-file
+  // transforms, not the optimizer's eager scan.
   optimizeDeps: {
-    include: ["react/jsx-runtime"],
-    exclude: ["react-native-reanimated"],
+    // hoist-non-react-statics is gesture-handler's own CJS dependency; pre-bundling it directly
+    // is what gives it a usable default export under Vite's ESM transform.
+    include: ["react/jsx-runtime", "hoist-non-react-statics", "invariant"],
+    // expo-asset is excluded (not pre-bundled) too: a pre-bundled dep's vi.mock in a test isn't
+    // honored, since the optimizer serves a cached chunk straight to the browser.
+    exclude: [
+      "react-native-reanimated",
+      "react-native-gesture-handler",
+      "react-native-draggable-flatlist",
+      "expo-asset",
+    ],
   },
   // The globals a React Native bundler defines, which esbuild is no longer there to supply for
   // the package excluded above.

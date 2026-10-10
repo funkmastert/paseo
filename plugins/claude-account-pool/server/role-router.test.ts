@@ -10,6 +10,7 @@ import {
   JEV_SPAWN_LABEL,
   JEV_TOOLS_LABEL,
   MODEL_OVERRIDDEN_LABEL,
+  MODEL_PIN_LABEL,
   TASK_CLASS_LABEL,
   TASK_CLASS_SOURCE_LABEL,
   THINKING_OVERRIDDEN_LABEL,
@@ -2801,7 +2802,7 @@ describe("JEV's labels", () => {
       expect(result?.labels?.[ARENA_PICK_LABEL]).toBeUndefined();
     });
 
-    it("an honored explicit request never carries the label, even when a different ref would have ranked higher", () => {
+    it("live, no pin: an eligible explicit request is overridden by the ranked pick, and the label says applied=1", () => {
       const result = createRoleRouter(arenaOptions())(
         {
           ...request({
@@ -2815,8 +2816,28 @@ describe("JEV's labels", () => {
         fakeContext,
       );
 
+      expect(result?.config.model).toBe("claude-sonnet-5");
+      expect(result?.labels?.[ARENA_PICK_LABEL]).toBe("v1;ref=claude-sonnet-5;tier=mid;board=webdev/webdev-react;date=2026-10-08;applied=1;proxy=0");
+      expect(result?.labels?.[MODEL_OVERRIDDEN_LABEL]).toBe("claude/claude-haiku-4-5");
+    });
+
+    it("live, paseo.model-pin set: the explicit request is kept, and the label still records the would-be pick at applied=0", () => {
+      const result = createRoleRouter(arenaOptions())(
+        {
+          ...request({
+            callerAgentId: "c1",
+            labels: { [AGENT_ROLE_LABEL]: "worker", [MODEL_PIN_LABEL]: "1" },
+            initialPrompt: "Add a hover state to the submit button.",
+            config: { provider: "claude", model: "claude-haiku-4-5", cwd: "/tmp/work" },
+          }),
+          jevHint: frontendKindHint(),
+        },
+        fakeContext,
+      );
+
       expect(result?.config.model).toBe("claude-haiku-4-5");
-      expect(result?.labels?.[ARENA_PICK_LABEL]).toBeUndefined();
+      expect(result?.labels?.[ARENA_PICK_LABEL]).toBe("v1;ref=claude-sonnet-5;tier=mid;board=webdev/webdev-react;date=2026-10-08;applied=0;proxy=0");
+      expect(result?.labels?.[MODEL_OVERRIDDEN_LABEL]).toBeUndefined();
     });
   });
 });

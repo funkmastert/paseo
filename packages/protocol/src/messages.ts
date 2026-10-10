@@ -472,6 +472,8 @@ const MutableDoneJanitorWorkspaceSweepConfigSchema = z
     maxArchivesPerSweep: z.number().int().positive().optional(),
     projectGraceHours: z.number().positive().optional(),
     maxProjectRemovalsPerSweep: z.number().int().positive().optional(),
+    // COMPAT(keptCooldownHours): added in v0.9.x, remove optional after 2027-10-09.
+    keptCooldownHours: z.number().positive().optional(),
   })
   .passthrough();
 // Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off unless
@@ -4428,6 +4430,8 @@ export const ServerInfoStatusPayloadSchema = z
         agentProfiles: z.boolean().optional(),
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: z.boolean().optional(),
+        // COMPAT(workspaceCreatedBy): added in v0.9.x, remove gate after 2027-10-09.
+        workspaceCreatedBy: z.boolean().optional(),
         // COMPAT(mcpStatus): added in v0.8.1, remove gate after 2027-03-12.
         mcpStatus: z.boolean().optional(),
         // COMPAT(mcpGatewayAdopt): added in v0.8.1, remove gate after 2027-03-14.
@@ -4798,6 +4802,11 @@ export const WorkspaceDescriptorPayloadSchema = z
     // COMPAT(directorySync): sequence of this latest directory projection.
     syncSeq: z.number().int().positive().optional(),
     diskUsage: WorkspaceDiskUsageSchema.nullable().optional(),
+    // COMPAT(workspaceCreatedBy): added in v0.9.x, remove optional after 2027-10-09 once daemon
+    // floor >= this version. Who made the workspace: a person starting a session, or an agent
+    // (MCP tools, schedules, Hub, remediation). Absent reads as "person" (an older daemon, or a
+    // record written before this field existed).
+    createdBy: z.enum(["person", "agent"]).optional(),
   })
   .transform((workspace) => ({
     ...workspace,

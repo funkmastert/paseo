@@ -178,6 +178,7 @@ export interface WorkspaceDescriptor {
   forge?: WorkspaceDescriptorPayload["forge"];
   project?: ProjectPlacementPayload;
   diskUsage?: WorkspaceDescriptorPayload["diskUsage"];
+  createdBy?: WorkspaceDescriptorPayload["createdBy"];
 }
 
 export function normalizeWorkspaceDescriptor(
@@ -217,6 +218,7 @@ export function normalizeWorkspaceDescriptor(
     forge: payload.forge,
     project: payload.project,
     diskUsage: payload.diskUsage ?? null,
+    createdBy: payload.createdBy,
   };
 }
 

@@ -1056,4 +1056,67 @@ describe("explain — arena ranking (U8, finding #2)", () => {
 
     expect(result.reasons.taskClass).not.toContain("Decided at create");
   });
+
+  // A reviewer with no work_kind answer defaults to the "review" kind (classifier.ts's
+  // `resolveWorkKind`) regardless of whether the preview ever asks JEV, which isolates the gap this
+  // closes: before the cache was wired below, `explain`'s own `world` never carried `arenaRanking`
+  // at all, so `decideArenaPick` always fell back to "no-file" — live ranking's model pick never
+  // showed up in the settings preview, only at a real create.
+  const reviewerRankedPolicy: RoleModelPolicy = {
+    ...DEFAULT_POLICY,
+    roles: DEFAULT_POLICY.roles.map((role) =>
+      role.id === "reviewer" ? { ...role, models: ["claude-haiku-4-5", "claude-sonnet-5"] } : role,
+    ),
+    arena: { enabled: true, shadow: false, roles: ["worker", "reviewer"], topTier: [], topTierMarginCi: 0, maxAgeHours: 72 },
+  };
+  const reviewerCatalog: ModelCatalog = new Map([["claude", new Set(["claude-haiku-4-5", "claude-sonnet-5"])]]);
+  const reviewerArenaRankingCache = {
+    get: () => ({
+      fetchedAt: Date.now(),
+      publishDate: "2026-10-08",
+      boards: {
+        "text_style_control/hard_prompts": [
+          { arenaName: "claude-sonnet-5-high", ours: "claude-sonnet-5", effort: "high", rating: 1700, ratingLower: 1680, ratingUpper: 1720, votes: 500 },
+          { arenaName: "claude-haiku-4-5-high", ours: "claude-haiku-4-5", effort: "high", rating: 1400, ratingLower: 1380, ratingUpper: 1420, votes: 500 },
+        ],
+      },
+      unmatched: {},
+      failedBoards: [],
+    }),
+  };
+
+  const reviewerPoolCache = {
+    get: () => ({ pool: { workers: [{ providerId: "claude-backup", priority: 1 }], leader: null }, failOpen: false }),
+    forceRefresh: vi.fn(),
+    stop: vi.fn(),
+  };
+
+  it("wires the same arena ranking cache the create hook uses: a reviewer's preview reflects the ranked pick", async () => {
+    const handlers = createRoleModelPolicyRpcHandlers(
+      baseDeps({
+        policyCache: fakePolicyCache(reviewerRankedPolicy),
+        catalogCache: fakeCatalogCache(reviewerCatalog),
+        poolCache: reviewerPoolCache,
+        arenaRankingCache: reviewerArenaRankingCache,
+      }),
+    );
+
+    const result = await handlers.explain({ role: "reviewer" }, context(fakePaseo({})));
+
+    expect(result).toMatchObject({ outcome: "selected", model: "claude-sonnet-5" });
+  });
+
+  it("without the cache wired, the preview falls back to today's pool order (the bug this closes)", async () => {
+    const handlers = createRoleModelPolicyRpcHandlers(
+      baseDeps({
+        policyCache: fakePolicyCache(reviewerRankedPolicy),
+        catalogCache: fakeCatalogCache(reviewerCatalog),
+        poolCache: reviewerPoolCache,
+      }),
+    );
+
+    const result = await handlers.explain({ role: "reviewer" }, context(fakePaseo({})));
+
+    expect(result).toMatchObject({ outcome: "selected", model: "claude-haiku-4-5" });
+  });
 });

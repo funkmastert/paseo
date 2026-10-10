@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
+import type { ArenaRankingsFile } from "../shared/arena-aliases";
 import { CURRENT_SCHEMA_VERSION, RoleModelPolicySchema, type RoleModelPolicy } from "../shared/role-policy-schema";
 import { roleModelPolicyRpc, type RoleModelPolicyExplainResult } from "../shared/role-policy-rpc";
 import type { HealthTracker } from "./health";
@@ -45,6 +46,14 @@ export interface RoleModelPolicyRpcDeps {
    * is the one place the preview and the hook may differ.
    */
   jevAvailability?: Pick<JevAvailability, "get">;
+  /**
+   * U6's daily LMArena rankings cache. Optional, mirroring the create hook's
+   * own `RoleRouterOptions.arenaRankingCache`: without it, `explain`'s
+   * `decideModel` call always falls back to `"no-file"` for U8's ranking
+   * (R8's intended behavior for a missing file, not an error) — which was the
+   * bug here before this was wired up at all.
+   */
+  arenaRankingCache?: { get(): ArenaRankingsFile | undefined };
 }
 
 export interface RoleModelPolicyRpcHandlers {
@@ -303,6 +312,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
         health: deps.health,
         nowMs: Date.now(),
         mcpGateway: deps.mcpGatewayCache?.get(),
+        arenaRanking: deps.arenaRankingCache?.get(),
       };
       const preview = spawnHintPreview(
         classifierInput,

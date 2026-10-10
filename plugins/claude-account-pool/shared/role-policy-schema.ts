@@ -52,6 +52,17 @@ export const WORK_KIND_LABEL = "paseo.work-kind";
 export const ARENA_PICK_LABEL = "paseo.arena-pick";
 
 /**
+ * Set by the caller, read only by `decideModel`: keeps an eligible explicit
+ * `config.model` request over U8's arena-ranked pick, in `arena.roles` and
+ * live (`arena.shadow` false). Any non-empty value counts — this is a flag,
+ * not a value the classifier reads. Absent (the common case) lets ranking
+ * override the request exactly as it overrides today's pool order. Shadow
+ * mode never needs this: an explicit request is already honored there, with
+ * the would-be pick recorded at `applied: false`.
+ */
+export const MODEL_PIN_LABEL = "paseo.model-pin";
+
+/**
  * Asks for MCP gateway servers a child would not get by default: a
  * comma-separated list of `mcpGateway.servers` names, `claude.ai` for the
  * account's claude.ai connectors, or `all`. Only ever adds. An unknown name
