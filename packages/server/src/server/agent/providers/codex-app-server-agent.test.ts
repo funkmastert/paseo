@@ -321,6 +321,8 @@ describe("Codex guarded mode approval handling", () => {
       gateLaunch: async () => ({ decision: "deny", message: "No build slot available." }),
     };
     const { session } = await startGuardedSession(appServer, { deviceLaunchGate });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
 
     appServer.requestCommandApproval({
       itemId: "command-3",
@@ -332,6 +334,19 @@ describe("Codex guarded mode approval handling", () => {
     const result = await appServer.waitForCommandApprovalDecision("command-3");
 
     expect(result).toEqual({ decision: "decline" });
+    // Review finding #8: the bare decision alone doesn't prove the agent ever learned why --
+    // the build-gate reason must reach it as a timeline message, same as the catastrophe gate's.
+    const assistantMessages = events.filter(
+      (event) => event.type === "timeline" && event.item.type === "assistant_message",
+    );
+    expect(
+      assistantMessages.some(
+        (event) =>
+          event.type === "timeline" &&
+          event.item.type === "assistant_message" &&
+          event.item.text.includes("No build slot available."),
+      ),
+    ).toBe(true);
 
     await session.close();
     appServer.assertNoErrors();
