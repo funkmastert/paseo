@@ -88,10 +88,11 @@ Where things stand today:
   - a hook written to `~/.codex/hooks.json` is skipped without a `trusted_hash`, and nothing documented computes that hash;
   - `--dangerously-bypass-hook-trust` exists only on `codex exec`.
 
-  Instead, a Codex child runs with `approval_policy: "untrusted"`. Codex then asks for approval before every command outside its own read-only safe list (`ls`, `cat`, plain `git status` and similar). Each request already reaches the daemon in-process (`handleCommandApprovalRequest` in `codex-app-server-agent.ts`), where the device gate already answers. No hook, no trust file, no CLI hop, and nothing is written to `~/.codex`. `docs/codex-workers.md` records the three failed hook paths so a later Codex release can be rechecked.
+  Instead, a Codex child runs with `sandbox_mode: "workspace-write"` and `approval_policy: "on-request"` — the same values the `auto` mode already uses for people. Codex then asks for approval before every command that needs to escalate beyond the sandbox (outside its own read-only safe list, or outside the workspace). Each request already reaches the daemon in-process (`handleCommandApprovalRequest` in `codex-app-server-agent.ts`), where the device gate already answers. No hook, no trust file, no CLI hop, and nothing is written to `~/.codex`. `docs/codex-workers.md` records the three failed hook paths so a later Codex release can be rechecked.
 
   Rejected:
   - Hooks, for the reasons above.
+  - `danger-full-access` + `approval_policy: "untrusted"`, this plan's original design (revised again 2026-10-09 after U2's second proof against the real binary): `"untrusted"` is rejected outright by Codex 0.160 (`approval_policy = "untrusted" is no longer supported; remove this setting`), and `danger-full-access` never raises an approval request at all with any policy, since nothing needs to escalate out of a sandbox that is already fully open. `workspace-write` + `on-request` is the design that actually produces an approval request before a command runs, confirmed end-to-end against the real binary.
   - A separate `CODEX_HOME` with a copied `auth.json`. A token refresh in either copy rotates the refresh token and can sign Tyler's own Codex out.
   - A managed `requirements.toml`. It is a machine-wide admin path, and its local activation is undocumented.
 
@@ -112,7 +113,7 @@ Where things stand today:
   - **Live detection:** every command item a guarded Codex child runs is re-checked after the fact against the catastrophe gate and the device gate. A command that a gate would have refused but that ran without an approval request turns health red and cancels that agent's turn. Commands on Codex's safe list need no approval and pass this check.
   - Codex refs are unusable for children unless health is green.
 
-- KTD-7. **Codex children run in a new guarded mode:** `sandbox_mode: "danger-full-access"` with `approval_policy: "untrusted"`, answered by the daemon (KTD-5), and only behind a green guard. Full Access (`approval_policy: never`) would bypass the guard. Workspace-write would block the caches builds write and stall on escalations nobody answers.
+- KTD-7. **Codex children run in a new guarded mode:** `sandbox_mode: "workspace-write"` with `approval_policy: "on-request"` — the same values the `auto` mode already uses for people — answered by the daemon instead of a person (KTD-5), and only behind a green guard. Full Access (`approval_policy: never`) would bypass the guard. `danger-full-access` was tried first and rejected: it never raises an approval request with any policy, so there is nothing for the daemon to answer.
 - KTD-8. **Tool profiles and instructions on Codex.**
   - **Settings:** `enforceToolDecision` writes Claude-shaped `settings.permissions` only for the Claude family. The read-only profile maps to `sandbox_mode: read-only`. When a role's profile cannot be expressed on Codex, its `codex/` refs are ineligible and the decision gives a reason.
   - **Prompt text:** per-agent prompt text the classifier adds (restriction notices and similar) goes into the session `systemPrompt`, which Codex receives as developer instructions.
@@ -162,7 +163,7 @@ Where things stand today:
 
 ```mermaid
 sequenceDiagram
-  participant C as Codex app-server (child, approval_policy untrusted)
+  participant C as Codex app-server (child, workspace-write + approval_policy on-request)
   participant A as Daemon approval handler (in-process)
   participant G as checkCatastrophe + deviceLaunchGate
   C->>A: item/commandExecution/requestApproval {command, cwd}
@@ -250,17 +251,17 @@ flowchart TD
 
 **Approach:**
 
-- Add a `guarded` mode preset: `danger-full-access` sandbox and `approval_policy: "untrusted"`. It is selectable only by the daemon for children, not offered to people in the mode picker.
-- Confirm against the real binary that `untrusted` still asks under `danger-full-access`.
+- Add a `guarded` mode preset: `workspace-write` sandbox and `approval_policy: "on-request"` — the same values `auto` already uses for people, but answered by the daemon instead of a person. It is selectable only by the daemon for children, not offered to people in the mode picker.
+- Confirm against the real binary that `on-request` actually asks for a command needing to escalate beyond the workspace.
 
-**Execution note:** start with a proof against the Codex 0.160 binary, the same way U2's hook proof ran. Use a scratch `app-server` in guarded mode, the cheapest model at low effort, and a temp cwd. Ask for `touch <tmp>/x`, and confirm that an `item/commandExecution/requestApproval` arrives before anything runs. Also note which of `ls`, `git status` and `echo` arrive without a request, for the docs. If `untrusted` does not ask under `danger-full-access`, try `granular` approvals. If neither asks, stop and report.
+**Execution note:** start with a proof against the Codex 0.160 binary, the same way U2's hook proof ran. Use a scratch `app-server` in guarded mode, the cheapest model at low effort, and a temp cwd. The first proof tried `danger-full-access` + `approval_policy: "untrusted"` per this plan's original design: `"untrusted"` is rejected outright (`approval_policy = "untrusted" is no longer supported; remove this setting`), and `danger-full-access` never raises an approval request with any policy, `granular` included — confirmed by watching a `touch` outside the workspace succeed silently, with zero `permission_requested` events. `workspace-write` + `on-request` is what actually works: ask for a command that needs to escalate beyond the workspace (deleting a file in `$HOME`, for instance), and confirm that an `item/commandExecution/requestApproval` arrives before anything runs; `accept` lets it run, `decline` blocks it. Also note which of `ls`, `git status` and `echo` arrive without a request, for the docs. `docs/codex-workers.md` has the full re-verification record.
 
 **Test scenarios:**
 
-- The `guarded` preset maps to `danger-full-access` plus `untrusted`, and passes `CodexProviderOptionsSchema`.
+- The `guarded` preset maps to `workspace-write` plus `on-request`, and passes `CodexProviderOptionsSchema`.
 - The preset is not listed among the user-facing modes.
 
-**Verification:** the proof output shows the approval request arriving before the command runs.
+**Verification:** the proof output shows the approval request arriving before the command runs, for a command that escalates beyond the workspace.
 
 ### U3. Guard decision in the approval handler (PR A)
 
@@ -531,7 +532,7 @@ flowchart TD
 
 | Risk                                                                              | Mitigation                                                                                                              |
 | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| A Codex release changes what `untrusted` asks for                                 | U4's daily self-test and the post-run re-check keep Codex unusable unless the guard is proved                           |
+| A Codex release changes what `on-request` asks for                                | U4's daily self-test and the post-run re-check keep Codex unusable unless the guard is proved                           |
 | Interactive input typed into a running Codex shell gets no new approval request   | The same gap Claude has; documented in `docs/codex-workers.md`                                                          |
 | A wrong alias ranks the wrong model                                               | Exact aliases only; unmatched rows are dropped and counted                                                              |
 | Text and webdev votes are not agentic work in our harness                         | The agent board leads for coding and ops; CI overlap counts as a tie; ranking only reorders operator-approved pools     |
