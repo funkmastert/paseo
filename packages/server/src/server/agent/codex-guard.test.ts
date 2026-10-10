@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
 
-import { decideCodexGuardedCommand } from "./codex-guard.js";
+import {
+  decideCodexGuardedCommand,
+  describeGuardedSensitiveFileChangePath,
+  describeGuardedSensitiveGitConfigCommand,
+} from "./codex-guard.js";
 import type { DeviceLaunchGate, DeviceLaunchGateDecision } from "./device-lease-manager.js";
 
 const REPO = "/Users/tester/code/app";
@@ -115,5 +119,76 @@ describe("decideCodexGuardedCommand", () => {
       resolveCurrentBranch: fakeBranchResolver("main"),
     });
     expect(result).toEqual({ decision: "accept" });
+  });
+
+  test("declines a git alias setup, closing the alias blind spot (review finding #2)", async () => {
+    const result = await decideCodexGuardedCommand({
+      command: "git config alias.pf 'push --force origin main'",
+      cwd: REPO,
+      agentId: "agent-1",
+      deviceLaunchGate: undefined,
+      resolveCurrentBranch: fakeBranchResolver("main"),
+    });
+    expect(result.decision).toBe("decline");
+    expect(result.reason).toContain("git-alias-setup");
+  });
+
+  test("skips the git-alias check too when the catastrophe kill switch is off", async () => {
+    const result = await decideCodexGuardedCommand({
+      command: "git config alias.pf 'push --force origin main'",
+      cwd: REPO,
+      agentId: "agent-1",
+      deviceLaunchGate: undefined,
+      isCatastropheGateEnabled: () => false,
+      resolveCurrentBranch: fakeBranchResolver("main"),
+    });
+    expect(result).toEqual({ decision: "accept" });
+  });
+});
+
+describe("describeGuardedSensitiveFileChangePath", () => {
+  test.each([
+    ["/workspace/project/.git/config", "a path inside a .git directory"],
+    ["/workspace/project/.git/hooks/pre-commit", "a path inside a .git directory"],
+    ["/workspace/project/.gitconfig", "a git config file"],
+    ["/workspace/project/.config/git/config", "a git config file"],
+    [
+      "/workspace/project/.gitattributes",
+      "a .gitattributes file (can declare a filter driver that runs arbitrary commands)",
+    ],
+    ["/workspace/project/.zshrc", "a shell startup file"],
+    ["/workspace/project/.bashrc", "a shell startup file"],
+  ])("flags %s", (path, expectedReason) => {
+    expect(describeGuardedSensitiveFileChangePath(path)).toBe(expectedReason);
+  });
+
+  test.each([
+    "/workspace/project/src/index.ts",
+    "/workspace/project/README.md",
+    "/workspace/project/gitattributes-notes.md",
+  ])("clears an ordinary path: %s", (path) => {
+    expect(describeGuardedSensitiveFileChangePath(path)).toBeNull();
+  });
+});
+
+describe("describeGuardedSensitiveGitConfigCommand", () => {
+  test.each([
+    "git config alias.pf 'push --force origin main'",
+    "git config --global alias.pf 'push --force origin main'",
+    "git config core.hooksPath /tmp/evil-hooks",
+    "git config core.sshCommand 'ssh -i /tmp/evil-key'",
+    "git config credential.helper '!/tmp/evil-helper'",
+    "git config diff.helper /tmp/evil-diff-helper",
+  ])("flags: %s", (command) => {
+    expect(describeGuardedSensitiveGitConfigCommand(command)).not.toBeNull();
+  });
+
+  test.each([
+    "git status",
+    "git config user.name test",
+    "git config --get remote.origin.url",
+    "npm config set registry https://example.com",
+  ])("clears: %s", (command) => {
+    expect(describeGuardedSensitiveGitConfigCommand(command)).toBeNull();
   });
 });

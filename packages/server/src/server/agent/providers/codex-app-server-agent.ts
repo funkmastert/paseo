@@ -55,7 +55,10 @@ import {
   explainDeviceLaunchRefusal,
 } from "../device-launch-approval.js";
 import type { DeviceLaunchGate } from "../device-lease-manager.js";
-import { decideCodexGuardedCommand } from "../codex-guard.js";
+import {
+  decideCodexGuardedCommand,
+  describeGuardedSensitiveFileChangePath,
+} from "../codex-guard.js";
 import {
   getCodexGuardHealthState,
   recheckCodexGuardCommandItem,
@@ -3439,6 +3442,11 @@ export class CodexAppServerAgentSession implements AgentSession {
    * item/commandExecution/requestApproval in guarded mode, so a completed item with none can be
    * told apart from one the real-time gate already answered. */
   private guardedApprovalSeenItemIds = new Set<string>();
+  /** The `item/fileChange/requestApproval` request carries no path info of its own (confirmed
+   * against the real app-server protocol) -- the touched paths arrive earlier, on the
+   * `item/started` notification for the same item id. Guarded mode needs them at approval time
+   * to decline a write to a sensitive path (docs/catastrophe-gate.md's git-alias blind spot). */
+  private guardedFileChangePathsByItemId = new Map<string, string[]>();
   private emittedItemStartedIds = new Set<string>();
   private emittedItemCompletedIds = new Set<string>();
   private emittedProviderSubagentUserMessageKeys = new Set<string>();
@@ -6765,6 +6773,11 @@ export class CodexAppServerAgentSession implements AgentSession {
         return;
       }
     }
+    this.trackGuardedFileChangePaths(
+      normalizedItemType,
+      itemId,
+      (parsed.item as { changes?: unknown }).changes,
+    );
     if (itemId && this.emittedItemStartedIds.has(itemId)) {
       return;
     }
@@ -6776,6 +6789,20 @@ export class CodexAppServerAgentSession implements AgentSession {
       this.pendingFileChangeOutputDeltas.delete(itemId);
     }
     this.replayPendingSubAgentNotifications(registeredChildThreadIds);
+  }
+
+  private trackGuardedFileChangePaths(
+    normalizedItemType: string | undefined,
+    itemId: string | undefined,
+    changes: unknown,
+  ): void {
+    if (this.currentMode !== "guarded" || normalizedItemType !== "fileChange" || !itemId) {
+      return;
+    }
+    const changedPaths = parseCodexPatchChanges(changes).map((file) => file.path);
+    if (changedPaths.length > 0) {
+      this.guardedFileChangePathsByItemId.set(itemId, changedPaths);
+    }
   }
 
   private handleUserMessageItem(
@@ -7078,9 +7105,30 @@ export class CodexAppServerAgentSession implements AgentSession {
       })
       .parse(params);
 
-    // Guarded mode approves file changes outright, matching Claude: the catastrophe gate covers
-    // shell commands only (docs/catastrophe-gate.md).
+    // Guarded mode approves most file changes, matching Claude: the catastrophe gate covers
+    // shell commands only (docs/catastrophe-gate.md). The exception is a path through which a
+    // pure file write can later weaponize an otherwise-innocuous shell command -- a `.git/config`
+    // alias, a hook, a `.gitattributes` filter driver, or a shell rc file (review finding #2).
+    // The approval request itself carries no path info (confirmed against the real app-server
+    // protocol); the touched paths were captured off the `item/started` notification for this
+    // item id, which always precedes the approval request for the same change.
     if (this.currentMode === "guarded") {
+      const changedPaths = this.guardedFileChangePathsByItemId.get(parsed.itemId) ?? [];
+      const sensitivePath = changedPaths
+        .map((changedPath) => ({
+          path: changedPath,
+          reason: describeGuardedSensitiveFileChangePath(changedPath),
+        }))
+        .find((entry) => entry.reason !== null);
+      if (sensitivePath) {
+        const reason = `Blocked by the Paseo guard: ${sensitivePath.path} is ${sensitivePath.reason}.`;
+        this.emitEvent({
+          type: "timeline",
+          provider: CODEX_PROVIDER,
+          item: { type: "assistant_message", text: formatOutOfBandStatusMessage(reason) },
+        });
+        return Promise.resolve({ decision: "decline" });
+      }
       return Promise.resolve({ decision: "accept" });
     }
 

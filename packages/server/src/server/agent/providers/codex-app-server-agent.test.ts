@@ -383,6 +383,117 @@ describe("Codex guarded mode approval handling", () => {
     appServer.assertNoErrors();
   });
 
+  test("approves an apply_patch request that touches an ordinary workspace file, with changes known (review finding #2)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.startsFileChange({
+      threadId: "thread-1",
+      itemId: "file-2",
+      changes: [{ path: "/workspace/project/src/index.ts", kind: "update" }],
+    });
+    appServer.requestFileChangeApproval({
+      itemId: "file-2",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result2 = await appServer.waitForCommandApprovalDecision("file-2");
+
+    expect(result2).toEqual({ decision: "accept" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test.each([
+    ["a path inside .git", "/workspace/project/.git/config"],
+    ["a top-level .gitconfig", "/workspace/project/.gitconfig"],
+    ["an XDG git config file", "/workspace/project/.config/git/config"],
+    [".gitattributes", "/workspace/project/.gitattributes"],
+    ["a shell rc file", "/workspace/project/.zshrc"],
+  ])(
+    "declines an apply_patch request that touches %s (review finding #2)",
+    async (_label, sensitivePath) => {
+      const appServer = createFakeCodexAppServer({
+        "turn/steer": () => ({ turn: { id: "native-A" } }),
+      });
+      const { session } = await startGuardedSession(appServer);
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+
+      appServer.startsFileChange({
+        threadId: "thread-1",
+        itemId: "file-3",
+        changes: [{ path: sensitivePath, kind: "update" }],
+      });
+      appServer.requestFileChangeApproval({
+        itemId: "file-3",
+        threadId: "thread-1",
+        turnId: "native-A",
+        reason: "Apply the patch",
+      });
+      const result = await appServer.waitForCommandApprovalDecision("file-3");
+
+      expect(result).toEqual({ decision: "decline" });
+      const assistantMessage = events.find(
+        (event) => event.type === "timeline" && event.item.type === "assistant_message",
+      );
+      expect(assistantMessage).toBeDefined();
+
+      await session.close();
+      appServer.assertNoErrors();
+    },
+  );
+
+  test("declines a command that sets a git alias (review finding #2's catastrophe-gate blind spot)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.requestCommandApproval({
+      itemId: "command-alias",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "git config alias.pf 'push --force origin main'",
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-alias");
+
+    expect(result).toEqual({ decision: "decline" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test.each([
+    "git config core.hooksPath /tmp/evil-hooks",
+    "git config core.sshCommand 'ssh -i /tmp/evil-key'",
+    "git config credential.helper '!/tmp/evil-helper'",
+  ])("declines a guarded git config command: %s", async (command) => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.requestCommandApproval({
+      itemId: "command-config",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command,
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-config");
+
+    expect(result).toEqual({ decision: "decline" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
   test("auto mode still creates a pending permission for a clean command", async () => {
     const appServer = createFakeCodexAppServer({
       "turn/steer": () => ({ turn: { id: "native-A" } }),
