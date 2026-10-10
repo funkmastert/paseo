@@ -270,6 +270,31 @@ interface RequestWithRoleFields {
 type AgentCreateConfig = PluginBeforeRequests["agent.create"]["config"];
 type ProviderOptionsValue = AgentCreateConfig["providerOptions"];
 
+const CODEX_GUARDED_OVERRIDE_KEYS = ["approval_policy", "sandbox_mode", "sandbox_workspace_write"] as const;
+
+/**
+ * Defense in depth for a routed Codex child (review finding #1): these three fields must never
+ * reach the provider on a guarded create at all, even though the provider itself
+ * (codex-app-server-agent.ts's `guardedProviderOptions()`) is also responsible for refusing them
+ * for a guarded session. Two independent layers enforcing the same invariant -- a caller-supplied
+ * approval_policy/sandbox_mode/sandbox_workspace_write must never be able to turn a guarded
+ * Codex child's approval requests off.
+ */
+function stripCodexGuardedOverrides(providerOptions: ProviderOptionsValue | undefined): ProviderOptionsValue | undefined {
+  if (typeof providerOptions !== "object" || providerOptions === null) {
+    return providerOptions;
+  }
+  const record = providerOptions as Record<string, unknown>;
+  if (!CODEX_GUARDED_OVERRIDE_KEYS.some((key) => key in record)) {
+    return providerOptions;
+  }
+  const next = { ...record };
+  for (const key of CODEX_GUARDED_OVERRIDE_KEYS) {
+    delete next[key];
+  }
+  return next as ProviderOptionsValue;
+}
+
 /**
  * Everything a tool decision writes into a create request. Both fields are
  * undefined when nothing was denied, so the request can pass through
@@ -1046,6 +1071,14 @@ function routeRoleForCreateUnguarded(
   // for some other Codex mode must not bypass the guard this classifier just routed it behind.
   if (decision.model.provider === "codex") {
     nextConfig.modeId = "guarded";
+    // Defense in depth (review finding #1): strip a caller's own approval_policy/sandbox_mode/
+    // sandbox_workspace_write before anything else touches providerOptions for a guarded Codex
+    // child. The provider itself (codex-app-server-agent.ts's `guardedProviderOptions()`) is also
+    // responsible for refusing these fields, but a caller's request must never carry them past
+    // this hook either. This must run before the enforcement overwrite below, which carries the
+    // daemon's own trusted providerOptions (e.g. a read-only tool profile's sandbox_mode) and must
+    // never be stripped.
+    nextConfig.providerOptions = stripCodexGuardedOverrides(nextConfig.providerOptions);
   }
   if (enforcement.providerOptions) {
     nextConfig.providerOptions = enforcement.providerOptions;

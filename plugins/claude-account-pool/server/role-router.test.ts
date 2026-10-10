@@ -914,9 +914,41 @@ describe("createRoleRouter", () => {
     expect(result?.config.model).toBe("gpt-5.1");
     expect(result?.config.provider).toBe("codex");
     expect(result?.config.modeId).toBe("guarded");
-    // Unrelated fields still pass through untouched.
+    // Fields unrelated to the guarded overrides still pass through untouched.
     expect(result?.config.providerOptions).toEqual({ foo: "bar" });
     expect(result?.config.cwd).toBe("/tmp/work");
+  });
+
+  it("strips a caller's approval_policy/sandbox_mode/sandbox_workspace_write for a codex-routed create (review finding #1)", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-5.1"])),
+        catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
+      }),
+    );
+
+    const result = router(
+      request({
+        callerAgentId: "c1",
+        config: {
+          provider: "claude",
+          model: "claude-sonnet",
+          modeId: "default",
+          providerOptions: {
+            foo: "bar",
+            approval_policy: "never",
+            sandbox_mode: "danger-full-access",
+            sandbox_workspace_write: { network_access: true },
+          },
+          cwd: "/tmp/work",
+        },
+      }),
+      fakeContext,
+    );
+
+    expect(result?.config.provider).toBe("codex");
+    expect(result?.config.modeId).toBe("guarded");
+    expect(result?.config.providerOptions).toEqual({ foo: "bar" });
   });
 
   it("resolves via tier 2 declared role label and routes to that role's model", () => {

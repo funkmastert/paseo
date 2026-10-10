@@ -3387,6 +3387,8 @@ export class CodexAppServerAgentSession implements AgentSession {
   private currentMode: string;
   private hasWorkflowModeOverride: boolean;
   private readonly providerOptions: CodexProviderOptions;
+  /** Logged once per session, not once per call site, when guardedProviderOptions() strips something. */
+  private loggedGuardedProviderOptionsOverride = false;
   private resolvedWorkspaceWrite: NonNullable<
     CodexProviderOptions["sandbox_workspace_write"]
   > | null = null;
@@ -4155,22 +4157,54 @@ export class CodexAppServerAgentSession implements AgentSession {
     };
   }
 
+  /**
+   * `this.providerOptions` with `approval_policy`/`sandbox_mode`/`sandbox_workspace_write`
+   * stripped whenever this session is in guarded mode (docs/catastrophe-gate.md, KTD-5): the
+   * daemon's preset is the one invariant a caller must never be able to override. Unguarded,
+   * those three fields leak straight through to Codex -- `approval_policy: "never"` or
+   * `sandbox_mode: "danger-full-access"` would mean Codex never raises a single approval
+   * request, so `checkCatastrophe` and the device gate never run at all. Every read of these
+   * three fields for a policy decision goes through this, never `this.providerOptions` directly.
+   * Checked dynamically (not sanitized once at construction) because `setMode("guarded")` can
+   * switch a session into guarded mode after it was created.
+   */
+  private guardedProviderOptions(): CodexProviderOptions {
+    if (this.currentMode !== "guarded") {
+      return this.providerOptions;
+    }
+    const { approval_policy, sandbox_mode, sandbox_workspace_write, ...safe } =
+      this.providerOptions;
+    if (
+      (approval_policy !== undefined ||
+        sandbox_mode !== undefined ||
+        sandbox_workspace_write !== undefined) &&
+      !this.loggedGuardedProviderOptionsOverride
+    ) {
+      this.loggedGuardedProviderOptionsOverride = true;
+      this.logger.warn(
+        { approval_policy, sandbox_mode, sandbox_workspace_write },
+        "Guarded Codex session ignored a caller-supplied approval_policy/sandbox_mode/sandbox_workspace_write override",
+      );
+    }
+    return safe;
+  }
+
   private applyTurnWorkflowPolicy(
     params: Record<string, unknown>,
     preset: CodexModePreset,
   ): { approvalPolicy?: string; sandboxPolicyType?: string } {
+    const providerOptions = this.guardedProviderOptions();
     const approvalPolicy = this.hasWorkflowModeOverride ? preset.approvalPolicy : undefined;
     const sandboxPolicyType =
-      this.providerOptions.sandbox_mode ??
-      (this.hasWorkflowModeOverride ? preset.sandbox : undefined);
-    if (approvalPolicy && this.providerOptions.approval_policy === undefined) {
+      providerOptions.sandbox_mode ?? (this.hasWorkflowModeOverride ? preset.sandbox : undefined);
+    if (approvalPolicy && providerOptions.approval_policy === undefined) {
       params.approvalPolicy = approvalPolicy;
     }
     if (sandboxPolicyType) {
       const nativeType = toCodexSandboxPolicyType(sandboxPolicyType);
       const workspaceWrite = {
         ...this.resolvedWorkspaceWrite,
-        ...this.providerOptions.sandbox_workspace_write,
+        ...providerOptions.sandbox_workspace_write,
       };
       params.sandboxPolicy =
         this.resolvedSandboxPolicy?.type === nativeType
@@ -5190,11 +5224,12 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     const responseApprovalsReviewer =
       typeof response?.approvalsReviewer === "string" ? response.approvalsReviewer : undefined;
+    const threadStartProviderOptions = this.guardedProviderOptions();
     if (
       shouldPromoteThreadResponseToAutoReview({
         approvalsReviewer: responseApprovalsReviewer,
-        approvalPolicy: approvalPolicy ?? String(this.providerOptions.approval_policy ?? ""),
-        sandbox: sandbox ?? this.providerOptions.sandbox_mode ?? "",
+        approvalPolicy: approvalPolicy ?? String(threadStartProviderOptions.approval_policy ?? ""),
+        sandbox: sandbox ?? threadStartProviderOptions.sandbox_mode ?? "",
       })
     ) {
       this.currentMode = "auto-review";
@@ -5209,6 +5244,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     sandbox?: string;
   } {
     const preset = MODE_PRESETS[this.currentMode] ?? MODE_PRESETS[DEFAULT_CODEX_MODE_ID];
+    const providerOptions = this.guardedProviderOptions();
     const approvalPolicy = this.hasWorkflowModeOverride ? preset.approvalPolicy : undefined;
     const sandbox = this.hasWorkflowModeOverride ? preset.sandbox : undefined;
     const innerConfig = this.buildCodexInnerConfig();
@@ -5219,10 +5255,10 @@ export class CodexAppServerAgentSession implements AgentSession {
     const params: Record<string, unknown> = {
       model,
       cwd: this.config.cwd ?? null,
-      ...(approvalPolicy && this.providerOptions.approval_policy === undefined
+      ...(approvalPolicy && providerOptions.approval_policy === undefined
         ? { approvalPolicy }
         : {}),
-      ...(sandbox && this.providerOptions.sandbox_mode === undefined ? { sandbox } : {}),
+      ...(sandbox && providerOptions.sandbox_mode === undefined ? { sandbox } : {}),
       ...(developerInstructions ? { developerInstructions } : {}),
       ...(innerConfig ? { config: innerConfig } : {}),
       ...(this.ephemeral ? { ephemeral: true } : {}),
@@ -5235,7 +5271,7 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   private buildCodexInnerConfig(): Record<string, unknown> | null {
     const innerConfig: Record<string, unknown> = {};
-    Object.assign(innerConfig, this.providerOptions);
+    Object.assign(innerConfig, this.guardedProviderOptions());
     if (this.deps.customCodexConfig) {
       Object.assign(innerConfig, this.deps.customCodexConfig);
     }

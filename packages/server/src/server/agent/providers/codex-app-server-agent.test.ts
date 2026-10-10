@@ -151,6 +151,87 @@ describe("Codex guarded mode preset", () => {
   });
 });
 
+describe("Codex guarded mode resists a caller's own providerOptions (review finding #1)", () => {
+  async function startThreadAndCapture(configOverrides: Partial<AgentSessionConfig>) {
+    const requests: Array<{ method: string; params: unknown }> = [];
+    const session = createSession({
+      modeId: "guarded",
+      thinkingOptionId: "low",
+      ...configOverrides,
+    });
+    session.currentThreadId = null;
+    session.activeForegroundTurnId = null;
+    session.client = {
+      request: vi.fn(async (method: string, params: unknown) => {
+        requests.push({ method, params });
+        if (method === "thread/start") {
+          return { thread: { id: "guarded-thread" } };
+        }
+        if (method === "turn/start") {
+          return {};
+        }
+        if (method === "model/list") {
+          return { models: [] };
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      }),
+    };
+    await session.startTurn("trigger thread creation");
+    const startCall = requests.find((req) => req.method === "thread/start");
+    return startCall?.params as Record<string, unknown> | undefined;
+  }
+
+  test('approval_policy: "never" is ignored; the guarded preset\'s on-request still wins', async () => {
+    const params = await startThreadAndCapture({
+      providerOptions: { approval_policy: "never" },
+    });
+    expect(params).toMatchObject({ approvalPolicy: "on-request" });
+    const innerConfig = params?.config as Record<string, unknown> | undefined;
+    expect(innerConfig?.approval_policy).toBeUndefined();
+  });
+
+  test('sandbox_mode: "danger-full-access" is ignored; the guarded preset\'s workspace-write still wins', async () => {
+    const params = await startThreadAndCapture({
+      providerOptions: { sandbox_mode: "danger-full-access" },
+    });
+    expect(params).toMatchObject({ sandbox: "workspace-write" });
+    const innerConfig = params?.config as Record<string, unknown> | undefined;
+    expect(innerConfig?.sandbox_mode).toBeUndefined();
+  });
+
+  test("sandbox_workspace_write.network_access is ignored; the inner config carries none of it", async () => {
+    const params = await startThreadAndCapture({
+      providerOptions: {
+        sandbox_mode: "workspace-write",
+        sandbox_workspace_write: { network_access: true, writable_roots: ["/"] },
+      },
+    });
+    const innerConfig = params?.config as Record<string, unknown> | undefined;
+    expect(innerConfig?.sandbox_workspace_write).toBeUndefined();
+  });
+
+  test("both overridden together: approval_policy and sandbox_mode both still resolve to the preset", async () => {
+    const params = await startThreadAndCapture({
+      providerOptions: { approval_policy: "never", sandbox_mode: "danger-full-access" },
+    });
+    expect(params).toMatchObject({ approvalPolicy: "on-request", sandbox: "workspace-write" });
+  });
+
+  test("auto mode (not guarded) still honors a caller's own approval_policy/sandbox_mode", async () => {
+    const params = await startThreadAndCapture({
+      modeId: "auto",
+      providerOptions: { approval_policy: "never", sandbox_mode: "danger-full-access" },
+    });
+    // The outer params omit approvalPolicy/sandbox because the caller's own providerOptions
+    // already carries them -- unchanged, non-guarded behavior.
+    expect(params?.approvalPolicy).toBeUndefined();
+    expect(params?.sandbox).toBeUndefined();
+    const innerConfig = params?.config as Record<string, unknown> | undefined;
+    expect(innerConfig?.approval_policy).toBe("never");
+    expect(innerConfig?.sandbox_mode).toBe("danger-full-access");
+  });
+});
+
 describe("Codex guarded mode approval handling", () => {
   async function startGuardedSession(
     appServer: FakeCodexAppServer,
