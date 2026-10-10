@@ -51,6 +51,7 @@ import {
   READ_CHECK_QUESTIONS,
   READ_TOOL_LINE_PREFIX_CHARS,
   readToolCharacters,
+  recentLine,
   sliceRange,
 } from "./state.js";
 import {
@@ -400,6 +401,15 @@ function latestRowPerCall(rows: readonly ReadCheckTimelineRow[]): ReadCheckTimel
   return rows.filter(
     (row, index) => row.item.type !== "tool_call" || last.get(row.item.callId) === index,
   );
+}
+
+/** R3: the newest `user_message` in the tail — the current turn's latest prompt, when there is one. */
+function latestUserPromptOf(recent: readonly AgentTimelineItem[]): string | null {
+  for (let index = recent.length - 1; index >= 0; index -= 1) {
+    const item = recent[index]!;
+    if (item.type === "user_message" && item.text.trim()) return item.text;
+  }
+  return null;
 }
 
 function hasTextBody(buffer: Buffer): boolean {
@@ -892,6 +902,41 @@ export class ReadCheckObserver implements FileReadObserver {
   }
 
   /**
+   * R3: the search call (`rg`, `grep`, `find`, a Glob) whose matched files named this read's
+   * path, from the read's own turn — even past the ordinary 16-row tail `timelineAround` keeps.
+   * Null when none did, or there is no current turn to search.
+   */
+  private findPinnedSearchLine(
+    agentId: string,
+    toolUseId: string | null,
+    turnId: string | null,
+    displayPath: string,
+    realPath: string,
+  ): string | null {
+    if (!turnId) return null;
+    let page: { epoch: string; rows: ReadCheckTimelineRow[] } | null = null;
+    try {
+      page = this.options.agents.tail(agentId, SCAN_ROWS);
+    } catch {
+      return null;
+    }
+    if (!page) return null;
+    const isOwn = (row: ReadCheckTimelineRow) =>
+      toolUseId !== null && row.item.type === "tool_call" && row.item.callId === toolUseId;
+    const first = page.rows.findIndex(isOwn);
+    const before = first >= 0 ? page.rows.slice(0, first) : page.rows;
+    for (let index = before.length - 1; index >= 0; index -= 1) {
+      const row = before[index]!;
+      if (row.turnId !== turnId) continue;
+      const item = row.item;
+      if (item.type !== "tool_call" || item.detail.type !== "search") continue;
+      const files = item.detail.filePaths ?? [];
+      if (files.includes(displayPath) || files.includes(realPath)) return recentLine(item);
+    }
+    return null;
+  }
+
+  /**
    * Rules 3 and 4 of "When JEV is asked". Default deny: a file is sent only when it is inside the
    * agent's cwd and inside a git work tree below the home directory, and no name it goes by (as
    * named, each symlink hop, its real path) is secret-shaped or personal. A hard link could be
@@ -1320,24 +1365,43 @@ export class ReadCheckObserver implements FileReadObserver {
     // recent calls. A subagent whose brief could not be found falls back to the parent's, exactly
     // as before this plan (`brief: missing`).
     const brief = subagentId ? (event.subagentBrief ?? null) : null;
+    // R2 searches this for every reader, subagent included; R3 only adds it to a main agent's
+    // (or a brief-missing subagent's) `task` — a subagent with its own brief keeps the parent's
+    // task to one line (R1), not the parent's turn prompt too.
+    const latestPrompt = latestUserPromptOf(around.recent);
+    const pinnedRecentLine = brief
+      ? null
+      : this.findPinnedSearchLine(
+          event.agentId,
+          input.toolUseId,
+          around.turnId,
+          displayPath,
+          realPath,
+        );
     const state = buildReadCheckState({
       title: agent?.title ?? null,
       assignment: this.assignmentOf(event.agentId, this.stateFor(event.agentId)),
-      ...(brief ? { subagentBrief: brief } : {}),
+      ...(brief ? { subagentBrief: brief } : { latestPrompt }),
+      pinnedRecentLine,
       recent: brief ? (this.subagentRings.get(subagentId!) ?? []) : around.recent,
       why: input.read.why,
       displayPath,
       size: describeSize({ ...slice, tokens: input.tokens }),
       rangeText: slice.text,
     });
-    // R2, KTD-3: after the eligibility checks, before the JEV call. Only `task` and the recent
-    // assistant lines are searched, never `excerpt` or `outline` — a path named only inside the
-    // content being judged says nothing about whether the agent already knew to expect it.
+    // R2, KTD-3: after the eligibility checks, before the JEV call. Only `task`, the current
+    // turn's latest prompt, and recent assistant lines are searched, never `excerpt` or
+    // `outline` — a path named only inside the content being judged says nothing about whether
+    // the agent already knew to expect it.
     if (
       isNamedRead(
         { namedPath: input.namedPath, displayPath, realPath },
         {
-          texts: [state.task, ...state.recent.filter((line) => line.startsWith("assistant: "))],
+          texts: [
+            state.task,
+            latestPrompt,
+            ...state.recent.filter((line) => line.startsWith("assistant: ")),
+          ],
         },
       )
     ) {

@@ -910,3 +910,91 @@ describe("ReadCheckObserver: the `named` rule (R2, KTD-3)", () => {
     expect(jev.transport.calls).toHaveLength(1);
   });
 });
+
+describe("ReadCheckObserver: a main agent's turn context (R3)", () => {
+  test("a new prompt mid-session is added to task, after the assignment", async () => {
+    const { observer, jev } = setup();
+    rows.push({
+      seq: rows.length,
+      timestamp: new Date().toISOString(),
+      turnId: "turn-1",
+      item: { type: "user_message", text: "Also check the session cookie expiry" },
+    });
+    const content = bigSource();
+    const file = writeRepoFile("src/other.ts", content);
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["task"]).toBe(
+      "Fix the login bug\n" +
+        "Find out why the login form rejects valid passwords and fix it.\n" +
+        "Also check the session cookie expiry",
+    );
+  });
+
+  test("the search call that named this path stays in recent past the ordinary tail, within the turn", async () => {
+    const { observer, jev } = setup();
+    rows.push({
+      seq: rows.length,
+      timestamp: new Date().toISOString(),
+      turnId: "turn-1",
+      item: {
+        type: "tool_call",
+        callId: "search-1",
+        name: "Grep",
+        status: "completed",
+        error: null,
+        detail: { type: "search", query: "session cookie", filePaths: ["src/session.ts"] },
+      },
+    });
+    // 16 rows after the search call, still in the same turn, push it out of the ordinary tail.
+    for (let index = 0; index < 16; index += 1) {
+      rows.push({
+        seq: rows.length,
+        timestamp: new Date().toISOString(),
+        turnId: "turn-1",
+        item: { type: "assistant_message", text: `filler ${index}` },
+      });
+    }
+    const content = bigSource();
+    const file = writeRepoFile("src/session.ts", content);
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).toContain("tool Grep session cookie");
+  });
+
+  test("a search call from an earlier turn does not stay pinned", async () => {
+    const { observer, jev } = setup();
+    rows.push({
+      seq: rows.length,
+      timestamp: new Date().toISOString(),
+      turnId: "turn-0",
+      item: {
+        type: "tool_call",
+        callId: "search-1",
+        name: "Grep",
+        status: "completed",
+        error: null,
+        detail: { type: "search", query: "session cookie", filePaths: ["src/session.ts"] },
+      },
+    });
+    for (let index = 0; index < 16; index += 1) {
+      rows.push({
+        seq: rows.length,
+        timestamp: new Date().toISOString(),
+        turnId: "turn-1",
+        item: { type: "assistant_message", text: `filler ${index}` },
+      });
+    }
+    const content = bigSource();
+    const file = writeRepoFile("src/session.ts", content);
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).not.toContain("tool Grep session cookie");
+  });
+});
