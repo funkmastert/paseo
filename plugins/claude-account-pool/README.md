@@ -168,6 +168,7 @@ For every `CLAUDE_CONFIG_DIR` in the config:
 mkdir -p ~/.claude-accounts/worker-1
 ln -s ~/.claude/projects ~/.claude-accounts/worker-1/projects
 ln -s ~/.claude/CLAUDE.md ~/.claude-accounts/worker-1/CLAUDE.md   # if you have one
+ln -s ~/.claude/skills ~/.claude-accounts/worker-1/skills         # if you have any
 CLAUDE_CONFIG_DIR=~/.claude-accounts/worker-1 claude auth login --email worker-1@example.com
 ```
 
@@ -180,9 +181,11 @@ account, not two. The usage windows the
 pool ranks accounts by come from that login. An entry authenticated some other
 way, such as an API key, reports no usage, and the pool places work on it
 blind. The shared `projects/` is what lets a session move between accounts,
-and the `CLAUDE.md` link gives every account your global rules. `paseo doctor`
-flags a directory that is signed out or missing either link, and prints the
-fix.
+the `CLAUDE.md` link gives every account your global rules, and the `skills/`
+link gives them all the same skills: without it, the same prompt behaves
+differently depending on which account the pool placed it on. `paseo doctor`
+flags a directory that is signed out or missing any of the three links, and
+prints the fix.
 
 ### 4. Apply the config
 
