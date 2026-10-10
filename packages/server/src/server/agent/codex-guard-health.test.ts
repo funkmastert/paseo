@@ -1,7 +1,7 @@
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
   evaluateCodexGuardSelfTest,
@@ -145,6 +145,66 @@ describe("recheckCodexGuardCommandItem", () => {
       agentId: "agent-1",
       deviceLaunchGate: undefined,
       approvalRequestSeen: false,
+      exitCode: 0,
+      resolveCurrentBranch: async () => "main",
+    });
+    expect(result.violation).toBe(true);
+  });
+
+  test("no violation and no gate call when the command exited non-zero -- the sandbox contained it", async () => {
+    const gateLaunch = vi.fn(async () => ({ decision: "allow" as const }));
+    const deviceLaunchGate: DeviceLaunchGate = { gateLaunch };
+    const result = await recheckCodexGuardCommandItem({
+      command: "git push --force origin main",
+      cwd: "/repo",
+      agentId: "agent-1",
+      deviceLaunchGate,
+      approvalRequestSeen: false,
+      exitCode: 1,
+      resolveCurrentBranch: async () => "main",
+    });
+    expect(result).toEqual({ violation: false });
+    expect(gateLaunch).not.toHaveBeenCalled();
+  });
+
+  test("logs one info line when a non-zero gated-looking command is skipped", async () => {
+    const info = vi.fn();
+    await recheckCodexGuardCommandItem(
+      {
+        command: "git push --force origin main",
+        cwd: "/repo",
+        agentId: "agent-1",
+        deviceLaunchGate: undefined,
+        approvalRequestSeen: false,
+        exitCode: 1,
+        resolveCurrentBranch: async () => "main",
+      },
+      { warn: vi.fn(), info },
+    );
+    expect(info).toHaveBeenCalledTimes(1);
+  });
+
+  test("exit 0 keeps today's behaviour: still a violation when no approval request arrived", async () => {
+    const result = await recheckCodexGuardCommandItem({
+      command: "git push --force origin main",
+      cwd: "/repo",
+      agentId: "agent-1",
+      deviceLaunchGate: undefined,
+      approvalRequestSeen: false,
+      exitCode: 0,
+      resolveCurrentBranch: async () => "main",
+    });
+    expect(result.violation).toBe(true);
+  });
+
+  test("a null exit code keeps today's behaviour: still a violation when no approval request arrived", async () => {
+    const result = await recheckCodexGuardCommandItem({
+      command: "git push --force origin main",
+      cwd: "/repo",
+      agentId: "agent-1",
+      deviceLaunchGate: undefined,
+      approvalRequestSeen: false,
+      exitCode: null,
       resolveCurrentBranch: async () => "main",
     });
     expect(result.violation).toBe(true);
@@ -178,6 +238,16 @@ describe("recheckCodexGuardCommandItem", () => {
 });
 
 describe("runCodexGuardSelfTest", () => {
+  let selfTestRoot: string;
+
+  beforeEach(() => {
+    selfTestRoot = mkdtempSync(path.join(os.tmpdir(), "codex-guard-self-test-root-"));
+  });
+
+  afterEach(() => {
+    rmSync(selfTestRoot, { recursive: true, force: true });
+  });
+
   function createGuardedClient(appServer: ReturnType<typeof createFakeCodexAppServer>) {
     return (deviceLaunchGate: DeviceLaunchGate) => {
       const client = new CodexAppServerAgentClient(createTestLogger(), undefined, {
@@ -216,6 +286,7 @@ describe("runCodexGuardSelfTest", () => {
       model: "gpt-6-luna",
       codexVersion: "0.160.0",
       timeoutMs: 5_000,
+      selfTestRoot,
     });
 
     const turnStartParams = await appServer.waitForTurnStart();
@@ -280,6 +351,7 @@ describe("runCodexGuardSelfTest", () => {
         model: "gpt-6-luna",
         codexVersion: "0.160.0",
         timeoutMs: 5_000,
+        selfTestRoot,
         logger: { warn },
       });
 
@@ -341,6 +413,7 @@ describe("runCodexGuardSelfTest", () => {
         model: "gpt-6-luna",
         codexVersion: "0.160.0",
         timeoutMs: 5_000,
+        selfTestRoot,
         gitScaffoldTimeoutMs: 200,
         logger: { warn },
       });
@@ -397,6 +470,7 @@ describe("runCodexGuardSelfTest", () => {
       model: "gpt-6-luna",
       codexVersion: "0.160.0",
       timeoutMs: 5_000,
+      selfTestRoot,
     });
 
     const turnStartParams = await appServer.waitForTurnStart();
@@ -444,6 +518,7 @@ describe("runCodexGuardSelfTest", () => {
       model: "gpt-6-luna",
       codexVersion: "0.160.0",
       timeoutMs: 5_000,
+      selfTestRoot,
     });
 
     const turnStartParams = await appServer.waitForTurnStart();
@@ -499,5 +574,80 @@ describe("runCodexGuardSelfTest", () => {
       status: "red",
       reason: "live detection landed mid-run",
     });
+  });
+
+  test("the ok/canary/remote paths sit outside os.tmpdir() and the session cwd, and the prompt asks for escalation up front (bug: targets inside the sandbox's writable roots)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    // A root outside os.tmpdir() -- the project checkout's own scratch area, not the OS temp
+    // directory a workspace-write sandbox makes writable by default.
+    const outsideTmpdirRoot = mkdtempSync(
+      path.join(process.cwd(), ".codex-guard-self-test-outside-tmpdir-"),
+    );
+    try {
+      const runPromise = runCodexGuardSelfTest({
+        createClient: createGuardedClient(appServer),
+        model: "gpt-6-luna",
+        codexVersion: "0.160.0",
+        timeoutMs: 5_000,
+        selfTestRoot: outsideTmpdirRoot,
+      });
+
+      const turnStartParams = await appServer.waitForTurnStart();
+      appServer.startsTurn({ threadId: "thread-1", turnId: "native-A" });
+      const okPath = extractGuardPath(turnStartParams, "paseo-guard-ok");
+      const canaryPath = extractGuardPath(turnStartParams, "paseo-guard-canary");
+      const promptText = JSON.stringify(turnStartParams);
+      // Quoted JSON string value, starting with a path separator (the agentId -- the other
+      // field carrying this literal -- has no separator in it, just the nonce).
+      const cwdMatch = /"(\/[^"]*codex-guard-self-test-[^"/]+)"/.exec(promptText);
+      if (!cwdMatch) throw new Error("No self-test cwd found in turn/start params");
+      const sessionCwd = cwdMatch[1] as string;
+
+      expect(okPath.startsWith(outsideTmpdirRoot)).toBe(true);
+      expect(canaryPath.startsWith(outsideTmpdirRoot)).toBe(true);
+      expect(okPath.startsWith(os.tmpdir())).toBe(false);
+      expect(canaryPath.startsWith(os.tmpdir())).toBe(false);
+      expect(okPath.startsWith(sessionCwd)).toBe(false);
+      expect(canaryPath.startsWith(sessionCwd)).toBe(false);
+      expect(promptText).toContain("request escalated permissions up front");
+
+      appServer.requestCommandApproval({
+        itemId: "ok-item",
+        threadId: "thread-1",
+        turnId: "native-A",
+        command: `touch ${okPath}`,
+        cwd: sessionCwd,
+        reason: "ok",
+      });
+      await appServer.waitForCommandApprovalDecision("ok-item");
+      writeFileSync(okPath, "");
+      appServer.requestCommandApproval({
+        itemId: "canary-item",
+        threadId: "thread-1",
+        turnId: "native-A",
+        command: `touch ${canaryPath}`,
+        cwd: sessionCwd,
+        reason: "canary",
+      });
+      await appServer.waitForCommandApprovalDecision("canary-item");
+      appServer.requestCommandApproval({
+        itemId: "force-push-item",
+        threadId: "thread-1",
+        turnId: "native-A",
+        command: "git push --force origin main",
+        cwd: sessionCwd,
+        reason: "force push",
+      });
+      await appServer.waitForCommandApprovalDecision("force-push-item");
+      appServer.completeTurn({ threadId: "thread-1" });
+
+      await runPromise;
+
+      expect(getCodexGuardHealthState()).toMatchObject({ status: "green" });
+    } finally {
+      rmSync(outsideTmpdirRoot, { recursive: true, force: true });
+    }
   });
 });

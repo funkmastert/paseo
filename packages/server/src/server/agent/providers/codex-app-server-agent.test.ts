@@ -977,6 +977,34 @@ describe("Codex guarded mode approval handling", () => {
     await session.close();
   });
 
+  test("leaves health alone when a gate-refusing command exits non-zero with no approval request -- the sandbox contained it", async () => {
+    resetCodexGuardHealthStateForTests();
+    let interrupted = false;
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+      "turn/interrupt": () => {
+        interrupted = true;
+        return {};
+      },
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.completesCommand({
+      threadId: "thread-1",
+      callId: "unapproved-nonzero-1",
+      command: "git push --force origin main",
+      output: "",
+      exitCode: 1,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getCodexGuardHealthState().status).toBe("unknown");
+    expect(interrupted).toBe(false);
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
   test("leaves health alone when a safe-list command ran with no approval request", async () => {
     resetCodexGuardHealthStateForTests();
     const appServer = createFakeCodexAppServer({

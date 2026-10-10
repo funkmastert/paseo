@@ -6378,7 +6378,12 @@ export class CodexAppServerAgentSession implements AgentSession {
     subAgentCallId: string | null = null,
   ): void {
     if (this.currentMode === "guarded" && !subAgentCallId && typeof parsed.command === "string") {
-      void this.recheckGuardedCommandCompletion(parsed.callId, parsed.command, parsed.cwd ?? null);
+      void this.recheckGuardedCommandCompletion(
+        parsed.callId,
+        parsed.command,
+        parsed.cwd ?? null,
+        parsed.exitCode ?? null,
+      );
     }
     const outputDeltas = subAgentCallId
       ? this.subAgentCallsByCallId.get(subAgentCallId)?.pendingCommandOutputDeltas
@@ -6423,6 +6428,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         itemId ?? null,
         timelineItem.detail.command,
         timelineItem.detail.cwd ?? null,
+        timelineItem.detail.exitCode ?? null,
       );
     }
   }
@@ -6460,6 +6466,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     callId: string | null,
     command: string,
     cwd: string | null,
+    exitCode: number | null,
   ): Promise<void> {
     // A completion with no callId can't be looked up in guardedApprovalSeenItemIds, so there is
     // no way to confirm an approval request was ever seen for it -- treat it as unmatched rather
@@ -6476,6 +6483,7 @@ export class CodexAppServerAgentSession implements AgentSession {
           deviceLaunchGate: this.deps.deviceLaunchGate,
           isCatastropheGateEnabled: this.deps.isCatastropheGateEnabled,
           approvalRequestSeen,
+          exitCode,
         },
         this.logger,
       );

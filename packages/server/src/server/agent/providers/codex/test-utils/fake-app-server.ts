@@ -18,6 +18,8 @@ interface FakeLegacyCommand {
   callId: string;
   command: string;
   output: string;
+  /** Defaults to 0 -- set non-zero to simulate a command the sandbox actually contained. */
+  exitCode?: number;
 }
 interface FakeSilentCommand {
   threadId: string;
@@ -461,7 +463,7 @@ export function createFakeCodexAppServer(
         status: "completed",
         command: params.command,
         aggregatedOutput: params.output,
-        exitCode: 0,
+        exitCode: params.exitCode ?? 0,
       });
     },
     completesSilentCommand(params) {
