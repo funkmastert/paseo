@@ -2292,6 +2292,15 @@ export async function createPaseoDaemon(
       workspaceGitService.onWorkspaceStateMayHaveChanged(cwd);
     },
     onAgentTurnFinished: (params) => handleAgentTurnFinished(params),
+    // R5, KTD-5 (docs/plans/2026-10-09-002-fix-device-idle-release-plan.md): archive and close
+    // both fire this, so a closed agent's devices free in this tick rather than on the next
+    // sweep (up to a minute for simulators) or the physical manager's next 15s reconcile.
+    onAgentClosed: (agentId) => {
+      void deviceLeaseManager.reconcileAgentGone().catch((error) => {
+        logger.warn({ err: error, agentId }, "Failed to reconcile the device cap on agent close");
+      });
+      physicalDeviceLeaseManager.detectionChanged();
+    },
     mcpAuthToken: agentMcpAuthToken,
     resolvePaseoToolPolicy: (provider) =>
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),

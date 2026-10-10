@@ -659,6 +659,13 @@ export interface AgentManagerOptions {
   // Fired once per running->idle transition (a finished turn), skipping
   // internal agents. Independent of attention tracking — see emitState().
   onAgentTurnFinished?: (params: { agentId: string; cwd: string }) => void;
+  /**
+   * Fired from `emitClosedAgent` — archive, close, and a reload's own-session failure all funnel
+   * through it. The device-lease managers reconcile here so an archived or closed agent's
+   * devices free in the same tick rather than on their next sweep
+   * (docs/plans/2026-10-09-002-fix-device-idle-release-plan.md, R5).
+   */
+  onAgentClosed?: (agentId: string) => void;
   durableTimelineStore?: AgentTimelineStore;
   terminalManager?: TerminalManager | null;
   mcpBaseUrl?: string;
@@ -1346,6 +1353,7 @@ export class AgentManager {
   private onAgentArchived?: AgentArchivedCallback;
   private onWorkspaceStateMayHaveChanged?: (params: { cwd: string }) => void;
   private onAgentTurnFinished?: (params: { agentId: string; cwd: string }) => void;
+  private onAgentClosed?: (agentId: string) => void;
   private logger: Logger;
   private readonly rescueTimeouts: Required<AgentManagerRescueTimeouts>;
   private readonly beforeSteerUnavailableFallback?: AgentManagerOptions["beforeSteerUnavailableFallback"];
@@ -1364,6 +1372,7 @@ export class AgentManager {
     this.onAgentAttention = options?.onAgentAttention;
     this.onWorkspaceStateMayHaveChanged = options?.onWorkspaceStateMayHaveChanged;
     this.onAgentTurnFinished = options.onAgentTurnFinished;
+    this.onAgentClosed = options.onAgentClosed;
     this.mcpBaseUrl = options?.mcpBaseUrl ?? null;
     this.mcpAuthToken = options?.mcpAuthToken ?? null;
     this.configureMcpGateway(options);
@@ -5734,6 +5743,11 @@ export class AgentManager {
 
   private emitClosedAgent(agent: ManagedAgentClosed, options?: { persist?: boolean }): void {
     this.emitState(agent, options);
+    try {
+      this.onAgentClosed?.(agent.id);
+    } catch (error) {
+      this.logger.warn({ err: error, agentId: agent.id }, "onAgentClosed callback failed");
+    }
   }
   private subscribeToSession(agent: ActiveManagedAgent): void {
     if (agent.unsubscribeSession) {
