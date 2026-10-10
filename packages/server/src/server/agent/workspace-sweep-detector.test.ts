@@ -486,6 +486,7 @@ describe("checkDeletionInvariant", () => {
       ).toEqual({
         holds: false,
         reason: `1 ignored path(s) that are not regenerable and no backup holds (${entry})`,
+        category: "ignored-path",
       });
     }
   });
@@ -538,6 +539,7 @@ describe("checkDeletionInvariant", () => {
       expect(checkDeletionInvariant(coverage({ ignored: [entry] }), "head")).toEqual({
         holds: false,
         reason: `1 ignored path(s) that are not regenerable and no backup holds (${entry})`,
+        category: "ignored-path",
       });
     }
   });
@@ -674,6 +676,7 @@ describe("resolveWorkspaceSweepConfig", () => {
       maxArchivesPerSweep: 10,
       projectGraceMs: 24 * HOUR,
       maxProjectRemovalsPerSweep: 10,
+      keptCooldownMs: 6 * HOUR,
     });
   });
 
@@ -697,6 +700,7 @@ describe("resolveWorkspaceSweepConfig", () => {
           maxArchivesPerSweep: 3,
           projectGraceHours: 48,
           maxProjectRemovalsPerSweep: 5,
+          keptCooldownHours: 2,
         },
       }),
     ).toEqual({
@@ -705,6 +709,7 @@ describe("resolveWorkspaceSweepConfig", () => {
       idleMs: 96 * HOUR,
       emptyIdleMs: 12 * HOUR,
       maxArchivesPerSweep: 3,
+      keptCooldownMs: 2 * HOUR,
       projectGraceMs: 48 * HOUR,
       maxProjectRemovalsPerSweep: 5,
     });

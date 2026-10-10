@@ -107,6 +107,7 @@ export interface DoneJanitorWorkspaceSweepConfig {
   maxArchivesPerSweep?: number;
   projectGraceHours?: number;
   maxProjectRemovalsPerSweep?: number;
+  keptCooldownHours?: number;
 }
 
 export interface ResolvedWorkspaceSweepConfig {
@@ -125,6 +126,9 @@ export interface ResolvedWorkspaceSweepConfig {
   /** How long a project stays after its last active workspace goes. */
   projectGraceMs: number;
   maxProjectRemovalsPerSweep: number;
+  /** How long a workspace kept for a reason that will not change within the hour (R5) waits
+   * before the sweep spends budget checking it again. */
+  keptCooldownMs: number;
 }
 
 export function resolveWorkspaceSweepConfig(janitor: {
@@ -140,6 +144,7 @@ export function resolveWorkspaceSweepConfig(janitor: {
     maxArchivesPerSweep: sweep?.maxArchivesPerSweep ?? 10,
     projectGraceMs: (sweep?.projectGraceHours ?? 24) * HOUR_MS,
     maxProjectRemovalsPerSweep: sweep?.maxProjectRemovalsPerSweep ?? 10,
+    keptCooldownMs: (sweep?.keptCooldownHours ?? 6) * HOUR_MS,
   };
 }
 
@@ -352,7 +357,16 @@ export type CoverageBasis =
   /** Against a snapshot whose backup the caller verified: nothing may differ from it. */
   | "snapshot";
 
-export type DeletionInvariant = { holds: true; detail: string } | { holds: false; reason: string };
+/**
+ * `category` marks the one failure the sweep's cooldown treats as permanent within the hour
+ * (R5, docs/done-janitor.md): an ignored, non-regenerable path a backup cannot cover either. Every
+ * other failure — an unreadable directory, a hidden change, an LFS file, a nested repository, an
+ * unpushed commit — is left uncategorized; it may clear on its own (a push, a rebase) sooner than
+ * the cooldown would allow re-checking.
+ */
+export type DeletionInvariant =
+  | { holds: true; detail: string }
+  | { holds: false; reason: string; category?: "ignored-path" };
 
 /**
  * The deletion invariant (docs/done-janitor.md): a worktree's directory goes only when every file
@@ -375,6 +389,7 @@ export function checkDeletionInvariant(
     return {
       holds: false,
       reason: `${kept.length} ignored path(s) that are not regenerable and no backup holds (${listSome(kept)})`,
+      category: "ignored-path",
     };
   }
   const nested = listNestedRepositories(coverage);

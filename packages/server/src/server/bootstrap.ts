@@ -323,6 +323,7 @@ import { resolveProviderExtends } from "./agent/device-launch-enforcement.js";
 import { DeviceReservationStore } from "./agent/device-reservation-store.js";
 import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
 import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
+import { createDaemonProcessOwnershipTracker } from "./agent/daemon-process-ownership.js";
 import { createNativeBuildGate } from "./agent/native-build-gate.js";
 import { PhysicalDeviceLeaseManager } from "./agent/physical-device-lease-manager.js";
 import { physicalDeviceMatches, type PhysicalDevice } from "./agent/physical-device-registry.js";
@@ -1144,6 +1145,7 @@ function createDoneJanitor(input: {
   worktreeSnapshotter: WorktreeSnapshotter;
   serverId: string;
   logger: Logger;
+  isDaemonOwnProcess?: (pid: number) => boolean;
 }): AgentDoneJanitor {
   const { agentManager, agentStorage, terminalManager, logger } = input;
   const overrides = input.config.doneJanitorOverrides;
@@ -1239,6 +1241,7 @@ function createDoneJanitor(input: {
           offsite: snapshot.offsite,
         }),
       listProcessesInside: (directory) => listProcessesInside(directory),
+      isDaemonOwnProcess: input.isDaemonOwnProcess,
       snapshotWorktree: (request) => input.worktreeSnapshotter.snapshot(request),
       listProjects: () => input.projectRegistry.list(),
       probeProjectRoot,
@@ -2201,6 +2204,7 @@ export async function createPaseoDaemon(
     return stats.bavail * stats.bsize;
   };
   // The resource monitor hands it each sweep's attributed `ps` (reportAttributedSample below).
+  const daemonProcessOwnership = createDaemonProcessOwnershipTracker(process.pid);
   const nativeBuildGate = createNativeBuildGate({
     inner: {
       async gateLaunch(input) {
@@ -3573,7 +3577,10 @@ export async function createPaseoDaemon(
               // watches, and names what that monitor's growth sample saw grow.
               readFreeDiskBytes,
               // The build gate counts builds from this sweep's `ps` rather than its own.
-              reportAttributedSample: (sample) => nativeBuildGate.observeSample(sample),
+              reportAttributedSample: (sample) => {
+                nativeBuildGate.observeSample(sample);
+                daemonProcessOwnership.observeSample(sample);
+              },
               readDiskGrowth: () => worktreeDiskMonitor?.getLastGrowthReport() ?? null,
               readDaemonConfig: () => ({
                 resourceMonitor: daemonConfigStore.get().resourceMonitor,
@@ -3697,6 +3704,7 @@ export async function createPaseoDaemon(
               daemonConfigStore,
               worktreeSnapshotter,
               serverId,
+              isDaemonOwnProcess: (pid) => daemonProcessOwnership.isDaemonOwnProcess(pid),
               logger,
             });
             doneJanitor.start();

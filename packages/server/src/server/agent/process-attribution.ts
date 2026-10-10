@@ -124,6 +124,36 @@ export interface AttributeProcessTreesOptions {
   extraRoots?: ReadonlyMap<string, readonly number[]>;
 }
 
+/**
+ * Whether `pid` is the daemon's own child — a `tea`/`git`/`gh` forge poll the daemon spawned
+ * directly, say — rather than an agent's. "The daemon's own" means the ppid chain from `pid`
+ * reaches `daemonPid` before it reaches any pid already inside an agent's tree
+ * (docs/done-janitor.md, "The sweep never counts the daemon's own child processes"). A pid
+ * already in `attributedPids` is an agent's, full stop: `attributedPids` is every pid
+ * `attributeProcessTrees` placed in some `agentTree.pids`, which already includes every
+ * descendant, so there is nothing to walk for it. Matches on the process tree, never on a
+ * command name.
+ */
+export function isDaemonOwnChildPid(input: {
+  pid: number;
+  rows: readonly ProcessSampleRow[];
+  daemonPid: number;
+  attributedPids: ReadonlySet<number>;
+}): boolean {
+  const { pid, rows, daemonPid, attributedPids } = input;
+  if (attributedPids.has(pid)) return false;
+  const rowsByPid = new Map(rows.map((row) => [row.pid, row] as const));
+  const seen = new Set<number>();
+  let current = rowsByPid.get(pid);
+  while (current && !seen.has(current.pid)) {
+    seen.add(current.pid);
+    if (current.pid === daemonPid) return true;
+    if (attributedPids.has(current.ppid)) return false;
+    current = rowsByPid.get(current.ppid);
+  }
+  return false;
+}
+
 export function attributeProcessTrees(
   rows: readonly ProcessSampleRow[],
   agentIds: readonly string[],
