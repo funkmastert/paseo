@@ -472,6 +472,8 @@ const MutableDoneJanitorWorkspaceSweepConfigSchema = z
     maxArchivesPerSweep: z.number().int().positive().optional(),
     projectGraceHours: z.number().positive().optional(),
     maxProjectRemovalsPerSweep: z.number().int().positive().optional(),
+    // COMPAT(keptCooldownHours): added in v0.9.x, remove optional after 2027-10-09.
+    keptCooldownHours: z.number().positive().optional(),
   })
   .passthrough();
 // Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off unless
