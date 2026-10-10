@@ -577,6 +577,16 @@ const AgentCatastropheGateSchema = z
   })
   .strict();
 
+// Live-toggleable, and on unless `enabled` is false: the kill switch for the AskUserQuestion
+// check. `mode: "log"` logs what it would have blocked and lets the turn end. See
+// docs/ask-user-question.md.
+const AgentAskUserQuestionSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    mode: z.enum(["enforce", "log"]).optional(),
+  })
+  .strict();
+
 // Live-toggleable, and on unless `enabled` is false: the native build gate. See
 // docs/resource-monitor.md, "The native build gate".
 const AgentBuildGateSchema = z
@@ -1061,6 +1071,7 @@ export const PersistedConfigSchema = z
         admission: AgentAdmissionSchema.optional(),
         refocus: AgentRefocusSchema.optional(),
         catastropheGate: AgentCatastropheGateSchema.optional(),
+        askUserQuestion: AgentAskUserQuestionSchema.optional(),
         buildGate: AgentBuildGateSchema.optional(),
         childEnv: AgentChildEnvSchema.optional(),
         remediation: AgentRemediationSchema.optional(),

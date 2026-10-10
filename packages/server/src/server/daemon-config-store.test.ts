@@ -1337,6 +1337,32 @@ describe("DaemonConfigStore", () => {
     expect(loadPersistedConfig(paseoHome).agents?.catastropheGate).toEqual({ enabled: false });
   });
 
+  test("patch sets the AskUserQuestion check's mode live and persists it", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+    writeFileSync(path.join(paseoHome, "config.json"), `${JSON.stringify({ version: 1 })}\n`);
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+      },
+      undefined,
+    );
+    // Absent means on, in "enforce" mode.
+    expect(store.get().askUserQuestion).toBeUndefined();
+
+    const next = store.patch({ askUserQuestion: { mode: "log" } });
+
+    expect(next.askUserQuestion).toEqual({ mode: "log" });
+    expect(loadPersistedConfig(paseoHome).agents?.askUserQuestion).toEqual({ mode: "log" });
+  });
+
   test("patch sets the disk brake live inside resourceMonitor, keeps its siblings, and persists it", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);
