@@ -104,6 +104,7 @@ function setup(
     answers?: Record<string, JevScriptedAnswer>;
     behavior?: TestJevServiceOptions["behavior"];
     fs?: ReadCheckFileSystem;
+    now?: () => number;
   } = {},
 ) {
   const config = options.config ?? {};
@@ -128,6 +129,7 @@ function setup(
     logger: pino({ level: "silent" }),
     sweepIntervalMs: 0,
     ...(options.fs ? { fs: options.fs } : {}),
+    ...(options.now ? { now: options.now } : {}),
   });
   return { jev, savings, observer };
 }
@@ -605,6 +607,32 @@ describe("ReadCheckObserver: live mode (D11)", () => {
     expect(savings.records[0]!.facts["liveReason"]).toBe("subagent-brief-missing");
     expect(savings.records[0]!.facts["briefMissing"]).toBe(true);
   });
+
+  test("R4, finding #5: a not_needed subagent read with a content-free brief is never denied", async () => {
+    // A declared `task_started` with both fields blank, not an undeclared id: the container
+    // exists, but the never-deny guarantee must still treat it as missing.
+    const { observer, savings } = setup({ config: LIVE });
+    const content = bigSource();
+    const file = writeRepoFile("src/session.ts", content);
+    const hold = observer.preToolUse({
+      agentId: AGENT,
+      agentCwd: repo,
+      input: {
+        hook_event_name: "PreToolUse",
+        tool_name: "Read",
+        tool_input: { file_path: file },
+        tool_use_id: `toolu_${++toolUseCounter}`,
+        cwd: repo,
+        agent_id: "sub-empty",
+      },
+      subagentBrief: { description: null, prompt: null },
+    });
+    expect(await hold!.verdict).toBeNull();
+    expect(savings.records).toHaveLength(1);
+    expect(savings.records[0]).toMatchObject({ decision: { did: "read" } });
+    expect(savings.records[0]!.facts["liveReason"]).toBe("subagent-brief-missing");
+    expect(savings.records[0]!.facts["briefMissing"]).toBe(true);
+  });
 });
 
 describe("ReadCheckObserver: the shadow-only subtrees (D12)", () => {
@@ -882,6 +910,121 @@ describe("ReadCheckObserver: a subagent's own context (R1, R4, KTD-2)", () => {
     expect(jev.transport.calls).toHaveLength(1);
     const state = jev.transport.calls[0]!.state as Record<string, unknown>;
     expect(state["recent"]).toEqual([]);
+  });
+
+  test("the ring is evicted after 24h of inactivity, even without SubagentStop (finding #3)", async () => {
+    let now = Date.parse("2026-01-01T00:00:00Z");
+    const { observer, jev } = setup({ now: () => now });
+    observer.postToolUse({
+      ...readPost(writeRepoFile("src/note.ts", "export const x = 1;\n"), "export const x = 1;\n", {
+        agent_id: "sub-1",
+      }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+    // Past AGENT_IDLE_MS, with no SubagentStop: a crashed or killed subagent's ring still frees.
+    now += 25 * 60 * 60_000;
+    await observer.sweep();
+
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).toEqual([]);
+  });
+
+  test("a secret-shaped path read inside a subagent never reaches its ring (finding #4)", async () => {
+    const { observer, jev } = setup();
+    const secret = writeRepoFile(".env.production", "SECRET=1\n");
+    observer.postToolUse({
+      ...readPost(secret, "SECRET=1\n", { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).toEqual([]);
+  });
+
+  test("a secret-shaped path edited inside a subagent never reaches its ring (finding #4)", async () => {
+    const { observer, jev } = setup();
+    const secret = path.join(repo, ".env.production");
+    observer.preToolUse({
+      agentId: AGENT,
+      agentCwd: repo,
+      input: {
+        hook_event_name: "PreToolUse",
+        tool_name: "Write",
+        tool_input: { file_path: secret, content: "SECRET=1" },
+        tool_use_id: `toolu_${++toolUseCounter}`,
+        cwd: repo,
+        agent_id: "sub-1",
+      },
+    });
+    await observer.idle();
+
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).toEqual([]);
+  });
+
+  test("a compound Bash read inside a subagent adds one ring entry, not one per file (finding #8)", async () => {
+    const { observer, jev } = setup();
+    const fileA = writeRepoFile("src/a.ts", "export const a = 1;\n");
+    const fileB = writeRepoFile("src/b.ts", "export const b = 1;\n");
+    observer.postToolUse({
+      agentId: AGENT,
+      agentCwd: repo,
+      input: {
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command: `cat ${fileA} ${fileB}` },
+        tool_use_id: `toolu_${++toolUseCounter}`,
+        cwd: repo,
+        agent_id: "sub-1",
+        tool_response: { stdout: "a\nb\n", stderr: "", interrupted: false },
+      },
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    const content = bigSource();
+    const file = writeRepoFile("src/template.hbs", content);
+    observer.postToolUse({
+      ...readPost(file, content, { agent_id: "sub-1" }),
+      subagentBrief: BRIEF,
+    });
+    await observer.idle();
+
+    // Redaction folds the observer's home prefix to `~` on every string sent to JEV, the command
+    // text included.
+    const state = jev.transport.calls[0]!.state as Record<string, unknown>;
+    expect(state["recent"]).toEqual([
+      "tool Bash `cat ~/projects/app/src/a.ts ~/projects/app/src/b.ts`",
+    ]);
   });
 });
 

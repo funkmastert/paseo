@@ -48,11 +48,13 @@ import {
   buildReadCheckState,
   describeSize,
   estimateReadTokens,
+  hasSubagentBriefContent,
   READ_CHECK_QUESTIONS,
   READ_TOOL_LINE_PREFIX_CHARS,
   readToolCharacters,
   recentLine,
   sliceRange,
+  type SubagentBrief,
 } from "./state.js";
 import {
   ReadCheckValidation,
@@ -72,6 +74,7 @@ import {
  */
 
 export type ReadCheckConfig = ResolvedJevConfig["readCheck"];
+export type { SubagentBrief } from "./state.js";
 
 export interface FileReadHookEvent {
   /** The Paseo agent that owns the session; a subagent's calls carry its parent's id. */
@@ -83,9 +86,10 @@ export interface FileReadHookEvent {
   /**
    * The subagent's own Agent/Task brief (R1), when the hook fired inside one: its tool call's
    * description and prompt, as the provider found them. Undefined outside a subagent; null when
-   * the hook carries a subagent id this provider never declared (R4, `brief: missing`).
+   * the hook carries a subagent id this provider never declared, or a declared brief with no
+   * content in either field (R4, `brief: missing` — see `hasSubagentBriefContent`).
    */
-  subagentBrief?: { description: string | null; prompt: string | null } | null;
+  subagentBrief?: SubagentBrief | null;
 }
 
 /** A live read held for its verdict. The callback denies with `denyReason`, or lets it run. */
@@ -594,8 +598,15 @@ export class ReadCheckObserver implements FileReadObserver {
   private readonly validation: ReadCheckValidation;
   private readonly agents = new Map<string, AgentReadState>();
   private readonly pending = new Map<string, PendingRead>();
-  /** KTD-2: per-subagent-id ring of its own recent Read, Bash and edit-tool calls. */
-  private readonly subagentRings = new Map<string, AgentTimelineItem[]>();
+  /**
+   * KTD-2: per-subagent-id ring of its own recent Read, Bash and edit-tool calls. `lastSeen`
+   * lets `sweep` evict a ring whose subagent never fires `SubagentStop` — crashed, killed, or
+   * whose parent disconnected — the same `AGENT_IDLE_MS` bound the `agents` map uses below.
+   */
+  private readonly subagentRings = new Map<
+    string,
+    { items: AgentTimelineItem[]; lastSeen: number }
+  >();
   private readonly personal: PersonalPathRules;
   private readonly runGit: (args: string[], options: JevGitOptions) => Promise<JevGitResult>;
   /** Paths written by a copy or move of a secret file, folded, to when they stop being refused. */
@@ -696,6 +707,11 @@ export class ReadCheckObserver implements FileReadObserver {
       for (const [key, until] of this.tainted) {
         if (now >= until) this.tainted.delete(key);
       }
+      // A subagent that crashes, is killed, or whose parent disconnects never fires
+      // `SubagentStop`: the same idle bound the `agents` map uses above reclaims its ring.
+      for (const [subagentId, ring] of this.subagentRings) {
+        if (now - ring.lastSeen >= AGENT_IDLE_MS) this.subagentRings.delete(subagentId);
+      }
       for (const agentId of this.validation.agentsWithOpenWindows()) this.scanAgent(agentId);
       this.validation.expire(now);
     } catch (error) {
@@ -770,6 +786,19 @@ export class ReadCheckObserver implements FileReadObserver {
     return state;
   }
 
+  /**
+   * R4: true only for a subagent read whose own brief is absent or content-free — the condition
+   * live mode's never-deny guarantee depends on (finding #5: a declared-but-empty brief is not
+   * "found" just because the container exists). One check, shared by the shadow and live
+   * judgment paths (finding #9).
+   */
+  private subagentBriefMissing(
+    subagentId: string | null,
+    brief: SubagentBrief | null | undefined,
+  ): boolean {
+    return subagentId !== null && !hasSubagentBriefContent(brief);
+  }
+
   /** SubagentStop (KTD-2): the ring is dropped when the subagent ends. */
   subagentEnd(subagentId: string): void {
     try {
@@ -782,10 +811,10 @@ export class ReadCheckObserver implements FileReadObserver {
   /** KTD-2: appends one rendered-ready call to `subagentId`'s own ring, capped at 16. */
   private pushRing(subagentId: string | null, item: AgentTimelineItem): void {
     if (!subagentId) return;
-    const ring = this.subagentRings.get(subagentId) ?? [];
-    ring.push(item);
-    if (ring.length > SUBAGENT_RING_ROWS) ring.shift();
-    this.subagentRings.set(subagentId, ring);
+    const items = this.subagentRings.get(subagentId)?.items ?? [];
+    items.push(item);
+    if (items.length > SUBAGENT_RING_ROWS) items.shift();
+    this.subagentRings.set(subagentId, { items, lastSeen: this.now() });
   }
 
   private assignmentOf(agentId: string, state: AgentReadState): string | null {
@@ -837,14 +866,29 @@ export class ReadCheckObserver implements FileReadObserver {
     const real = await this.realpathOf(target);
     this.stateFor(event.agentId).edited.add(real);
     this.validation.noteEdit(event.agentId, real, at);
-    this.pushRing(hook.subagentId, {
-      type: "tool_call",
-      callId: hook.toolUseId ?? "",
-      name: hook.toolName,
-      status: "completed",
-      error: null,
-      detail: { type: hook.toolName === "Write" ? "write" : "edit", filePath: target },
-    });
+    if (!this.isRefusedForRing(target, real)) {
+      this.pushRing(hook.subagentId, {
+        type: "tool_call",
+        callId: hook.toolUseId ?? "",
+        name: hook.toolName,
+        status: "completed",
+        error: null,
+        detail: { type: hook.toolName === "Write" ? "write" : "edit", filePath: target },
+      });
+    }
+  }
+
+  /**
+   * Finding #4: a secret-shaped or personal name must never reach a subagent's ring, even though
+   * the ring's own push is not gated on the full `classify()` eligibility check (which runs git
+   * and the file system for every judged read, too costly to run for every observed call). This
+   * is the same name test `classify` runs first, before any of that work, on both the path as
+   * named and its real path.
+   */
+  private isRefusedForRing(namedPath: string, realPath: string): boolean {
+    return [namedPath, realPath].some(
+      (name) => isSecretShapedPath(name) || isPersonalPath(name, this.personal),
+    );
   }
 
   private onWindowClose(close: ReadCheckWindowClose): void {
@@ -1174,9 +1218,15 @@ export class ReadCheckObserver implements FileReadObserver {
 
     // A read live mode already judged: settle its measurement, never judge it twice.
     const liveSavingsId = pending?.live ? await pending.live.catch(() => null) : null;
+    // Finding #4: a refused name on any file this call touched keeps the whole ring entry out,
+    // even for Bash, whose ring item never shows the path itself. Finding #8: one ring entry per
+    // call, not one per file — a compound Bash line would otherwise push the identical entry
+    // once per file it named.
+    let ringRefused = false;
 
     for (const file of read.files) {
       const realPath = await this.realpathOf(file.path);
+      if (this.isRefusedForRing(file.path, realPath)) ringRefused = true;
       this.noteRead(event.agentId, realPath, read.tool, at, contextTokens);
       this.validation.noteRead(event.agentId, realPath, at);
       const signalMark = this.validation.mark();
@@ -1203,9 +1253,9 @@ export class ReadCheckObserver implements FileReadObserver {
           signalMark,
         });
       }
-      // KTD-2: pushed after this file is judged, so it never appears in its own `recent`.
-      this.pushRing(hook.subagentId, readRingItem(hook, read, file));
     }
+    // KTD-2: pushed after every file is judged, so it never appears in its own `recent`.
+    if (!ringRefused) this.pushRing(hook.subagentId, readRingItem(hook, read, read.files[0]!));
   }
 
   private async judgeShadow(input: ShadowReadInput): Promise<void> {
@@ -1272,7 +1322,7 @@ export class ReadCheckObserver implements FileReadObserver {
         subagent: input.hook.subagentId !== null,
         // R4: a subagent read judged against the parent's task because its own brief could not
         // be found.
-        briefMissing: input.hook.subagentId !== null && !input.event.subagentBrief,
+        briefMissing: this.subagentBriefMissing(input.hook.subagentId, input.event.subagentBrief),
         // D12: the subtree this read came from, or null for an ordinary one. The ledger counts
         // these apart, and they never count toward the shadow-to-live evidence rule.
         shadowOnly: eligibility.shadowOnly,
@@ -1364,10 +1414,12 @@ export class ReadCheckObserver implements FileReadObserver {
     const agent = this.options.agents.agent(event.agentId);
     const around = this.timelineAround(event.agentId, input.toolUseId);
     const displayPath = displayPathOf(realPath, event.agentCwd);
-    // R1, R4: a subagent whose brief was found is judged against its own brief and its own
-    // recent calls. A subagent whose brief could not be found falls back to the parent's, exactly
-    // as before this plan (`brief: missing`).
-    const brief = subagentId ? (event.subagentBrief ?? null) : null;
+    // R1, R4: a subagent whose brief was found and has content is judged against its own brief
+    // and its own recent calls. A subagent whose brief could not be found, or is content-free
+    // (finding #5), falls back to the parent's, exactly as before this plan (`brief: missing`).
+    const brief = this.subagentBriefMissing(subagentId, event.subagentBrief)
+      ? null
+      : (event.subagentBrief ?? null);
     // R2 searches this for every reader, subagent included; R3 only adds it to a main agent's
     // (or a brief-missing subagent's) `task` — a subagent with its own brief keeps the parent's
     // task to one line (R1), not the parent's turn prompt too.
@@ -1386,7 +1438,7 @@ export class ReadCheckObserver implements FileReadObserver {
       assignment: this.assignmentOf(event.agentId, this.stateFor(event.agentId)),
       ...(brief ? { subagentBrief: brief } : { latestPrompt }),
       pinnedRecentLine,
-      recent: brief ? (this.subagentRings.get(subagentId!) ?? []) : around.recent,
+      recent: brief ? (this.subagentRings.get(subagentId!)?.items ?? []) : around.recent,
       why: input.read.why,
       displayPath,
       size: describeSize({ ...slice, tokens: input.tokens }),
@@ -1645,7 +1697,7 @@ export class ReadCheckObserver implements FileReadObserver {
     // never got to see — never deny on that basis. A `named` read never reaches here (`ask()`
     // already returned null for one), so this is a defensive restatement of that rule, not a new
     // path to it.
-    const subagentBriefMissing = subagentId !== null && !event.subagentBrief;
+    const subagentBriefMissing = this.subagentBriefMissing(subagentId, event.subagentBrief);
     const decision = decideLiveDeny({
       answer: asked.answer,
       answered: asked.kind === "answered",
