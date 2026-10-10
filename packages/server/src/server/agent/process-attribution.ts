@@ -126,12 +126,16 @@ export interface AttributeProcessTreesOptions {
 
 /**
  * Whether `pid` is the daemon's own child — a `tea`/`git`/`gh` forge poll the daemon spawned
- * directly, say — rather than an agent's. "The daemon's own" means the ppid chain from `pid`
- * reaches `daemonPid` before it reaches any pid already inside an agent's tree
+ * directly, say — rather than an agent's. "Directly" is load-bearing: this checks `pid`'s
+ * immediate `ppid`, not an arbitrary ancestor. The daemon also forks a handful of long-lived
+ * shared services of its own — the terminal worker (`worker-terminal-manager.ts`'s
+ * `forkTerminalWorker`) is one — that are themselves direct children of the daemon but host
+ * unrelated work for many workspaces at once; a user's terminal shell is that worker's child,
+ * one hop further out, and must never inherit the worker's own daemon-owned-ness just because
+ * the daemon sits two hops up its ppid chain. Walking arbitrarily far up would misclassify that
+ * shell as a forge poll and let the sweep treat an occupied worktree as empty
  * (docs/done-janitor.md, "The sweep never counts the daemon's own child processes"). A pid
- * already in `attributedPids` is an agent's, full stop: `attributedPids` is every pid
- * `attributeProcessTrees` placed in some `agentTree.pids`, which already includes every
- * descendant, so there is nothing to walk for it. Matches on the process tree, never on a
+ * already in `attributedPids` is an agent's, full stop. Matches on the process tree, never on a
  * command name.
  */
 export function isDaemonOwnChildPid(input: {
@@ -142,16 +146,8 @@ export function isDaemonOwnChildPid(input: {
 }): boolean {
   const { pid, rows, daemonPid, attributedPids } = input;
   if (attributedPids.has(pid)) return false;
-  const rowsByPid = new Map(rows.map((row) => [row.pid, row] as const));
-  const seen = new Set<number>();
-  let current = rowsByPid.get(pid);
-  while (current && !seen.has(current.pid)) {
-    seen.add(current.pid);
-    if (current.pid === daemonPid) return true;
-    if (attributedPids.has(current.ppid)) return false;
-    current = rowsByPid.get(current.ppid);
-  }
-  return false;
+  const row = rows.find((candidate) => candidate.pid === pid);
+  return row !== undefined && row.ppid === daemonPid;
 }
 
 export function attributeProcessTrees(

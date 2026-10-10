@@ -245,4 +245,17 @@ describe("isDaemonOwnChildPid", () => {
   test("a pid missing from the sample is not assumed to be the daemon's", () => {
     expect(isDaemonOwnChildPid({ pid: 404, rows, daemonPid, attributedPids })).toBe(false);
   });
+
+  test("a terminal shell forked under the daemon's long-lived terminal-worker process is not the daemon's own", () => {
+    // daemon(100) -> terminal worker(150, direct child, long-lived, hosts many terminals)
+    // -> user's shell(250, ppid=150, cwd inside the worktree)
+    const terminalRows: ProcessSampleRow[] = [
+      ...rows,
+      row({ pid: 150, ppid: daemonPid, command: "node worker-terminal.js" }),
+      row({ pid: 250, ppid: 150, command: "/bin/zsh" }),
+    ];
+    expect(isDaemonOwnChildPid({ pid: 250, rows: terminalRows, daemonPid, attributedPids })).toBe(
+      false,
+    );
+  });
 });
