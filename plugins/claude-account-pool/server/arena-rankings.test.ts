@@ -463,6 +463,56 @@ describe("startArenaRankingsPoller", () => {
     expect(() => poller.stop()).not.toThrow();
   });
 
+  it("caps retryOnce at MAX_FAILED_BOARD_RETRY_ATTEMPTS, then a successful daily refresh resets the budget", async () => {
+    function failTextStyleControlMock() {
+      return vi.fn().mockImplementation(async (url: string) => {
+        const config = new URL(url).searchParams.get("config");
+        if (config === "text_style_control") {
+          throw new Error("still down");
+        }
+        const row = { model_name: "claude-sonnet-5.5-high", category: "overall", rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+        return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
+      }) as unknown as typeof fetch;
+    }
+    function succeedMock() {
+      return vi.fn().mockImplementation(async () => {
+        const row = { model_name: "claude-sonnet-5.5-high", category: "overall", rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+        return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
+      }) as unknown as typeof fetch;
+    }
+
+    // Seed the file with text_style_control's boards failed via the daily refresh.
+    global.fetch = failTextStyleControlMock();
+    const poller = startArenaRankingsPoller(tempDir, noInterval);
+    await runWithFakeTimers(() => poller.runOnce());
+    expect((await loadArenaRankings(tempDir))?.failedBoards.length).toBeGreaterThan(0);
+
+    // 3 retry attempts, each actually driven (not short-circuited by the cap).
+    global.fetch = failTextStyleControlMock();
+    for (let i = 0; i < 3; i++) {
+      const result = await runWithFakeTimers(() => poller.retryOnce());
+      expect(result.status).not.toBe("capped");
+    }
+
+    // A 4th attempt is capped: retryFailedBoards (and fetch) never runs.
+    global.fetch = vi.fn(async () => {
+      throw new Error("retryOnce should not have called fetch once capped");
+    }) as unknown as typeof fetch;
+    const fourth = await runWithFakeTimers(() => poller.retryOnce());
+    expect(fourth).toEqual({ status: "capped" });
+
+    // A daily refresh — success or failure — resets the attempt budget. Here it succeeds fully,
+    // so the file ends up with zero failed boards; retryOnce after it reports "no-failed-boards"
+    // (it checked, found nothing to do) rather than "capped" (it never checked at all), proving
+    // the counter was actually reset rather than left exhausted.
+    global.fetch = succeedMock();
+    await runWithFakeTimers(() => poller.runOnce());
+
+    const afterReset = await runWithFakeTimers(() => poller.retryOnce());
+    expect(afterReset).toEqual({ status: "no-failed-boards" });
+
+    poller.stop();
+  });
 });
 
 describe("retryFailedBoards", () => {
@@ -546,16 +596,53 @@ describe("retryFailedBoards", () => {
     expect(written?.failedBoards).toEqual([]);
   });
 
-  it("leaves the file as-is when the retry fails again", async () => {
+  it("leaves the file as-is when the retry fails again, and logs the failure", async () => {
     await seedFile(["text_style_control/hard_prompts"]);
     global.fetch = vi.fn().mockRejectedValue(new Error("still down")) as unknown as typeof fetch;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     const result = await runWithFakeTimers(() => retryFailedBoards(tempDir));
     expect(result).toEqual({ status: "no-recovery", stillFailed: ["text_style_control/hard_prompts"] });
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("still failing"));
 
     const written = await loadArenaRankings(tempDir);
     expect(written?.boards["agent/overall"]).toEqual([goodBoard]);
     expect(written?.failedBoards).toEqual(["text_style_control/hard_prompts"]);
+    errors.mockRestore();
+  });
+
+  it("drops the merge when the file moved underneath it (a daily refresh committed mid-retry)", async () => {
+    await seedFile(["text_style_control/hard_prompts"]);
+
+    const newerFile = {
+      fetchedAt: Date.now() + 10_000, // A daily refresh that committed after this retry's read.
+      publishDate: "2026-10-10",
+      boards: { "agent/overall": [goodBoard] },
+      unmatched: { "agent/overall": 0 },
+      failedBoards: ["webdev/overall"], // A different failure set than the one this retry is chasing.
+    };
+
+    global.fetch = vi.fn().mockImplementation(async () => {
+      // Simulate the daily refresh's write landing while this retry's fetch is still in flight.
+      await fs.writeFile(path.join(tempDir, "arena-rankings.json"), JSON.stringify(newerFile), "utf-8");
+      const row = {
+        model_name: "claude-sonnet-5.5-high",
+        category: "hard_prompts",
+        rating: 1500,
+        rating_lower: 1490,
+        rating_upper: 1510,
+        vote_count: 200,
+        leaderboard_publish_date: "2026-10-09",
+      };
+      return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await runWithFakeTimers(() => retryFailedBoards(tempDir));
+    expect(result).toEqual({ status: "superseded", stillFailed: [] });
+
+    // The retry's recovered board is dropped entirely — the newer write stands untouched.
+    const written = await loadArenaRankings(tempDir);
+    expect(written).toEqual(newerFile);
   });
 });
 
@@ -645,6 +732,72 @@ describe("HF 429/5xx backoff", () => {
     expect(result.status).toBe("success");
     expect(calls).toBeGreaterThan(1);
   });
+
+  it("honors a future HTTP-date Retry-After, waiting roughly the delta rather than the 5s default", async () => {
+    let calls = 0;
+    // HTTP-date has no sub-second precision, so toUTCString() can truncate this by up to ~1s —
+    // the assertions below leave slack for that instead of pinning an exact millisecond.
+    const retryAt = new Date(Date.now() + 2_000);
+    global.fetch = vi.fn().mockImplementation(async () => {
+      calls++;
+      if (calls === 1) {
+        return new Response("rate limited", { status: 429, headers: { "retry-after": retryAt.toUTCString() } });
+      }
+      return okPage();
+    }) as unknown as typeof fetch;
+
+    const resultPromise = refreshArenaRankings(tempDir);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(calls).toBe(1); // Not yet — not even a fully-truncated ~1s delta has elapsed.
+
+    await vi.advanceTimersByTimeAsync(2_500);
+    // Comfortably past the (possibly truncated) ~2s delta, and well short of the 5s default —
+    // proving the date-derived wait was honored instead of the default schedule.
+    expect(calls).toBeGreaterThan(1);
+
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+    expect(result.status).toBe("success");
+  });
+
+  it("clamps a past HTTP-date Retry-After to an immediate retry instead of a negative wait", async () => {
+    let calls = 0;
+    const pastDate = new Date(Date.now() - 60_000).toUTCString();
+    global.fetch = vi.fn().mockImplementation(async () => {
+      calls++;
+      if (calls === 1) {
+        return new Response("rate limited", { status: 429, headers: { "retry-after": pastDate } });
+      }
+      return okPage();
+    }) as unknown as typeof fetch;
+
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+    expect(result.status).toBe("success");
+    expect(calls).toBeGreaterThan(1); // Clamped to 0ms, not skipped or left negative.
+  });
+
+  it("caps an excessive Retry-After: fails that page immediately instead of sleeping it out", async () => {
+    // "agent" is the first config fetchAllBoards processes. Every call for it hits a 6-minute
+    // Retry-After — past MAX_RETRY_AFTER_MS (5 min) — on every attempt, forever. If the cap
+    // didn't apply, fetchHfPage would sleep 6 minutes and retry, growing this count past 1; capped,
+    // it throws on the very first 429 without ever sleeping or re-attempting that page.
+    let agentCalls = 0;
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      const config = new URL(url).searchParams.get("config");
+      if (config === "agent") {
+        agentCalls++;
+        return new Response("rate limited", { status: 429, headers: { "retry-after": String(6 * 60) } });
+      }
+      return okPage();
+    }) as unknown as typeof fetch;
+
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+
+    expect(agentCalls).toBe(1); // No retry attempted — failed fast instead of sleeping 6 minutes.
+    expect(result.status).toBe("success"); // Every other config still succeeded; only "agent" failed.
+    const written = await loadArenaRankings(tempDir);
+    expect(written?.failedBoards).toContain("agent/overall");
+  });
 });
 
 describe("fetching a config shared by several categories", () => {
@@ -702,5 +855,77 @@ describe("fetching a config shared by several categories", () => {
     for (const category of categoryOrder) {
       expect(written?.boards[`text_style_control/${category}`]).toHaveLength(1);
     }
+  });
+
+  it("doesn't drop rows when a category's block is interleaved (non-contiguous) in the config", async () => {
+    // "coding" rows appear, then "expert" interrupts, then "coding" resumes — violating the
+    // documented contiguous-block assumption. An earlier version tracked a "finished" category
+    // via the previous row's category changing, which would permanently drop the resumed "coding"
+    // rows at offset 2. The fix removed that tracking: every row whose category is wanted gets
+    // bucketed regardless of what came before or after it.
+    const pages = [
+      { category: "coding", name: "claude-sonnet-5.5-high" }, // offset 0
+      { category: "expert", name: "claude-opus-5-high" }, // offset 1 — interrupts "coding"
+      { category: "coding", name: "claude-opus-5.5-high" }, // offset 2 — "coding" resumes
+    ];
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      const config = u.searchParams.get("config");
+      const offset = Number(u.searchParams.get("offset"));
+      if (config !== "text_style_control") {
+        const row = { model_name: "claude-sonnet-5.5-high", category: "overall", rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+        return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
+      }
+      if (offset >= pages.length) {
+        return new Response(JSON.stringify({ rows: [], num_rows_total: pages.length }), { status: 200 });
+      }
+      const page = pages[offset];
+      const row = { model_name: page.name, category: page.category, rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+      return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: pages.length }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+    expect(result.status).toBe("success");
+
+    const written = await loadArenaRankings(tempDir);
+    // Both "coding" rows (offset 0 and the resumed offset 2) survive, not just the first.
+    expect(written?.boards["text_style_control/coding"]).toHaveLength(2);
+    expect(written?.boards["text_style_control/expert"]).toHaveLength(1);
+  });
+
+  it("keeps rows already collected for other categories when a later page in the same config fails", async () => {
+    // "coding"'s entire block (2 rows) is read successfully on pages 0-1; page 2 (which would
+    // have served "expert") then fails every attempt. The config-level fetch should still credit
+    // "coding" with its 2 rows instead of discarding everything the config ever collected.
+    const codingRows = [
+      { model_name: "claude-sonnet-5.5-high", category: "coding" },
+      { model_name: "claude-opus-5-high", category: "coding" },
+    ];
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      const config = u.searchParams.get("config");
+      const offset = Number(u.searchParams.get("offset"));
+      if (config !== "text_style_control") {
+        const row = { model_name: "claude-sonnet-5.5-high", category: "overall", rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+        return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
+      }
+      if (offset < codingRows.length) {
+        const page = codingRows[offset];
+        const row = { model_name: page.model_name, category: page.category, rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+        return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 10 }), { status: 200 });
+      }
+      // Every later page (would-be "expert" rows) fails every attempt.
+      return new Response("internal error", { status: 503 });
+    }) as unknown as typeof fetch;
+
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+    expect(result.status).toBe("success"); // Other configs succeeded; text_style_control is partial, not total, failure.
+
+    const written = await loadArenaRankings(tempDir);
+    // "coding" (fully read before the failing page) keeps its rows.
+    expect(written?.boards["text_style_control/coding"]).toHaveLength(2);
+    // "expert" (never reached) is the one marked failed, not "coding".
+    expect(written?.failedBoards).toContain("text_style_control/expert");
+    expect(written?.failedBoards).not.toContain("text_style_control/coding");
   });
 });

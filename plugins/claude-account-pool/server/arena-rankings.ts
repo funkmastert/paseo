@@ -16,6 +16,7 @@
 
 import * as fs from "fs/promises";
 import * as path from "path";
+import { randomUUID } from "crypto";
 import {
   allBoardIds,
   arenaAliasFor,
@@ -53,6 +54,14 @@ const MAX_PAGES_PER_CONFIG = 40;
 const REQUEST_SPACING_MS = 1_500;
 /** Backoff schedule for a 429/5xx (or other transient error), honored unless `Retry-After` says otherwise. */
 const RETRY_BACKOFFS_MS = [5_000, 15_000, 45_000];
+/**
+ * Ceiling on how long a `Retry-After` is allowed to stall one page fetch. Beyond this, we don't
+ * wait at all — the page fails fast and the board falls to `failedBoards` for the short-cycle
+ * retry poller to pick up later, rather than one huge external value (malformed, or an HF
+ * multi-hour hint) blocking the whole refresh and, with it, the daily-refresh-triggered reset of
+ * the retry poller's own attempt budget.
+ */
+const MAX_RETRY_AFTER_MS = 5 * 60 * 1000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -211,6 +220,9 @@ async function fetchHfPage(config: string, offset: number): Promise<HfRowsPage> 
       return { rows: data.rows, num_rows_total: data.num_rows_total };
     } catch (e) {
       lastError = e;
+      if (e instanceof RetryableHfError && e.retryAfterMs !== undefined && e.retryAfterMs > MAX_RETRY_AFTER_MS) {
+        throw e; // Past the cap: fail this page now rather than block on the server's say-so.
+      }
       if (attempt < RETRY_BACKOFFS_MS.length) {
         const retryAfterMs = e instanceof RetryableHfError ? e.retryAfterMs : undefined;
         await sleep(retryAfterMs ?? RETRY_BACKOFFS_MS[attempt]);
@@ -221,36 +233,55 @@ async function fetchHfPage(config: string, offset: number): Promise<HfRowsPage> 
 }
 
 /**
- * Page through one HF config from offset 0, bucketing rows by `category` for
- * every category in `wantedCategories`, and stopping once every wanted
- * category's contiguous block has ended (or the config runs out of rows).
- * Several of our boards share one config — `text_style_control` alone covers
- * five categories — so reading the config once here instead of once per
- * category (the old per-board loop) cuts the request count sharply: the old
- * code re-paged from offset 0 for every category sharing a config,
- * re-reading every earlier category's block each time.
+ * Page through one HF config from offset 0, bucketing every row whose
+ * `category` is in `wantedCategories`, until the config runs out of rows or
+ * the page safety cap is hit. Several of our boards share one config —
+ * `text_style_control` alone covers five categories — so reading the config
+ * once here instead of once per category (the old per-board loop) cuts the
+ * request count sharply: the old code re-paged from offset 0 for every
+ * category sharing a config, re-reading every earlier category's block each
+ * time.
+ *
+ * This never tries to detect a category's block "ending" to stop early:
+ * an earlier version did, by watching for a transition away from the
+ * previous row's category, but that silently dropped a category's later
+ * rows if it ever reappeared non-contiguously (interleaved with another
+ * wanted category) — the whole config is read once in production anyway
+ * since every category each config serves is wanted by some kind of work,
+ * so the early-stop bought nothing here but a fragile assumption.
+ *
+ * On a page fetch throwing (after its own retries are exhausted), returns
+ * whatever was collected so far instead of discarding it: a category fully
+ * read before the failing page stays usable, which keeps a later-page error
+ * from being worse than the old per-board code, where one board's failure
+ * never touched another's independently-fetched data.
  */
-async function fetchConfigCategoryRows(config: string, wantedCategories: ReadonlySet<string>): Promise<Map<string, LeaderboardRow[]>> {
+async function fetchConfigCategoryRows(
+  config: string,
+  wantedCategories: ReadonlySet<string>,
+): Promise<{ rowsByCategory: Map<string, LeaderboardRow[]>; error: unknown | undefined }> {
   const collected = new Map<string, LeaderboardRow[]>();
-  const finished = new Set<string>();
   let offset = 0;
-  let lastCategory: string | undefined;
 
   for (let page = 0; page < MAX_PAGES_PER_CONFIG; page++) {
     if (page > 0) {
       await sleep(REQUEST_SPACING_MS);
     }
-    const { rows, num_rows_total } = await fetchHfPage(config, offset);
+    let rows: HfRowsPage["rows"];
+    let num_rows_total: number;
+    try {
+      const pageResult = await fetchHfPage(config, offset);
+      rows = pageResult.rows;
+      num_rows_total = pageResult.num_rows_total;
+    } catch (e) {
+      return { rowsByCategory: collected, error: e };
+    }
     if (rows.length === 0) {
       break;
     }
     for (const item of rows) {
       const category = item.row.category;
-      if (lastCategory !== undefined && category !== lastCategory && wantedCategories.has(lastCategory)) {
-        finished.add(lastCategory); // The previous block ended.
-      }
-      lastCategory = category;
-      if (wantedCategories.has(category) && !finished.has(category)) {
+      if (wantedCategories.has(category)) {
         const bucket = collected.get(category);
         if (bucket) {
           bucket.push(item.row);
@@ -263,11 +294,8 @@ async function fetchConfigCategoryRows(config: string, wantedCategories: Readonl
     if (offset >= num_rows_total) {
       break;
     }
-    if ([...wantedCategories].every((c) => finished.has(c))) {
-      break;
-    }
   }
-  return collected;
+  return { rowsByCategory: collected, error: undefined };
 }
 
 /**
@@ -276,6 +304,12 @@ async function fetchConfigCategoryRows(config: string, wantedCategories: Readonl
  * categories are wanted. Spaces requests between configs the same way
  * `fetchConfigCategoryRows` spaces pages within one, so a refresh never
  * bursts the datasets-server.
+ *
+ * A board whose category has no collected rows AND the config scan hit an
+ * error is marked failed; a board with collected rows is normalized and
+ * kept even if the same config scan errored on a later page (partial credit
+ * — see `fetchConfigCategoryRows`). A board with no collected rows and no
+ * error is a legitimately empty board, same as before this fix.
  */
 async function fetchBoardsGroupedByConfig(boardIds: readonly string[]): Promise<{
   boards: Record<string, ArenaRankingRow[]>;
@@ -309,19 +343,20 @@ async function fetchBoardsGroupedByConfig(boardIds: readonly string[]): Promise<
     if (i > 0) {
       await sleep(REQUEST_SPACING_MS);
     }
-    try {
-      const wantedCategories = new Set(entries.map((e) => e.category));
-      const rowsByCategory = await fetchConfigCategoryRows(config, wantedCategories);
-      for (const { category, boardId } of entries) {
-        const { rows, unmatched: boardUnmatched } = normalizeBoardRows(rowsByCategory.get(category) ?? []);
-        boards[boardId] = rows;
-        unmatched[boardId] = boardUnmatched;
-      }
-    } catch (e) {
-      console.error(`arena-rankings: failed to fetch config ${config}: ${e instanceof Error ? e.message : e}`);
-      for (const { boardId } of entries) {
+    const wantedCategories = new Set(entries.map((e) => e.category));
+    const { rowsByCategory, error } = await fetchConfigCategoryRows(config, wantedCategories);
+    if (error) {
+      console.error(`arena-rankings: failed to fetch config ${config}: ${error instanceof Error ? error.message : error}`);
+    }
+    for (const { category, boardId } of entries) {
+      const categoryRows = rowsByCategory.get(category);
+      if (categoryRows === undefined && error) {
         failedBoards.push(boardId);
+        continue;
       }
+      const { rows, unmatched: boardUnmatched } = normalizeBoardRows(categoryRows ?? []);
+      boards[boardId] = rows;
+      unmatched[boardId] = boardUnmatched;
     }
   }
 
@@ -341,10 +376,15 @@ function rankingsFilePath(paseoHome: string): string {
   return path.join(paseoHome, "arena-rankings.json");
 }
 
-/** Write the rankings file atomically: write to a temp sibling, then rename over the target. */
+/**
+ * Write the rankings file atomically: write to a temp sibling, then rename over the target. The
+ * temp path is unique per call (not just per-process) — the daily refresh and the failed-board
+ * retry both call this from the same process, and a shared `pid`-only name let their writes
+ * collide on the same temp file if they ever overlapped.
+ */
 async function writeRankingsFile(paseoHome: string, file: ArenaRankingsFile): Promise<void> {
   const targetPath = rankingsFilePath(paseoHome);
-  const tempPath = `${targetPath}.tmp-${process.pid}`;
+  const tempPath = `${targetPath}.tmp-${process.pid}-${randomUUID()}`;
   await fs.writeFile(tempPath, JSON.stringify(file, null, 2), "utf-8");
   await fs.rename(tempPath, targetPath);
 }
@@ -434,6 +474,18 @@ export async function loadArenaRankings(paseoHome: string, maxAgeHours = 72): Pr
  * into the file atomically. Returns `"no-failed-boards"` when there is
  * nothing to retry (no file yet, or the last refresh had none), so the
  * poller's retry loop knows to reset its attempt counter.
+ *
+ * Re-reads the file immediately before writing and merges onto *that* copy,
+ * not the one read at the start: a daily refresh can commit while the retry
+ * fetch (which can take a while — up to `MAX_PAGES_PER_CONFIG` pages, each
+ * with its own retries) is in flight. If the file moved (`fetchedAt`
+ * changed) since this retry started, the daily write already supersedes
+ * whatever this retry would merge, so the retry's result is dropped rather
+ * than clobbering it — a plain read-then-write has no way to detect that.
+ * `startArenaRankingsPoller` additionally serializes the daily and retry
+ * runs so in the normal case this branch is unreachable; it only matters for
+ * a caller that invokes this directly, as the retry poller's exposed
+ * `retryOnce` does for tests.
  */
 export async function retryFailedBoards(
   paseoHome: string,
@@ -441,26 +493,89 @@ export async function retryFailedBoards(
   | { status: "no-failed-boards" }
   | { status: "merged"; recovered: string[]; stillFailed: string[] }
   | { status: "no-recovery"; stillFailed: string[] }
+  | { status: "superseded"; stillFailed: string[] }
 > {
   const file = await readRankingsFile(paseoHome);
   if (!file || file.failedBoards.length === 0) {
     return { status: "no-failed-boards" };
   }
+  const retryStartedFromFetchedAt = file.fetchedAt;
 
   const { boards, unmatched, failedBoards: stillFailed } = await fetchBoardsGroupedByConfig(file.failedBoards);
   const recovered = file.failedBoards.filter((id) => !stillFailed.includes(id));
   if (recovered.length === 0) {
+    console.error(`arena-rankings: retry found ${stillFailed.length} board(s) still failing: ${stillFailed.join(", ")}`);
     return { status: "no-recovery", stillFailed };
   }
 
+  const latest = await readRankingsFile(paseoHome);
+  if (!latest || latest.fetchedAt !== retryStartedFromFetchedAt) {
+    console.error(`arena-rankings: retry recovered ${recovered.length} board(s) but the file moved underneath it; dropping the merge`);
+    return { status: "superseded", stillFailed };
+  }
+
   const merged: ArenaRankingsFile = {
-    ...file,
-    boards: { ...file.boards, ...boards },
-    unmatched: { ...file.unmatched, ...unmatched },
+    ...latest,
+    boards: { ...latest.boards, ...boards },
+    unmatched: { ...latest.unmatched, ...unmatched },
     failedBoards: stillFailed,
   };
   await writeRankingsFile(paseoHome, merged);
   return { status: "merged", recovered, stillFailed };
+}
+
+/**
+ * Serializes calls through a shared tail promise: each call waits for the
+ * previous one to settle (success or failure) before it starts. Used so the
+ * daily refresh and the failed-board retry — two independent
+ * `createIntervalPoller`s against the same file — never run at once, which
+ * is what makes `retryFailedBoards`'s own re-check-before-write (the
+ * `"superseded"` path) unreachable in practice rather than just handled.
+ */
+function createRunLock() {
+  let tail: Promise<unknown> = Promise.resolve();
+  return function withLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = tail.then(fn, fn);
+    tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+}
+
+/** Everything `retryFailedBoards` can report, plus `"capped"` for when the attempt budget is spent. */
+type FailedBoardRetryResult = Awaited<ReturnType<typeof retryFailedBoards>> | { status: "capped" };
+
+/**
+ * Owns the retry poller's attempt budget (`MAX_FAILED_BOARD_RETRY_ATTEMPTS`)
+ * so it's a plain, directly testable unit instead of logic buried in an
+ * interval callback's closure — `startArenaRankingsPoller` wires this into
+ * the retry interval and also exposes it as `retryOnce` for tests to drive
+ * the cap and the reset behavior without waiting on real timers.
+ */
+function createFailedBoardRetryer(paseoHome: string): { runOnce: () => Promise<FailedBoardRetryResult>; reset: () => void } {
+  let attempts = 0;
+  return {
+    async runOnce(): Promise<FailedBoardRetryResult> {
+      if (attempts >= MAX_FAILED_BOARD_RETRY_ATTEMPTS) {
+        return { status: "capped" };
+      }
+      const result = await retryFailedBoards(paseoHome);
+      if (result.status === "no-failed-boards") {
+        attempts = 0;
+        return result;
+      }
+      attempts++;
+      if (result.status === "merged") {
+        console.log(`arena-rankings: recovered ${result.recovered.length} previously-failed board(s): ${result.recovered.join(", ")}`);
+      }
+      return result;
+    },
+    reset(): void {
+      attempts = 0;
+    },
+  };
 }
 
 /**
@@ -475,7 +590,9 @@ export async function retryFailedBoards(
  * shorter interval for a few attempts, merging any recovery into the file
  * (`retryFailedBoards`) so a board that failed once isn't stuck for a full
  * day. The attempt counter resets whenever a daily refresh runs (a fresh
- * baseline of failures) or a retry finds nothing left to retry.
+ * baseline of failures) or a retry finds nothing left to retry. The two
+ * pollers run through a shared lock (`createRunLock`) so they never touch
+ * the file at the same time.
  */
 export function startArenaRankingsPoller(
   paseoHome: string,
@@ -485,49 +602,39 @@ export function startArenaRankingsPoller(
     setIntervalFn?: typeof setInterval;
     clearIntervalFn?: typeof clearInterval;
   } = {},
-): IntervalPoller<void> {
-  let retryAttempts = 0;
+): IntervalPoller<void> & { retryOnce: () => Promise<FailedBoardRetryResult> } {
+  const withLock = createRunLock();
+  const retryer = createFailedBoardRetryer(paseoHome);
 
   const dailyPoller = createIntervalPoller<void>({
     intervalMs: options.intervalMs ?? REFRESH_INTERVAL_MS,
     setIntervalFn: options.setIntervalFn,
     clearIntervalFn: options.clearIntervalFn,
-    run: async () => {
-      const result = await refreshArenaRankings(paseoHome);
-      retryAttempts = 0;
-      if (result.status === "failed") {
-        console.error(`arena-rankings: daily refresh failed, keeping the previous file: ${result.error}`);
-      } else {
-        const unmatchedTotal = Object.values(result.unmatched).reduce((sum, n) => sum + n, 0);
-        console.log(`arena-rankings: refreshed ${result.boardCount} board(s), ${unmatchedTotal} unmatched row(s) across them`);
-      }
-    },
+    run: () =>
+      withLock(async () => {
+        const result = await refreshArenaRankings(paseoHome);
+        retryer.reset();
+        if (result.status === "failed") {
+          console.error(`arena-rankings: daily refresh failed, keeping the previous file: ${result.error}`);
+        } else {
+          const unmatchedTotal = Object.values(result.unmatched).reduce((sum, n) => sum + n, 0);
+          console.log(`arena-rankings: refreshed ${result.boardCount} board(s), ${unmatchedTotal} unmatched row(s) across them`);
+        }
+      }),
   });
 
   const retryPoller = createIntervalPoller<void>({
     intervalMs: options.retryIntervalMs ?? FAILED_BOARD_RETRY_INTERVAL_MS,
     setIntervalFn: options.setIntervalFn,
     clearIntervalFn: options.clearIntervalFn,
-    run: async () => {
-      if (retryAttempts >= MAX_FAILED_BOARD_RETRY_ATTEMPTS) {
-        return;
-      }
-      const result = await retryFailedBoards(paseoHome);
-      if (result.status === "no-failed-boards") {
-        retryAttempts = 0;
-        return;
-      }
-      retryAttempts++;
-      if (result.status === "merged") {
-        console.log(`arena-rankings: recovered ${result.recovered.length} previously-failed board(s): ${result.recovered.join(", ")}`);
-      }
-    },
+    run: () => withLock(() => retryer.runOnce()).then(() => undefined),
   });
 
   void dailyPoller.runOnce();
 
   return {
     runOnce: () => dailyPoller.runOnce(),
+    retryOnce: () => withLock(() => retryer.runOnce()),
     stop: () => {
       dailyPoller.stop();
       retryPoller.stop();
