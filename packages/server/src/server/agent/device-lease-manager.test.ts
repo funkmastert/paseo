@@ -1364,6 +1364,8 @@ describe("DeviceLeaseManager simulator teardown config", () => {
       agents: [IDLE_HOLDER],
     });
     await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    // The agent's own CLI process, present and idle, so the tree is attributable at all.
+    harness.state.rows.push(agentRootRow(850, "agent-1"));
 
     harness.state.nowMs += 6 * 60_000;
     await sweepRows(harness);
@@ -1377,6 +1379,7 @@ describe("DeviceLeaseManager simulator teardown config", () => {
       agents: [IDLE_HOLDER],
     });
     await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    harness.state.rows.push(agentRootRow(850, "agent-1"));
 
     harness.state.nowMs += 31 * 60_000;
     await sweepRows(harness);
@@ -1486,6 +1489,7 @@ describe("DeviceLeaseManager idle release", () => {
   test("a booted: true simulator lease is never idle-released; the teardown still shuts it down at its own limit", async () => {
     const harness = createManager({ agents: [IDLE_HOLDER] });
     await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    harness.state.rows.push(agentRootRow(850, "agent-1"));
 
     harness.state.nowMs += 16 * 60_000;
     await sweepRows(harness);

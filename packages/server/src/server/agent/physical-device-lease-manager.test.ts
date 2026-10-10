@@ -610,6 +610,8 @@ describe("PhysicalDeviceLeaseManager idle release", () => {
       agentId: "agent-1",
       command: `adb -s ${USB_PIXEL.id} install app.apk`,
     });
+    // The agent's own CLI process, present and idle, so the tree is attributable at all.
+    harness.state.rows = [agentRootRow(500, "agent-1")];
     sweepRows(harness);
 
     harness.state.nowMs += 15 * MINUTE;
@@ -708,6 +710,7 @@ describe("PhysicalDeviceLeaseManager idle release", () => {
       agentId: "agent-1",
       command: `adb -s ${USB_PIXEL.id} install app.apk`,
     });
+    harness.state.rows = [agentRootRow(500, "agent-1")];
     sweepRows(harness);
 
     harness.state.nowMs += 15 * MINUTE;

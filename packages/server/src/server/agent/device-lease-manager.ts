@@ -506,7 +506,13 @@ function isLeaseInUse(input: {
   const { evidence } = input;
   if (input.holder?.isRunning || !evidence) return true;
   const tree = evidence.agentTrees.find((entry) => entry.agentId === input.lease.agentId);
-  if (tree && hasLiveCommands(evidence.rows, tree)) return true;
+  // No tree at all is not evidence of nothing running — Codex's `app-server` and OpenCode's
+  // shared `serve` never carry the `callerAgentId` marker attribution keys on
+  // (docs/stalled-agents.md), so every non-Claude agent would otherwise read as permanently
+  // idle. Treat a missing tree as inconclusive, the same as no evidence at all, rather than
+  // falling through to the device-id check as if no live command existed.
+  if (!tree) return true;
+  if (hasLiveCommands(evidence.rows, tree)) return true;
   if (!input.lease.deviceId) return false;
   // Every process inside a booted simulator names its UDID (its data directory is in the
   // path), so those are the device itself, not something using it.
