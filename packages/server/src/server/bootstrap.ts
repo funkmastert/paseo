@@ -1145,7 +1145,7 @@ function createDoneJanitor(input: {
   worktreeSnapshotter: WorktreeSnapshotter;
   serverId: string;
   logger: Logger;
-  isDaemonOwnProcess?: (pid: number) => boolean;
+  isDaemonOwnProcess?: (pid: number) => boolean | "unknown";
 }): AgentDoneJanitor {
   const { agentManager, agentStorage, terminalManager, logger } = input;
   const overrides = input.config.doneJanitorOverrides;

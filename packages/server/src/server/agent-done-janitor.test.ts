@@ -151,7 +151,7 @@ function harness(input: {
   /** Why a snapshot's backup is not verified; absent: it is. */
   unverifiedBackup?: (snapshot: WorktreeSnapshotResult) => string | null;
   processes?: (directory: string) => ProcessScan;
-  isDaemonOwnProcess?: (pid: number) => boolean;
+  isDaemonOwnProcess?: (pid: number) => boolean | "unknown";
   scheduledCwds?: string[];
   runningScripts?: number;
   /** Open terminals per read; overrides `terminals`. */
@@ -3058,6 +3058,49 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
           reason: "a process runs inside it: bun run build (pid 555)",
         }),
       );
+    });
+
+    test("an 'unknown' daemon-ownership verdict still keeps the worktree, same as a confident false (R4)", async () => {
+      const h = owned({
+        processes: () => ({
+          kind: "scanned",
+          processes: [{ pid: 555, command: "bun run build", path: PASEO }],
+        }),
+        isDaemonOwnProcess: () => "unknown",
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: "a process runs inside it: bun run build (pid 555)",
+        }),
+      );
+    });
+
+    test("an 'unknown' daemon-ownership verdict does not start the R5 cooldown, unlike a confident false", async () => {
+      let scans = 0;
+      const h = owned({
+        processes: () => {
+          scans += 1;
+          return {
+            kind: "scanned",
+            processes: [{ pid: 555, command: "bun run build", path: PASEO }],
+          };
+        },
+        isDaemonOwnProcess: () => "unknown",
+      });
+
+      await h.janitor.tick();
+      expect(scans).toBe(1);
+
+      h.setNow(NOW + 3 * HOUR); // would still be inside a 6h cooldown, if one had started
+      await h.janitor.tick();
+
+      // No cooldown: the scan runs again rather than being skipped as already-known-kept.
+      expect(scans).toBe(2);
     });
 
     test("the kept cooldown (R5): an unbacked ignored path is skipped for 6h and spends no budget", async () => {

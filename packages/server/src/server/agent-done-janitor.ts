@@ -256,10 +256,12 @@ export interface DoneJanitorDependencies {
   listProcessesInside(directory: string): Promise<ProcessScan>;
   /**
    * Whether `pid` is the daemon's own child (a forge poll it spawned directly), never an agent's
-   * — see `isDaemonOwnChildPid` (process-attribution.ts). Absent: nothing is excluded, so a build
-   * that predates this still keeps every worktree a process sits in, same as before (R4).
+   * — see `isDaemonOwnChildPid` (process-attribution.ts). `"unknown"` when there is no fresh
+   * attribution sample to answer from (see `daemon-process-ownership.ts`) — callers must not treat
+   * that the same as a confident `false`. Absent: nothing is excluded, so a build that predates
+   * this still keeps every worktree a process sits in, same as before (R4).
    */
-  isDaemonOwnProcess?(pid: number): boolean;
+  isDaemonOwnProcess?(pid: number): boolean | "unknown";
   /**
    * Snapshots a worktree's uncommitted and unpushed work under `refs/backup/` without touching
    * it (docs/work-snapshots.md). Called before a dead agent is archived and before any worktree
@@ -1015,14 +1017,18 @@ export class AgentDoneJanitor {
     }
     const isDaemonOwnProcess = this.deps.isDaemonOwnProcess;
     const processes = isDaemonOwnProcess
-      ? scan.processes.filter((process) => !isDaemonOwnProcess(process.pid))
+      ? scan.processes.filter((process) => isDaemonOwnProcess(process.pid) !== true)
       : scan.processes;
     const [first] = processes;
     if (!first) return null;
     const others = processes.length > 1 ? ` and ${processes.length - 1} more` : "";
+    // "unknown" (no fresh attribution sample yet) can't rule out this pid being a daemon forge
+    // poll that just hasn't shown up in a sample — tag no category so R5 never starts a cooldown
+    // off a guess; a confident "not the daemon's own" still earns the normal cooldown.
+    const category = isDaemonOwnProcess?.(first.pid) === false ? "process" : undefined;
     return {
       reason: `a process runs inside it: ${first.command} (pid ${first.pid})${others}`,
-      category: "process",
+      category,
     };
   }
 
