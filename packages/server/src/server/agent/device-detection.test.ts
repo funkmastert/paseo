@@ -163,4 +163,23 @@ describe("collectDeviceIdReferences", () => {
   test("reports nothing for a sample with no UDIDs in it", () => {
     expect(collectDeviceIdReferences([row({ pid: 1, command: EMULATOR_LAUNCHER })]).size).toBe(0);
   });
+
+  test("a known device id matches as a whole token, for an AVD name or adb serial", () => {
+    const references = collectDeviceIdReferences(
+      [
+        row({ pid: 1, command: "/sdk/emulator/emulator -avd fake_pixel_a" }),
+        row({ pid: 2, command: "adb -s fake_pixel_a logcat" }),
+      ],
+      ["fake_pixel_a"],
+    );
+    expect(references.get("fake_pixel_a")?.pids).toEqual([1, 2]);
+  });
+
+  test("a known device id only matches whole tokens, not a substring of a longer word", () => {
+    const references = collectDeviceIdReferences(
+      [row({ pid: 1, command: "emulator -avd pixel_7a" })],
+      ["pixel_7"],
+    );
+    expect(references.has("pixel_7")).toBe(false);
+  });
 });
