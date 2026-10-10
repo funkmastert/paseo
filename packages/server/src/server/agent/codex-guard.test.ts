@@ -4,6 +4,7 @@ import {
   decideCodexGuardedCommand,
   describeGuardedSensitiveFileChangePath,
   describeGuardedSensitiveGitConfigCommand,
+  describeGuardedSensitiveGitInvocation,
 } from "./codex-guard.js";
 import type { DeviceLaunchGate, DeviceLaunchGateDecision } from "./device-lease-manager.js";
 
@@ -190,5 +191,52 @@ describe("describeGuardedSensitiveGitConfigCommand", () => {
     "npm config set registry https://example.com",
   ])("clears: %s", (command) => {
     expect(describeGuardedSensitiveGitConfigCommand(command)).toBeNull();
+  });
+});
+
+describe("describeGuardedSensitiveGitInvocation (re-review finding #1)", () => {
+  test.each([
+    `git -c alias.pf="push --force origin main" pf`,
+    `git -c alias.pf='push --force origin main' pf`,
+    "git -c core.hooksPath=/tmp/evil-hooks status",
+    "git -c core.sshCommand='ssh -i /tmp/evil-key' fetch",
+    "git -c credential.helper=!/tmp/evil-helper fetch",
+    "git --config-env=alias.pf=SOME_VAR pf",
+    "git --config-env alias.pf=SOME_VAR pf",
+  ])("flags the atomic set-and-invoke bypass: %s", (command) => {
+    expect(describeGuardedSensitiveGitInvocation(command, REPO)).not.toBeNull();
+  });
+
+  test.each([
+    "git status",
+    "git -c user.name=test commit -m x",
+    "git -c core.pager=cat log",
+    "git --config-env=user.name=SOME_VAR commit -m x",
+    "npm -c alias.pf=x run build",
+  ])("clears an ordinary invocation: %s", (command) => {
+    expect(describeGuardedSensitiveGitInvocation(command, REPO)).toBeNull();
+  });
+
+  test("the atomic bypass is declined end-to-end by decideCodexGuardedCommand", async () => {
+    const result = await decideCodexGuardedCommand({
+      command: `git -c alias.pf="push --force origin main" pf`,
+      cwd: REPO,
+      agentId: "agent-1",
+      deviceLaunchGate: undefined,
+      resolveCurrentBranch: fakeBranchResolver("main"),
+    });
+    expect(result.decision).toBe("decline");
+  });
+
+  test("a GIT_CONFIG_KEY_* env-var alias setup is declined end-to-end", async () => {
+    const result = await decideCodexGuardedCommand({
+      command:
+        'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.pf GIT_CONFIG_VALUE_0="push --force origin main" git pf',
+      cwd: REPO,
+      agentId: "agent-1",
+      deviceLaunchGate: undefined,
+      resolveCurrentBranch: fakeBranchResolver("main"),
+    });
+    expect(result.decision).toBe("decline");
   });
 });

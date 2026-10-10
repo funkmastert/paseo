@@ -5,6 +5,7 @@ import {
   type CurrentBranchResolver,
 } from "./catastrophe-gate.js";
 import type { DeviceLaunchGate } from "./device-lease-manager.js";
+import { commandName, walkShellCommands, type ExpandedWord } from "./shell-commands.js";
 
 export interface CodexGuardDecision {
   decision: "accept" | "decline";
@@ -90,6 +91,112 @@ export function describeGuardedSensitiveGitConfigCommand(command: string): strin
   return null;
 }
 
+function isSensitiveGitConfigKey(key: string): boolean {
+  const lower = key.trim().toLowerCase();
+  return (
+    lower.startsWith("alias.") ||
+    lower === "core.hookspath" ||
+    lower === "core.sshcommand" ||
+    lower.endsWith(".helper")
+  );
+}
+
+// `GIT_CONFIG_KEY_0=alias.pf GIT_CONFIG_VALUE_0="push --force origin main" git pf` sets the same
+// config through environment variables instead of `-c`, with no "config" token anywhere in the
+// command text -- GIT_CONFIG_SENSITIVE_KEY_PATTERN above never sees it. Checked on the key the
+// env var names, the same sensitivity test as everywhere else in this file.
+const GIT_CONFIG_ENV_KEY_PATTERN = /\bGIT_CONFIG_KEY_\d+\s*=\s*['"]?([^\s'";]+)/gi;
+
+function describeGuardedSensitiveGitConfigEnv(command: string): string | null {
+  for (const match of command.matchAll(GIT_CONFIG_ENV_KEY_PATTERN)) {
+    const key = match[1];
+    if (key && isSensitiveGitConfigKey(key)) {
+      return "a GIT_CONFIG_KEY_* environment assignment that sets an alias, hook path, ssh command, or helper";
+    }
+  }
+  return null;
+}
+
+/**
+ * `checkGit`'s own option-skipping loop (catastrophe-gate.ts) discards `-c key=value` and
+ * `--config-env key=var` without ever reading `key` -- so `git -c alias.pf="push --force origin
+ * main" pf` sets and invokes the alias in one atomic command, never reaching the literal `push`
+ * token `checkGitPush` matches on, and never containing the literal word `config` either (review
+ * finding #1). Walking the same shell tokenizer the catastrophe gate uses, this looks at every
+ * top-level `git` invocation's own `-c`/`--config-env` options directly, regardless of what
+ * subcommand or alias follows. An option whose value cannot be resolved (a substitution, an
+ * unexpanded variable) is treated as sensitive too -- the same fail-closed-on-ambiguity rule as
+ * everywhere else in this guard.
+ */
+interface GitConfigOptionMatch {
+  /** The option's value text, or null when it is missing or unresolvable. */
+  value: string | null;
+  /** Whether this option's value lives in the next argument (`-c`/`--config-env`) rather than
+   * inline (`--config-env=key=var`), so the caller knows whether to skip it too. */
+  consumedNext: boolean;
+}
+
+/** `-c key=value`, `--config-env key=var`, or `--config-env=key=var` at `args[index]`; null when
+ * `args[index]` is none of those. */
+function matchGitConfigOption(args: ExpandedWord[], index: number): GitConfigOptionMatch | null {
+  const arg = args[index];
+  if (!arg) return null;
+  const text = arg.resolved ? arg.text : null;
+  if (text !== null && text.startsWith("--config-env=")) {
+    return { value: text.slice("--config-env=".length), consumedNext: false };
+  }
+  if (text === "-c" || text === "--config-env") {
+    const valueArg = args[index + 1];
+    return { value: valueArg?.resolved ? valueArg.text : null, consumedNext: true };
+  }
+  return null;
+}
+
+export function describeGuardedSensitiveGitInvocation(command: string, cwd: string): string | null {
+  let sensitiveReason: string | null = null;
+  try {
+    walkShellCommands(
+      command,
+      { cwd, home: null },
+      {
+        command(args: ExpandedWord[]): boolean {
+          const program = args[0];
+          if (!program?.resolved || commandName(program.text) !== "git") {
+            return false;
+          }
+          for (let index = 1; index < args.length; index++) {
+            const match = matchGitConfigOption(args, index);
+            if (!match) continue;
+            if (match.value === null) {
+              // Either the value is unresolvable, or the option's own argument is missing --
+              // both are ambiguous enough to decline rather than assume safety.
+              sensitiveReason = "a git -c/--config-env option whose value could not be resolved";
+              return true;
+            }
+            const key = match.value.split("=", 1)[0] ?? match.value;
+            if (isSensitiveGitConfigKey(key)) {
+              sensitiveReason =
+                "a git -c/--config-env option that sets an alias, hook path, ssh command, or helper";
+              return true;
+            }
+            if (match.consumedNext) {
+              index++;
+            }
+          }
+          return false;
+        },
+        outputRedirect(): boolean {
+          return false;
+        },
+      },
+    );
+  } catch {
+    // A tokenization failure here is not proof of anything; the caller's own catch-all already
+    // declines on error.
+  }
+  return sensitiveReason;
+}
+
 export interface CodexGuardLogger {
   warn: (obj: object, msg?: string) => void;
 }
@@ -137,7 +244,10 @@ export async function decideCodexGuardedCommand(
         );
         return { decision: "decline", reason: formatCatastropheDenial(decision, input.command) };
       }
-      const gitConfigReason = describeGuardedSensitiveGitConfigCommand(input.command);
+      const gitConfigReason =
+        describeGuardedSensitiveGitConfigCommand(input.command) ??
+        describeGuardedSensitiveGitConfigEnv(input.command) ??
+        describeGuardedSensitiveGitInvocation(input.command, input.cwd);
       if (gitConfigReason) {
         input.logger?.warn(
           {
