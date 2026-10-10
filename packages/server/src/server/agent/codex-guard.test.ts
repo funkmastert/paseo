@@ -352,6 +352,25 @@ describe("describeGuardedSensitiveFileChangePath -- NTFS name aliases (verify fi
   });
 });
 
+describe("describeGuardedSensitiveFileChangePath -- HFS+-ignored code points (verify finding, round 7)", () => {
+  // HFS+ ignores these when comparing two names -- `.g‌it` (a zero width non-joiner after the
+  // "g") opens `.git` on an HFS+ volume -- the same class of gap as git's CVE-2014-9390 /
+  // core.protectHFS. Reused from jev/secret-paths.ts's comparableName (round 5's fix already
+  // routes this check through it), so this is end-to-end coverage of that shared fix, not a
+  // second implementation.
+  test.each([
+    ['zero width non-joiner before "it"', "/workspace/project/.g\u200Cit/hooks/post-checkout"],
+    ['zero width no-break space (BOM) before "sh"', "/workspace/project/.s\uFEFFsh/config"],
+    ['right-to-left override before "rc"', "/workspace/project/.zsh\u202Erc"],
+  ])("flags an HFS+-ignored code point -- %s: %j", (_label, path) => {
+    expect(describeGuardedSensitiveFileChangePath(path)).not.toBeNull();
+  });
+
+  test("does NOT flag U+200B (zero width space) -- HFS+ does not ignore it", () => {
+    expect(describeGuardedSensitiveFileChangePath("/workspace/project/.g\u200Bit")).toBeNull();
+  });
+});
+
 describe("resolveGuardedFileChangePath (re-review finding #2)", () => {
   let scratch: string;
 
