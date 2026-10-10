@@ -558,6 +558,86 @@ describe("Codex guarded mode approval handling", () => {
     appServer.assertNoErrors();
   });
 
+  test("evicts a file-change item's tracked paths once it completes (re-review finding #6)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const internals = asInternals(session as unknown as CodexTestSession);
+
+    appServer.startsFileChange({
+      threadId: "thread-1",
+      itemId: "file-evict",
+      changes: [{ path: "/workspace/project/.gitattributes", kind: "add" }],
+    });
+    internals.handleNotification("item/completed", {
+      threadId: "thread-1",
+      item: { type: "fileChange", id: "file-evict", status: "completed" },
+    });
+
+    // The tracked entry is gone -- a later approval request for the same item id has nothing to
+    // go on and declines as untracked (review finding #4), not as the sensitive path it would
+    // have matched had the entry survived.
+    appServer.requestFileChangeApproval({
+      itemId: "file-evict",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("file-evict");
+
+    expect(result).toEqual({ decision: "decline" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("caps guardedFileChangePathsByItemId, evicting the oldest entry first (re-review finding #6)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const internals = asInternals(session as unknown as CodexTestSession);
+
+    // One more than the cap -- none of these ever completes, so only the cap's own eviction
+    // keeps the map bounded.
+    for (let index = 0; index <= 500; index++) {
+      internals.handleNotification("item/started", {
+        threadId: "thread-1",
+        item: {
+          type: "fileChange",
+          id: `cap-item-${index}`,
+          changes: [{ path: `/workspace/project/file-${index}.md`, kind: "add" }],
+        },
+      });
+    }
+
+    // The oldest entry (item 0) was pushed out by the cap -- its approval request has nothing
+    // tracked and declines as untracked.
+    appServer.requestFileChangeApproval({
+      itemId: "cap-item-0",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const oldestResult = await appServer.waitForCommandApprovalDecision("cap-item-0");
+    expect(oldestResult).toEqual({ decision: "decline" });
+
+    // The newest entry survived the cap and resolves normally (an ordinary workspace path, not
+    // sensitive, so it's accepted rather than declined-as-untracked).
+    appServer.requestFileChangeApproval({
+      itemId: "cap-item-500",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const newestResult = await appServer.waitForCommandApprovalDecision("cap-item-500");
+    expect(newestResult).toEqual({ decision: "accept" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
   test("declines a command that sets a git alias (review finding #2's catastrophe-gate blind spot)", async () => {
     const appServer = createFakeCodexAppServer({
       "turn/steer": () => ({ turn: { id: "native-A" } }),

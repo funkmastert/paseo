@@ -226,6 +226,11 @@ function formatOutOfBandStatusMessage(text: string): string {
   return `${text.replace(/\n+$/u, "")}\n\n`;
 }
 
+/** Backstop cap on guardedFileChangePathsByItemId (review finding #6): eviction on completion
+ * keeps this bounded in the normal case, but a completion notification that never arrives for
+ * some entry must not grow the map for a session's whole lifetime either. */
+const MAX_GUARDED_FILE_CHANGE_PATHS_ENTRIES = 500;
+
 const CODEX_APP_SERVER_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
   supportsSessionPersistence: true,
@@ -3446,7 +3451,10 @@ export class CodexAppServerAgentSession implements AgentSession {
   /** The `item/fileChange/requestApproval` request carries no path info of its own (confirmed
    * against the real app-server protocol) -- the touched paths arrive earlier, on the
    * `item/started` notification for the same item id. Guarded mode needs them at approval time
-   * to decline a write to a sensitive path (docs/catastrophe-gate.md's git-alias blind spot). */
+   * to decline a write to a sensitive path (docs/catastrophe-gate.md's git-alias blind spot).
+   * Most entries are written and never read back, since an in-workspace write never raises an
+   * approval request at all -- evicted on the item's completion (or once its approval resolves)
+   * and capped (review finding #6) rather than left to grow for a session's whole lifetime. */
   private guardedFileChangePathsByItemId = new Map<string, string[]>();
   private emittedItemStartedIds = new Set<string>();
   private emittedItemCompletedIds = new Set<string>();
@@ -6388,6 +6396,29 @@ export class CodexAppServerAgentSession implements AgentSession {
    * with no approval request turns health red and cancels the turn -- the one case the real-time
    * gate above never had a chance to answer.
    */
+  /**
+   * The one sequence every guarded-mode fail-closed path ends in: turn health red, tell the
+   * agent why over the timeline, and stop the turn. Shared by the live re-check's violation
+   * branch and its catch block (review finding #7) so the two can't drift out of sync the way
+   * they did when the catch block was added for finding #4.
+   */
+  private async failGuardedModeClosed(reason: string, timelineText: string): Promise<void> {
+    setCodexGuardHealthState(
+      {
+        status: "red",
+        reason,
+        codexVersion: getCodexGuardHealthState().codexVersion,
+      },
+      this.logger,
+    );
+    this.emitEvent({
+      type: "timeline",
+      provider: CODEX_PROVIDER,
+      item: { type: "assistant_message", text: formatOutOfBandStatusMessage(timelineText) },
+    });
+    await this.interrupt();
+  }
+
   private async recheckGuardedCommandCompletion(
     callId: string | null,
     command: string,
@@ -6412,49 +6443,19 @@ export class CodexAppServerAgentSession implements AgentSession {
         this.logger,
       );
       if (!result.violation) return;
-      setCodexGuardHealthState(
-        {
-          status: "red",
-          reason: result.reason ?? "A guarded command ran without an approval request.",
-          codexVersion: getCodexGuardHealthState().codexVersion,
-        },
-        this.logger,
+      await this.failGuardedModeClosed(
+        result.reason ?? "A guarded command ran without an approval request.",
+        "Paseo guard health just turned red: a command ran with no approval request. Stopping this turn.",
       );
-      this.emitEvent({
-        type: "timeline",
-        provider: CODEX_PROVIDER,
-        item: {
-          type: "assistant_message",
-          text: formatOutOfBandStatusMessage(
-            "Paseo guard health just turned red: a command ran with no approval request. Stopping this turn.",
-          ),
-        },
-      });
-      await this.interrupt();
     } catch (error) {
       // Fail closed (review finding #4): a crash in the recheck itself must not look like a
       // healthy guard. The opposite of the fail-open comment this mirrors in Claude's hook --
       // guarded mode has no other layer, so an unprovable command stays unproven, not approved.
       this.logger.warn({ err: error }, "Codex guard live re-check failed");
-      setCodexGuardHealthState(
-        {
-          status: "red",
-          reason: `Codex guard live re-check failed: ${error instanceof Error ? error.message : String(error)}`,
-          codexVersion: getCodexGuardHealthState().codexVersion,
-        },
-        this.logger,
+      await this.failGuardedModeClosed(
+        `Codex guard live re-check failed: ${error instanceof Error ? error.message : String(error)}`,
+        "Paseo guard health just turned red: the live re-check failed. Stopping this turn.",
       );
-      this.emitEvent({
-        type: "timeline",
-        provider: CODEX_PROVIDER,
-        item: {
-          type: "assistant_message",
-          text: formatOutOfBandStatusMessage(
-            "Paseo guard health just turned red: the live re-check failed. Stopping this turn.",
-          ),
-        },
-      });
-      await this.interrupt();
     }
   }
 
@@ -6528,6 +6529,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       return;
     }
     const bufferedOutput = this.consumeOutputDelta(outputDeltas, parsed.callId);
+    this.evictGuardedFileChangePaths("fileChange", parsed.callId ?? undefined);
     const timelineItem = mapCodexPatchNotificationToToolCall({
       callId: parsed.callId,
       changes: parsed.changes,
@@ -6631,6 +6633,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       typeof parsed.item.type === "string" ? parsed.item.type : undefined,
     );
     const itemId = parsed.item.id;
+    this.evictGuardedFileChangePaths(normalizedItemType, itemId);
     this.maybeRecheckGuardedShellItem(timelineItem, itemId);
     if (this.shouldSkipCompletedThreadItem(timelineItem, normalizedItemType, itemId)) {
       this.replayPendingSubAgentNotifications(registeredChildThreadIds);
@@ -6833,8 +6836,28 @@ export class CodexAppServerAgentSession implements AgentSession {
       return;
     }
     const changedPaths = parseCodexPatchChanges(changes).map((file) => file.path);
-    if (changedPaths.length > 0) {
-      this.guardedFileChangePathsByItemId.set(itemId, changedPaths);
+    if (changedPaths.length === 0) {
+      return;
+    }
+    // Review finding #6: eviction on completion keeps this bounded in the normal case, but a cap
+    // is the backstop against a completion notification that never arrives for some entry.
+    if (this.guardedFileChangePathsByItemId.size >= MAX_GUARDED_FILE_CHANGE_PATHS_ENTRIES) {
+      const oldestItemId = this.guardedFileChangePathsByItemId.keys().next().value;
+      if (oldestItemId !== undefined) {
+        this.guardedFileChangePathsByItemId.delete(oldestItemId);
+      }
+    }
+    this.guardedFileChangePathsByItemId.set(itemId, changedPaths);
+  }
+
+  /** Review finding #6: a completed (or approval-resolved) file-change item never needs its
+   * tracked paths again. */
+  private evictGuardedFileChangePaths(
+    normalizedItemType: string | undefined,
+    itemId: string | undefined,
+  ): void {
+    if (normalizedItemType === "fileChange" && itemId) {
+      this.guardedFileChangePathsByItemId.delete(itemId);
     }
   }
 
@@ -7164,6 +7187,9 @@ export class CodexAppServerAgentSession implements AgentSession {
         return this.declineUntrackedGuardedFileChange(parsed.itemId);
       }
       const changedPaths = this.guardedFileChangePathsByItemId.get(parsed.itemId) ?? [];
+      // Review finding #6: once this approval resolves, the entry is never needed again --
+      // evict it immediately rather than waiting for the item's own completion notification.
+      this.guardedFileChangePathsByItemId.delete(parsed.itemId);
       const cwd = this.config.cwd ?? process.cwd();
       const sensitivePath = changedPaths
         .map((changedPath) => {

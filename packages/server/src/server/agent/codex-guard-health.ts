@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
 import type { AgentClient } from "./agent-sdk-types.js";
+import type { CatastropheRule } from "./catastrophe-gate.js";
 import { decideCodexGuardedCommand, type CodexGuardCommandInput } from "./codex-guard.js";
 import type { DeviceLaunchGate } from "./device-lease-manager.js";
 
@@ -20,7 +21,10 @@ export interface CodexGuardHealthState {
 }
 
 const CANARY_DENY_REASON = "Paseo guard self-test canary";
-const FORCE_PUSH_MAIN_RULE = "force-push-main";
+// Typed against catastrophe-gate.ts's own CatastropheRule union (review finding #9): a future
+// rename of this rule id there is now a compile error here, instead of a silently-always-red
+// self-test that never again sees the text it's looking for.
+const FORCE_PUSH_MAIN_RULE: CatastropheRule = "force-push-main";
 
 const execFileAsync = promisify(execFile);
 
