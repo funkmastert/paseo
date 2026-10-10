@@ -3,6 +3,7 @@ import {
   DEFAULT_TOOL_PROFILE,
   ToolProfileSchema,
   applyToolProfile,
+  isToolProfileExpressibleOnCodex,
   parseDeniedTools,
   profileDeniedTools,
   serializeDeniedTools,
@@ -299,5 +300,74 @@ describe("denied-tool label round trip", () => {
 
   it("drops entries that are not well-formed tool names", () => {
     expect(parseDeniedTools("Bash, ,Write(*),Edit")).toEqual(["Bash", "Edit"]);
+  });
+});
+
+describe("isToolProfileExpressibleOnCodex (KTD-8)", () => {
+  it("read-only is always expressible, regardless of its own deny list", () => {
+    expect(isToolProfileExpressibleOnCodex({ kind: "read-only" })).toBe(true);
+  });
+
+  it("unrestricted and write are expressible: they deny nothing", () => {
+    expect(isToolProfileExpressibleOnCodex({ kind: "unrestricted" })).toBe(true);
+    expect(isToolProfileExpressibleOnCodex({ kind: "write" })).toBe(true);
+  });
+
+  it("orchestrator is not expressible: it denies specific tools Codex has no way to deny", () => {
+    expect(isToolProfileExpressibleOnCodex({ kind: "orchestrator" })).toBe(false);
+  });
+
+  it("a custom profile with no deny list is expressible", () => {
+    expect(isToolProfileExpressibleOnCodex({ kind: "custom" })).toBe(true);
+    expect(isToolProfileExpressibleOnCodex({ kind: "custom", deny: [] })).toBe(true);
+  });
+
+  it("a custom profile with a deny list is not expressible", () => {
+    expect(isToolProfileExpressibleOnCodex({ kind: "custom", deny: ["Bash"] })).toBe(false);
+  });
+
+  it("an otherwise-expressible profile is not expressible once inherited denials exist", () => {
+    expect(isToolProfileExpressibleOnCodex({ kind: "unrestricted" }, ["Bash"])).toBe(false);
+  });
+
+  it("read-only stays expressible even with inherited denials -- it maps to sandbox_mode regardless", () => {
+    expect(isToolProfileExpressibleOnCodex({ kind: "read-only" }, ["Bash"])).toBe(true);
+  });
+});
+
+describe("applyToolProfile — targetFamily codex (KTD-8)", () => {
+  it("read-only maps to sandbox_mode: read-only, not Claude's settings.permissions", () => {
+    const result = applyToolProfile(undefined, { kind: "read-only" }, [], undefined, "codex");
+    expect(result).toEqual({ sandbox_mode: "read-only" });
+  });
+
+  it("unrestricted writes nothing at all", () => {
+    expect(applyToolProfile(undefined, { kind: "unrestricted" }, [], undefined, "codex")).toBeUndefined();
+  });
+
+  it("a profile with real denials writes no Claude-shaped keys -- there is nothing to express them in", () => {
+    const result = applyToolProfile(undefined, { kind: "orchestrator" }, [], undefined, "codex");
+    expect(result).toBeUndefined();
+  });
+
+  it("still appends the restriction notice even when nothing else is written", () => {
+    const result = applyToolProfile(undefined, { kind: "unrestricted" }, [], "You are restricted.", "codex");
+    expect(result).toEqual({ appendSystemPrompt: "You are restricted." });
+  });
+
+  it("appends the notice alongside sandbox_mode for read-only", () => {
+    const result = applyToolProfile(undefined, { kind: "read-only" }, [], "You are read-only.", "codex");
+    expect(result).toEqual({ sandbox_mode: "read-only", appendSystemPrompt: "You are read-only." });
+  });
+
+  it("preserves an existing providerOptions key the caller already set", () => {
+    const result = applyToolProfile({ model: "gpt-6-sol" }, { kind: "read-only" }, [], undefined, "codex");
+    expect(result).toEqual({ model: "gpt-6-sol", sandbox_mode: "read-only" });
+  });
+
+  it("an unrecognized targetFamily (or none) still takes the Claude path", () => {
+    const result = applyToolProfile(undefined, { kind: "read-only" }, [], undefined, "claude");
+    expect(result).toMatchObject({ disallowedTools: expect.any(Array) });
+    expect((result as { sandbox_mode?: unknown }).sandbox_mode).toBeUndefined();
   });
 });

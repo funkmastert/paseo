@@ -166,6 +166,9 @@ async function performWrite(
     allowUnlistedModels: current.policy.allowUnlistedModels,
     // Same again: an unrelated save must not switch the child output style back on (or off).
     childOutputStyle: current.policy.childOutputStyle,
+    // Same again: Codex's budget reserve is not part of the settings screen's editable
+    // surface yet, so an unrelated save must carry it through untouched.
+    codex: current.policy.codex,
     revision: randomUUID(),
   };
   const parsed = RoleModelPolicySchema.safeParse(candidate);

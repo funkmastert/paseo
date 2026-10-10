@@ -18,8 +18,8 @@ execution: code
   - PR A (U1–U5) makes Codex launchable and guarded.
   - PR B (U6–U8) builds the picker. It works on Claude-only pools without PR A, and `codex/` refs stay unusable until PR A's guard health is green.
 - **Stop conditions:** stop and report if any of these hold:
-  - no hook delivery path runs the guard unattended under `codex app-server`;
-  - the self-test cannot tell a hook denial from a model refusal;
+  - Codex does not ask for approval before non-safe commands in guarded mode (U2's proof);
+  - the self-test cannot tell a guard refusal from a model refusal;
   - a change would let ranking pick a leader's model.
 - **Tail ownership:** workers commit locally. They never push, never restart the 6767 daemon, and never edit `~/.paseo/config.json`. The leader reviews, opens the PRs, merges, deploys and edits live config.
 
@@ -45,7 +45,7 @@ Where things stand today:
 ### Requirements
 
 - R1. The daemon launches Codex on macOS and Windows without PATH setup, finding the copy bundled with the ChatGPT or Codex desktop app.
-- R2. Four guards refuse a daemon-launched Codex agent in every Codex mode, Full Access included: the catastrophe gate, the native build gate, the device cap and the physical-device install gate. Tyler's own Codex sessions behave as before.
+- R2. Four guards refuse a daemon-launched Codex child in the mode children run in, with no person in the loop: the catastrophe gate, the native build gate, the device cap and the physical-device install gate. Tyler's own Codex sessions behave as before.
 - R3. Codex children are routable only while a recent self-test proves the guard denies commands. An unguarded command turns the guard red and stops new Codex routing.
 - R4. Codex children stay within the Codex usage window and a concurrency cap, and never think above xhigh. A tool restriction is expressed in Codex's own terms; if it cannot be, the child is not routed to Codex.
 - R5. A daily job fetches the LMArena leaderboard from the official Hugging Face dataset and caches it. A hand-kept alias table matches its names to our model refs; unmatched rows are dropped and counted, never guessed.
@@ -64,7 +64,7 @@ Where things stand today:
 ### Deferred to Follow-Up Work
 
 - A budget-aware tie-break between Claude and Codex, for when their scores tie.
-- Guarding Codex `apply_patch` and MCP calls with the same hook.
+- Gating Codex `apply_patch` and MCP calls beyond approving them.
 - Adding newly ranked models to pools automatically. Pool membership stays an operator edit.
 - Ranking for the advisor role.
 
@@ -83,33 +83,37 @@ Where things stand today:
   (session-settled: user-directed — chosen over ranking all tiers together: "workers shouldnt need to use the highest level models. only rarely")
 
 - KTD-3. **Guards first.** PR B may merge before PR A, but no `codex/` ref enters a live pool until PR A is deployed and its self-test is green. (session-settled: user-directed — chosen over routing to Codex with approval-only gates: "3. yes")
-- KTD-4. **Hook delivery.** First try per-launch `-c` config overrides on the `app-server` argv, which write nothing to `~/.codex`. If Codex skips them or demands trust for them, fall back to the terminal hook installer's pattern (`packages/server/src/terminal/agent-hooks/codex/`):
-  - the daemon writes a hook entry into `~/.codex/hooks.json`;
-  - its trust hash goes in `~/.codex/config.toml` (`[hooks.state."<file>:<event>:…"] trusted_hash`);
-  - the hook exits at once without the per-launch env the daemon sets, so Tyler's own sessions are untouched.
+- KTD-4. **Guard delivery: the daemon answers Codex's approval requests.** Revised 2026-10-09 after U2's proof against Codex 0.160 showed that no hook path runs unattended under `app-server`:
+  - `-c` hook overrides are accepted and then silently skipped;
+  - a hook written to `~/.codex/hooks.json` is skipped without a `trusted_hash`, and nothing documented computes that hash;
+  - `--dangerously-bypass-hook-trust` exists only on `codex exec`.
+
+  Instead, a Codex child runs with `sandbox_mode: "workspace-write"` and `approval_policy: "on-request"` — the same values the `auto` mode already uses for people. Codex then asks for approval before every command that needs to escalate beyond the sandbox (outside its own read-only safe list, or outside the workspace). Each request already reaches the daemon in-process (`handleCommandApprovalRequest` in `codex-app-server-agent.ts`), where the device gate already answers. No hook, no trust file, no CLI hop, and nothing is written to `~/.codex`. `docs/codex-workers.md` records the three failed hook paths so a later Codex release can be rechecked.
 
   Rejected:
+  - Hooks, for the reasons above.
+  - `danger-full-access` + `approval_policy: "untrusted"`, this plan's original design (revised again 2026-10-09 after U2's second proof against the real binary): `"untrusted"` is rejected outright by Codex 0.160 (`approval_policy = "untrusted" is no longer supported; remove this setting`), and `danger-full-access` never raises an approval request at all with any policy, since nothing needs to escalate out of a sandbox that is already fully open. `workspace-write` + `on-request` is the design that actually produces an approval request before a command runs, confirmed end-to-end against the real binary.
   - A separate `CODEX_HOME` with a copied `auth.json`. A token refresh in either copy rotates the refresh token and can sign Tyler's own Codex out.
-  - A managed `requirements.toml`. It is a machine-wide admin path on both OSes.
+  - A managed `requirements.toml`. It is a machine-wide admin path, and its local activation is undocumented.
 
-- KTD-5. **One guard endpoint.**
-  - **Hook to daemon:** the hook runs `paseo codex-guard` through `PASEO_HOOK_CLI`. It posts the command, the cwd, the Codex thread id and a per-launch token to a local daemon endpoint beside `/api/terminal-activity`.
-  - **Naming:** the command is its own CLI subcommand and its own installer marker, and must not contain `hooks codex`. The terminal activity hook already installs on `PreToolUse` under that marker, matched by substring, so a shared marker would let each reinstall erase the other hook.
-  - **Daemon decision:** the daemon resolves the agent by thread id, runs `checkCatastrophe` and then the composed `deviceLaunchGate`, and answers deny with the reason.
-  - **Failure, when the Paseo env is present:** the hook fails **closed**. On a daemon error, a timeout (5 s), a bad token or an unknown thread, it denies with "Paseo guard unreachable; retry shortly". This departs from the Claude hook, which fails open in-process (`packages/server/src/server/agent/providers/claude/agent.ts` around `checkCatastrophe`), because a Codex child in Full Access has no other layer, and a fail-open there is invisible to guard health. Without the Paseo env, the hook exits 0 at once (Tyler's own sessions).
-  - **Second layer:** the approval-request path stays.
+- KTD-5. **One guard decision, in the approval handler.**
+  - **Order:** for a Codex agent in guarded mode (KTD-7), `handleCommandApprovalRequest` runs `checkCatastrophe` (the same function and branch lookup the Claude hook uses), then the composed `deviceLaunchGate`.
+  - **Outcome:** a refusal declines with the reason, explained over steer as device refusals already are. A clean command is approved at once, per command (never "approve for session"), with no pending permission and no person in the loop.
+  - **Failure:** an error inside the gates declines. Nothing runs until the daemon says yes, so the guard fails closed by construction.
+  - **File changes:** `apply_patch` approval requests are approved in guarded mode. That matches Claude, whose catastrophe gate covers shell commands only.
+  - **Modes left alone:** outside guarded mode, approvals keep today's behaviour: device gate first, then a person.
 - KTD-6. **Guard health is proved, not configured.**
-  - **The self-test:** a cheap Codex turn (a luna model at low effort) runs two commands.
-    - An ordinary command must run.
-    - A canary command carrying a nonce must be denied with the canary's own reason. A fail-closed deny does not count.
+  - **The self-test:** a cheap Codex turn (a luna model at low effort, guarded mode, a temp cwd) runs two commands that are not on Codex's safe list.
+    - `touch <tmp>/paseo-guard-ok-<nonce>` must be approved, and the file must then exist.
+    - `touch <tmp>/paseo-guard-canary-<nonce>` must reach the approval handler and be declined by the canary rule, and the file must not exist.
 
-    Health is green only when the daemon saw both hook calls and both outcomes match.
+    Health is green only when both approval requests were seen and both outcomes match.
 
   - **When it runs:** at daemon start, daily, and when the Codex binary version changes. The self-test agent does not count against KTD-9's cap.
-  - **Live detection:** any Codex command item without a matching hook call turns health red and cancels that agent's turn. Fail-closed denials are counted, and three in ten minutes also turn health red.
+  - **Live detection:** every command item a guarded Codex child runs is re-checked after the fact against the catastrophe gate and the device gate. A command that a gate would have refused but that ran without an approval request turns health red and cancels that agent's turn. Commands on Codex's safe list need no approval and pass this check.
   - Codex refs are unusable for children unless health is green.
 
-- KTD-7. **Codex children run Full Access,** the analogue of `bypassPermissions`, and only behind a green guard. Workspace-write would stall unattended children on escalations nobody answers, and it blocks writes to the caches builds use.
+- KTD-7. **Codex children run in a new guarded mode:** `sandbox_mode: "workspace-write"` with `approval_policy: "on-request"` — the same values the `auto` mode already uses for people — answered by the daemon instead of a person (KTD-5), and only behind a green guard. Full Access (`approval_policy: never`) would bypass the guard. `danger-full-access` was tried first and rejected: it never raises an approval request with any policy, so there is nothing for the daemon to answer.
 - KTD-8. **Tool profiles and instructions on Codex.**
   - **Settings:** `enforceToolDecision` writes Claude-shaped `settings.permissions` only for the Claude family. The read-only profile maps to `sandbox_mode: read-only`. When a role's profile cannot be expressed on Codex, its `codex/` refs are ineligible and the decision gives a reason.
   - **Prompt text:** per-agent prompt text the classifier adds (restriction notices and similar) goes into the session `systemPrompt`, which Codex receives as developer instructions.
@@ -155,23 +159,19 @@ Where things stand today:
 
 ### High-Level Technical Design
 
-**Codex guard, one command:**
+**Codex guard, one command (guarded mode):**
 
 ```mermaid
 sequenceDiagram
-  participant C as Codex app-server (child)
-  participant H as paseo codex-guard
-  participant D as Daemon guard endpoint
+  participant C as Codex app-server (child, workspace-write + approval_policy on-request)
+  participant A as Daemon approval handler (in-process)
   participant G as checkCatastrophe + deviceLaunchGate
-  C->>H: PreToolUse Bash {thread id, cwd, command}
-  H->>D: POST {token, thread id, cwd, command}
-  D->>D: thread id -> agent
-  D->>G: gate(agent, cwd, command)
-  G-->>D: allow | deny + reason
-  D-->>H: decision
-  H-->>C: permissionDecision deny + reason (or allow)
-  Note over H: error, timeout, bad token or unknown thread: deny (fail closed)
-  Note over D: health records each call, so a command item with no call turns health red
+  C->>A: item/commandExecution/requestApproval {command, cwd}
+  A->>G: gate(agent, cwd, command)
+  G-->>A: allow | refuse + reason
+  A-->>C: decision accept (allow) or decline (refuse, or any gate error)
+  Note over A: refusal reason goes to the agent over steer
+  Note over A: after each command item, re-check it; a refused command that ran unasked turns health red
 ```
 
 **Worker model pick:**
@@ -235,46 +235,37 @@ flowchart TD
 
 **Verification:** after deploy, `list_providers` shows `codex` available and `list_models codex` lists the subscription's models.
 
-### U2. Guard hook delivery (PR A)
+### U2. Guarded mode and its proof (PR A)
 
-**Goal:** every daemon-launched Codex app-server runs the guard hook unattended, and Tyler's own Codex does not.
+**Goal:** a daemon-launched Codex child can run in guarded mode, and every non-safe command it runs reaches the daemon's approval handler first.
 
-**Requirements:** R2; KTD-4.
+**Requirements:** R2; KTD-4, KTD-7.
 
 **Dependencies:** U1.
 
 **Files:**
 
-- `packages/server/src/server/agent/providers/codex-app-server-agent.ts` (app-server argv and env)
-- a new `packages/server/src/server/agent/providers/codex/guard-hook.ts` and its test
-- `packages/server/src/terminal/agent-hooks/codex/codex-settings.ts`, only if the fallback is needed
+- `packages/server/src/server/agent/providers/codex-app-server-agent.ts` (`MODE_PRESETS`: a `guarded` preset)
+- `packages/server/src/server/agent/providers/codex-app-server-agent.test.ts`
+- `docs/codex-workers.md` (replace "Guard hook: blocked" with the guarded-mode design; keep the three failed hook paths as the recheck list)
 
 **Approach:**
 
-- The per-launch env carries `PASEO_HOOK_CLI`, a guard URL and a token.
-- The hook definition matches `Bash` and runs `paseo codex-guard`, under its own installer marker (KTD-5).
-- Deliver it by `-c` overrides, including a trust entry if Codex requires one. Otherwise use the KTD-4 fallback, with the hook exiting 0 when the env is missing.
-- Back up both `~/.codex` files before any write.
+- Add a `guarded` mode preset: `workspace-write` sandbox and `approval_policy: "on-request"` — the same values `auto` already uses for people, but answered by the daemon instead of a person. It is selectable only by the daemon for children, not offered to people in the mode picker.
+- Confirm against the real binary that `on-request` actually asks for a command needing to escalate beyond the workspace.
 
-**Execution note:** start with a proof against the real Codex 0.160 binary. Launch a scratch `app-server` with the candidate delivery, run one turn on the cheapest model, and confirm the hook process ran.
-
-- Try the argv path first.
-- Do not create a separate `CODEX_HOME` with a copied auth file (KTD-4).
-
-If neither path runs the hook, stop per the Goal Capsule.
+**Execution note:** start with a proof against the Codex 0.160 binary, the same way U2's hook proof ran. Use a scratch `app-server` in guarded mode, the cheapest model at low effort, and a temp cwd. The first proof tried `danger-full-access` + `approval_policy: "untrusted"` per this plan's original design: `"untrusted"` is rejected outright (`approval_policy = "untrusted" is no longer supported; remove this setting`), and `danger-full-access` never raises an approval request with any policy, `granular` included — confirmed by watching a `touch` outside the workspace succeed silently, with zero `permission_requested` events. `workspace-write` + `on-request` is what actually works: ask for a command that needs to escalate beyond the workspace (deleting a file in `$HOME`, for instance), and confirm that an `item/commandExecution/requestApproval` arrives before anything runs; `accept` lets it run, `decline` blocks it. Also note which of `ls`, `git status` and `echo` arrive without a request, for the docs. `docs/codex-workers.md` has the full re-verification record.
 
 **Test scenarios:**
 
-- The argv for a child launch contains the hook and trust overrides.
-- In the fallback, the hooks file gains exactly one guard entry with the right trust hash. Re-installing is idempotent, and the existing `SessionStart` shim is kept.
-- The guard entry and the terminal activity hook's `PreToolUse` entry both survive repeated installs of either one, in any order, as on a daemon boot.
-- The hook with no Paseo env exits 0 without contacting anything.
+- The `guarded` preset maps to `workspace-write` plus `on-request`, and passes `CodexProviderOptionsSchema`.
+- The preset is not listed among the user-facing modes.
 
-**Verification:** the scratch proof's output shows the hook ran under app-server in Full Access.
+**Verification:** the proof output shows the approval request arriving before the command runs, for a command that escalates beyond the workspace.
 
-### U3. Guard endpoint and CLI (PR A)
+### U3. Guard decision in the approval handler (PR A)
 
-**Goal:** the daemon refuses catastrophic, over-cap and blocked device commands from Codex agents.
+**Goal:** the daemon refuses catastrophic, over-cap and blocked device commands from guarded Codex children, and approves everything else without a person.
 
 **Requirements:** R2; KTD-5.
 
@@ -282,33 +273,32 @@ If neither path runs the hook, stop per the Goal Capsule.
 
 **Files:**
 
-- a new `packages/cli/src/commands/codex-guard.ts` and its test, registered beside `packages/cli/src/commands/hooks.ts`
-- a new `packages/server/src/server/agent/codex-guard.ts` and its test
-- `packages/server/src/server/bootstrap.ts` (route next to `/api/terminal-activity`, wiring to `deviceLaunchGate`)
+- `packages/server/src/server/agent/providers/codex-app-server-agent.ts` (`handleCommandApprovalRequest`, `handleFileChangeApprovalRequest`)
+- a new `packages/server/src/server/agent/codex-guard.ts` and its test (the gate composition, kept out of the 7,000-line provider)
+- `packages/server/src/server/bootstrap.ts` (pass the catastrophe check and branch lookup to the Codex client, as it does for Claude)
 - `packages/server/src/server/agent/device-launch-enforcement.ts` and its test
 - `docs/catastrophe-gate.md` ("Where it runs", "Other providers")
 - `docs/device-leases.md` (Enforcement table)
 
 **Approach:**
 
-- **CLI:** reads Codex hook JSON from stdin, posts it, and prints the deny output Codex expects.
-- **Endpoint:** checks the token, resolves the agent by thread id, runs the gates in Claude's order, and returns the reason. Each call and its outcome go to guard health.
-- **Failure:** the CLI fails closed per KTD-5.
-- **Enforcement table:** Codex moves to `refuses`, with a gap clause: only while guard health is green.
+- **Decision:** guarded mode only. Run the catastrophe gate, then the device gate. Decline with the reason, or approve. Any thrown error declines.
+- **File changes:** `apply_patch` requests are approved in guarded mode.
+- **Other modes:** unchanged.
+- **Enforcement table:** Codex moves to `refuses` "in guarded mode", with a gap clause: other Codex modes still only ask, and interactive input typed into a running shell is not re-gated.
 
 **Test scenarios:**
 
-- `git push --force origin main` from a Codex agent is denied with the catastrophe reason.
-- A native build while another holds the build slot is denied with the build-gate reason.
-- An emulator boot over the cap is denied.
-- A physical-device install that the install gate blocks is denied.
-- An ordinary `npm test` is allowed.
-- A wrong token, or an unknown thread id, is denied with the "guard unreachable" reason and logged.
-- The daemon is unreachable or slower than 5 s: the CLI denies with that reason.
-- No Paseo env: the CLI exits 0 without a network call.
-- The deny JSON matches Codex's `hookSpecificOutput.permissionDecision` shape.
+- In guarded mode, `git push --force origin main` is declined with the catastrophe reason, and the reason reaches the agent.
+- A native build while another holds the build slot is declined with the build-gate reason.
+- An emulator boot over the cap is declined.
+- A physical-device install that the install gate blocks is declined.
+- `npm test` is approved with no pending permission created.
+- A gate that throws gives a decline.
+- An `apply_patch` request is approved in guarded mode.
+- In `auto` mode, a clean command still becomes a pending permission, as today.
 
-**Verification:** after deploy, a Codex test child's `git push --force origin main` is refused with the gate's message.
+**Verification:** after deploy, a guarded Codex test child's `git push --force origin main` is refused with the gate's message.
 
 ### U4. Guard health (PR A)
 
@@ -321,28 +311,26 @@ If neither path runs the hook, stop per the Goal Capsule.
 **Files:**
 
 - a new `packages/server/src/server/agent/codex-guard-health.ts` and its test
-- `packages/server/src/server/agent/providers/codex-app-server-agent.ts` (matching command items to hook calls)
+- `packages/server/src/server/agent/providers/codex-app-server-agent.ts` (report approval decisions, and re-check executed command items)
 - `packages/server/src/server/bootstrap.ts` (schedule, plugin wiring)
 - `plugins/claude-account-pool/server/role-availability.ts` (health input)
 
 **Approach:**
 
 - **States:** `unknown`, `green` or `red`, with a reason and a timestamp.
-- **Self-test:** run per KTD-6. Green needs both the hook call and the declined command.
-- **Detection:** a command item with no matching hook call (by call id where Codex supplies one, otherwise by command and time) sets red and cancels the turn.
+- **Self-test:** run per KTD-6.
+- **Detection:** per KTD-6. The post-run re-check reuses the U3 gate composition.
 - **Logging:** state changes go to `daemon.log` and the remediation ledger. They never push; machine and ops health stay quiet by policy.
 
 **Test scenarios:**
 
-- The ordinary command runs and the canary is denied with the canary reason: green.
-- The canary is denied with the "guard unreachable" reason: not green.
-- The ordinary command is denied: not green.
-- The canary ran: red.
-- The hook was not called: red.
-- Three fail-closed denials in ten minutes: red.
+- The ok file exists and the canary is declined by the canary rule: green.
+- The canary is declined for another reason, or the ok command is declined: not green.
+- The canary ran (its file exists): red.
+- No approval request arrived for either command: red.
 - The self-test errors or times out: stays `unknown`, and Codex is unusable.
-- A child's unmatched command item: red, and that turn is cancelled.
-- A matched item: no change.
+- A child's command item that a gate refuses and that ran without an approval request: red, and that turn is cancelled.
+- A safe-list command (`ls`) that ran without a request: no change.
 - The binary version changes: the self-test re-runs.
 - `unknown` and `red` both make every `codex/` ref unusable for children.
 
@@ -369,7 +357,7 @@ If neither path runs the hook, stop per the Goal Capsule.
 **Approach:**
 
 - **Tool profiles and prompts:** follow KTD-8.
-- **Mode:** a Codex child gets Full Access.
+- **Mode:** a Codex child gets guarded mode (KTD-7).
 - **Thinking:** for Codex children only, any effort above xhigh becomes xhigh: `max`, `ultra`, and any id outside Paseo's ladder. Claude children's levels are unchanged, and `subagent-no-ultracode` stays as it is.
 - **Budget:** read the `codex` `session` window from the daemon's provider usage, against the `codex` policy key (KTD-9). A missing or stale reading counts as unusable. This is deliberately stricter than Claude's "no reading is fine", because Codex is the extra capacity, not the default.
 - **Seam for PR B:** put every Codex gate inside the usability check `selectModel` already applies (`isRefUsable` and its callers). PR B's ranking then gets them without its own code.
@@ -542,18 +530,18 @@ If neither path runs the hook, stop per the Goal Capsule.
 
 ## Risks
 
-| Risk                                                                              | Mitigation                                                                                                                         |
-| --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| An untrusted hook is skipped silently under app-server                            | U2's real-binary proof first; U4's self-test and unmatched-command detection keep Codex unusable unless the guard is proved        |
-| Interactive input typed into a running Codex shell gets no new PreToolUse         | The same gap Claude has; documented in `docs/codex-workers.md`                                                                     |
-| A wrong alias ranks the wrong model                                               | Exact aliases only; unmatched rows are dropped and counted                                                                         |
-| Text and webdev votes are not agentic work in our harness                         | The agent board leads for coding and ops; CI overlap counts as a tie; ranking only reorders operator-approved pools                |
-| Codex children drain the window Tyler uses himself                                | KTD-9's 60% ceiling, freshness check and cap of 3                                                                                  |
-| HF is slow or down                                                                | A daily job with retries, the previous file kept, the 72 h age check, and no network wait in the classifier                        |
-| Arena ranks max/xhigh variants while standard work runs high                      | A row at our effort is preferred; a proxy is recorded, and a top-tier proxy must clear an extra CI width                           |
-| A daemon error or event-loop wedge while a Codex child works                      | The hook fails closed with a retry message; repeated fail-closed denials turn health red                                           |
-| Windows hook invocation and quoting are not exercised on this Mac                 | Unit tests cover the Windows command shape and paths; the first Windows run is a manual check, recorded in `docs/codex-workers.md` |
-| A leader that still labels `paseo.task-class` sends its children to today's order | The MODEL POLICY text says not to label; the decisions log shows declared children, so the leader can check                        |
+| Risk                                                                              | Mitigation                                                                                                              |
+| --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| A Codex release changes what `on-request` asks for                                | U4's daily self-test and the post-run re-check keep Codex unusable unless the guard is proved                           |
+| Interactive input typed into a running Codex shell gets no new approval request   | The same gap Claude has; documented in `docs/codex-workers.md`                                                          |
+| A wrong alias ranks the wrong model                                               | Exact aliases only; unmatched rows are dropped and counted                                                              |
+| Text and webdev votes are not agentic work in our harness                         | The agent board leads for coding and ops; CI overlap counts as a tie; ranking only reorders operator-approved pools     |
+| Codex children drain the window Tyler uses himself                                | KTD-9's 60% ceiling, freshness check and cap of 3                                                                       |
+| HF is slow or down                                                                | A daily job with retries, the previous file kept, the 72 h age check, and no network wait in the classifier             |
+| Arena ranks max/xhigh variants while standard work runs high                      | A row at our effort is preferred; a proxy is recorded, and a top-tier proxy must clear an extra CI width                |
+| A daemon error or event-loop wedge while a Codex child works                      | Approval waits or declines; nothing runs unapproved                                                                     |
+| Windows Codex is not exercised on this Mac                                        | Unit tests cover the Windows binary paths; the first Windows run is a manual check, recorded in `docs/codex-workers.md` |
+| A leader that still labels `paseo.task-class` sends its children to today's order | The MODEL POLICY text says not to label; the decisions log shows declared children, so the leader can check             |
 
 ## Assumptions
 
@@ -563,12 +551,12 @@ Inferred while planning, and not confirmed with Tyler:
 - Codex limits: a 60% window ceiling, a 2-hour freshness limit and at most 3 concurrent Codex children.
 - Ranking runs in shadow for about an hour after deploy before it goes live.
 - The kind list is coding, frontend, research, review, writing, ops and other.
-- Codex children run Full Access behind the guard.
+- Codex children run in guarded mode: full disk access, with every non-safe command approved by the daemon.
 - The self-test costs one cheap Codex turn at each daemon start and once a day.
 
 ## Sources
 
 - `~/bozeo-ops/briefs/arena-model-picker-grounding.md` (local research, 2026-10-09)
 - https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset (CC-BY-4.0) and https://arena.ai/blog/arena-leaderboard-dataset/
-- https://learn.chatgpt.com/docs/hooks (Codex hooks: PreToolUse, trust, sources)
+- https://learn.chatgpt.com/docs/hooks (Codex hooks: PreToolUse, trust, sources; rejected per KTD-4)
 - `docs/jev.md` (Feature 2, thresholds and precedence), `docs/catastrophe-gate.md`, `docs/device-leases.md`

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_TOOL_PROFILE } from "../shared/tool-profiles";
-import { DEFAULT_MODEL_BUDGET_THRESHOLD_PCT, DEFAULT_THINKING_POLICY } from "../shared/role-policy-schema";
+import { DEFAULT_CODEX_POLICY, DEFAULT_MODEL_BUDGET_THRESHOLD_PCT, DEFAULT_THINKING_POLICY } from "../shared/role-policy-schema";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { DEFAULT_POLICY, type RoleModelPolicy } from "../shared/role-policy-schema";
 import { createPolicyCache, loadRolePolicy } from "./role-policy";
@@ -26,6 +26,7 @@ const VALID_STORED_POLICY: RoleModelPolicy = {
   exposeClassifierTool: false,
   allowUnlistedModels: [],
   thinking: DEFAULT_THINKING_POLICY,
+  codex: DEFAULT_CODEX_POLICY,
   childOutputStyle: "Concise",
   agentTypeMappings: { worker: "worker" },
   revision: "abc123",

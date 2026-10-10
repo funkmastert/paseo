@@ -226,6 +226,7 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
       workspaceGitService: options?.workspaceGitService,
       customProvider: options?.customProvider,
       deviceLaunchGate: options?.deviceLaunchGate,
+      isCatastropheGateEnabled: options?.isCatastropheGateEnabled,
     }),
   copilot: (logger, runtimeSettings, options) =>
     new CopilotACPAgentClient({

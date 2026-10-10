@@ -151,6 +151,16 @@ import { JevToolUseLog } from "./agent/tools/jev-tool-use-log.js";
 import { AgentSideProcesses } from "./agent/agent-side-processes.js";
 import { createCatastropheCommandGate } from "./jev/command-gate.js";
 import { createAgentProviderRuntime } from "./agent/provider-runtime.js";
+import {
+  CodexAppServerAgentClient,
+  findDefaultCodexBinary,
+} from "./agent/providers/codex-app-server-agent.js";
+import { resolveBinaryVersion } from "./agent/providers/diagnostic-utils.js";
+import {
+  getCodexGuardHealthState,
+  runCodexGuardSelfTest,
+  shouldRunCodexGuardSelfTest,
+} from "./agent/codex-guard-health.js";
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
 import { WorkspaceReconciliationService } from "./workspace-reconciliation-service.js";
 import {
@@ -326,6 +336,7 @@ import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
 import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
 import { createDaemonProcessOwnershipTracker } from "./agent/daemon-process-ownership.js";
 import { createNativeBuildGate } from "./agent/native-build-gate.js";
+import { runProviderRefreshWithDeadline } from "./agent/provider-refresh-deadline.js";
 import { PhysicalDeviceLeaseManager } from "./agent/physical-device-lease-manager.js";
 import { physicalDeviceMatches, type PhysicalDevice } from "./agent/physical-device-registry.js";
 import {
@@ -2316,6 +2327,49 @@ export async function createPaseoDaemon(
       extraClients: config.agentClients,
     },
   });
+  // Codex guard health's self-test (docs/catastrophe-gate.md, KTD-6): no codex/ ref is usable
+  // for children until this is green. Checked now and hourly after, so a daily re-run and a
+  // Codex binary version change are both caught without a separate timer for each.
+  const checkCodexGuardSelfTest = () => {
+    void (async () => {
+      try {
+        const binaryPath = await findDefaultCodexBinary();
+        if (!binaryPath) return;
+        const codexVersion = await resolveBinaryVersion(binaryPath);
+        if (!shouldRunCodexGuardSelfTest(getCodexGuardHealthState(), Date.now(), codexVersion)) {
+          return;
+        }
+        const codexRuntimeSettings = config.agentProviderSettings?.codex;
+        const probeClient = new CodexAppServerAgentClient(logger, codexRuntimeSettings);
+        // Review finding #9: an unresponsive Codex binary left this probe hanging with no
+        // deadline, unlike the self-test's own 60s turn race below -- matching the provider
+        // catalog registry's own refresh timeout keeps a stuck probe from blocking the hourly
+        // self-test schedule indefinitely.
+        const { models } = await runProviderRefreshWithDeadline({
+          label: "Codex guard self-test catalog",
+          timeoutMs: 120_000,
+          operation: (context) =>
+            probeClient.fetchCatalog({ scope: "global", force: false }, context),
+        });
+        const model = models.find((candidate) => candidate.id.includes("luna")) ?? models[0];
+        if (!model) return;
+        await runCodexGuardSelfTest({
+          createClient: (guardDeviceLaunchGate) =>
+            new CodexAppServerAgentClient(logger, codexRuntimeSettings, {
+              deviceLaunchGate: guardDeviceLaunchGate,
+            }),
+          model: model.id,
+          codexVersion,
+          logger,
+        });
+      } catch (error) {
+        logger.warn({ err: error }, "Codex guard self-test scheduling failed");
+      }
+    })();
+  };
+  checkCodexGuardSelfTest();
+  setInterval(checkCodexGuardSelfTest, 60 * 60 * 1000).unref();
+
   const providerSnapshotManager = agentProviderRuntime.snapshotManager;
   daemonConfigStore.onFieldChange("catalogRefreshTimeoutMs", (value) => {
     providerSnapshotManager.setRefreshTimeoutMs(typeof value === "number" ? value : undefined);

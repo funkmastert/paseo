@@ -14,12 +14,18 @@ import {
   type TaskClassId,
 } from "../shared/role-policy-schema";
 import { sameModel } from "../shared/model-identity";
-import { DEFAULT_TOOL_PROFILE, profileDeniedTools, type ToolProfile } from "../shared/tool-profiles";
+import {
+  DEFAULT_TOOL_PROFILE,
+  isToolProfileExpressibleOnCodex,
+  profileDeniedTools,
+  type ToolProfile,
+} from "../shared/tool-profiles";
 import { WORK_KINDS, type ArenaRankingsFile, type WorkKind } from "../shared/arena-aliases";
 import { decideArenaPick, moveRefToFront, type ArenaPickDecision } from "./arena-model-pick";
 import {
   clampThinkingOption,
   THINKING_LEVEL_LABELS,
+  thinkingLevelRank,
   ULTRACODE_EFFORT_OPTION_ID,
   ULTRACODE_OPTION_ID,
   type ThinkingClampHow,
@@ -188,6 +194,21 @@ interface ClassifierWorldBase {
    * so this is always a snapshot already on disk, never a live fetch.
    */
   arenaRanking?: ArenaRankingsFile;
+  /**
+   * Codex guard health (docs/catastrophe-gate.md, KTD-6), read fresh for each decision rather
+   * than cached on the world the way `arenaRanking` is: guard health can flip red mid-session.
+   * Omitted means not wired -- role-availability.ts's `isCodexRefUsable` treats that the same as
+   * an explicit `false` (guards-first, KTD-3), so no `codex/` ref is ever usable until a caller
+   * supplies this.
+   */
+  isCodexGuardHealthy?: () => boolean;
+  /**
+   * Currently-running Codex children, for `policy.codex.maxChildren` (KTD-9). Omitted means not
+   * wired, which role-availability.ts treats as zero -- permissive on its own, but moot while
+   * `isCodexGuardHealthy` above is also omitted, since that already makes every `codex/` ref
+   * unusable.
+   */
+  runningCodexChildren?: number;
 }
 
 /** What the role hook knows about the JEV agent tools at create. Data, like pool health. */
@@ -445,7 +466,12 @@ export interface ThinkingDecision {
   override?: {
     requested: string;
     applied: string | null;
-    reason: "leader-rule" | "subagent-no-ultracode" | "not-advertised" | "no-thinking-options";
+    reason:
+      | "leader-rule"
+      | "subagent-no-ultracode"
+      | "not-advertised"
+      | "no-thinking-options"
+      | "codex-max-effort";
   };
   reason: string;
 }
@@ -765,10 +791,27 @@ function decideModel(
   // One options object for both eligibility calls below, so an explicit
   // request and ordered selection are held to the same bar by construction —
   // including `allowUnlistedModels`, which either path can act on.
+  //
+  // Leaders never use Codex (Scope Boundaries) -- an absolute rule, not conditioned on arena
+  // ranking being enabled. Forcing the guard-health check to false here is a hard refusal for
+  // the leader role no matter what the world's actual guard health says, exactly the same as an
+  // unwired isCodexGuardHealthy reads for every other role.
+  //
+  // A role whose tool profile Codex cannot express (KTD-8) is refused the same way: Codex has no
+  // per-tool denial mechanism, so routing it there would silently drop the restriction rather than
+  // enforce it. This checks only the role's own configured profile, not denials inherited from a
+  // caller -- `decideModel` has no access to that half of the tool decision.
+  const codexIneligible = role.id === LEADER_ROLE_ID || !isToolProfileExpressibleOnCodex(role.toolProfile);
+  const codexAvailability = {
+    policy: world.policy.codex,
+    isGuardHealthy: codexIneligible ? () => false : world.isCodexGuardHealthy,
+    runningChildren: world.runningCodexChildren,
+  };
   const selectionOptions = {
     modelBudgetThresholdPct: world.policy.modelBudgetThresholdPct,
     allowUnlistedModels: world.policy.allowUnlistedModels,
     taskClass,
+    codex: codexAvailability,
   };
 
   // U8's arena-ranked pick (KTD-1, KTD-2, KTD-11, KTD-13): evaluated whenever `policy.arena` exists
@@ -793,6 +836,7 @@ function decideModel(
         isModelRefUsable(ref, world.catalog, world.pool, world.health, {
           modelBudgetThresholdPct: world.policy.modelBudgetThresholdPct,
           allowUnlistedModels: world.policy.allowUnlistedModels,
+          codex: codexAvailability,
         }),
       arena,
       rankings: world.arenaRanking,
@@ -1223,6 +1267,81 @@ function resolveThinkingLevel(
 }
 
 /**
+ * Codex's thinking decision (U5): there is no catalog entry to verify against, so `wanted` is
+ * resolved the same way as the Claude path -- leader rule, then an explicit request, then the
+ * task class default -- and then capped to `xhigh` whenever it is not on Paseo's own ladder
+ * (`thinkingLevelRank`). That one check covers Codex's own `max` and `ultra`, Ultra Code, and
+ * anything unrecognized, uniformly. Leaders never route to Codex (KTD-1), so this never needs a
+ * leader exception.
+ */
+/**
+ * Which level is wanted before any model-specific clamp is applied, and why: the leader rule, an
+ * explicit request, or the task class's default. Shared between decideThinking and
+ * decideCodexThinking (review finding #7) -- the two providers clamp the result differently, but
+ * resolve the same unclamped "wanted" level the same way.
+ */
+function resolveWantedThinkingLevel(
+  input: ClassifierInput,
+  world: ClassifierWorld,
+  taskClass: TaskClassId | undefined,
+  role: RoleDecision,
+  asChild: boolean,
+): { outcome: "leader-rule" | "requested" | "task-class-default"; wanted: string } {
+  const requested = input.requestedThinkingOptionId;
+  const isLeaderTier = !asChild || role.role.id === LEADER_ROLE_ID;
+  const leaderLevel = world.policy.thinking.leader;
+
+  if (isLeaderTier && leaderLevel !== null) {
+    return { outcome: "leader-rule", wanted: leaderLevel };
+  }
+  if (requested !== undefined) {
+    return { outcome: "requested", wanted: requested };
+  }
+  return {
+    outcome: "task-class-default",
+    wanted: world.policy.thinking.byTaskClass[taskClass ?? "standard"],
+  };
+}
+
+function decideCodexThinking(
+  input: ClassifierInput,
+  world: ClassifierWorld,
+  taskClass: TaskClassId | undefined,
+  role: RoleDecision,
+  asChild: boolean,
+  effective: EffectiveThinkingModel,
+): ThinkingDecision {
+  const requested = input.requestedThinkingOptionId;
+  const { outcome, wanted } = resolveWantedThinkingLevel(input, world, taskClass, role, asChild);
+
+  // `max` IS ranked on Paseo's own ladder (above xhigh, for a future Claude level) but Codex
+  // still caps to xhigh at it -- the plan names it explicitly alongside Codex's own `ultra` and
+  // anything unranked, so this compares against xhigh's rank rather than testing for undefined.
+  const wantedRank = thinkingLevelRank(wanted);
+  const xhighRank = thinkingLevelRank(ULTRACODE_EFFORT_OPTION_ID) as number;
+  const capped = wantedRank === undefined || wantedRank > xhighRank;
+  const optionId = capped ? ULTRACODE_EFFORT_OPTION_ID : wanted;
+  const override: ThinkingDecision["override"] =
+    requested !== undefined && requested !== optionId
+      ? { requested, applied: optionId, reason: "codex-max-effort" }
+      : undefined;
+
+  return {
+    outcome,
+    optionId,
+    modelRef: effective.modelRef,
+    wanted,
+    ...(requested !== undefined ? { requested } : {}),
+    ...(override ? { override } : {}),
+    reason: capped
+      ? `Capped to ${thinkingLabel(ULTRACODE_EFFORT_OPTION_ID)}: Codex children never think above it, and ${thinkingLabel(wanted)} is not on Paseo's ladder.`
+      : `${thinkingLabel(optionId)} is used, from ${
+          outcome === "leader-rule" ? "the leader rule" : outcome === "requested" ? "the request" : "the task class default"
+        }.`,
+  };
+}
+
+/**
  * The thinking half: which effort level `config.thinkingOptionId` becomes.
  * Decided AFTER the model, because every rung below reads the EFFECTIVE
  * model, not the one the caller asked for.
@@ -1265,6 +1384,15 @@ function decideThinking(
   const requestedField = requested !== undefined ? { requested } : {};
   const isSubagent = asChild;
   const effective = effectiveThinkingModel(input, world, model);
+
+  // Codex has no entry in `world.thinkingCatalog` (Claude is the only provider that reports
+  // thinking options through listModels), and Codex's own effort ladder -- low/medium/high/xhigh
+  // plus max and ultra -- is not Paseo's. A guarded Codex child never thinks above xhigh (U5):
+  // max, ultra, and anything else off Paseo's ladder all cap to it.
+  if (effective?.family === "codex") {
+    return decideCodexThinking(input, world, taskClass, role, asChild, effective);
+  }
+
   const entry = effective ? world.thinkingCatalog.get(effective.family)?.get(effective.modelId) : undefined;
 
   if (!effective || !entry) {
@@ -1312,21 +1440,7 @@ function decideThinking(
     };
   }
 
-  const isLeaderTier = !asChild || role.role.id === LEADER_ROLE_ID;
-  const leaderLevel = world.policy.thinking.leader;
-
-  let outcome: "leader-rule" | "requested" | "task-class-default";
-  let wanted: string;
-  if (isLeaderTier && leaderLevel !== null) {
-    outcome = "leader-rule";
-    wanted = leaderLevel;
-  } else if (requested !== undefined) {
-    outcome = "requested";
-    wanted = requested;
-  } else {
-    outcome = "task-class-default";
-    wanted = world.policy.thinking.byTaskClass[taskClass ?? "standard"];
-  }
+  const { outcome, wanted } = resolveWantedThinkingLevel(input, world, taskClass, role, asChild);
 
   const level = resolveThinkingLevel(wanted, entry.optionIds, entry.defaultOptionId, isSubagent);
   const override: ThinkingDecision["override"] =

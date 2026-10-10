@@ -98,6 +98,7 @@ export interface FakeCodexAppServer {
     turnId: string;
     reason: string;
   }): void;
+  startsFileChange(params: { threadId: string; itemId: string; changes: unknown }): void;
   requestUserInput(params: {
     itemId: string;
     threadId: string;
@@ -530,6 +531,17 @@ export function createFakeCodexAppServer(
     },
     async waitForCommandApprovalDecision(itemId) {
       return await this.waitForApprovalDecision(itemId);
+    },
+    startsFileChange(params) {
+      writeNotification("item/started", {
+        threadId: params.threadId,
+        item: {
+          type: "fileChange",
+          id: params.itemId,
+          changes: params.changes,
+          status: "inProgress",
+        },
+      });
     },
     requestFileChangeApproval(params) {
       const requestId = nextServerRequestId;

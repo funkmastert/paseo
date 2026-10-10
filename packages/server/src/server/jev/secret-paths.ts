@@ -145,14 +145,33 @@ const LOOKALIKES: Record<string, string> = {
 };
 const LOOKALIKE_RE = new RegExp(`[${Object.keys(LOOKALIKES).join("")}]`, "g");
 
+// HFS+ ignores these code points when comparing two names -- `.g‌it` (a ZERO WIDTH NON-JOINER
+// after the "g") opens `.git` on an HFS+ volume, the same class of gap as git's CVE-2014-9390 /
+// core.protectHFS. None has a legitimate role in a file name, so all are stripped outright,
+// before any other folding -- NFKC/lookalike folding operates on code points these never were
+// meant to survive as. U+200B (zero width space) is deliberately NOT on this list: HFS+ does not
+// ignore it, so a name built with one is genuinely a different name on that filesystem too.
+const HFS_IGNORED_CODE_POINTS = /[‌-‏‪-‮⁪-⁯﻿]/g;
+
 /**
- * A path as the secret rules compare it. Compatibility forms fold (`．env` is `.env`), lookalike
- * letters become ASCII, and each segment loses what Windows drops when it opens a file: trailing
- * dots and spaces, and an `:stream` suffix (`.env::$DATA`). On macOS and Linux those are distinct
- * files, but a name built to look like a secret one is refused there too.
+ * A path as the secret rules compare it. HFS+-ignored code points are stripped outright,
+ * compatibility forms fold (`．env` is `.env`), lookalike letters become ASCII, and each segment
+ * loses what Windows drops when it opens a file: trailing dots and spaces, and an `:stream`
+ * suffix (`.env::$DATA`). On Linux those are distinct files, but a name built to look like a
+ * secret one is refused there too.
+ *
+ * Exported for reuse by codex-guard.ts's file-change sensitivity check (docs/jev.md Feature 16
+ * step 7 names this spot as the canonical normalization): the same aliasing -- an HFS+-ignored
+ * code point, a trailing dot/space, or a `:stream` suffix -- that can hide a secret file from
+ * this module's own regexes can equally hide `.git`/`.ssh`/a shell rc file from that one's
+ * sensitive-path check, so both normalize the same way rather than keeping two copies that could
+ * drift.
  */
-function comparableName(filePath: string): string {
-  const folded = filePath.normalize("NFKC").replace(LOOKALIKE_RE, (letter) => LOOKALIKES[letter]!);
+export function comparableName(filePath: string): string {
+  const withoutIgnoredCodePoints = filePath.replace(HFS_IGNORED_CODE_POINTS, "");
+  const folded = withoutIgnoredCodePoints
+    .normalize("NFKC")
+    .replace(LOOKALIKE_RE, (letter) => LOOKALIKES[letter]!);
   return folded
     .replace(/\\/g, "/")
     .split("/")

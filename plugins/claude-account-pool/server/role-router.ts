@@ -161,9 +161,10 @@ export interface ThinkingOverriddenEpisode {
    * "subagent-no-ultracode": a subagent asked for Ultra Code, which only a
    * leader runs. "not-advertised": the model doesn't offer the requested id,
    * so it was clamped. "no-thinking-options": the model offers none, so the
-   * request was removed.
+   * request was removed. "codex-max-effort": a Codex child asked for an
+   * effort above xhigh (or off Paseo's ladder entirely), capped to it.
    */
-  reason: "leader-rule" | "subagent-no-ultracode" | "not-advertised" | "no-thinking-options";
+  reason: "leader-rule" | "subagent-no-ultracode" | "not-advertised" | "no-thinking-options" | "codex-max-effort";
 }
 
 export interface RoleRouterOptions {
@@ -271,6 +272,31 @@ interface RequestWithRoleFields {
 type AgentCreateConfig = PluginBeforeRequests["agent.create"]["config"];
 type ProviderOptionsValue = AgentCreateConfig["providerOptions"];
 
+const CODEX_GUARDED_OVERRIDE_KEYS = ["approval_policy", "sandbox_mode", "sandbox_workspace_write"] as const;
+
+/**
+ * Defense in depth for a routed Codex child (review finding #1): these three fields must never
+ * reach the provider on a guarded create at all, even though the provider itself
+ * (codex-app-server-agent.ts's `guardedProviderOptions()`) is also responsible for refusing them
+ * for a guarded session. Two independent layers enforcing the same invariant -- a caller-supplied
+ * approval_policy/sandbox_mode/sandbox_workspace_write must never be able to turn a guarded
+ * Codex child's approval requests off.
+ */
+function stripCodexGuardedOverrides(providerOptions: ProviderOptionsValue | undefined): ProviderOptionsValue | undefined {
+  if (typeof providerOptions !== "object" || providerOptions === null) {
+    return providerOptions;
+  }
+  const record = providerOptions as Record<string, unknown>;
+  if (!CODEX_GUARDED_OVERRIDE_KEYS.some((key) => key in record)) {
+    return providerOptions;
+  }
+  const next = { ...record };
+  for (const key of CODEX_GUARDED_OVERRIDE_KEYS) {
+    delete next[key];
+  }
+  return next as ProviderOptionsValue;
+}
+
 /**
  * Everything a tool decision writes into a create request. Both fields are
  * undefined when nothing was denied, so the request can pass through
@@ -323,15 +349,20 @@ function enforceToolDecision(
   tools: AgentDecision["tools"],
   outputStyle: AgentDecision["outputStyle"],
   jevTools: AgentDecision["jevTools"],
+  targetFamily?: string,
 ): ToolEnforcement {
   const extended = request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
   const restriction = restrictionNotice(tools.deniedTools, { inherited: tools.inheritedTools.length > 0 });
   const hint = jevTools?.arm === "on" ? JEV_TOOLS_DISCOVERY_HINT : undefined;
   const notice = restriction && hint ? `${restriction}\n\n${hint}` : restriction ?? hint;
   return {
-    providerOptions: applyToolProfile(request.config.providerOptions, tools.profile, tools.inheritedTools, notice) as
-      | ProviderOptionsValue
-      | undefined,
+    providerOptions: applyToolProfile(
+      request.config.providerOptions,
+      tools.profile,
+      tools.inheritedTools,
+      notice,
+      targetFamily,
+    ) as ProviderOptionsValue | undefined,
     labels: toolDenialLabels(extended.labels, tools.deniedTools),
     // Written on every path that writes tool enforcement, and only when it changes something.
     outputStyle:
@@ -921,7 +952,24 @@ function routeRoleForCreateUnguarded(
     });
   };
 
-  const enforcement = enforceToolDecision(request, decision.tools, decision.outputStyle, decision.jevTools);
+  // Tool enforcement's target family must match what will actually run, not just the
+  // classifier's tentative pick: a cross-family rewrite the registry check below rejects falls
+  // back to the request's own provider, and enforcement has to follow it there rather than stay
+  // aimed at the family the rewrite gave up on.
+  let enforcementProvider = decision.model.provider;
+  if (decision.model.crossesRequestedFamily) {
+    const registeredProviderIds = options.providerIds?.get();
+    if (registeredProviderIds && !registeredProviderIds.has(decision.model.provider as string)) {
+      enforcementProvider = request.config.provider ?? null;
+    }
+  }
+  const enforcement = enforceToolDecision(
+    request,
+    decision.tools,
+    decision.outputStyle,
+    decision.jevTools,
+    enforcementProvider ?? undefined,
+  );
 
   // Tool enforcement is independent of model selection: a role can have no
   // configured models (so no rewrite) and still be restricted to reading, or
@@ -1022,6 +1070,20 @@ function routeRoleForCreateUnguarded(
   const nextConfig: AgentCreateConfig = { ...request.config, model: decision.model.model };
   if (decision.model.crossesRequestedFamily && decision.model.provider !== null) {
     nextConfig.provider = decision.model.provider as AgentCreateConfig["provider"];
+  }
+  // A routed Codex child always runs guarded (KTD-7, docs/catastrophe-gate.md): the daemon
+  // decides every approval itself, never a person. Set unconditionally -- an explicit request
+  // for some other Codex mode must not bypass the guard this classifier just routed it behind.
+  if (decision.model.provider === "codex") {
+    nextConfig.modeId = "guarded";
+    // Defense in depth (review finding #1): strip a caller's own approval_policy/sandbox_mode/
+    // sandbox_workspace_write before anything else touches providerOptions for a guarded Codex
+    // child. The provider itself (codex-app-server-agent.ts's `guardedProviderOptions()`) is also
+    // responsible for refusing these fields, but a caller's request must never carry them past
+    // this hook either. This must run before the enforcement overwrite below, which carries the
+    // daemon's own trusted providerOptions (e.g. a read-only tool profile's sandbox_mode) and must
+    // never be stripped.
+    nextConfig.providerOptions = stripCodexGuardedOverrides(nextConfig.providerOptions);
   }
   if (enforcement.providerOptions) {
     nextConfig.providerOptions = enforcement.providerOptions;

@@ -1,7 +1,16 @@
 import { describe, expect, test, vi } from "vitest";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { type Dirent, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  type Dirent,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -15,20 +24,29 @@ import type {
   AgentSlashCommand,
   AgentStreamEvent,
 } from "../agent-sdk-types.js";
+import type { DeviceLaunchGate } from "../device-lease-manager.js";
 import {
   buildCodexAppServerEnv,
   buildCodexTurnTokenDelta,
   CodexAppServerAgentClient,
   CodexAppServerAgentSession,
   codexMicrosoftStoreBinaryCandidates,
+  codexChatGptBundleCandidates,
   codexAppServerTurnInputFromPrompt,
   listCodexSkills,
   mapCodexPatchNotificationToToolCall,
   mapCodexPlanUpdateToTodo,
   mapCodexPlanToToolCall,
+  MODE_PRESETS,
   normalizeCodexOutputSchema,
   toAgentUsage,
 } from "./codex-app-server-agent.js";
+import { CodexProviderOptionsSchema } from "./codex/options.js";
+import {
+  getCodexGuardHealthState,
+  resetCodexGuardHealthStateForTests,
+} from "../codex-guard-health.js";
+import * as codexGuardHealthModule from "../codex-guard-health.js";
 
 describe("mapCodexPlanUpdateToTodo", () => {
   test("preserves checklist progress without creating a plan card", () => {
@@ -80,6 +98,1004 @@ describe("Codex executable discovery", () => {
         "codex.exe",
       ),
     ]);
+  });
+
+  test("generates ChatGPT bundle candidates on macOS", () => {
+    const platformBackup = process.platform;
+    Object.defineProperty(process, "platform", {
+      value: "darwin",
+      configurable: true,
+    });
+
+    try {
+      const candidates = codexChatGptBundleCandidates();
+      expect(candidates).toContain(
+        path.join("/Applications", "ChatGPT.app", "Contents/Resources/codex-cli/bin/codex"),
+      );
+      expect(candidates.some((c) => c.includes("Applications/ChatGPT.app"))).toBe(true);
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: platformBackup,
+        configurable: true,
+      });
+    }
+  });
+
+  test("returns empty candidates on non-macOS", () => {
+    const platformBackup = process.platform;
+    Object.defineProperty(process, "platform", {
+      value: "win32",
+      configurable: true,
+    });
+
+    try {
+      const candidates = codexChatGptBundleCandidates();
+      expect(candidates).toEqual([]);
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: platformBackup,
+        configurable: true,
+      });
+    }
+  });
+});
+
+describe("Codex guarded mode preset", () => {
+  test("maps to workspace-write plus on-request", () => {
+    expect(MODE_PRESETS.guarded).toEqual({
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
+    });
+  });
+
+  test("the sandbox value is a legal CodexProviderOptionsSchema sandbox_mode", () => {
+    expect(() =>
+      CodexProviderOptionsSchema.parse({ sandbox_mode: MODE_PRESETS.guarded.sandbox }),
+    ).not.toThrow();
+  });
+
+  test("is not offered as a user-facing mode", async () => {
+    const session = createSession();
+    const modes = await session.getAvailableModes();
+    expect(modes.some((mode) => mode.id === "guarded")).toBe(false);
+  });
+});
+
+describe("Codex guarded mode resists a caller's own providerOptions (review finding #1)", () => {
+  async function startThreadAndCapture(configOverrides: Partial<AgentSessionConfig>) {
+    const requests: Array<{ method: string; params: unknown }> = [];
+    const session = createSession({
+      modeId: "guarded",
+      thinkingOptionId: "low",
+      ...configOverrides,
+    });
+    session.currentThreadId = null;
+    session.activeForegroundTurnId = null;
+    session.client = {
+      request: vi.fn(async (method: string, params: unknown) => {
+        requests.push({ method, params });
+        if (method === "thread/start") {
+          return { thread: { id: "guarded-thread" } };
+        }
+        if (method === "turn/start") {
+          return {};
+        }
+        if (method === "model/list") {
+          return { models: [] };
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      }),
+    };
+    await session.startTurn("trigger thread creation");
+    const startCall = requests.find((req) => req.method === "thread/start");
+    return startCall?.params as Record<string, unknown> | undefined;
+  }
+
+  test('approval_policy: "never" is ignored; the guarded preset\'s on-request still wins', async () => {
+    const params = await startThreadAndCapture({
+      providerOptions: { approval_policy: "never" },
+    });
+    expect(params).toMatchObject({ approvalPolicy: "on-request" });
+    const innerConfig = params?.config as Record<string, unknown> | undefined;
+    expect(innerConfig?.approval_policy).toBeUndefined();
+  });
+
+  test('sandbox_mode: "danger-full-access" is ignored; the guarded preset\'s workspace-write still wins', async () => {
+    const params = await startThreadAndCapture({
+      providerOptions: { sandbox_mode: "danger-full-access" },
+    });
+    expect(params).toMatchObject({ sandbox: "workspace-write" });
+    const innerConfig = params?.config as Record<string, unknown> | undefined;
+    expect(innerConfig?.sandbox_mode).toBeUndefined();
+  });
+
+  test("sandbox_workspace_write.network_access is ignored; the inner config carries none of it", async () => {
+    const params = await startThreadAndCapture({
+      providerOptions: {
+        sandbox_mode: "workspace-write",
+        sandbox_workspace_write: { network_access: true, writable_roots: ["/"] },
+      },
+    });
+    const innerConfig = params?.config as Record<string, unknown> | undefined;
+    expect(innerConfig?.sandbox_workspace_write).toBeUndefined();
+  });
+
+  test("both overridden together: approval_policy and sandbox_mode both still resolve to the preset", async () => {
+    const params = await startThreadAndCapture({
+      providerOptions: { approval_policy: "never", sandbox_mode: "danger-full-access" },
+    });
+    expect(params).toMatchObject({ approvalPolicy: "on-request", sandbox: "workspace-write" });
+  });
+
+  test("auto mode (not guarded) still honors a caller's own approval_policy/sandbox_mode", async () => {
+    const params = await startThreadAndCapture({
+      modeId: "auto",
+      providerOptions: { approval_policy: "never", sandbox_mode: "danger-full-access" },
+    });
+    // The outer params omit approvalPolicy/sandbox because the caller's own providerOptions
+    // already carries them -- unchanged, non-guarded behavior.
+    expect(params?.approvalPolicy).toBeUndefined();
+    expect(params?.sandbox).toBeUndefined();
+    const innerConfig = params?.config as Record<string, unknown> | undefined;
+    expect(innerConfig?.approval_policy).toBe("never");
+    expect(innerConfig?.sandbox_mode).toBe("danger-full-access");
+  });
+});
+
+describe("Codex guarded mode approval handling", () => {
+  async function startGuardedSession(
+    appServer: FakeCodexAppServer,
+    deps: { deviceLaunchGate?: DeviceLaunchGate; isCatastropheGateEnabled?: () => boolean } = {},
+    cwd = "/workspace/project",
+  ): Promise<{ session: AgentSession; paseoTurnId: string }> {
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd, modeId: "guarded" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+      deps,
+      false,
+      false,
+      false,
+      "agent-guarded-1",
+    );
+    const started = await session.startTurn("first");
+    await appServer.waitForTurnStart();
+    appServer.startsTurn({ threadId: "thread-1", turnId: "native-A" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return { session, paseoTurnId: started.turnId };
+  }
+
+  test("declines git push --force origin main with the catastrophe reason, and the reason reaches the agent", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    appServer.requestCommandApproval({
+      itemId: "command-1",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "git push --force origin main",
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-1");
+
+    expect(result).toEqual({ decision: "decline" });
+    expect(session.getPendingPermissions()).toHaveLength(0);
+    const assistantMessages = events.filter(
+      (event) => event.type === "timeline" && event.item.type === "assistant_message",
+    );
+    expect(
+      assistantMessages.some(
+        (event) =>
+          event.type === "timeline" &&
+          event.item.type === "assistant_message" &&
+          event.item.text.includes("force-push-main"),
+      ),
+    ).toBe(true);
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("approves an ordinary command with no pending permission created", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.requestCommandApproval({
+      itemId: "command-2",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "npm test",
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-2");
+
+    expect(result).toEqual({ decision: "accept" });
+    expect(session.getPendingPermissions()).toHaveLength(0);
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("declines a build-gate refusal with the build-gate reason", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const deviceLaunchGate: DeviceLaunchGate = {
+      gateLaunch: async () => ({ decision: "deny", message: "No build slot available." }),
+    };
+    const { session } = await startGuardedSession(appServer, { deviceLaunchGate });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    appServer.requestCommandApproval({
+      itemId: "command-3",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "./gradlew assembleDebug",
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-3");
+
+    expect(result).toEqual({ decision: "decline" });
+    // Review finding #8: the bare decision alone doesn't prove the agent ever learned why --
+    // the build-gate reason must reach it as a timeline message, same as the catastrophe gate's.
+    const assistantMessages = events.filter(
+      (event) => event.type === "timeline" && event.item.type === "assistant_message",
+    );
+    expect(
+      assistantMessages.some(
+        (event) =>
+          event.type === "timeline" &&
+          event.item.type === "assistant_message" &&
+          event.item.text.includes("No build slot available."),
+      ),
+    ).toBe(true);
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("declines when a gate throws", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const deviceLaunchGate: DeviceLaunchGate = {
+      gateLaunch: async () => {
+        throw new Error("device gate exploded");
+      },
+    };
+    const { session } = await startGuardedSession(appServer, { deviceLaunchGate });
+
+    appServer.requestCommandApproval({
+      itemId: "command-4",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "npm test",
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-4");
+
+    expect(result).toEqual({ decision: "decline" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("declines an apply_patch request whose changed paths were never tracked (re-review finding #4)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    // No appServer.startsFileChange(...) call -- this item's paths were never tracked at all
+    // (a malformed/missing changes payload, or a notification that never arrived).
+    appServer.requestFileChangeApproval({
+      itemId: "file-1",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("file-1");
+
+    expect(result).toEqual({ decision: "decline" });
+    expect(session.getPendingPermissions()).toHaveLength(0);
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("approves an apply_patch request that touches an ordinary workspace file, with changes known (review finding #2)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.startsFileChange({
+      threadId: "thread-1",
+      itemId: "file-2",
+      changes: [{ path: "/workspace/project/src/index.ts", kind: "update" }],
+    });
+    appServer.requestFileChangeApproval({
+      itemId: "file-2",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result2 = await appServer.waitForCommandApprovalDecision("file-2");
+
+    expect(result2).toEqual({ decision: "accept" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test.each([
+    ["a path inside .git", "/workspace/project/.git/config"],
+    ["a top-level .gitconfig", "/workspace/project/.gitconfig"],
+    ["an XDG git config file", "/workspace/project/.config/git/config"],
+    [".gitattributes", "/workspace/project/.gitattributes"],
+    ["a shell rc file", "/workspace/project/.zshrc"],
+  ])(
+    "declines an apply_patch request that touches %s (review finding #2)",
+    async (_label, sensitivePath) => {
+      const appServer = createFakeCodexAppServer({
+        "turn/steer": () => ({ turn: { id: "native-A" } }),
+      });
+      const { session } = await startGuardedSession(appServer);
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+
+      appServer.startsFileChange({
+        threadId: "thread-1",
+        itemId: "file-3",
+        changes: [{ path: sensitivePath, kind: "update" }],
+      });
+      appServer.requestFileChangeApproval({
+        itemId: "file-3",
+        threadId: "thread-1",
+        turnId: "native-A",
+        reason: "Apply the patch",
+      });
+      const result = await appServer.waitForCommandApprovalDecision("file-3");
+
+      expect(result).toEqual({ decision: "decline" });
+      const assistantMessage = events.find(
+        (event) => event.type === "timeline" && event.item.type === "assistant_message",
+      );
+      expect(assistantMessage).toBeDefined();
+
+      await session.close();
+      appServer.assertNoErrors();
+    },
+  );
+
+  test("declines an apply_patch request whose reported path is a symlink into .git/ (re-review finding #2)", async () => {
+    const scratch = realpathSync(await mkdtemp(path.join(tmpdir(), "codex-guard-symlink-test-")));
+    try {
+      mkdirSync(path.join(scratch, ".git"), { recursive: true });
+      const gitConfig = path.join(scratch, ".git", "config");
+      writeFileSync(gitConfig, "[core]\n");
+      const link = path.join(scratch, "notes.md");
+      symlinkSync(gitConfig, link);
+
+      const appServer = createFakeCodexAppServer({
+        "turn/steer": () => ({ turn: { id: "native-A" } }),
+      });
+      const { session } = await startGuardedSession(appServer, {}, scratch);
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+
+      appServer.startsFileChange({
+        threadId: "thread-1",
+        itemId: "file-symlink",
+        // Codex reports the literal path it was asked to write ("notes.md") -- a symlink, not
+        // a path with ".git" anywhere in its own text.
+        changes: [{ path: link, kind: "update" }],
+      });
+      appServer.requestFileChangeApproval({
+        itemId: "file-symlink",
+        threadId: "thread-1",
+        turnId: "native-A",
+        reason: "Apply the patch",
+      });
+      const result = await appServer.waitForCommandApprovalDecision("file-symlink");
+
+      expect(result).toEqual({ decision: "decline" });
+      const assistantMessage = events.find(
+        (event) => event.type === "timeline" && event.item.type === "assistant_message",
+      );
+      expect(assistantMessage).toBeDefined();
+
+      await session.close();
+      appServer.assertNoErrors();
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test("declines an apply_patch request whose reported path is a dangling symlink into .git/hooks/ (verify finding #2)", async () => {
+    const scratch = realpathSync(
+      await mkdtemp(path.join(tmpdir(), "codex-guard-dangling-symlink-test-")),
+    );
+    try {
+      mkdirSync(path.join(scratch, ".git", "hooks"), { recursive: true });
+      const hookTarget = path.join(scratch, ".git", "hooks", "post-checkout");
+      // The hook file does not exist yet -- apply_patch is "creating" the link's name, the same
+      // shape as the verification report's confirmed bypass.
+      const link = path.join(scratch, "evil-hook-link.md");
+      symlinkSync(".git/hooks/post-checkout", link);
+      expect(existsSync(hookTarget)).toBe(false);
+
+      const appServer = createFakeCodexAppServer({
+        "turn/steer": () => ({ turn: { id: "native-A" } }),
+      });
+      const { session } = await startGuardedSession(appServer, {}, scratch);
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+
+      appServer.startsFileChange({
+        threadId: "thread-1",
+        itemId: "file-dangling-symlink",
+        changes: [{ path: link, kind: "add" }],
+      });
+      appServer.requestFileChangeApproval({
+        itemId: "file-dangling-symlink",
+        threadId: "thread-1",
+        turnId: "native-A",
+        reason: "Apply the patch",
+      });
+      const result = await appServer.waitForCommandApprovalDecision("file-dangling-symlink");
+
+      expect(result).toEqual({ decision: "decline" });
+      const assistantMessage = events.find(
+        (event) => event.type === "timeline" && event.item.type === "assistant_message",
+      );
+      expect(assistantMessage).toBeDefined();
+
+      await session.close();
+      appServer.assertNoErrors();
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test("declines a quote-split git config alias setup end-to-end (verify finding #1)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.requestCommandApproval({
+      itemId: "command-quote-split",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: `git config alia""s.pf 'push --force origin main'`,
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-quote-split");
+
+    expect(result).toEqual({ decision: "decline" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("declines a rename whose destination (kind.move_path) is sensitive, even though the source path isn't (verify finding #2, round 3)", async () => {
+    const scratch = realpathSync(await mkdtemp(path.join(tmpdir(), "codex-guard-move-path-test-")));
+    try {
+      mkdirSync(path.join(scratch, ".git", "hooks"), { recursive: true });
+      const hookTarget = path.join(scratch, ".git", "hooks", "post-checkout");
+
+      const appServer = createFakeCodexAppServer({
+        "turn/steer": () => ({ turn: { id: "native-A" } }),
+      });
+      const { session } = await startGuardedSession(appServer, {}, scratch);
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+
+      appServer.startsFileChange({
+        threadId: "thread-1",
+        itemId: "file-rename",
+        // The real app-server protocol's rename shape: kind is an object carrying move_path,
+        // not a bare string -- notes.md itself is harmless; only the destination is sensitive.
+        changes: [
+          {
+            path: path.join(scratch, "notes.md"),
+            kind: { type: "update", move_path: hookTarget },
+          },
+        ],
+      });
+      appServer.requestFileChangeApproval({
+        itemId: "file-rename",
+        threadId: "thread-1",
+        turnId: "native-A",
+        reason: "Apply the patch",
+      });
+      const result = await appServer.waitForCommandApprovalDecision("file-rename");
+
+      expect(result).toEqual({ decision: "decline" });
+      const assistantMessage = events.find(
+        (event) => event.type === "timeline" && event.item.type === "assistant_message",
+      );
+      expect(assistantMessage).toBeDefined();
+
+      await session.close();
+      appServer.assertNoErrors();
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test("tracks file-change paths from the legacy patch_apply_started channel too (re-review finding #4)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session as unknown as CodexTestSession).handleNotification(
+      "codex/event/patch_apply_begin",
+      {
+        threadId: "thread-1",
+        msg: {
+          type: "patch_apply_begin",
+          call_id: "legacy-patch-1",
+          changes: [{ path: "/workspace/project/.gitattributes", kind: "add" }],
+        },
+      },
+    );
+
+    appServer.requestFileChangeApproval({
+      itemId: "legacy-patch-1",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("legacy-patch-1");
+
+    expect(result).toEqual({ decision: "decline" });
+    const assistantMessage = events.find(
+      (event) => event.type === "timeline" && event.item.type === "assistant_message",
+    );
+    expect(assistantMessage).toBeDefined();
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("tracks a rename's move_path destination from the legacy patch_apply_started channel's real map-keyed shape (verify finding #1, round 4)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session as unknown as CodexTestSession).handleNotification(
+      "codex/event/patch_apply_begin",
+      {
+        threadId: "thread-1",
+        msg: {
+          type: "patch_apply_begin",
+          call_id: "legacy-rename-1",
+          // The real legacy patch_apply_begin payload: a map keyed by path, with move_path as a
+          // TOP-LEVEL sibling of "type" on the entry's own value -- not nested under a "kind"
+          // field at all, and not an array of {path, kind} records (the v2 shape the earlier,
+          // wrong version of this test used).
+          changes: {
+            "/workspace/project/notes.md": {
+              type: "update",
+              unified_diff: "@@ -1 +1 @@\n-hello\n+goodbye\n",
+              move_path: "/workspace/project/.ssh/config",
+            },
+          },
+        },
+      },
+    );
+
+    appServer.requestFileChangeApproval({
+      itemId: "legacy-rename-1",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("legacy-rename-1");
+
+    expect(result).toEqual({ decision: "decline" });
+    const assistantMessage = events.find(
+      (event) => event.type === "timeline" && event.item.type === "assistant_message",
+    );
+    expect(assistantMessage).toBeDefined();
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("tracks a rename's move_path from the legacy channel's older {typeName: {move_path}} map-entry form (verify finding #1, round 4)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session as unknown as CodexTestSession).handleNotification(
+      "codex/event/patch_apply_begin",
+      {
+        threadId: "thread-1",
+        msg: {
+          type: "patch_apply_begin",
+          call_id: "legacy-rename-2",
+          // The older map-entry shape: no "type"/"kind" field anywhere on the entry itself --
+          // the type name ("update") is the key, wrapping an object that carries move_path.
+          changes: {
+            "/workspace/project/notes.md": {
+              update: { move_path: "/workspace/project/.gitattributes" },
+            },
+          },
+        },
+      },
+    );
+
+    appServer.requestFileChangeApproval({
+      itemId: "legacy-rename-2",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("legacy-rename-2");
+
+    expect(result).toEqual({ decision: "decline" });
+    const assistantMessage = events.find(
+      (event) => event.type === "timeline" && event.item.type === "assistant_message",
+    );
+    expect(assistantMessage).toBeDefined();
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("tracks a rename's top-level move_path (sibling of type, not nested under kind) from the modern item/started channel too (verify finding #1, round 4)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    appServer.startsFileChange({
+      threadId: "thread-1",
+      itemId: "file-rename-map",
+      // Map-keyed changes (not the v2 array-of-records form), with move_path at the top level
+      // of the entry's own value.
+      changes: {
+        "/workspace/project/notes.md": {
+          type: "update",
+          move_path: "/workspace/project/.git/hooks/post-checkout",
+        },
+      },
+    });
+    appServer.requestFileChangeApproval({
+      itemId: "file-rename-map",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("file-rename-map");
+
+    expect(result).toEqual({ decision: "decline" });
+    const assistantMessage = events.find(
+      (event) => event.type === "timeline" && event.item.type === "assistant_message",
+    );
+    expect(assistantMessage).toBeDefined();
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("evicts a file-change item's tracked paths once it completes (re-review finding #6)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const internals = asInternals(session as unknown as CodexTestSession);
+
+    appServer.startsFileChange({
+      threadId: "thread-1",
+      itemId: "file-evict",
+      changes: [{ path: "/workspace/project/.gitattributes", kind: "add" }],
+    });
+    internals.handleNotification("item/completed", {
+      threadId: "thread-1",
+      item: { type: "fileChange", id: "file-evict", status: "completed" },
+    });
+
+    // The tracked entry is gone -- a later approval request for the same item id has nothing to
+    // go on and declines as untracked (review finding #4), not as the sensitive path it would
+    // have matched had the entry survived.
+    appServer.requestFileChangeApproval({
+      itemId: "file-evict",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("file-evict");
+
+    expect(result).toEqual({ decision: "decline" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("caps guardedFileChangePathsByItemId, evicting the oldest entry first (re-review finding #6)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const internals = asInternals(session as unknown as CodexTestSession);
+
+    // One more than the cap -- none of these ever completes, so only the cap's own eviction
+    // keeps the map bounded.
+    for (let index = 0; index <= 500; index++) {
+      internals.handleNotification("item/started", {
+        threadId: "thread-1",
+        item: {
+          type: "fileChange",
+          id: `cap-item-${index}`,
+          changes: [{ path: `/workspace/project/file-${index}.md`, kind: "add" }],
+        },
+      });
+    }
+
+    // The oldest entry (item 0) was pushed out by the cap -- its approval request has nothing
+    // tracked and declines as untracked.
+    appServer.requestFileChangeApproval({
+      itemId: "cap-item-0",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const oldestResult = await appServer.waitForCommandApprovalDecision("cap-item-0");
+    expect(oldestResult).toEqual({ decision: "decline" });
+
+    // The newest entry survived the cap and resolves normally (an ordinary workspace path, not
+    // sensitive, so it's accepted rather than declined-as-untracked).
+    appServer.requestFileChangeApproval({
+      itemId: "cap-item-500",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const newestResult = await appServer.waitForCommandApprovalDecision("cap-item-500");
+    expect(newestResult).toEqual({ decision: "accept" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("declines a command that sets a git alias (review finding #2's catastrophe-gate blind spot)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.requestCommandApproval({
+      itemId: "command-alias",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "git config alias.pf 'push --force origin main'",
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-alias");
+
+    expect(result).toEqual({ decision: "decline" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test.each([
+    "git config core.hooksPath /tmp/evil-hooks",
+    "git config core.sshCommand 'ssh -i /tmp/evil-key'",
+    "git config credential.helper '!/tmp/evil-helper'",
+  ])("declines a guarded git config command: %s", async (command) => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.requestCommandApproval({
+      itemId: "command-config",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command,
+      cwd: "/workspace/project",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("command-config");
+
+    expect(result).toEqual({ decision: "decline" });
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("auto mode still creates a pending permission for a clean command", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startPublicSteeringSession(appServer);
+
+    const commandPermission = waitForNextPermission(session);
+    appServer.requestCommandApproval({
+      itemId: "command-5",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "npm test",
+      cwd: "/workspace/project",
+    });
+    await commandPermission;
+
+    expect(session.getPendingPermissions()).toHaveLength(1);
+    await session.respondToPermission(session.getPendingPermissions()[0]!.id, {
+      behavior: "allow",
+    });
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("turns health red and cancels the turn when a command a gate refuses ran with no approval request", async () => {
+    resetCodexGuardHealthStateForTests();
+    let interrupted = false;
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+      "turn/interrupt": () => {
+        interrupted = true;
+        return {};
+      },
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.completesCommand({
+      threadId: "thread-1",
+      callId: "unapproved-1",
+      command: "git push --force origin main",
+      output: "",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getCodexGuardHealthState().status).toBe("red");
+    expect(interrupted).toBe(true);
+
+    await session.close();
+  });
+
+  test("leaves health alone when a safe-list command ran with no approval request", async () => {
+    resetCodexGuardHealthStateForTests();
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.completesCommand({
+      threadId: "thread-1",
+      callId: "safe-1",
+      command: "ls",
+      output: "",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getCodexGuardHealthState().status).toBe("unknown");
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("treats a completion with no callId as unmatched and turns health red (review finding #3)", async () => {
+    resetCodexGuardHealthStateForTests();
+    let interrupted = false;
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+      "turn/interrupt": () => {
+        interrupted = true;
+        return {};
+      },
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    // The legacy `codex/event/exec_command_end` channel's call_id is optional (confirmed in its
+    // own zod schema) -- this is the real path a command completion can reach
+    // recheckGuardedCommandCompletion with no callId, unlike the canonical item/completed channel
+    // (whose CodexThreadItemSchema requires an id, so a missing id never produces a timeline item
+    // at all).
+    asInternals(session as unknown as CodexTestSession).handleNotification(
+      "codex/event/exec_command_end",
+      {
+        threadId: "thread-1",
+        msg: {
+          type: "exec_command_end",
+          command: "git push --force origin main",
+          exit_code: 0,
+          success: true,
+        },
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getCodexGuardHealthState().status).toBe("red");
+    expect(interrupted).toBe(true);
+
+    await session.close();
+  });
+
+  test("a no-callId completion of a safe command leaves health alone (review finding #3)", async () => {
+    resetCodexGuardHealthStateForTests();
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    asInternals(session as unknown as CodexTestSession).handleNotification(
+      "codex/event/exec_command_end",
+      {
+        threadId: "thread-1",
+        msg: {
+          type: "exec_command_end",
+          command: "ls",
+          exit_code: 0,
+          success: true,
+        },
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getCodexGuardHealthState().status).toBe("unknown");
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("fails closed (turns health red) when the live re-check itself throws (review finding #4)", async () => {
+    resetCodexGuardHealthStateForTests();
+    let interrupted = false;
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+      "turn/interrupt": () => {
+        interrupted = true;
+        return {};
+      },
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    // decideCodexGuardedCommand already fails closed on its own errors (its own try/catch wraps
+    // its entire body, turning any internal failure into a normal decline), so a throw can only
+    // reach recheckGuardedCommandCompletion's own catch from the dependency it calls directly.
+    // Spying on that one function, restored immediately after, is the narrowest way to exercise
+    // this specific catch block's fail-closed behavior (review finding #4).
+    const spy = vi
+      .spyOn(codexGuardHealthModule, "recheckCodexGuardCommandItem")
+      .mockRejectedValueOnce(new Error("live re-check exploded"));
+
+    appServer.completesCommand({
+      threadId: "thread-1",
+      callId: "unapproved-throws-1",
+      command: "npm test",
+      output: "",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getCodexGuardHealthState().status).toBe("red");
+    expect(interrupted).toBe(true);
+
+    spy.mockRestore();
+    await session.close();
   });
 });
 

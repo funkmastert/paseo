@@ -69,6 +69,16 @@ const THINKING_LEVEL_RANK: Readonly<Partial<Record<ThinkingLevelId, number>>> = 
   max: 6,
 };
 
+/**
+ * The rank of a level on Paseo's own comparable ladder, or undefined for an id that isn't on it
+ * at all — `ultracode`, Codex's own `max`/`ultra`, or anything unrecognized. For the classifier's
+ * Codex-only max-effort cap (server/classifier.ts): a Codex child's requested effort is capped to
+ * `xhigh` exactly when this returns undefined for it.
+ */
+export function thinkingLevelRank(id: string): number | undefined {
+  return THINKING_LEVEL_RANK[id as ThinkingLevelId];
+}
+
 export type ThinkingClampHow = "unclamped" | "nearest-lower" | "nearest-higher" | "highest-effort" | "model-default";
 
 export interface ThinkingClamp {

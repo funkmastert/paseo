@@ -6,19 +6,20 @@ import {
 } from "./device-launch-enforcement.js";
 
 describe("resolveDeviceLaunchEnforcement", () => {
-  test("names the mechanism for every provider the daemon can refuse outright", () => {
+  test("names the mechanism for every provider the daemon can refuse outright, with nothing left to confess", () => {
     expect(resolveDeviceLaunchEnforcement("claude")).toMatchObject({ tier: "refuses" });
     expect(resolveDeviceLaunchEnforcement("opencode")).toMatchObject({ tier: "refuses" });
-    // A tier that refuses has nothing left to confess.
     expect(resolveDeviceLaunchEnforcement("claude").gap).toBeUndefined();
     expect(resolveDeviceLaunchEnforcement("opencode").gap).toBeUndefined();
   });
 
-  test("a provider the daemon can only ask says so, and says where the hole is", () => {
+  test("Codex refuses, but only in guarded mode -- the one refuses tier with something left to confess", () => {
     const codex = resolveDeviceLaunchEnforcement("codex");
-    expect(codex.tier).toBe("asks");
-    expect(codex.gap).toContain("Full Access");
+    expect(codex.tier).toBe("refuses");
+    expect(codex.gap).toContain("guarded");
+  });
 
+  test("a provider the daemon can only ask says so, and says where the hole is", () => {
     for (const provider of ["copilot", "cursor", "kimi", "kiro", "traecli", "omp"]) {
       const enforcement = resolveDeviceLaunchEnforcement(provider);
       expect(enforcement.tier, provider).toBe("asks");
@@ -94,9 +95,10 @@ describe("describeDeviceLaunchEnforcement", () => {
     expect(text).toContain("only thing holding the cap");
   });
 
-  test("tells a partially guarded agent where its gate stops applying", () => {
+  test("tells a refused agent where its guard stops applying, even on the refuses tier", () => {
     const text = describeDeviceLaunchEnforcement(resolveDeviceLaunchEnforcement("codex"));
-    expect(text).toContain("Full Access");
+    expect(text).toContain("refused");
+    expect(text).toContain("guarded");
     expect(text).toContain("device_checkout");
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_TOOL_PROFILE } from "./tool-profiles";
 import {
+  DEFAULT_CODEX_POLICY,
   DEFAULT_POLICY,
   DEFAULT_THINKING_BY_TASK_CLASS,
   DEFAULT_THINKING_POLICY,
@@ -50,6 +51,7 @@ function policy(overrides: Partial<RoleModelPolicy>): RoleModelPolicy {
     allowUnlistedModels: [],
     thinking: DEFAULT_THINKING_POLICY,
     childOutputStyle: "Concise",
+    codex: DEFAULT_CODEX_POLICY,
     revision: "r1",
     ...overrides,
   };

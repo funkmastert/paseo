@@ -51,9 +51,10 @@ const ENFORCEMENT_BY_PROVIDER: Record<string, DeviceLaunchEnforcement> = {
     mechanism: "the Paseo bridge plugin's tool.execute.before hook on the bash tool",
   },
   codex: {
-    tier: "asks",
-    mechanism: "the command-approval request Codex sends before running a sandboxed command",
-    gap: "Full Access sets Codex's approval policy to never, so it asks nothing and boots freely",
+    tier: "refuses",
+    mechanism:
+      "the daemon's in-process approval handler for a child running in guarded mode (docs/catastrophe-gate.md)",
+    gap: "only guarded children get this; Tyler's own Codex sessions and any other mode still only ask, through the same command-approval request, and interactive input typed into a running shell is not re-gated",
   },
   copilot: {
     tier: "asks",
@@ -147,7 +148,9 @@ export function resolveProviderExtends(
 export function describeDeviceLaunchEnforcement(enforcement: DeviceLaunchEnforcement): string {
   switch (enforcement.tier) {
     case "refuses":
-      return `Your device launches are refused when there is no slot, through ${enforcement.mechanism}. Call device_checkout first and you will never see a refusal.`;
+      return enforcement.gap
+        ? `Your device launches are refused when there is no slot, through ${enforcement.mechanism} — ${enforcement.gap}. Call device_checkout first and you will never see a refusal.`
+        : `Your device launches are refused when there is no slot, through ${enforcement.mechanism}. Call device_checkout first and you will never see a refusal.`;
     case "asks":
       return `Your device launches are refused only when you ask first, through ${enforcement.mechanism} — ${enforcement.gap}. Call device_checkout yourself; it is the only thing holding the cap for you.`;
     case "observes":
