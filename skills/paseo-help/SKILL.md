@@ -83,6 +83,57 @@ If diagnosing the bundled daemon on a computer with Paseo Desktop installed, but
 
 Offer to fix the PATH or symlink; do not change shell configuration silently.
 
+## This checkout is a fork, and the deployed docs do not describe it
+
+`funkmastert/paseo` is **Bozeo**, a fork of `getpaseo/paseo`. Before answering from
+paseo.sh, check whether the question touches something the fork changed.
+
+- **Branch.** The work is on `multi-account-orchestrator`. `main` is an unmodified copy
+  of upstream, so a checkout of `main` reproduces none of the behaviour below.
+- **Precedence.** For anything fork-specific, this repository's `docs/`,
+  [docs/install.md](../../docs/install.md) and
+  [plugins/claude-account-pool/README.md](../../plugins/claude-account-pool/README.md)
+  win over paseo.sh. Upstream docs know nothing about the Bozeo branding, the
+  `claude-account-pool` plugin, the `/install` command, or JEV. Quoting them on those
+  topics produces confident wrong answers.
+- **Install.** Follow `.claude/commands/install.md`; it automates `docs/install.md` and
+  is authoritative on ordering and consent.
+
+### Fork gotchas worth checking before diagnosing
+
+Each of these has cost real time. They look like different bugs than they are.
+
+- **Node.** The repo needs Node 22, and the machine's default `node` may be older. A
+  version manager only applies to shells that load it, so load it in every shell —
+  including before `git commit`, because lefthook's `pre-commit` runs `oxlint` and
+  `oxfmt` and fails with `ERR_UNKNOWN_FILE_EXTENSION` under an old Node.
+- **An existing `~/.paseo` blocks a fresh install** even with no daemon running;
+  preflight reports `EXISTING INSTALL OR BUSY PORT`. Agent history does **not** transfer
+  to a new home, and copying `agents/` back does not restore it.
+- **A new home cannot be reached off-box.** It is written with relay off and
+  `daemon.listen: 127.0.0.1:6767`. A phone or another machine reaching it is a
+  configuration change, not a fault. A tailnet address cannot be bound while Tailscale is
+  down; `0.0.0.0` needs `daemon.auth.password` on untrusted networks.
+- **Pool sign-in silently cross-signs.** `--email` only pre-fills the page: with a live
+  claude.com session the authorize step completes against that account. Verify `orgId`,
+  not just `email` — matching orgs mean the pool has fewer accounts than entries and is
+  treating one budget as several.
+- **The app shows one host at a time**, and remote hosts are added in the app UI only —
+  not in `desktop-settings.json`, not from the CLI. An empty session list after a fresh
+  install is expected, not a broken connection. `paseo ls` also hides archived agents
+  unless you pass `-a`.
+- **Quitting the app stops the daemon.** The defaults are `manageBuiltInDaemon: true` and
+  `keepRunningAfterQuit: false`, so quitting takes every running agent with it. Use a
+  CLI-started daemon or a launch agent for an always-on host.
+- **JEV is off until `PASEO_JEV_API_KEY` exists** in `~/.config/paseo/jev.env`
+  (`chmod 600`). It is read through a 5-second cache, so no restart is needed. The service
+  logs `jev: off, no key` **once per process**, so an existing line in the log is not
+  evidence the key is still missing — compare the line's `pid` against the running daemon,
+  or check that a restarted daemon added no new line.
+- **Do not promise CI.** `ci.yml` and `nix.yml` trigger only on pull requests into `main`,
+  so a PR based on `multi-account-orchestrator` runs nothing, and Actions has been
+  disabled on the fork (`workflow run` returns HTTP 422). Verify locally and say so.
+
 ## Escalate with evidence
 
 If the current docs and diagnostics do not resolve the problem, collect the app and daemon versions, OS, install method, connection method, exact error, minimal reproduction, and a small redacted log excerpt.
