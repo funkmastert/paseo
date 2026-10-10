@@ -392,6 +392,9 @@ const AgentDeviceLeasesSchema = z
     // 0 disables the backstop.
     maxLeaseHours: z.number().nonnegative().optional(),
     queueTimeoutMinutes: z.number().positive().optional(),
+    // How long a lease may sit unused before it releases on its own, reason `idle`. 0 disables
+    // it, like `maxLeaseHours`. See docs/device-leases.md#a-lease-cannot-leak.
+    idleReleaseMinutes: z.number().nonnegative().optional(),
     // On unless `enabled` is false, but it acts on leases, so it needs the cap on too. Honors
     // `dryRun` above. See docs/device-leases.md#shutdown.
     simulatorTeardown: z
