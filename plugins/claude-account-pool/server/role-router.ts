@@ -39,6 +39,7 @@ import { formatModelRef } from "./role-availability";
 import type { ParentToolProfiles } from "./parent-profiles";
 import type { ResolveRoleTier } from "./role-resolve";
 import type { McpGatewayCache } from "./mcp-gateway-cache";
+import type { CodexGuardAvailabilitySnapshot } from "./codex-guard-availability";
 import { withMcpScope } from "./mcp-scope-enforcement";
 
 /** Stands in for `callerAgentId` in notifications about a root agent, which has none. */
@@ -196,6 +197,15 @@ export interface RoleRouterOptions {
    * to `"no-file"` — R8's intended behavior for a missing file, not an error.
    */
   arenaRankingCache?: { get(): ArenaRankingsFile | undefined };
+  /**
+   * The daemon's Codex guard health plus its running-children count (docs/codex-workers.md,
+   * KTD-6, KTD-9), polled the same way `arenaRankingCache` is. Optional: without it (or on a
+   * daemon that never started the poller, or an older daemon with no `codexGuard.status` RPC),
+   * `ClassifierWorld.isCodexGuardHealthy` is never supplied, which `isCodexRefUsable` already
+   * treats as unhealthy by design (guards-first, KTD-3) -- no `codex/` ref becomes usable just
+   * because this cache is absent.
+   */
+  codexGuardCache?: { get(): CodexGuardAvailabilitySnapshot | undefined };
   /** Called (deduplicated per caller+values) when labels[paseo.mcp] named something no gateway server is called. */
   onDeclaredMcpUnknown?: (episode: DeclaredMcpUnknownEpisode) => void;
   /**
@@ -868,6 +878,8 @@ function routeRoleForCreateUnguarded(
       callerDenials: callerDenialsFor(options, policy, callerAgentId),
       mcpGateway: options.mcpGatewayCache?.get(),
       arenaRanking: options.arenaRankingCache?.get(),
+      isCodexGuardHealthy: () => options.codexGuardCache?.get()?.healthy ?? false,
+      runningCodexChildren: options.codexGuardCache?.get()?.runningChildren,
       ...(input.jevTools ? { jevToolsAvailable: input.jevTools } : {}),
     },
   );

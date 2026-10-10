@@ -9,6 +9,7 @@ import { echoed, echoedList } from "./server/echo";
 import { CE_PLUGIN_ID, createCompoundPolicyRouter, type CompoundPolicyEpisode, type ProviderEntryShape } from "./server/compound-policy";
 import { createHealthTracker } from "./server/health";
 import { createJevAvailability, jevToolsWorldFor, type JevAvailability } from "./server/jev-availability";
+import { createCodexGuardAvailability, type CodexGuardAvailability } from "./server/codex-guard-availability";
 import { fetchSpawnHint, type SpawnHint } from "./server/jev-hint";
 import type { JevToolsWorld } from "./server/classifier";
 import { createMcpGatewayCache, type McpGatewayCache } from "./server/mcp-gateway-cache";
@@ -68,6 +69,7 @@ export default function contribute(server: PluginServerContext) {
   let recentAgentTypes: RecentAgentTypes | null = null;
   let roleRouter: RoleCreateRouter | null = null;
   let jevAvailability: JevAvailability | null = null;
+  let codexGuardAvailability: CodexGuardAvailability | null = null;
   let arenaRankingsPoller: IntervalPoller<void> | null = null;
   let arenaRankingCache: ArenaRankingCache | null = null;
   // stdout, not console.error: this is a record of every create, not a problem report.
@@ -116,6 +118,11 @@ export default function contribute(server: PluginServerContext) {
     // empty and nothing JEV runs.
     jevAvailability = createJevAvailability(paseo);
     const startedJevAvailability = jevAvailability;
+    // Polls `codexGuard.status` every 60 s (docs/codex-workers.md, KTD-6, KTD-9). Until a poll
+    // answers, and on a daemon without the RPC, it stays empty and no `codex/` ref is usable
+    // (guards-first, KTD-3) -- the same fail-closed default as a missing guard health source.
+    codexGuardAvailability = createCodexGuardAvailability(paseo);
+    const startedCodexGuardAvailability = codexGuardAvailability;
     // Daily LMArena refresh (U6, KTD-10). Started once per plugin process,
     // fire-and-forget like jevAvailability's first poll: a slow or failing
     // fetch must never delay a create, and the classifier treats a missing
@@ -146,6 +153,7 @@ export default function contribute(server: PluginServerContext) {
       parentProfiles,
       mcpGatewayCache,
       arenaRankingCache,
+      codexGuardCache: codexGuardAvailability,
       onDeclaredMcpUnknown: (episode) =>
         console.error(
           `[claude-account-pool] role-router: caller "${episode.callerAgentId}" asked for MCP servers ${echoedList(episode.values)} in paseo.mcp, which no mcpGateway server is called; created without them`,
@@ -224,6 +232,7 @@ export default function contribute(server: PluginServerContext) {
       mcpGatewayCache,
       jevAvailability,
       arenaRankingCache,
+      codexGuardCache: codexGuardAvailability,
     });
     router = createRouter({
       poolCache,
@@ -308,6 +317,9 @@ export default function contribute(server: PluginServerContext) {
         // Not part of the warm-up: a slow first `jev.status` must not delay a create. A create
         // before it answers runs as if JEV were absent.
         void startedJevAvailability.refresh().catch(() => undefined);
+        // Same reasoning: a slow first `codexGuard.status` must not delay a create. A create
+        // before it answers runs with every `codex/` ref unusable (guards-first, KTD-3).
+        void startedCodexGuardAvailability.refresh().catch(() => undefined);
         const timedOut = new Promise<void>((resolveTimeout) => {
           const timer = setTimeout(resolveTimeout, STARTUP_WARM_TIMEOUT_MS);
           // Never the reason the process stays alive.
@@ -506,6 +518,7 @@ export default function contribute(server: PluginServerContext) {
     const startedMcpGatewayCache = mcpGatewayCache;
     const startedJevAvailability = jevAvailability;
     const startedArenaRankingCache = arenaRankingCache;
+    const startedCodexGuardAvailability = codexGuardAvailability;
     classifierTool = startClassifierToolServer({
       spawnHintAvailability: () => startedJevAvailability?.get()?.spawnHint,
       world: () => ({
@@ -519,6 +532,8 @@ export default function contribute(server: PluginServerContext) {
         // U8 (KTD-13): without this, the tool's preview always fell back to "no-file", the same gap
         // `role-model-policy.explain` had below — neither wired the cache the create hook uses.
         arenaRanking: startedArenaRankingCache?.get(),
+        isCodexGuardHealthy: () => startedCodexGuardAvailability?.get()?.healthy ?? false,
+        runningCodexChildren: startedCodexGuardAvailability?.get()?.runningChildren,
       }),
     });
     return classifierTool;
@@ -636,6 +651,7 @@ export default function contribute(server: PluginServerContext) {
     catalogCache?.stop();
     parentProfiles?.stop();
     jevAvailability?.stop();
+    codexGuardAvailability?.stop();
     arenaRankingsPoller?.stop();
     arenaRankingCache?.stop();
     classifierTool?.close();

@@ -106,6 +106,10 @@ import {
   JevSavingsEventsResponseSchema,
 } from "./jev/rpc-schemas.js";
 import {
+  CodexGuardStatusRequestSchema,
+  CodexGuardStatusResponseSchema,
+} from "./codex-guard/rpc-schemas.js";
+import {
   PaseoConfigRawSchema,
   PaseoLifecycleCommandRawSchema,
   PaseoMetadataGenerationEntrySchema,
@@ -3973,6 +3977,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   JevAskRequestSchema,
   JevSavingsSummaryRequestSchema,
   JevSavingsEventsRequestSchema,
+  CodexGuardStatusRequestSchema,
   ResumeAgentRequestMessageSchema,
   ImportAgentRequestMessageSchema,
   RefreshAgentRequestMessageSchema,
@@ -4451,6 +4456,9 @@ export const ServerInfoStatusPayloadSchema = z
         jevAsk: z.boolean().optional(),
         // COMPAT(jevSavings): added in v0.8.x, remove gate after 2027-03-30.
         jevSavings: z.boolean().optional(),
+        // COMPAT(codexGuardStatus): added in v0.9.x, remove gate after 2027-10-10. Codex guard
+        // health plus the running-children count (docs/codex-workers.md, KTD-6, KTD-9).
+        codexGuardStatus: z.boolean().optional(),
         // COMPAT(deviceManagement): added in v0.8.x, remove gate after 2027-09-30. The Devices
         // section's release/reserve/shutdown actions (docs/device-leases.md); an older daemon
         // only supports the read-only device_status_update the deviceLeases flag above gates.
@@ -7787,6 +7795,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   JevAskResponseSchema,
   JevSavingsSummaryResponseSchema,
   JevSavingsEventsResponseSchema,
+  CodexGuardStatusResponseSchema,
   ListCommandsResponseSchema,
   ListTerminalsResponseSchema,
   TerminalsChangedSchema,

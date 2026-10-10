@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { ArenaRankingsFile } from "../shared/arena-aliases";
+import type { CodexGuardAvailabilitySnapshot } from "./codex-guard-availability";
 import { CURRENT_SCHEMA_VERSION, RoleModelPolicySchema, type RoleModelPolicy } from "../shared/role-policy-schema";
 import { roleModelPolicyRpc, type RoleModelPolicyExplainResult } from "../shared/role-policy-rpc";
 import type { HealthTracker } from "./health";
@@ -54,6 +55,13 @@ export interface RoleModelPolicyRpcDeps {
    * bug here before this was wired up at all.
    */
   arenaRankingCache?: { get(): ArenaRankingsFile | undefined };
+  /**
+   * Codex guard health plus the running-children count (docs/codex-workers.md, KTD-6, KTD-9),
+   * mirroring the create hook's own `RoleRouterOptions.codexGuardCache`: without it, `explain`
+   * never sees a healthy guard and reports every `codex/` ref `unavailable`, matching what a live
+   * create would actually do rather than claiming a model the hook couldn't route to.
+   */
+  codexGuardCache?: { get(): CodexGuardAvailabilitySnapshot | undefined };
 }
 
 export interface RoleModelPolicyRpcHandlers {
@@ -313,6 +321,8 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
         nowMs: Date.now(),
         mcpGateway: deps.mcpGatewayCache?.get(),
         arenaRanking: deps.arenaRankingCache?.get(),
+        isCodexGuardHealthy: () => deps.codexGuardCache?.get()?.healthy ?? false,
+        runningCodexChildren: deps.codexGuardCache?.get()?.runningChildren,
       };
       const preview = spawnHintPreview(
         classifierInput,

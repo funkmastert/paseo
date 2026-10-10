@@ -1196,6 +1196,77 @@ describe("createRoleRouter", () => {
     }
   });
 
+  describe("codexGuardCache (daemon -> plugin guard health bridge, U4/U5)", () => {
+    /**
+     * Codex first, Claude second, so whether the codex ref is picked turns on usability, not on
+     * the "unavailable -> fall back to top configured model" path a single-model pool would hide
+     * behind (every other codex test in this file uses exactly one model for that reason).
+     */
+    function codexFirstOptions(overrides: Partial<RoleRouterOptions> = {}): RoleRouterOptions {
+      const health = createHealthTracker();
+      health.reportUsage("codex", [{ window: "session", usedPct: 10 }]);
+      return baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-5.1", "claude-sonnet-5"])),
+        catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"], claude: ["claude-sonnet-5"] })),
+        poolCache: fakePoolCache({ workers: [{ providerId: "claude-backup", priority: 1 }], leader: { providerId: "leader" } }),
+        health,
+        ...overrides,
+      });
+    }
+
+    it("falls back to the next pool entry when no codexGuardCache is wired (guards-first, KTD-3)", () => {
+      const router = createRoleRouter(codexFirstOptions());
+
+      const result = router(request({ callerAgentId: "c1" }), fakeContext);
+
+      expect(result?.config.provider).not.toBe("codex");
+      expect(result?.config.model).toBe("claude-sonnet-5");
+    });
+
+    it("selects the codex ref once codexGuardCache reports a healthy guard", () => {
+      const router = createRoleRouter(
+        codexFirstOptions({ codexGuardCache: { get: () => ({ healthy: true, runningChildren: 0 }) } }),
+      );
+
+      const result = router(request({ callerAgentId: "c1" }), fakeContext);
+
+      expect(result?.config.provider).toBe("codex");
+      expect(result?.config.model).toBe("gpt-5.1");
+    });
+
+    it("falls back when codexGuardCache explicitly reports an unhealthy guard", () => {
+      const router = createRoleRouter(
+        codexFirstOptions({ codexGuardCache: { get: () => ({ healthy: false, runningChildren: 0 }) } }),
+      );
+
+      const result = router(request({ callerAgentId: "c1" }), fakeContext);
+
+      expect(result?.config.provider).not.toBe("codex");
+      expect(result?.config.model).toBe("claude-sonnet-5");
+    });
+
+    it("falls back when the running-children count is already at the policy's cap", () => {
+      const policy = {
+        ...DEFAULT_POLICY,
+        roles: DEFAULT_POLICY.roles.map((role) =>
+          role.id === "worker" ? { ...role, models: ["codex/gpt-5.1", "claude-sonnet-5"] } : role,
+        ),
+        codex: { maxWindowPct: 60, maxReadingAgeHours: 2, maxChildren: 1 },
+      };
+      const router = createRoleRouter(
+        codexFirstOptions({
+          policyCache: fakePolicyCache(policy),
+          codexGuardCache: { get: () => ({ healthy: true, runningChildren: 1 }) },
+        }),
+      );
+
+      const result = router(request({ callerAgentId: "c1" }), fakeContext);
+
+      expect(result?.config.provider).not.toBe("codex");
+      expect(result?.config.model).toBe("claude-sonnet-5");
+    });
+  });
+
   describe("explicit model request precedence", () => {
     // worker's pool: "claude-sonnet-5" is the top (only) pick.
     const pool: ResolvedPool = { workers: [{ providerId: "claude-backup", priority: 1 }], leader: { providerId: "leader" } };

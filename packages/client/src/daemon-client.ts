@@ -522,6 +522,10 @@ export type JevDecisionsListPayload = Extract<
   SessionOutboundMessage,
   { type: "jev.decisions.list.response" }
 >["payload"];
+export type CodexGuardStatusPayload = Extract<
+  SessionOutboundMessage,
+  { type: "codex.guard.status.response" }
+>["payload"];
 export type JevAskPayload = Extract<
   SessionOutboundMessage,
   { type: "jev.ask.response" }
@@ -5398,6 +5402,23 @@ export class DaemonClient {
       requestId: options?.requestId,
       timeout: options?.timeout ?? JEV_DEFAULT_RPC_TIMEOUT_MS,
       message: { type: "jev.status.request" },
+    });
+  }
+
+  /**
+   * Codex guard health plus the running-children count (docs/codex-workers.md, "Guard health";
+   * KTD-6, KTD-9). Defaults to a timeout under a plugin hook's budget, like `jevStatus`.
+   */
+  async codexGuardStatus(options?: {
+    requestId?: string;
+    timeout?: number;
+  }): Promise<CodexGuardStatusPayload> {
+    // COMPAT(codexGuardStatus): callers gate on `server_info.features.codexGuardStatus`; an older
+    // daemon answers an unknown request type with an `unknown_schema` rpc_error.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout ?? JEV_DEFAULT_RPC_TIMEOUT_MS,
+      message: { type: "codex.guard.status.request" },
     });
   }
 
