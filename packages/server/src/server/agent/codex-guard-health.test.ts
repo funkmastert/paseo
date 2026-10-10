@@ -1,5 +1,7 @@
-import { writeFileSync } from "node:fs";
-import { beforeEach, describe, expect, test } from "vitest";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
   evaluateCodexGuardSelfTest,
@@ -262,6 +264,127 @@ describe("runCodexGuardSelfTest", () => {
     await runPromise;
 
     expect(getCodexGuardHealthState()).toMatchObject({ status: "green" });
+  });
+
+  test("logs the git scaffold's own failure, distinguishable from a guard regression (re-review finding #8)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const warn = vi.fn();
+    const emptyBinDir = mkdtempSync(path.join(os.tmpdir(), "codex-guard-no-git-"));
+    const originalPath = process.env.PATH;
+    process.env.PATH = emptyBinDir;
+    try {
+      const runPromise = runCodexGuardSelfTest({
+        createClient: createGuardedClient(appServer),
+        model: "gpt-6-luna",
+        codexVersion: "0.160.0",
+        timeoutMs: 5_000,
+        logger: { warn },
+      });
+
+      const turnStartParams = await appServer.waitForTurnStart();
+      appServer.startsTurn({ threadId: "thread-1", turnId: "native-A" });
+      const okPath = extractGuardPath(turnStartParams, "paseo-guard-ok");
+      const canaryPath = extractGuardPath(turnStartParams, "paseo-guard-canary");
+
+      appServer.requestCommandApproval({
+        itemId: "ok-item",
+        threadId: "thread-1",
+        turnId: "native-A",
+        command: `touch ${okPath}`,
+        cwd: "/tmp",
+        reason: "ok",
+      });
+      await appServer.waitForCommandApprovalDecision("ok-item");
+      writeFileSync(okPath, "");
+      appServer.requestCommandApproval({
+        itemId: "canary-item",
+        threadId: "thread-1",
+        turnId: "native-A",
+        command: `touch ${canaryPath}`,
+        cwd: "/tmp",
+        reason: "canary",
+      });
+      await appServer.waitForCommandApprovalDecision("canary-item");
+      appServer.completeTurn({ threadId: "thread-1" });
+
+      await runPromise;
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.anything(),
+        "Codex guard self-test git scaffold setup failed",
+      );
+    } finally {
+      process.env.PATH = originalPath;
+      rmSync(emptyBinDir, { recursive: true, force: true });
+    }
+  });
+
+  test("the git scaffold's own timeout keeps a hanging git from blocking the self-test (re-review finding #5)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const warn = vi.fn();
+    const slowBinDir = mkdtempSync(path.join(os.tmpdir(), "codex-guard-slow-git-"));
+    const fakeGitPath = path.join(slowBinDir, "git");
+    // Sleeps far longer than the 200ms scaffold timeout below; if the timeout did not kill it,
+    // this test would itself hang for 5s instead of completing almost immediately.
+    writeFileSync(fakeGitPath, "#!/bin/sh\nsleep 5\n");
+    chmodSync(fakeGitPath, 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${slowBinDir}:${originalPath ?? ""}`;
+    try {
+      const startedAt = Date.now();
+      const runPromise = runCodexGuardSelfTest({
+        createClient: createGuardedClient(appServer),
+        model: "gpt-6-luna",
+        codexVersion: "0.160.0",
+        timeoutMs: 5_000,
+        gitScaffoldTimeoutMs: 200,
+        logger: { warn },
+      });
+
+      const turnStartParams = await appServer.waitForTurnStart();
+      appServer.startsTurn({ threadId: "thread-1", turnId: "native-A" });
+      const okPath = extractGuardPath(turnStartParams, "paseo-guard-ok");
+      const canaryPath = extractGuardPath(turnStartParams, "paseo-guard-canary");
+
+      appServer.requestCommandApproval({
+        itemId: "ok-item",
+        threadId: "thread-1",
+        turnId: "native-A",
+        command: `touch ${okPath}`,
+        cwd: "/tmp",
+        reason: "ok",
+      });
+      await appServer.waitForCommandApprovalDecision("ok-item");
+      writeFileSync(okPath, "");
+      appServer.requestCommandApproval({
+        itemId: "canary-item",
+        threadId: "thread-1",
+        turnId: "native-A",
+        command: `touch ${canaryPath}`,
+        cwd: "/tmp",
+        reason: "canary",
+      });
+      await appServer.waitForCommandApprovalDecision("canary-item");
+      appServer.completeTurn({ threadId: "thread-1" });
+
+      await runPromise;
+      const elapsedMs = Date.now() - startedAt;
+
+      // Well under the fake git's 5s sleep: the 200ms scaffold timeout, not the real exit, is
+      // what ended the wait.
+      expect(elapsedMs).toBeLessThan(4_000);
+      expect(warn).toHaveBeenCalledWith(
+        expect.anything(),
+        "Codex guard self-test git scaffold setup failed",
+      );
+    } finally {
+      process.env.PATH = originalPath;
+      rmSync(slowBinDir, { recursive: true, force: true });
+    }
   });
 
   test("sets health red when the force-push command's catastrophe-gate refusal is never observed (review finding #5)", async () => {

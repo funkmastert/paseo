@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
@@ -21,40 +22,70 @@ export interface CodexGuardHealthState {
 const CANARY_DENY_REASON = "Paseo guard self-test canary";
 const FORCE_PUSH_MAIN_RULE = "force-push-main";
 
+const execFileAsync = promisify(execFile);
+
+// Review finding #5: bounded so a hanging git (a GPG-signing pinentry prompt with no human
+// present, most plausibly) can't wedge this indefinitely, and async so it never blocks the
+// daemon's event loop the way the five execFileSync calls this replaced did.
+const GIT_SCAFFOLD_TIMEOUT_MS = 10_000;
+
+async function runGitScaffoldCommand(
+  args: string[],
+  cwd: string | undefined,
+  timeoutMs: number,
+): Promise<void> {
+  await execFileAsync("git", args, {
+    ...(cwd ? { cwd } : {}),
+    timeout: timeoutMs,
+    // GIT_TERMINAL_PROMPT=0 forbids git's own credential/host-key prompts outright, on top of
+    // the timeout, rather than relying on the timeout alone to eventually recover from one.
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
+}
+
 /**
  * A scratch repo with an initial commit on `main` and a bare remote already carrying it, so the
  * scripted `git push --force origin main` (review finding #5) has a real target to attempt
- * against. Failures here are swallowed -- the canary and ok commands still exercise the rest of
- * the self-test on a `git`-less machine, just without this third command's coverage, and
+ * against. Failures here (including a timeout) are logged and swallowed (review finding #8) --
+ * the canary and ok commands still exercise the rest of the self-test on a `git`-less or
+ * misconfigured host, just without this third command's coverage, and
  * evaluateCodexGuardSelfTest already turns that into a red verdict on its own. The bare remote
  * lives inside `cwd` itself (never added or committed to the repo it backs) so the caller's own
  * `rmSync(cwd, ...)` cleans it up too, with no separate temp directory to leak.
  */
-function setUpSelfTestGitScaffold(cwd: string): void {
+async function setUpSelfTestGitScaffold(
+  cwd: string,
+  logger?: CodexGuardHealthLogger,
+  timeoutMs: number = GIT_SCAFFOLD_TIMEOUT_MS,
+): Promise<void> {
   try {
     const remoteCwd = path.join(cwd, ".codex-guard-self-test-remote");
-    execFileSync("git", ["init", "--bare", "-q", remoteCwd]);
-    execFileSync("git", ["init", "-q", "-b", "main"], { cwd });
-    execFileSync(
-      "git",
+    await runGitScaffoldCommand(["init", "--bare", "-q", remoteCwd], undefined, timeoutMs);
+    await runGitScaffoldCommand(["init", "-q", "-b", "main"], cwd, timeoutMs);
+    await runGitScaffoldCommand(
       [
         "-c",
         "user.email=guard-self-test@example.com",
         "-c",
         "user.name=Paseo Guard Self-Test",
+        "-c",
+        "commit.gpgsign=false",
         "commit",
         "--allow-empty",
         "-q",
         "-m",
         "init",
       ],
-      { cwd },
+      cwd,
+      timeoutMs,
     );
-    execFileSync("git", ["remote", "add", "origin", remoteCwd], { cwd });
-    execFileSync("git", ["push", "-q", "origin", "main"], { cwd });
-  } catch {
-    // Left for evaluateCodexGuardSelfTest to turn into red: no catastropheRuleSeen without a
-    // scaffold to push against.
+    await runGitScaffoldCommand(["remote", "add", "origin", remoteCwd], cwd, timeoutMs);
+    await runGitScaffoldCommand(["push", "-q", "origin", "main"], cwd, timeoutMs);
+  } catch (error) {
+    // evaluateCodexGuardSelfTest turns a missing catastropheRuleSeen into red on its own; this
+    // log line is what tells a git-less host or a scaffold timeout apart from a real guard
+    // regression (review finding #8).
+    logger?.warn({ err: error }, "Codex guard self-test git scaffold setup failed");
   }
 }
 
@@ -226,6 +257,8 @@ export interface RunCodexGuardSelfTestOptions {
   logger?: CodexGuardHealthLogger;
   codexVersion: string | null;
   timeoutMs?: number;
+  /** Bounds each git scaffold command (review finding #5); defaults to GIT_SCAFFOLD_TIMEOUT_MS. */
+  gitScaffoldTimeoutMs?: number;
 }
 
 const DEFAULT_SELF_TEST_TIMEOUT_MS = 60_000;
@@ -255,7 +288,11 @@ export async function runCodexGuardSelfTest(options: RunCodexGuardSelfTestOption
   // origin main` names its destination explicitly, so checkCatastrophe matches it on the command
   // text alone, with no git subprocess of its own -- but a live Codex model is more likely to
   // actually attempt the exact scripted command against a repo that can plausibly take it.
-  setUpSelfTestGitScaffold(cwd);
+  await setUpSelfTestGitScaffold(
+    cwd,
+    options.logger,
+    options.gitScaffoldTimeoutMs ?? GIT_SCAFFOLD_TIMEOUT_MS,
+  );
 
   const seen = { ok: false, canary: false, catastrophe: false };
   // This gate is the self-test's only source of a decision, so recording it here -- rather than
