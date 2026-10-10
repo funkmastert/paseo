@@ -181,16 +181,32 @@ export function recentLine(item: AgentTimelineItem): string | null {
   }
 }
 
+/** A subagent's own Agent/Task brief (R1): the one shape shared by the provider, the observer, and the state. */
+export interface SubagentBrief {
+  description: string | null;
+  prompt: string | null;
+}
+
+/**
+ * Whether `brief` has anything to judge a read against. A declared-but-empty brief (both fields
+ * null or blank) is content-free and must be treated exactly like a brief that was never found
+ * (R4): the never-deny guarantee in `decision.ts` depends on this, not on whether a brief object
+ * merely exists.
+ */
+export function hasSubagentBriefContent(brief: SubagentBrief | null | undefined): boolean {
+  return Boolean(brief?.description?.trim() || brief?.prompt?.trim());
+}
+
 export interface ReadCheckStateInput {
   title: string | null;
   assignment: string | null;
   /**
-   * Present when this read is inside a subagent whose own brief was found (R1): its Agent/Task
-   * call's own description and prompt. Absent for a main agent's read, and for a subagent's read
-   * whose brief could not be found — both fall back to the legacy task below (R4, "judged as
-   * today").
+   * Present when this read is inside a subagent whose own brief was found and has content (R1,
+   * R4): its Agent/Task call's own description and prompt. Absent for a main agent's read, and
+   * for a subagent's read whose brief could not be found or was content-free — both fall back to
+   * the legacy task below (R4, "judged as today").
    */
-  subagentBrief?: { description: string | null; prompt: string | null };
+  subagentBrief?: SubagentBrief;
   /**
    * The current turn's latest prompt from the leader or Tyler (R3), added after a main agent's
    * assignment. Ignored for a subagent read: R1 keeps the parent's task to one line.
@@ -219,8 +235,9 @@ export interface ReadCheckStateInput {
  * assignment, and (R3) the current turn's latest prompt.
  */
 function buildTask(input: ReadCheckStateInput): string {
-  if (input.subagentBrief) {
-    const brief = [input.subagentBrief.description, input.subagentBrief.prompt]
+  const subagentBrief = input.subagentBrief;
+  if (subagentBrief && hasSubagentBriefContent(subagentBrief)) {
+    const brief = [subagentBrief.description, subagentBrief.prompt]
       .filter((part): part is string => Boolean(part))
       .join("\n")
       .slice(0, TASK_ASSIGNMENT_CHARS);

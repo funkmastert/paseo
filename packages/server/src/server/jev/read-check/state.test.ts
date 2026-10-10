@@ -6,6 +6,7 @@ import {
   buildReadCheckState,
   describeSize,
   estimateReadTokens,
+  hasSubagentBriefContent,
   outlineOf,
   READ_CHECK_MAX_STATE_BYTES,
   readToolCharacters,
@@ -154,6 +155,29 @@ describe("buildReadCheckState", () => {
       rangeText: "x",
     });
     expect(state.task).toBe(`${"d".repeat(800)}\n(parent task: Fix login)`);
+  });
+
+  test("a declared-but-content-free brief falls back to the legacy task (finding #5)", () => {
+    const state = buildReadCheckState({
+      title: "Fix login",
+      assignment: "Find why login fails",
+      subagentBrief: { description: null, prompt: null },
+      recent: [{ type: "assistant_message", text: "Reading the template" }],
+      why: null,
+      displayPath: "src/templates/base.hbs",
+      size: "all 10 lines, about 50 tokens",
+      rangeText: "x".repeat(10),
+    });
+    expect(state.task).toBe("Fix login\nFind why login fails");
+    expect(state.recent).toEqual(["assistant: Reading the template"]);
+  });
+
+  test("a blank-only brief (empty strings) is content-free too", () => {
+    expect(hasSubagentBriefContent({ description: "", prompt: "   " })).toBe(false);
+    expect(hasSubagentBriefContent({ description: null, prompt: null })).toBe(false);
+    expect(hasSubagentBriefContent(undefined)).toBe(false);
+    expect(hasSubagentBriefContent(null)).toBe(false);
+    expect(hasSubagentBriefContent({ description: "Read the docs", prompt: null })).toBe(true);
   });
 
   test("a main agent's task adds the current turn's latest prompt after the assignment", () => {
