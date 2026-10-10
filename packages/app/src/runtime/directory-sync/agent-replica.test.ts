@@ -53,6 +53,32 @@ function entry(agent: AgentSnapshotPayload): FetchAgentsEntry {
 }
 
 describe("AgentDirectoryReplica", () => {
+  it("leaves the agents map and pending permissions untouched when a live update changes nothing", () => {
+    const serverId = "agent-replica-redundant-update";
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, null as unknown as DaemonClient);
+    const replica = new AgentDirectoryReplica(
+      serverId,
+      () => undefined,
+      () => undefined,
+    );
+    replica.commitSnapshot([entry(payload("steady"))], []);
+    const before = useSessionStore.getState().sessions[serverId];
+    const agentsBefore = before?.agents;
+    const pendingBefore = before?.pendingPermissions;
+
+    // The shape of a streaming-only tick: same updatedAt, nothing else different.
+    replica.applyDelta({
+      kind: "upsert",
+      agent: payload("steady"),
+      project: entry(payload("steady")).project,
+    });
+
+    const after = useSessionStore.getState().sessions[serverId];
+    expect(after?.agents).toBe(agentsBefore);
+    expect(after?.pendingPermissions).toBe(pendingBefore);
+  });
+
   it("does not let a late cache read replace newer live turn state", () => {
     const serverId = "agent-replica-late-cache";
     const store = useSessionStore.getState();

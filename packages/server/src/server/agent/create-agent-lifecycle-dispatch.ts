@@ -9,6 +9,7 @@ import type {
   CreatePaseoWorktreeWorkflowResult,
 } from "../worktree-session.js";
 import type { WorkspaceGitService } from "../workspace-git-service.js";
+import type { WorkspaceCreatedBy } from "../workspace-registry.js";
 import type {
   CreateAgentWorktreeTarget,
   FirstAgentContext,
@@ -62,6 +63,7 @@ export class CreateAgentLifecycleDispatch {
     target: CreateAgentWorktreeTarget | undefined;
     firstAgentContext: FirstAgentContext;
     hasLegacyGitOptions: boolean;
+    createdBy?: WorkspaceCreatedBy;
   }): Promise<CreatePaseoWorktreeWorkflowResult | null> {
     if (input.target && input.hasLegacyGitOptions) {
       throw new Error("create_agent_request worktree cannot be combined with git options");
@@ -70,7 +72,12 @@ export class CreateAgentLifecycleDispatch {
       return null;
     }
 
-    return this.createWorktreeForTarget(input.cwd, input.target, input.firstAgentContext);
+    return this.createWorktreeForTarget(
+      input.cwd,
+      input.target,
+      input.firstAgentContext,
+      input.createdBy,
+    );
   }
 
   registerAutoArchiveIfRequested(input: {
@@ -115,6 +122,7 @@ export class CreateAgentLifecycleDispatch {
     cwd: string,
     target: CreateAgentWorktreeTarget,
     firstAgentContext: FirstAgentContext,
+    createdBy?: WorkspaceCreatedBy,
   ): Promise<CreatePaseoWorktreeWorkflowResult> {
     const baseInput = {
       cwd,
@@ -122,7 +130,8 @@ export class CreateAgentLifecycleDispatch {
       runSetup: false,
       paseoHome: this.dependencies.paseoHome,
       worktreesRoot: this.dependencies.worktreesRoot,
-    } as const;
+      createdBy,
+    };
 
     switch (target.mode) {
       case "branch-off":

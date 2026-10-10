@@ -2,7 +2,7 @@ import type { Locator } from "@playwright/test";
 import { test, expect, type Page } from "../support/fixtures";
 import { gotoAppShell } from "../support/helpers/app";
 import { daemonWsRoutePattern } from "../support/helpers/daemon-port";
-import { seedWorkspace, type SeededWorkspace } from "../support/helpers/seed-client";
+import { seedWorkspace, settleAutoPin, type SeededWorkspace } from "../support/helpers/seed-client";
 import { getServerId } from "../support/helpers/server-id";
 
 // These actions used to be reachable only from the sidebar workspace ⋯ menu, the workspace header
@@ -112,6 +112,8 @@ test.describe("Command center workspace management", () => {
     const workspace = await seedWorkspace({ repoPrefix: "cc-rename-" });
 
     try {
+      // Collapsing the project section requires the row to actually live under it, not in Pinned.
+      await settleAutoPin(workspace.client, workspace.workspaceId);
       await gotoAppShell(page);
       await openWorkspace(page, workspace.workspaceId);
       await collapseProjectSection(page, workspace);
@@ -164,6 +166,8 @@ test.describe("Command center workspace management", () => {
     const workspace = await seedWorkspace({ repoPrefix: "cc-pin-" });
 
     try {
+      // Start from unpinned so "Pin to top" (not "Unpin") is the entry offered first.
+      await settleAutoPin(workspace.client, workspace.workspaceId);
       await gotoAppShell(page);
       await openWorkspace(page, workspace.workspaceId);
 

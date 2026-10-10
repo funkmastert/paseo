@@ -21,6 +21,7 @@ import {
   type SpawnedACPProcess,
   type SessionStateResponse,
   buildACPClientCapabilities,
+  consumeACPTurnTokenDelta,
   createLoggedNdJsonStream,
   deriveModelDefinitionsFromACP,
   deriveModesFromACP,
@@ -50,6 +51,7 @@ import type {
   AgentPersistenceHandle,
   ProviderRefreshContext,
 } from "../agent-sdk-types.js";
+import type { DeviceLaunchGate } from "../device-lease-manager.js";
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import { buildStringCommandShellInvocation } from "../../../utils/string-command-shell.js";
 import { asInternals } from "../../test-utils/class-mocks.js";
@@ -689,6 +691,165 @@ describe("ACPAgentSession terminal tools", () => {
   });
 });
 
+/**
+ * The device cap on an ACP provider (docs/device-leases.md). ACP has no hook, but this daemon is
+ * the ACP *client*: it spawns the terminals the agent asks for, and it answers the permission
+ * requests the agent sends. Both are real refusals. Nothing here boots a device — the terminal
+ * spawn is stubbed and the cap is a fake.
+ */
+describe("ACPAgentSession device launch gate", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function createGatedSession(
+    gate: DeviceLaunchGate,
+    config: { featureValues?: Record<string, unknown> } = {},
+  ): ACPAgentSession {
+    return new ACPAgentSession(
+      {
+        provider: "copilot",
+        cwd: "/tmp/paseo-acp-test",
+        featureValues: config.featureValues,
+      },
+      {
+        provider: "copilot",
+        logger: createTestLogger(),
+        defaultCommand: ["copilot", "--acp"],
+        defaultModes: [],
+        deviceLaunchGate: gate,
+        agentId: "agent-copilot",
+        capabilities: {
+          supportsStreaming: true,
+          supportsSessionPersistence: true,
+          supportsDynamicModes: true,
+          supportsMcpServers: true,
+          supportsReasoningStream: true,
+          supportsToolInvocations: true,
+        },
+      },
+    );
+  }
+
+  const DENIED: DeviceLaunchGate = {
+    gateLaunch: async () => ({
+      decision: "deny",
+      message: "Bozeo device cap: no ios slot. Call device_checkout and wait.",
+    }),
+  };
+
+  test("a terminal the cap refuses is never spawned", async () => {
+    const spawn = vi.spyOn(spawnUtils, "spawnProcess").mockReturnValue(createTerminalChildStub());
+    const session = createGatedSession(DENIED);
+
+    await expect(
+      session.createTerminal({
+        sessionId: "session-1",
+        command: "xcrun simctl boot 'iPhone 17 Pro'",
+        cwd: "/repo",
+      }),
+    ).rejects.toThrow("Call device_checkout and wait");
+    // The refusal is the whole point: no process, not a killed one.
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  test("the cap sees the whole command, argv and all", async () => {
+    const gateLaunch = vi.fn(async () => ({ decision: "allow" as const }));
+    vi.spyOn(spawnUtils, "spawnProcess").mockReturnValue(createTerminalChildStub());
+    const session = createGatedSession({ gateLaunch });
+
+    await session.createTerminal({
+      sessionId: "session-1",
+      command: "emulator",
+      args: ["-avd", "Pixel_7"],
+      cwd: "/repo",
+    });
+
+    expect(gateLaunch).toHaveBeenCalledWith({
+      agentId: "agent-copilot",
+      command: "emulator -avd Pixel_7",
+    });
+  });
+
+  test("an allowed terminal runs, and a cap that throws does not stop it", async () => {
+    const spawn = vi.spyOn(spawnUtils, "spawnProcess").mockReturnValue(createTerminalChildStub());
+    const allowed = createGatedSession({ gateLaunch: async () => ({ decision: "allow" }) });
+    await allowed.createTerminal({ sessionId: "s", command: "npm test", cwd: "/repo" });
+    expect(spawn).toHaveBeenCalledTimes(1);
+
+    const throwing = createGatedSession({
+      gateLaunch: async () => {
+        throw new Error("ps timed out");
+      },
+    });
+    await throwing.createTerminal({ sessionId: "s", command: "npm test", cwd: "/repo" });
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  test("auto-accept does not approve a device launch the cap refuses", async () => {
+    // Auto-accept is on by default for unattended agents, so a gate behind it would wave
+    // through every launch the cap exists to stop.
+    const session = createGatedSession(DENIED, {
+      featureValues: { auto_accept: true },
+    });
+
+    const outcome = await session.requestPermission({
+      sessionId: "session-1",
+      toolCall: {
+        toolCallId: "call-1",
+        title: "Run xcrun simctl boot",
+        kind: "execute",
+        rawInput: { command: "xcrun simctl boot 'iPhone 17 Pro'" },
+      },
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "reject", name: "Reject", kind: "reject_once" },
+      ],
+    } as unknown as Parameters<ACPAgentSession["requestPermission"]>[0]);
+
+    expect(outcome).toEqual({ outcome: { outcome: "selected", optionId: "reject" } });
+  });
+
+  test("auto-accept still approves everything the cap has no opinion about", async () => {
+    const gateLaunch = vi.fn(async () => ({ decision: "allow" as const }));
+    const session = createGatedSession({ gateLaunch }, { featureValues: { auto_accept: true } });
+
+    const outcome = await session.requestPermission({
+      sessionId: "session-1",
+      toolCall: {
+        toolCallId: "call-1",
+        title: "Run npm test",
+        kind: "execute",
+        rawInput: { command: "npm test" },
+      },
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "reject", name: "Reject", kind: "reject_once" },
+      ],
+    } as unknown as Parameters<ACPAgentSession["requestPermission"]>[0]);
+
+    expect(outcome).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
+  });
+
+  test("a permission request that is not about a command never reaches the cap", async () => {
+    const gateLaunch = vi.fn(async () => ({ decision: "allow" as const }));
+    const session = createGatedSession({ gateLaunch }, { featureValues: { auto_accept: true } });
+
+    await session.requestPermission({
+      sessionId: "session-1",
+      toolCall: {
+        toolCallId: "call-1",
+        title: "Write App.tsx",
+        kind: "edit",
+        rawInput: { path: "/repo/App.tsx", content: "export default null;" },
+      },
+      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+    } as unknown as Parameters<ACPAgentSession["requestPermission"]>[0]);
+
+    expect(gateLaunch).not.toHaveBeenCalled();
+  });
+});
+
 describe("mapACPUsage", () => {
   test("maps ACP usage fields into Paseo usage", () => {
     expect(
@@ -702,6 +863,49 @@ describe("mapACPUsage", () => {
       inputTokens: 11,
       outputTokens: 7,
       cachedInputTokens: 5,
+    });
+  });
+});
+
+describe("consumeACPTurnTokenDelta", () => {
+  test("re-baselines without a delta on the first observation", () => {
+    expect(consumeACPTurnTokenDelta(1_000, undefined)).toEqual({
+      delta: undefined,
+      nextBaseline: 1_000,
+    });
+  });
+
+  test("returns the growth since the last baseline", () => {
+    expect(consumeACPTurnTokenDelta(1_800, 1_000)).toEqual({
+      delta: 800,
+      nextBaseline: 1_800,
+    });
+  });
+
+  test("clamps a reset/reconnect drop instead of reporting garbage", () => {
+    // totalTokens dropped below the baseline (session reset, reconnect) — no delta, but the
+    // baseline still advances to the new (lower) total so the drop doesn't linger forever.
+    expect(consumeACPTurnTokenDelta(200, 1_000)).toEqual({
+      delta: undefined,
+      nextBaseline: 200,
+    });
+  });
+
+  test("suppresses a zero delta", () => {
+    expect(consumeACPTurnTokenDelta(1_000, 1_000)).toEqual({
+      delta: undefined,
+      nextBaseline: 1_000,
+    });
+  });
+
+  test("keeps the existing baseline when totalTokens is missing", () => {
+    expect(consumeACPTurnTokenDelta(undefined, 1_000)).toEqual({
+      delta: undefined,
+      nextBaseline: 1_000,
+    });
+    expect(consumeACPTurnTokenDelta(null, undefined)).toEqual({
+      delta: undefined,
+      nextBaseline: undefined,
     });
   });
 });
@@ -2798,6 +3002,71 @@ describe("ACPAgentSession", () => {
       turnId,
     });
     expect(asInternals<ACPSessionInternals>(session).activeForegroundTurnId).toBeNull();
+  });
+
+  test("turn_completed omits turnTokenDelta on the first turn, then reports session-total growth on the next", async () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    let resolvePrompt!: (value: PromptResponse) => void;
+    const prompt = vi.fn(
+      () =>
+        new Promise<PromptResponse>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+    );
+
+    asInternals<ACPSessionInternals>(session).sessionId = "session-1";
+    asInternals<ACPSessionInternals>(session).connection = { prompt };
+    session.subscribe((event) => events.push(event));
+
+    await session.startTurn("first");
+    resolvePrompt({
+      stopReason: "end_turn",
+      usage: { inputTokens: 800, outputTokens: 200, totalTokens: 1_000 },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const turn1Completed = events.find((event) => event.type === "turn_completed");
+    expect(turn1Completed).toBeDefined();
+    expect(turn1Completed).not.toHaveProperty("turnTokenDelta");
+
+    await session.startTurn("second");
+    resolvePrompt({
+      stopReason: "end_turn",
+      usage: { inputTokens: 1_100, outputTokens: 300, totalTokens: 1_400 },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const turnCompletedEvents = events.filter((event) => event.type === "turn_completed");
+    expect(turnCompletedEvents).toHaveLength(2);
+    expect(turnCompletedEvents[1]).toMatchObject({ type: "turn_completed", turnTokenDelta: 400 });
+  });
+
+  test("turn_completed omits turnTokenDelta when ACP reports no usage", async () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    let resolvePrompt!: (value: PromptResponse) => void;
+    const prompt = vi.fn(
+      () =>
+        new Promise<PromptResponse>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+    );
+
+    asInternals<ACPSessionInternals>(session).sessionId = "session-1";
+    asInternals<ACPSessionInternals>(session).connection = { prompt };
+    session.subscribe((event) => events.push(event));
+
+    await session.startTurn("hello");
+    resolvePrompt({ stopReason: "end_turn" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const turnCompleted = events.find((event) => event.type === "turn_completed");
+    expect(turnCompleted).toBeDefined();
+    expect(turnCompleted).not.toHaveProperty("turnTokenDelta");
   });
 
   test("startTurn emits the submitted user message even when ACP does not echo it", async () => {

@@ -384,6 +384,47 @@ test("sets the complete viewed timeline subscription only when the daemon suppor
   });
 });
 
+test("gates mcp_status_update on the mcpStatus feature so an old daemon's stricter enum isn't sent an unknown event", async () => {
+  const legacyTransport = createMockTransport();
+  const legacyClient = new DaemonClient({
+    url: "ws://test",
+    clientId: "mcp_status_gate_legacy",
+    transportFactory: () => legacyTransport.transport,
+    reconnect: { enabled: false },
+  });
+  const supportedTransport = createMockTransport();
+  const supportedClient = new DaemonClient({
+    url: "ws://test",
+    clientId: "mcp_status_gate_supported",
+    transportFactory: () => supportedTransport.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(legacyClient, supportedClient);
+
+  const legacyConnect = legacyClient.connect();
+  legacyTransport.triggerOpen({ features: { explicitEventSubscriptions: true } });
+  await legacyConnect;
+  legacyTransport.sent.length = 0;
+
+  const supportedConnect = supportedClient.connect();
+  supportedTransport.triggerOpen({
+    features: { explicitEventSubscriptions: true, mcpStatus: true },
+  });
+  await supportedConnect;
+  supportedTransport.sent.length = 0;
+
+  legacyClient.on(() => {});
+  supportedClient.on(() => {});
+
+  const legacyRequest = parseSentFrame(legacyTransport.sent.at(-1));
+  const supportedRequest = parseSentFrame(supportedTransport.sent.at(-1));
+
+  expect(legacyRequest.type).toBe("session.events.set_subscription.request");
+  expect(legacyRequest.events).not.toContain("mcp_status_update");
+  expect(supportedRequest.type).toBe("session.events.set_subscription.request");
+  expect(supportedRequest.events).toContain("mcp_status_update");
+});
+
 test("normalizes legacy and dedicated agent attention notifications", async () => {
   const mock = createMockTransport();
   const client = new DaemonClient({
@@ -1074,6 +1115,41 @@ test("keeps the transport connected when a session RPC ping times out", async ()
   expect(client.getConnectionState().status).toBe("connected");
 });
 
+test("sendMessage says where a message to a moved agent was delivered, so a wait can follow it", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_send_moved",
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const sent = client.sendMessage("agent_retired", "pick it up");
+  const request = parseSentFrame(mock.sent.at(-1));
+  expect(request).toMatchObject({ type: "send_agent_message_request", agentId: "agent_retired" });
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "send_agent_message_response",
+      payload: {
+        requestId: request.requestId,
+        agentId: "agent_retired",
+        accepted: true,
+        error: null,
+        deliveredToAgentId: "agent_successor",
+      },
+    }),
+  );
+
+  await expect(sent).resolves.toEqual({
+    agentId: "agent_retired",
+    deliveredToAgentId: "agent_successor",
+  });
+});
+
 test("waits for the daemon to acknowledge push token revocation", async () => {
   const mock = createMockTransport();
   const client = new DaemonClient({
@@ -1172,6 +1248,123 @@ test("defaults session RPC waiters to sixty seconds", async () => {
 
   await vi.advanceTimersByTimeAsync(1);
   await expect(responsePromise).rejects.toThrow("Timeout waiting for message (60000ms)");
+});
+
+async function connectJevClient(): Promise<{
+  client: DaemonClient;
+  mock: ReturnType<typeof createMockTransport>;
+}> {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+  return { client, mock };
+}
+
+function settledFlag(promise: Promise<unknown>): () => boolean {
+  let settled = false;
+  void promise.then(
+    () => {
+      settled = true;
+      return undefined;
+    },
+    () => {
+      settled = true;
+      return undefined;
+    },
+  );
+  return () => settled;
+}
+
+const JEV_SPAWN_HINT_INPUT = {
+  feature: "spawnHint",
+  callSite: "test",
+  state: {},
+  questions: { hard: { type: "noul" as const, instructions: "Is it hard?" } },
+};
+
+test("jevDecide defaults its timeout to the caller's deadline plus a margin, not the 60 s RPC default", async () => {
+  useHeartbeatClock();
+  const { client } = await connectJevClient();
+
+  const responsePromise = client.jevDecide({ ...JEV_SPAWN_HINT_INPUT, deadlineMs: 1_500 });
+  const settled = settledFlag(responsePromise);
+  const rejection = expect(responsePromise).rejects.toThrow("Timeout waiting for message (2000ms)");
+
+  await vi.advanceTimersByTimeAsync(1_999);
+  expect(settled()).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  await rejection;
+});
+
+test("jevDecide without a deadline times out on spawnHint's default deadline plus the margin", async () => {
+  useHeartbeatClock();
+  const { client } = await connectJevClient();
+
+  const rejection = expect(client.jevDecide(JEV_SPAWN_HINT_INPUT)).rejects.toThrow(
+    "Timeout waiting for message (2000ms)",
+  );
+  await vi.advanceTimersByTimeAsync(2_000);
+  await rejection;
+});
+
+test("jevDecide never waits past the plugin hook budget, whatever the deadline", async () => {
+  useHeartbeatClock();
+  const { client } = await connectJevClient();
+
+  const rejection = expect(
+    client.jevDecide({ ...JEV_SPAWN_HINT_INPUT, deadlineMs: 600_000 }),
+  ).rejects.toThrow("Timeout waiting for message (20000ms)");
+  await vi.advanceTimersByTimeAsync(20_000);
+  await rejection;
+});
+
+test("jevAsk sends its deadline and waits for it plus a margin", async () => {
+  useHeartbeatClock();
+  const { client, mock } = await connectJevClient();
+
+  const responsePromise = client.jevAsk({
+    context: "npm run build exits 2",
+    question: { type: "noul", instructions: "Is the build broken?" },
+  });
+  const settled = settledFlag(responsePromise);
+  const rejection = expect(responsePromise).rejects.toThrow(
+    "Timeout waiting for message (17000ms)",
+  );
+
+  const askFrame = mock.sent
+    .map((raw) => assertStr(raw))
+    .find((raw) => raw.includes('"jev.ask.request"'));
+  expect(askFrame).toBeDefined();
+  expect(askFrame).toContain('"deadlineMs":15000');
+
+  await vi.advanceTimersByTimeAsync(16_999);
+  expect(settled()).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  await rejection;
+});
+
+test("jev status and scope check default to a timeout under the plugin hook budget", async () => {
+  useHeartbeatClock();
+  const { client } = await connectJevClient();
+
+  const status = expect(client.jevStatus()).rejects.toThrow(
+    "Timeout waiting for message (10000ms)",
+  );
+  const scope = expect(client.jevScopeCheck({ cwd: "/tmp/x" })).rejects.toThrow(
+    "Timeout waiting for message (10000ms)",
+  );
+  await vi.advanceTimersByTimeAsync(10_000);
+  await status;
+  await scope;
 });
 
 test("honors explicit fetchAgent timeout below the session RPC default", async () => {
@@ -6097,6 +6290,89 @@ test("sends provider.usage.list.request and resolves provider.usage.list.respons
   });
 });
 
+test("sends mcp_gateway.auth.start.request and resolves the authorization URL (U6)", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const authPromise = client.startMcpGatewayAuth("github", { requestId: "auth-1" });
+
+  expect(JSON.parse(assertStr(mock.sent[0]))).toEqual({
+    type: "session",
+    message: {
+      type: "mcp_gateway.auth.start.request",
+      requestId: "auth-1",
+      name: "github",
+    },
+  });
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "mcp_gateway.auth.start.response",
+      payload: {
+        requestId: "auth-1",
+        authorizationUrl: "https://github.com/login/oauth/authorize?code_challenge=abc",
+        error: null,
+      },
+    }),
+  );
+
+  await expect(authPromise).resolves.toEqual({
+    requestId: "auth-1",
+    authorizationUrl: "https://github.com/login/oauth/authorize?code_challenge=abc",
+    error: null,
+  });
+});
+
+test("resolves mcp_gateway.auth.start.response with an error for an unknown server", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const authPromise = client.startMcpGatewayAuth("never-configured", { requestId: "auth-2" });
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "mcp_gateway.auth.start.response",
+      payload: {
+        requestId: "auth-2",
+        authorizationUrl: null,
+        error: 'Unknown MCP gateway server "never-configured"',
+      },
+    }),
+  );
+
+  await expect(authPromise).resolves.toEqual({
+    requestId: "auth-2",
+    authorizationUrl: null,
+    error: 'Unknown MCP gateway server "never-configured"',
+  });
+});
+
 test("sends close_items_request and resolves close_items_response", async () => {
   const logger = createMockLogger();
   const mock = createMockTransport();
@@ -6263,4 +6539,50 @@ test("wire snapshot callers own expansion and receive hash references unchanged"
     wrapSessionMessage({ type: "get_providers_snapshot_response", payload: body }),
   );
   expect(await request).toEqual(body);
+});
+
+test("gets a token usage breakdown for a range", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: { tokenUsage: true } });
+  await connectPromise;
+
+  const response = client.getTokenUsageBreakdown({ range: "24h" });
+  const request = parseSentFrame(mock.sent[0]);
+  expect(request).toMatchObject({ type: "usage.tokens.get_breakdown.request", range: "24h" });
+  const payload = {
+    requestId: request.requestId,
+    generatedAt: "2026-10-07T12:00:00.000Z",
+    range: "24h",
+    rangeStartMs: 1_759_752_000_000,
+    rows: [
+      {
+        provider: "claude",
+        model: "claude-opus-5-5",
+        role: "worker",
+        input: 10,
+        cacheWrite: 200,
+        cacheRead: 3_000,
+        output: 40,
+        weighted: 900,
+        responses: 2,
+      },
+    ],
+    coverage: {
+      enabled: true,
+      recordingSinceMs: 1_759_752_000_000,
+      backfill: { state: "done", filesDone: 4, filesTotal: 4 },
+    },
+  };
+  mock.triggerMessage(wrapSessionMessage({ type: "usage.tokens.get_breakdown.response", payload }));
+
+  await expect(response).resolves.toEqual(payload);
 });

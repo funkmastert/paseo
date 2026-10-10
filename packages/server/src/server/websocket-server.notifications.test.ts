@@ -1,16 +1,26 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Server as HTTPServer } from "http";
 import type pino from "pino";
 import type { AgentManager } from "./agent/agent-manager.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
 import type { DownloadTokenStore } from "./file-download/token-store.js";
-import type { DaemonConfigStore } from "./daemon-config-store.js";
+import { createTestDaemonConfigStore } from "./test-utils/daemon-config-store.js";
 import type { ScheduleService } from "./schedule/service.js";
 import type { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import { asInternals, createStub } from "./test-utils/class-mocks.js";
 import { createProviderSnapshotManagerStub } from "./test-utils/session-stubs.js";
-import type { PushNotificationSender, PushPayload } from "./push/index.js";
+import type {
+  PushNotificationSender,
+  PushNotifications,
+  PushPayload,
+  PushSendMeta,
+} from "./push/index.js";
 import type { WorkspaceAutoName } from "./workspace-auto-name.js";
+import type { JevService } from "./jev/contract.js";
+import { createTestJevService, type TestJevServiceOptions } from "./jev/fake.js";
 
 const WORKSPACE_ID = "workspace-1";
 
@@ -75,13 +85,18 @@ function createWorkspaceAutoNameStub(): WorkspaceAutoName {
 
 class RecordingPushNotificationSender implements PushNotificationSender {
   readonly sent: PushPayload[] = [];
+  readonly levels: Array<PushSendMeta["level"]> = [];
 
-  async send(payload: PushPayload): Promise<void> {
+  async send(payload: PushPayload, meta?: PushSendMeta): Promise<void> {
     this.sent.push(payload);
+    this.levels.push(meta?.level);
   }
 }
 
-function createServer(agentManagerOverrides?: Record<string, unknown>) {
+function createServer(
+  agentManagerOverrides?: Record<string, unknown>,
+  options: { jev?: JevService; paseoHome?: string } = {},
+) {
   const pushNotifications = new RecordingPushNotificationSender();
   const agentManager = {
     subscribe: vi.fn(() => () => {}),
@@ -99,10 +114,6 @@ function createServer(agentManagerOverrides?: Record<string, unknown>) {
     })),
     ...agentManagerOverrides,
   };
-  const daemonConfigStore = {
-    onApply: vi.fn(() => () => {}),
-    onChange: vi.fn(() => () => {}),
-  };
 
   const server = new VoiceAssistantWebSocketServer(
     createStub<HTTPServer>({}),
@@ -111,8 +122,8 @@ function createServer(agentManagerOverrides?: Record<string, unknown>) {
     createStub<AgentManager>(agentManager),
     createStub<AgentStorage>({}),
     createStub<DownloadTokenStore>({}),
-    "/tmp/paseo-test",
-    createStub<DaemonConfigStore>(daemonConfigStore),
+    options.paseoHome ?? "/tmp/paseo-test",
+    createTestDaemonConfigStore(),
     null,
     { allowedOrigins: new Set() },
     createWorkspaceAutoNameStub(),
@@ -146,6 +157,17 @@ function createServer(agentManagerOverrides?: Record<string, unknown>) {
     undefined,
     pushNotifications,
     createProviderSnapshotManagerStub().manager,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    options.jev,
   );
 
   return { server, agentManager, pushNotifications };
@@ -301,6 +323,32 @@ describe("VoiceAssistantWebSocketServer notification payloads", () => {
     expect(getLastAssistantMessage).toHaveBeenCalledWith("agent-2");
   });
 
+  it("ranks a root agent's finish as an alert and a delegated child's as a notice", async () => {
+    const labelsById: Record<string, Record<string, string>> = {
+      "agent-root": {},
+      "agent-child": { "paseo.parent-agent-id": "agent-root" },
+    };
+    const { server, pushNotifications } = createServer({
+      getAgent: vi.fn((agentId: string) => ({
+        config: { title: null },
+        cwd: "/tmp/worktree",
+        workspaceId: WORKSPACE_ID,
+        labels: labelsById[agentId],
+        pendingPermissions: new Map(),
+      })),
+    });
+
+    for (const agentId of ["agent-root", "agent-child"]) {
+      await asInternals<WebSocketServerInternals>(server).broadcastAgentAttention({
+        agentId,
+        provider: "claude",
+        reason: "finished",
+      });
+    }
+
+    expect(pushNotifications.levels).toEqual(["alert", "notice"]);
+  });
+
   it("routes a hidden stale focused browser tab's notification to the present Electron web client", async () => {
     const { server, pushNotifications } = createServer();
     const nowMs = Date.now();
@@ -354,5 +402,137 @@ describe("VoiceAssistantWebSocketServer notification payloads", () => {
 
     expect(readAttentionRequiredMessage(ws).shouldNotify).toBe(false);
     expect(pushNotifications.sent).toEqual([]);
+  });
+});
+
+describe("VoiceAssistantWebSocketServer finish triage (JEV feature 3b)", () => {
+  const homes: string[] = [];
+
+  afterEach(() => {
+    // The finish record is appended off the push path; retry while its last write lands.
+    for (const home of homes.splice(0)) {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+    }
+  });
+
+  function createTriagingServer(jevOptions: TestJevServiceOptions) {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "ws-finish-triage-"));
+    homes.push(paseoHome);
+    const jev = createTestJevService({
+      config: { notificationTriage: { shadow: false } },
+      answers: { needs_person: { type: "choice", choice: "routine", confidence: 0.92 } },
+      ...jevOptions,
+      service: { resolveAgentCwds: async () => [paseoHome], ...jevOptions.service },
+    });
+    const fetchTimeline = vi.fn((): { rows: unknown[] } => ({ rows: [] }));
+    const created = createServer(
+      {
+        getAgent: vi.fn(() => ({
+          config: { title: "Tidy up" },
+          cwd: paseoHome,
+          workspaceId: WORKSPACE_ID,
+          labels: {},
+          pendingPermissions: new Map(),
+        })),
+        getLastAssistantMessage: vi.fn(async () => "Removed the stale branch. All tidy."),
+        fetchTimeline,
+        listAgents: vi.fn(() => []),
+        subscribeOperatorSignals: vi.fn(() => () => {}),
+      },
+      { jev, paseoHome },
+    );
+    return { ...created, jev, fetchTimeline };
+  }
+
+  async function broadcastFinish(server: VoiceAssistantWebSocketServer) {
+    await asInternals<WebSocketServerInternals>(server).broadcastAgentAttention({
+      agentId: "agent-root",
+      reason: "finished",
+    });
+  }
+
+  it("sends a scripted routine finish as a notice", async () => {
+    const { server, pushNotifications } = createTriagingServer({});
+    await broadcastFinish(server);
+    await vi.waitFor(() => expect(pushNotifications.levels).toEqual(["notice"]));
+    expect(pushNotifications.sent).toHaveLength(1);
+  });
+
+  it("sends the alert when JEV times out", async () => {
+    const { server, pushNotifications } = createTriagingServer({ behavior: { kind: "timeout" } });
+    await broadcastFinish(server);
+    expect(pushNotifications.sent).toHaveLength(0);
+    // The feature's 3-second deadline, then the alert.
+    await vi.waitFor(() => expect(pushNotifications.levels).toEqual(["alert"]), {
+      timeout: 6_000,
+    });
+  });
+
+  it("sends the alert when JEV throws", async () => {
+    const { server, pushNotifications, jev } = createTriagingServer({});
+    vi.spyOn(jev, "decide").mockRejectedValue(new Error("boom"));
+    await broadcastFinish(server);
+    await vi.waitFor(() => expect(pushNotifications.levels).toEqual(["alert"]));
+  });
+
+  it("sends the alert when the state builder throws", async () => {
+    const { server, pushNotifications, jev, fetchTimeline } = createTriagingServer({});
+    fetchTimeline.mockImplementation(() => {
+      throw new Error("timeline gone");
+    });
+    const decide = vi.spyOn(jev, "decide");
+    await broadcastFinish(server);
+    await vi.waitFor(() => expect(pushNotifications.levels).toEqual(["alert"]));
+    expect(decide).not.toHaveBeenCalled();
+  });
+
+  it("sends the alert for an excluded agent and sends JEV nothing", async () => {
+    const { server, pushNotifications, jev } = createTriagingServer({
+      service: { resolveAgentCwds: async () => null },
+    });
+    await broadcastFinish(server);
+    await vi.waitFor(() => expect(pushNotifications.levels).toEqual(["alert"]));
+    expect(jev.transport.calls).toHaveLength(0);
+  });
+
+  it("sends the client messages before the push", async () => {
+    const { server, pushNotifications, jev } = createTriagingServer({
+      behavior: { kind: "hold" },
+    });
+    const ws = connectClient(server, null);
+    await broadcastFinish(server);
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    expect(pushNotifications.sent).toHaveLength(0);
+    await vi.waitFor(() => expect(jev.transport.held).toBe(1));
+    jev.transport.release();
+    await vi.waitFor(() => expect(pushNotifications.levels).toEqual(["notice"]));
+  });
+
+  it("keeps the alert and asks JEV nothing while Tyler is away (review finding 5)", async () => {
+    const { server, pushNotifications, jev } = createTriagingServer({});
+    await asInternals<{ pushNotifications: PushNotifications }>(
+      server,
+    ).pushNotifications.policy.updateSettings({ availability: { mode: "away", until: null } });
+    const decide = vi.spyOn(jev, "decide");
+    await broadcastFinish(server);
+    await vi.waitFor(() => expect(pushNotifications.levels).toEqual(["alert"]));
+    expect(decide).not.toHaveBeenCalled();
+  });
+
+  it("in shadow sends the alert without waiting for JEV", async () => {
+    const { server, pushNotifications, jev } = createTriagingServer({
+      config: {},
+      behavior: { kind: "hold" },
+    });
+    await broadcastFinish(server);
+    expect(pushNotifications.levels).toEqual(["alert"]);
+    await vi.waitFor(() => expect(jev.transport.held).toBe(1));
+    jev.transport.release();
+    await vi.waitFor(() =>
+      expect(jev.listDecisions("agent-root")).toMatchObject([
+        { action: "sent as an alert; would have sent a notice (shadow)", applied: false },
+      ]),
+    );
+    expect(pushNotifications.levels).toEqual(["alert"]);
   });
 });

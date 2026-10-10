@@ -33,6 +33,7 @@ function ws(
     archiveUnpushedCommitCount: null,
     scripts: [],
     hasRunningScripts: false,
+    diskUsage: input.diskUsage ?? null,
     workspaceKey: input.workspaceKey,
   };
 }

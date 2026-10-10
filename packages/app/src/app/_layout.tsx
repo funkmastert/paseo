@@ -133,8 +133,10 @@ import {
   parseHostWorkspaceRouteFromPathname,
   parseServerIdFromPathname,
 } from "@/utils/host-routes";
-import { buildNotificationRoute, resolveNotificationTarget } from "@/utils/notification-routing";
+import { resolveNotificationTapAction } from "@/utils/notification-routing";
+import { openExternalUrl } from "@/utils/open-external-url";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
+import { AgentMoveNoticeToast } from "@/components/agent-move-notice-toast";
 import { PluginCatalogSync } from "@/plugins";
 import {
   ensureOsNotificationPermission,
@@ -165,16 +167,18 @@ function PushNotificationRouter() {
   const router = useRouter();
   const lastHandledIdRef = useRef<string | null>(null);
   const openNotification = useStableEvent((data: Record<string, unknown> | undefined) => {
-    const target = resolveNotificationTarget(data);
-    const serverId = target.serverId;
-    const workspaceId = target.workspaceId;
-    const agentId = target.agentId;
-    if (serverId && workspaceId && agentId) {
+    const action = resolveNotificationTapAction(data);
+    if (action.kind === "open-external") {
+      void openExternalUrl(action.url);
+      return;
+    }
+    if (action.kind === "open-agent") {
+      const { serverId, workspaceId, agentId } = action;
       navigateToAgent({ serverId, workspaceId, agentId, pin: true });
       return;
     }
 
-    router.navigate(buildNotificationRoute(data));
+    router.navigate(action.route);
   });
 
   useEffect(() => {
@@ -881,6 +885,10 @@ function AppWithSidebar({ children }: { children: ReactNode }) {
       pathname === "/new" ||
       pathname === "/sessions" ||
       pathname === "/schedules" ||
+      pathname === "/ask-jev" ||
+      pathname === "/jev" ||
+      pathname === "/tokens" ||
+      pathname === "/pinned-grid" ||
       routeHasKnownHost);
 
   return <AppContainer chromeEnabled={shouldShowAppChrome}>{children}</AppContainer>;
@@ -913,6 +921,10 @@ function RootStack() {
         <Stack.Screen name="open-project" />
         <Stack.Screen name="sessions" />
         <Stack.Screen name="schedules" />
+        <Stack.Screen name="ask-jev" />
+        <Stack.Screen name="jev" />
+        <Stack.Screen name="tokens" />
+        <Stack.Screen name="pinned-grid" />
         <Stack.Screen name="pair-scan" />
       </Stack.Protected>
       <Stack.Screen name="h/[serverId]" />
@@ -941,6 +953,7 @@ function AppShell() {
       <HorizontalScrollProvider>
         <OpenProjectListener />
         <AgentNavigationListener />
+        <AgentMoveNoticeToast />
         <AppWithSidebar>
           <WorkspaceRouteNavigationBridge />
           <RootStack />

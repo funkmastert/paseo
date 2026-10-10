@@ -1,0 +1,16 @@
+import { createRequire } from "node:module";
+import { readFileSync, rmSync } from "node:fs";
+const require = createRequire("/Users/tylerthackray/paseo-worktrees/bozeo/package.json");
+const { chromium } = require("playwright");
+const url = JSON.parse(readFileSync("/Users/tylerthackray/bozeo-ops/pair.json", "utf8")).url;
+rmSync("/Users/tylerthackray/bozeo-ops/pair.json");
+const browser = await chromium.launch();
+const page = await (await browser.newContext({ viewport: { width: 1400, height: 1000 } })).newPage();
+await page.goto("https://bozeo.ngrok.app/" + url.slice(url.indexOf("#")), { waitUntil: "networkidle", timeout: 60000 });
+await page.waitForTimeout(20000);
+const text = await page.innerText("body");
+const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+console.log("lines:", lines.length);
+const i = lines.findIndex((l) => /^wt[0-9]-/.test(l)); console.log("context:", lines.slice(Math.max(0, i - 25), i + 3).join(" | "));
+console.log("--- first 80 lines ---\n" + lines.slice(0, 80).join(" | "));
+await browser.close();

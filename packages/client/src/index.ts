@@ -1,6 +1,7 @@
 import type { DaemonClientConfig } from "./daemon-client.js";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import type {
+  ActiveTurnBehavior,
   AgentSnapshotPayload,
   CreateAgentRequestMessage,
   FetchWorkspacesRequestMessage,
@@ -14,6 +15,8 @@ import type {
   ProjectListRequestMessage,
   ProjectListResponseMessage,
   ListProviderModesResponseMessage,
+  McpGatewayAuthStartResponseMessage,
+  McpGatewayServerAdoptResponseMessage,
   MutableDaemonConfig,
   MutableDaemonConfigPatch,
   ProviderDiagnosticResponseMessage,
@@ -52,8 +55,12 @@ import type {
   FetchAgentTimelineDirection,
   FetchAgentTimelinePayload,
   FetchAgentTimelineProjection,
+  JevDecidePayload,
+  JevStatusPayload,
+  SendAgentMessageResult,
   WaitForFinishResult,
 } from "./daemon-client.js";
+import type { JevQuestions } from "@getpaseo/protocol/jev/rpc-schemas";
 
 /**
  * Coding turns routinely run for minutes, so the handle waits far longer than
@@ -256,6 +263,7 @@ export interface PaseoAgentTimelineRefetchOptions {
 
 export interface PaseoAgentSendOptions {
   messageId?: string;
+  activeTurnBehavior?: ActiveTurnBehavior;
   images?: Array<{ data: string; mimeType: string }>;
   attachments?: SendAgentMessageRequest["attachments"];
 }
@@ -265,6 +273,7 @@ export interface PaseoAgentRunOptions extends PaseoAgentSendOptions {
 }
 
 export type PaseoAgentRunResult = WaitForFinishResult;
+export type PaseoAgentSendResult = SendAgentMessageResult;
 export type PaseoAgentPermissionResponse = AgentPermissionResponse;
 
 export interface PaseoAgentRespondToPermissionOptions {
@@ -334,7 +343,12 @@ export interface PaseoAgentHandle {
   readonly timeline: PaseoAgentTimelineHandle;
   current(): PaseoAgent | null;
   refresh(requestId?: string): Promise<PaseoAgentRefetchResult | null>;
-  send(text: string, options?: PaseoAgentSendOptions): Promise<void>;
+  /**
+   * Sends a prompt and resolves once the daemon accepts it. If this agent had moved to another
+   * account, `deliveredToAgentId` names the agent the prompt went to: wait on
+   * `deliveredToAgentId ?? agentId`, not on this handle, to see that turn.
+   */
+  send(text: string, options?: PaseoAgentSendOptions): Promise<PaseoAgentSendResult>;
   respondToPermission(options: PaseoAgentRespondToPermissionOptions): Promise<void>;
   /** Sends a prompt and resolves when that turn finishes or needs attention. */
   run(text: string, options?: PaseoAgentRunOptions): Promise<PaseoAgentRunResult>;
@@ -429,6 +443,55 @@ export interface PaseoProviderActions {
   subscribe(handler: (update: PaseoProviderSnapshotUpdate) => void): () => void;
 }
 
+export type PaseoMcpGatewayAuthStartResult = McpGatewayAuthStartResponseMessage["payload"];
+export type PaseoMcpGatewayServerAdoptResult = McpGatewayServerAdoptResponseMessage["payload"];
+
+export interface PaseoMcpGatewayActions {
+  /**
+   * Starts interactive OAuth for one brokered MCP gateway server (U6, R6's one-click auth
+   * action). Returns `{authorizationUrl, error}` rather than throwing on a known failure
+   * (unknown server, static-auth server); open `authorizationUrl` via the platform's external-
+   * URL opener. Completion arrives later via the `mcp_status_update` subscription, not this call.
+   */
+  startAuth(
+    name: string,
+    options?: { requestId?: string },
+  ): Promise<PaseoMcpGatewayAuthStartResult>;
+  /**
+   * Brokers a server the given agent reported from its own per-dir MCP config through the
+   * gateway and starts sign-in when it needs OAuth (the strip's "Broker & sign in" action).
+   * Same result shape and non-throwing contract as `startAuth`. Requires
+   * `server_info.features.mcpGatewayAdopt`.
+   */
+  adopt(
+    name: string,
+    agentId: string,
+    options?: { requestId?: string },
+  ): Promise<PaseoMcpGatewayServerAdoptResult>;
+}
+
+export interface PaseoJevActions {
+  /** Feature 2's client-facing RPC (docs/jev.md, "RPCs"): only `feature: "spawnHint"` is served. */
+  decide(
+    input: {
+      feature: string;
+      callSite: string;
+      state: unknown;
+      questions: JevQuestions;
+      scope?: { cwd: string; parentAgentId?: string };
+      deadlineMs?: number;
+      shadow?: true;
+    },
+    options?: { timeout?: number },
+  ): Promise<JevDecidePayload>;
+  status(options?: { timeout?: number }): Promise<JevStatusPayload["status"]>;
+  /** The D7 check alone (docs/jev.md, "The D7 exclusion"). */
+  checkScope(
+    input: { cwd: string; parentAgentId?: string },
+    options?: { timeout?: number },
+  ): Promise<"ok" | "excluded">;
+}
+
 export interface PaseoConfigActions {
   /**
    * Reads daemon config through the existing config RPC. Provider profiles,
@@ -456,6 +519,10 @@ export interface PaseoApi {
   readonly agents: PaseoAgentActions;
   readonly providers: PaseoProviderActions;
   readonly config: PaseoConfigActions;
+  readonly mcpGateway: PaseoMcpGatewayActions;
+  // COMPAT(jevPaseoApi): a plugin reloaded against an older daemon's host has no `paseo.jev`, and
+  // a call is a TypeError before any RPC. Callers check `typeof paseo.jev?.decide === "function"`.
+  readonly jev?: PaseoJevActions;
 }
 
 export interface PaseoClient extends PaseoApi {
@@ -573,6 +640,18 @@ export function createPaseoApi(daemonClient: DaemonClient): PaseoApi {
     config: {
       get: (requestId) => daemonClient.getDaemonConfig(requestId),
       patch: (patch, requestId) => daemonClient.patchDaemonConfig(patch, requestId),
+    },
+    mcpGateway: {
+      startAuth: (name, options) => daemonClient.startMcpGatewayAuth(name, options),
+      adopt: (name, agentId, options) => daemonClient.adoptMcpGatewayServer(name, agentId, options),
+    },
+    jev: {
+      decide: (input, options) => daemonClient.jevDecide(input, options),
+      status: async (options) => (await daemonClient.jevStatus(options)).status,
+      checkScope: async (input, options) => {
+        const { scope } = await daemonClient.jevScopeCheck(input, options);
+        return scope === "excluded" ? "excluded" : "ok";
+      },
     },
   };
 }
@@ -739,20 +818,20 @@ function createAgentHandleFactory(daemonClient: DaemonClient): AgentHandleFactor
         current = result?.agent ?? null;
         return result;
       },
-      send: async (text, options) => {
-        await daemonClient.sendAgentMessage(id, text, options);
-      },
+      send: async (text, options) => await daemonClient.sendAgentMessage(id, text, options),
       respondToPermission: async ({ requestId, response }) => {
         await daemonClient.respondToPermission(id, requestId, response);
       },
       run: async (text, options) => {
         const { timeoutMs, ...sendOptions } = options ?? {};
-        await daemonClient.sendAgentMessage(id, text, sendOptions);
+        const sent = await daemonClient.sendAgentMessage(id, text, sendOptions);
+        // The turn runs where the message was delivered: not `id` when that agent had moved.
         const result = await daemonClient.waitForFinish(
-          id,
+          sent.deliveredToAgentId ?? id,
           timeoutMs ?? DEFAULT_WAIT_FOR_FINISH_MS,
         );
-        if (result.final) {
+        // A turn that ran on the agent this one moved to reports that agent, not this handle's.
+        if (result.final?.id === id) {
           current = result.final;
         }
         return result;

@@ -18,6 +18,7 @@ export const SIDEBAR_ROW_ITEMS = [
   "host",
   "changeRequest",
   "services",
+  "diskUsage",
   "labels",
 ] as const;
 
@@ -32,6 +33,7 @@ export const DEFAULT_SIDEBAR_ROW_ITEMS: SidebarRowItems = {
   host: true,
   changeRequest: true,
   services: true,
+  diskUsage: true,
   labels: true,
 };
 

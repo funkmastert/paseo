@@ -1,4 +1,8 @@
-import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
+import type {
+  MutableDaemonConfigPatch,
+  SessionEventSubscription,
+} from "@getpaseo/protocol/messages";
+import type { McpGatewaySnapshotEntry } from "./mcp-gateway/gateway.js";
 import type { AgentRequests } from "./agent/requests/index.js";
 import equal from "fast-deep-equal";
 import { v4 as uuidv4 } from "uuid";
@@ -19,11 +23,14 @@ import {
   type WorkspaceScriptListRequest,
   type WorkspaceScriptStartRequest,
   type WorkspaceScriptStopRequest,
+  type McpGatewayAuthStartRequest,
+  type McpGatewayServerAdoptRequest,
   type CloseItemsRequest,
   type DirectorySuggestionsRequest,
   type ProjectPlacementPayload,
   type WorkspaceSetupSnapshot,
   type WorkspaceDescriptorPayload,
+  type WorkspaceDiskUsage,
 } from "./messages.js";
 import type {
   TerminalManager,
@@ -43,7 +50,11 @@ import {
   toAgentPersistenceHandle,
 } from "./persistence-hooks.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent/agent-loading.js";
+import { AgentProviderMoveError } from "./agent/provider-move.js";
+import { McpGatewayActionError } from "./mcp-gateway/action-failure.js";
+import type { McpGatewayRemedy } from "./mcp-gateway/action-failure.js";
 import {
+  resolvePromptTarget,
   sendPromptToAgent,
   waitForAgentRunStartWithTimeout,
   unarchiveAgentState,
@@ -118,11 +129,12 @@ import { assertPluginTimelineDataSize } from "./agent/agent-timeline-content.js"
 import { parsePluginClientId } from "./plugins/plugin-session-identity.js";
 import {
   projectTimelineRows,
+  selectItemsByProjectedLimit,
   selectProjectedTimelinePage,
   type TimelineProjectionEntry,
   type TimelineProjectionMode,
 } from "./agent/timeline-projection.js";
-import { buildAgentForkContextAttachment } from "./agent/activity-curator.js";
+import { buildAgentForkContextAttachment, curateAgentActivity } from "./agent/activity-curator.js";
 import { buildAgentPrompt } from "./agent/prompt-attachments.js";
 import type { StructuredGenerationDaemonConfig } from "./agent/structured-generation-providers.js";
 import {
@@ -154,16 +166,16 @@ import {
   type PersistedWorkspaceRecord,
   type ProjectMutation,
   type ProjectRegistry,
+  type WorkspaceCreatedBy,
   type WorkspaceMutation,
+  type WorkspaceMutationContext,
   type WorkspaceRegistry,
+  type WorkspaceTitleSource,
 } from "./workspace-registry.js";
 import { wrapSpokenInput } from "./voice-config.js";
 import { isVoicePermissionAllowed } from "./voice-permission-policy.js";
-import {
-  ProjectIconReader,
-  removeProjectCustomIcon,
-  setProjectCustomIcon,
-} from "../utils/project-custom-icon.js";
+import { ProjectIconReader, setProjectCustomIcon } from "../utils/project-custom-icon.js";
+import { removeProjectRecord } from "./project-removal.js";
 import { VoiceSession } from "./session/voice/voice-session.js";
 import { CheckoutSession } from "./session/checkout/checkout-session.js";
 import {
@@ -174,11 +186,32 @@ import {
   createAgentStructuredTextGeneration,
   createGitMetadataGenerator,
 } from "./session/checkout/git-metadata-generator.js";
+import { NotifyPolicySession } from "./session/notify-policy/notify-policy-session.js";
 import { ScheduleSession } from "./session/schedule/schedule-session.js";
+import { RestartRecoverySession } from "./session/restart-recovery/restart-recovery-session.js";
+import type { RestartRecoveryService } from "./agent/restart-recovery/service.js";
 import { ProviderCatalogSession } from "./session/provider/provider-catalog-session.js";
+import {
+  createUsageHistorySession,
+  type UsageHistorySession,
+} from "./session/usage-history/usage-history-session.js";
+import type { UsageHistoryStore } from "./usage-history/usage-history-store.js";
+import {
+  createTokenUsageSession,
+  type TokenUsageReader,
+  type TokenUsageSession,
+} from "./session/token-usage/token-usage-session.js";
+import {
+  createContextUsageSession,
+  type ContextUsageSession,
+} from "./session/context-usage/context-usage-session.js";
+import type { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
+import { createJevSession, type JevSession } from "./session/jev/jev-session.js";
+import type { JevService } from "./jev/contract.js";
 import { WorkspaceFilesSession } from "./session/files/workspace-files-session.js";
 import { AgentConfigSession } from "./session/agent-config/agent-config-session.js";
 import { ProjectConfigSession } from "./session/project-config/project-config-session.js";
+import { DoctorSession } from "./session/doctor/doctor-session.js";
 import { DaemonSession, type DaemonRuntimeConfig } from "./session/daemon/daemon-session.js";
 import type { DaemonWebSocketRuntimeDiagnosticSnapshot } from "./session/daemon/diagnostics.js";
 import type { HubRelationshipManagement } from "./hub/relationship-controller.js";
@@ -244,6 +277,12 @@ import {
 } from "./paseo-worktree-service.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import {
+  type AutoPinExpiry,
+  autoPinWorkspaceOnSessionStart,
+  isHumanAttributableCreate,
+  resolveWorkspaceCreatedBy,
+} from "./workspace-auto-pin.js";
+import {
   buildAgentSessionConfig as buildWorktreeAgentSessionConfig,
   createPaseoWorktreeWorkflow as createWorktreeWorkflow,
   type CreatePaseoWorktreeSetupContinuationInput,
@@ -281,6 +320,8 @@ type ProviderSubagentManagerEvent = Extract<
 // TODO: Remove once all app store clients are on >=0.1.45 and understand arbitrary provider strings.
 // Clients before 0.1.45 validate providers with z.enum(["claude", "codex", "opencode"]) and reject
 // the entire session message if they encounter an unknown provider.
+/** Projected timeline entries read for an agent attached to `jev.ask`; the session clips the text. */
+const JEV_ASK_AGENT_TIMELINE_ITEMS = 40;
 const LEGACY_PROVIDER_IDS = new Set(["claude", "codex", "opencode"]);
 const MIN_VERSION_ALL_PROVIDERS = "0.1.45";
 const MIN_VERSION_EXPLICIT_WORKSPACE_RECOVERY = "0.1.105";
@@ -337,6 +378,27 @@ function beginAgentDeleteIfSupported(agentStorage: AgentStorage, agentId: string
 }
 
 const FETCH_AGENTS_SORT_KEYS = ["status_priority", "created_at", "updated_at", "title"] as const;
+
+/**
+ * Broadcasts a client only receives once it has explicitly subscribed (SessionEventSubscription).
+ * Kept as a set rather than a chain of `||` in `emit` so adding one is a one-line change that
+ * cannot push that method over its complexity budget.
+ */
+const SUBSCRIPTION_GATED_EVENTS = new Set<SessionEventSubscription>([
+  "project.update",
+  "providers_snapshot_update",
+  "mcp_status_update",
+  "device_status_update",
+  "agent_attention_required",
+  "agent_permission_request",
+  "agent_permission_resolved",
+]);
+
+function isSubscriptionGatedEvent(
+  type: SessionOutboundMessage["type"],
+): type is SessionEventSubscription {
+  return SUBSCRIPTION_GATED_EVENTS.has(type as SessionEventSubscription);
+}
 
 export function resolveWaitForFinishError(options: {
   status: "permission" | "error" | "idle";
@@ -471,6 +533,8 @@ export interface SessionOptions {
   workspaceLabelService?: WorkspaceLabelService;
   filesystem?: SessionFileSystem;
   scheduleService: ScheduleService;
+  /** Absent when the daemon runs without restart recovery (tests, older wiring). */
+  restartRecovery?: RestartRecoveryService;
   checkoutDiffManager: CheckoutDiffManager;
   github?: ForgeService;
   createAgentMcpTransport?: AgentMcpTransportFactory;
@@ -479,7 +543,13 @@ export interface SessionOptions {
   renameCurrentBranch?: typeof renameCurrentBranchDefault;
   workspaceGitService: WorkspaceGitService;
   workspaceAutoName: WorkspaceAutoName;
+  /** Told when a client uses a workspace, so an auto pin lasts while it is active. */
+  autoPinExpiry?: Pick<AutoPinExpiry, "noteWorkspaceUsed">;
   daemonConfigStore: DaemonConfigStore;
+  /** Reads the daemon-wide WorktreeDiskMonitor's last sample for a workspace, if any. */
+  getWorktreeDiskUsage?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+  /** Fire-and-forget: asks the monitor to sample a workspace outside its normal rotation. */
+  requestWorktreeDiskUsageSample?: (workspaceId: string, cwd: string) => void;
   pluginRuntime?: {
     before: import("./plugins/lifecycle/index.js").PluginLifecycle["before"];
     emit: import("./plugins/lifecycle/index.js").PluginLifecycle["emit"];
@@ -518,6 +588,10 @@ export interface SessionOptions {
   terminalManager: TerminalManager | null;
   providerSnapshotManager: ProviderSnapshotManager;
   providerUsageService: ProviderUsageService;
+  usageHistory?: UsageHistoryStore;
+  tokenUsage?: TokenUsageReader;
+  contextUsage?: AgentContextUsageService;
+  jev?: JevService | null;
   hubExecutionAgents?: HubExecutionAgents;
   hubRelationships?: HubRelationshipManagement;
   serviceProxy?: ServiceProxySubsystem;
@@ -654,6 +728,26 @@ function workspaceLabelErrorCode(error: unknown): string {
   return "workspace_label_failed";
 }
 
+interface GatewayRemedyPayload {
+  remedyCommand: string | null;
+  remedyPath: string | null;
+  remedyRedirectUrl: string | null;
+}
+
+/** Flattens a failure's remedy onto the wire; every field null when there is nothing to do. */
+function gatewayRemedyPayload(failure: { remedy: McpGatewayRemedy } | null): GatewayRemedyPayload {
+  const remedy = failure?.remedy;
+  return {
+    remedyCommand: remedy?.command ?? null,
+    remedyPath: remedy?.path ?? null,
+    remedyRedirectUrl: remedy?.redirectUrl ?? null,
+  };
+}
+
+function emptyGatewayRemedy(): GatewayRemedyPayload {
+  return gatewayRemedyPayload(null);
+}
+
 export class Session {
   private readonly clientId: string;
   private readonly authorization: SessionAuthorization;
@@ -689,10 +783,13 @@ export class Session {
   private readonly renameCurrentBranch: typeof renameCurrentBranchDefault;
   private readonly workspaceGitService: WorkspaceGitService;
   private readonly workspaceAutoName: WorkspaceAutoName;
+  private readonly autoPinExpiry: Pick<AutoPinExpiry, "noteWorkspaceUsed"> | undefined;
   private readonly gitMutation: GitMutationService;
   private readonly workspaceProvisioning: WorkspaceProvisioningService;
   private readonly workspaceRecovery: WorkspaceRecoveryService;
   private readonly daemonConfigStore: DaemonConfigStore;
+  private readonly getWorktreeDiskUsage?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+  private readonly requestWorktreeDiskUsageSample?: (workspaceId: string, cwd: string) => void;
   private readonly pushNotifications: PushNotifications;
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
@@ -700,6 +797,8 @@ export class Session {
   private unsubscribeProjectMutations: (() => void) | null = null;
   private unsubscribePluginChanges: (() => void) | null = null;
   private unsubscribeWorkspaceMutations: (() => void) | null = null;
+  private unsubscribeMcpGatewayStatus: (() => void) | null = null;
+  private unsubscribeDeviceStatus: (() => void) | null = null;
   private registryMutationQueue: Promise<void> = Promise.resolve();
   private projectUpdateQueue: Promise<void> = Promise.resolve();
   private isCleanedUp = false;
@@ -747,11 +846,18 @@ export class Session {
   private readonly voiceSession: VoiceSession;
   private readonly checkoutSession: CheckoutSession;
   private readonly scheduleSession: ScheduleSession;
+  private readonly notifyPolicySession: NotifyPolicySession;
+  private readonly restartRecoverySession: RestartRecoverySession;
   private readonly providerCatalogSession: ProviderCatalogSession;
+  private readonly usageHistorySession: UsageHistorySession | null;
+  private readonly tokenUsageSession: TokenUsageSession | null;
+  private readonly contextUsageSession: ContextUsageSession | null;
+  private readonly jevSession: JevSession | null;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
   private readonly agentConfigSession: AgentConfigSession;
   private readonly projectConfigSession: ProjectConfigSession;
   private readonly daemonSession: DaemonSession;
+  private readonly doctorSession: DoctorSession;
   private readonly hubExecutionController: HubExecutionController | null;
   private readonly workspaceScripts: WorkspaceScriptsService;
   private readonly agentRequests: Pick<AgentRequests, "create" | "send">;
@@ -788,7 +894,10 @@ export class Session {
       renameCurrentBranch,
       workspaceGitService,
       workspaceAutoName,
+      autoPinExpiry,
       daemonConfigStore,
+      getWorktreeDiskUsage,
+      requestWorktreeDiskUsageSample,
       pluginRuntime,
       orchestrationSkills,
       stt,
@@ -797,6 +906,10 @@ export class Session {
       terminalManager,
       providerSnapshotManager,
       providerUsageService,
+      usageHistory,
+      tokenUsage,
+      contextUsage,
+      jev,
       serviceProxy,
       scriptRuntimeStore,
       workspaceSetupSnapshots,
@@ -864,6 +977,7 @@ export class Session {
       logger: this.sessionLogger,
     });
     this.workspaceAutoName = workspaceAutoName;
+    this.autoPinExpiry = autoPinExpiry;
     this.workspaceProvisioning = createWorkspaceProvisioningService({
       lifecycle: this.pluginRuntime,
       serverId,
@@ -918,9 +1032,19 @@ export class Session {
       onBranchChanged,
       logger: this.sessionLogger,
     });
+    this.notifyPolicySession = new NotifyPolicySession({
+      host: { emit: (msg) => this.emit(msg) },
+      getNotifyPolicy: () => this.pushNotifications.policy,
+      logger: this.sessionLogger,
+    });
     this.scheduleSession = new ScheduleSession({
       host: { emit: (msg) => this.emit(msg) },
       scheduleService,
+      logger: this.sessionLogger,
+    });
+    this.restartRecoverySession = new RestartRecoverySession({
+      host: { emit: (msg) => this.emit(msg) },
+      service: options.restartRecovery,
       logger: this.sessionLogger,
     });
     this.providerCatalogSession = new ProviderCatalogSession({
@@ -938,6 +1062,46 @@ export class Session {
       providerSnapshotManager,
       providerUsageService,
       logger: this.sessionLogger,
+    });
+    this.usageHistorySession = createUsageHistorySession({
+      host: { emit: (msg) => this.emit(msg) },
+      store: usageHistory,
+      logger: this.sessionLogger,
+    });
+    this.tokenUsageSession = createTokenUsageSession({
+      host: { emit: (msg) => this.emit(msg) },
+      reader: tokenUsage,
+      logger: this.sessionLogger,
+    });
+    this.contextUsageSession = createContextUsageSession({
+      host: { emit: (msg) => this.emit(msg) },
+      service: contextUsage,
+      loadAgent: async (agentId) => {
+        await ensureUnarchivedAgentLoaded(agentId, {
+          agentManager: this.agentManager,
+          agentStorage: this.agentStorage,
+          logger: this.sessionLogger,
+        });
+      },
+      logger: this.sessionLogger,
+    });
+    this.jevSession = createJevSession({
+      host: { emit: (msg) => this.emit(msg) },
+      service: jev,
+      logger: this.sessionLogger,
+      readAgentThread: (agentId) => {
+        const agent = this.agentManager.getAgent(agentId);
+        if (!agent) return null;
+        const recent = selectItemsByProjectedLimit({
+          items: this.agentManager.getTimeline(agentId),
+          direction: "tail",
+          limit: JEV_ASK_AGENT_TIMELINE_ITEMS,
+        });
+        return {
+          title: agent.config.title ?? null,
+          activity: curateAgentActivity(recent.items),
+        };
+      },
     });
     this.agentConfigSession = new AgentConfigSession({
       host: {
@@ -987,6 +1151,29 @@ export class Session {
       hubRelationships: options.hubRelationships,
       reloadConfig: () => daemonConfigStore.reload(),
     });
+    this.doctorSession = new DoctorSession({
+      host: { emit: (msg) => this.emit(msg) },
+      paseoHome: this.paseoHome,
+      daemonVersion,
+      // The worker's own start, not the pid file's: a restart under a live supervisor moves it.
+      getDaemonStartedAt: async () => new Date(Date.now() - process.uptime() * 1000).toISOString(),
+      listAgents: () =>
+        this.agentManager
+          .listAgents()
+          .map((agent) => ({ cwd: agent.cwd, status: agent.lifecycle, archived: false })),
+      listWorkspaces: async () =>
+        (await this.workspaceRegistry.list()).map((workspace) => ({
+          cwd: workspace.cwd,
+          baseBranch: workspace.baseBranch ?? null,
+          archivedAt: workspace.archivedAt ?? null,
+          pinned: Boolean(workspace.pinnedAt),
+        })),
+      listPlugins: () => this.pluginRuntime?.listPlugins() ?? [],
+      getPluginLogs: (id) =>
+        (this.pluginRuntime?.getLogs(id) ?? []).map((entry) => `${entry.stream}: ${entry.message}`),
+      listProviderUsage: async () => (await providerUsageService.listUsage()).providers,
+      logger: this.sessionLogger,
+    });
     this.hubExecutionController = options.hubExecutionAgents
       ? new HubExecutionController({
           agents: options.hubExecutionAgents,
@@ -996,6 +1183,8 @@ export class Session {
         })
       : null;
     this.daemonConfigStore = daemonConfigStore;
+    this.getWorktreeDiskUsage = getWorktreeDiskUsage;
+    this.requestWorktreeDiskUsageSample = requestWorktreeDiskUsageSample;
     this.terminalManager = terminalManager;
     this.terminalController = new TerminalSessionController({
       terminalManager,
@@ -1088,6 +1277,9 @@ export class Session {
       listTerminalActivityContributions: () => this.listTerminalActivityContributions(),
       isProviderVisibleToClient: (provider) => this.isProviderVisibleToClient(provider),
       buildWorkspaceDescriptor: (input) => this.buildWorkspaceDescriptor(input),
+      getDiskUsage: (workspaceId) => this.getWorktreeDiskUsage?.(workspaceId),
+      requestDiskUsageSample: (workspaceId, cwd) =>
+        this.requestWorktreeDiskUsageSample?.(workspaceId, cwd),
     });
 
     this.voiceSession = new VoiceSession({
@@ -1471,7 +1663,7 @@ export class Session {
     );
 
     const t0 = Date.now();
-    const cancellation = await this.agentManager.cancelAgentRun(agentId);
+    const cancellation = await this.agentManager.cancelAgentRun(agentId, "user");
     this.sessionLogger.debug(
       { agentId, cancellation: cancellation.status, durationMs: Date.now() - t0 },
       "interruptAgentIfRunning: cancelAgentRun completed",
@@ -1523,6 +1715,73 @@ export class Session {
         });
     }
     this.providerCatalogSession.start();
+    // COMPAT(mcpStatus): copies providers_snapshot_update's push pattern (KTD7) —
+    // gated by the same explicit-subscription mechanism, so old clients never receive it.
+    this.unsubscribeMcpGatewayStatus = this.agentManager.onMcpGatewayStatusChange((snapshot) => {
+      if (!this.wantsEvent("mcp_status_update")) return;
+      this.emit(this.mcpStatusUpdateMessage(snapshot));
+    });
+  }
+
+  /**
+   * Subscribes to the device cap's changes the first time a client asks for them
+   * (docs/device-leases.md). On demand rather than at construction: a session that never
+   * subscribes to `device_status_update` — every CLI call, every old client — has no reason to
+   * hold a listener on the cap.
+   */
+  private ensureDeviceStatusSubscription(): void {
+    if (this.unsubscribeDeviceStatus) return;
+    const emitIfSubscribed = () => {
+      if (!this.wantsEvent("device_status_update")) return;
+      void this.emitDeviceStatusUpdate();
+    };
+    const unsubscribeEmulator = this.agentManager.onDeviceStatusChange(emitIfSubscribed);
+    const unsubscribePhysical = this.agentManager.onPhysicalDeviceStatusChange(emitIfSubscribed);
+    this.unsubscribeDeviceStatus = () => {
+      unsubscribeEmulator();
+      unsubscribePhysical();
+    };
+  }
+
+  /**
+   * Snapshots the device cap and pushes it. Reads the cap's cached `ps` sample rather than
+   * taking a new one, so a burst of lease changes costs nothing; the numbers are still the
+   * process scan's, only up to one sweep old.
+   */
+  private async emitDeviceStatusUpdate(source?: object): Promise<void> {
+    try {
+      const snapshot = await this.agentManager.getDeviceStatusSnapshot();
+      if (!snapshot) return;
+      const physical = await this.agentManager.getPhysicalDeviceStatusSnapshot();
+      const message = {
+        type: "device_status_update" as const,
+        payload: {
+          enabled: snapshot.enabled,
+          dryRun: snapshot.dryRun,
+          totalSlots: snapshot.totalSlots,
+          slotsPerPlatform: snapshot.slotsPerPlatform,
+          used: snapshot.used,
+          devices: snapshot.devices,
+          waiting: snapshot.waiting,
+          blocked: snapshot.blocked,
+          enforcement: snapshot.enforcement,
+          generatedAt: snapshot.generatedAt,
+          ...(physical ? { physicalDevices: physical.devices } : {}),
+          ...(physical && physical.blocked.length > 0 ? { physicalBlocked: physical.blocked } : {}),
+        },
+      };
+      if (source) this.emitForSource(message, source);
+      else this.emit(message);
+    } catch (error) {
+      this.sessionLogger.warn({ err: error }, "Failed to emit device status update");
+    }
+  }
+
+  private mcpStatusUpdateMessage(servers: McpGatewaySnapshotEntry[]) {
+    return {
+      type: "mcp_status_update" as const,
+      payload: { servers, generatedAt: new Date().toISOString() },
+    };
   }
 
   private subscribeToRegistryMutations(): void {
@@ -2008,13 +2267,42 @@ export class Session {
       this.dispatchWorkspaceLifecycleMessage(msg) ??
       this.dispatchWorkspaceFileMessage(msg, source) ??
       this.dispatchProviderMessage(msg) ??
+      this.dispatchUsageMessage(msg) ??
       this.dispatchOrchestrationSkillsMessage(msg) ??
       this.dispatchPluginDirectoryMessage(msg) ??
       this.dispatchPluginMessage(msg) ??
       this.dispatchTerminalMessage(msg) ??
       this.dispatchScheduleMessage(msg) ??
-      this.dispatchMiscMessage(msg);
+      this.dispatchRestartRecoveryOrDeviceOrMiscMessage(msg);
     if (promise) await promise;
+  }
+
+  private dispatchRestartRecoveryOrDeviceOrMiscMessage(
+    msg: SessionInboundMessage,
+  ): Promise<void> | undefined {
+    return (
+      this.dispatchRestartRecoveryMessage(msg) ??
+      this.dispatchDeviceActionMessage(msg) ??
+      this.dispatchMiscMessage(msg)
+    );
+  }
+
+  /** The Devices UI's three human actions on a device (docs/device-leases.md). */
+  private dispatchDeviceActionMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "device.lease.release.request":
+        return this.handleDeviceLeaseReleaseRequest(msg.deviceId, msg.requestId);
+      case "device.reserve.set.request":
+        return this.handleDeviceReserveSetRequest(msg.deviceId, msg.reserved, msg.requestId);
+      case "device.shutdown.request":
+        return this.handleDeviceShutdownRequest(
+          msg.deviceId,
+          msg.confirmMidTurnHolder,
+          msg.requestId,
+        );
+      default:
+        return undefined;
+    }
   }
 
   private dispatchWorkspaceLifecycleMessage(msg: SessionInboundMessage): Promise<void> | undefined {
@@ -2024,6 +2312,60 @@ export class Session {
       this.dispatchWorkspaceSetupMessage(msg) ??
       this.dispatchWorkspaceAndProjectMessage(msg)
     );
+  }
+
+  /**
+   * Usage reads: the accounts' usage history, token usage by model and role, an agent's context
+   * breakdown, and JEV.
+   */
+  private dispatchUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    return (
+      this.dispatchUsageHistoryMessage(msg) ??
+      this.dispatchTokenUsageMessage(msg) ??
+      this.dispatchContextUsageMessage(msg) ??
+      this.dispatchJevMessage(msg)
+    );
+  }
+
+  private dispatchContextUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type !== "agent.context_usage.read.request" || !this.contextUsageSession) {
+      return undefined;
+    }
+    return this.contextUsageSession.handleReadRequest(msg);
+  }
+
+  private dispatchUsageHistoryMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type !== "usage.history.get.request" || !this.usageHistorySession) return undefined;
+    return this.usageHistorySession.handleGetRequest(msg);
+  }
+
+  private dispatchTokenUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type !== "usage.tokens.get_breakdown.request" || !this.tokenUsageSession) {
+      return undefined;
+    }
+    return this.tokenUsageSession.handleGetBreakdownRequest(msg);
+  }
+
+  private dispatchJevMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (!this.jevSession) return undefined;
+    switch (msg.type) {
+      case "jev.decide.request":
+        return this.jevSession.handleDecide(msg);
+      case "jev.status.request":
+        return this.jevSession.handleStatus(msg);
+      case "jev.scope.check.request":
+        return this.jevSession.handleScopeCheck(msg);
+      case "jev.decisions.list.request":
+        return this.jevSession.handleDecisionsList(msg);
+      case "jev.ask.request":
+        return this.jevSession.handleAsk(msg);
+      case "jev.savings.summary.request":
+        return this.jevSession.handleSavingsSummary(msg);
+      case "jev.savings.events.request":
+        return this.jevSession.handleSavingsEvents(msg);
+      default:
+        return undefined;
+    }
   }
 
   private dispatchOrchestrationSkillsMessage(
@@ -2314,6 +2656,8 @@ export class Session {
     switch (msg.type) {
       case "agent.detach.request":
         return this.handleDetachAgentRequest(msg.agentId, msg.requestId);
+      case "agent.provider.move.request":
+        return this.handleAgentProviderMoveRequest(msg);
       default:
         return undefined;
     }
@@ -2346,6 +2690,22 @@ export class Session {
           },
           source,
         );
+        // COMPAT(mcpStatus): the gateway only pushes on state changes, so a client that
+        // connects after the gateway has settled would see an empty strip until the next
+        // real transition. Hand the newly-subscribing source the current snapshot eagerly;
+        // skipped when empty so gateway-less daemons emit nothing (R10).
+        if (msg.events.includes("mcp_status_update")) {
+          const snapshot = this.agentManager.getMcpGatewaySnapshot();
+          if (snapshot.length > 0) {
+            this.emitForSource(this.mcpStatusUpdateMessage(snapshot), source);
+          }
+        }
+        // Same eager hand-off as above: the cap only pushes on change, so a client connecting
+        // to a settled daemon would otherwise see nothing until a device came or went.
+        if (msg.events.includes("device_status_update")) {
+          this.ensureDeviceStatusSubscription();
+          void this.emitDeviceStatusUpdate(source);
+        }
         return undefined;
       }
       case "agent.timeline.set_subscription.request": {
@@ -2455,6 +2815,8 @@ export class Session {
       case "daemon.config.reload.request":
         this.daemonSession.handleConfigReloadRequest(msg);
         return undefined;
+      case "daemon.doctor.request":
+        return this.doctorSession.handleDoctorRequest(msg);
       case "hub.management.daemon.connect.request":
       case "hub.management.daemon.get_status.request":
       case "hub.management.daemon.disconnect.request":
@@ -2464,21 +2826,30 @@ export class Session {
         return this.daemonSession.handleDiagnosticsRequest(msg);
       case "daemon.update.request":
         return this.daemonSession.handleUpdateRequest(msg);
-      case "set_daemon_config_request":
+      case "set_daemon_config_request": {
+        const patched = this.daemonConfigStore.patch(msg.config);
         this.emit({
           type: "set_daemon_config_response",
-          payload: {
-            requestId: msg.requestId,
-            config: this.daemonConfigStore.patch(msg.config),
-          },
+          payload: { requestId: msg.requestId, config: patched },
         });
+        this.refreshDeviceStatusIfPatched(msg.config);
         return undefined;
+      }
       case "read_project_config_request":
         return this.projectConfigSession.handleReadProjectConfigRequest(msg);
       case "write_project_config_request":
         return this.projectConfigSession.handleWriteProjectConfigRequest(msg);
       default:
         return undefined;
+    }
+  }
+
+  /** A daemon-config patch doesn't otherwise make the daemon push a fresh device_status_update
+   * on its own — the dry-run switch (or any other deviceLeases writer) would look stuck until
+   * the next resource-monitor sweep, up to a minute away. */
+  private refreshDeviceStatusIfPatched(config: MutableDaemonConfigPatch): void {
+    if (config.deviceLeases !== undefined) {
+      this.agentManager.refreshDeviceStatus();
     }
   }
 
@@ -2708,6 +3079,17 @@ export class Session {
     }
   }
 
+  private dispatchRestartRecoveryMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "agent.restart_recovery.get_plan.request":
+      case "agent.restart_recovery.apply.request":
+      case "agent.restart_recovery.dismiss.request":
+        return this.restartRecoverySession.handle(msg);
+      default:
+        return undefined;
+    }
+  }
+
   private dispatchScheduleMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     switch (msg.type) {
       case "schedule/create":
@@ -2738,8 +3120,21 @@ export class Session {
       case "list_commands_request":
         await this.handleListCommandsRequest(msg);
         return;
+      case "mcp_gateway.auth.start.request":
+        await this.handleMcpGatewayAuthStartRequest(msg);
+        return;
+      case "mcp_gateway.server.adopt.request":
+        await this.handleMcpGatewayServerAdoptRequest(msg);
+        return;
       case "register_push_token":
         this.handleRegisterPushToken(msg.token);
+        return;
+      case "notifications.policy.get.request":
+      case "notifications.policy.set.request":
+        await this.notifyPolicySession.handlePolicyRequest(msg);
+        return;
+      case "notifications.ledger.list.request":
+        this.notifyPolicySession.handleLedgerListRequest(msg);
         return;
       case "push.unregister.request":
         this.pushNotifications.revoke(msg.token);
@@ -2958,6 +3353,52 @@ export class Session {
           agentId,
           accepted: false,
           error: message,
+        },
+      });
+    }
+  }
+
+  private async handleAgentProviderMoveRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.provider.move.request" }>,
+  ): Promise<void> {
+    const { agentId, providerId, requestId } = msg;
+    this.sessionLogger.info({ agentId, providerId, requestId }, "Moving agent to another provider");
+    try {
+      await ensureUnarchivedAgentLoaded(agentId, {
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        logger: this.sessionLogger,
+      });
+      const moved = await this.agentManager.moveAgentToProvider(agentId, providerId);
+      if (moved.workspaceId) {
+        await this.emitWorkspaceUpdatesForWorkspaceIds(new Set([moved.workspaceId]));
+      }
+      this.emit({
+        type: "agent.provider.move.response",
+        payload: {
+          requestId,
+          agentId,
+          accepted: true,
+          providerId: moved.provider,
+          code: null,
+          error: null,
+        },
+      });
+    } catch (error) {
+      const refusal = error instanceof AgentProviderMoveError ? error : null;
+      this.sessionLogger.warn(
+        { err: error, agentId, providerId, requestId, code: refusal?.code },
+        "Failed to move agent to another provider",
+      );
+      this.emit({
+        type: "agent.provider.move.response",
+        payload: {
+          requestId,
+          agentId,
+          accepted: false,
+          providerId: this.agentManager.getAgent(agentId)?.provider ?? providerId,
+          code: refusal?.code ?? "move_failed",
+          error: getErrorMessageOr(error, "Failed to move agent to another provider"),
         },
       });
     }
@@ -3194,6 +3635,61 @@ export class Session {
     }
   }
 
+  /** The Devices UI's "Release the lease" action (docs/device-leases.md). */
+  private async handleDeviceLeaseReleaseRequest(
+    deviceId: string,
+    requestId: string,
+  ): Promise<void> {
+    this.sessionLogger.info({ deviceId, requestId }, "session: device.lease.release.request");
+    const released = await this.agentManager.releaseDeviceLease(deviceId);
+    this.emit({
+      type: "device.lease.release.response",
+      payload: { requestId, deviceId, released },
+    });
+  }
+
+  /** "Reserve for me" / "Unreserve" from the Devices UI. */
+  private async handleDeviceReserveSetRequest(
+    deviceId: string,
+    reserved: boolean,
+    requestId: string,
+  ): Promise<void> {
+    this.sessionLogger.info(
+      { deviceId, reserved, requestId },
+      "session: device.reserve.set.request",
+    );
+    await this.agentManager.setDeviceReservation(deviceId, reserved);
+    this.emit({
+      type: "device.reserve.set.response",
+      payload: { requestId, deviceId, reserved },
+    });
+  }
+
+  /** "Shut down", an explicit human action — never reaping (docs/device-leases.md). */
+  private async handleDeviceShutdownRequest(
+    deviceId: string,
+    confirmMidTurnHolder: boolean | undefined,
+    requestId: string,
+  ): Promise<void> {
+    this.sessionLogger.info(
+      { deviceId, confirmMidTurnHolder, requestId },
+      "session: device.shutdown.request",
+    );
+    const result = await this.agentManager.shutdownDevice({
+      deviceId,
+      ...(confirmMidTurnHolder === undefined ? {} : { confirmMidTurnHolder }),
+    });
+    this.emit({
+      type: "device.shutdown.response",
+      payload: {
+        requestId,
+        deviceId,
+        status: result.status,
+        ...("message" in result && result.message ? { message: result.message } : {}),
+      },
+    });
+  }
+
   private async handleProjectIconSetRequest(
     request: Extract<SessionInboundMessage, { type: "project.icon.set.request" }>,
   ): Promise<void> {
@@ -3287,15 +3783,11 @@ export class Session {
           removedWorkspaceIds.push(workspaceId);
         }
 
-        await this.projectRegistry.remove(resolvedProjectId);
-        await removeProjectCustomIcon({
+        await removeProjectRecord({
+          projectRegistry: this.projectRegistry,
           paseoHome: this.paseoHome,
           projectId: resolvedProjectId,
-        }).catch((error) => {
-          this.sessionLogger.warn(
-            { err: error, projectId: resolvedProjectId },
-            "Failed to clean up removed project icon",
-          );
+          logger: this.sessionLogger,
         });
       } finally {
         if (activeWorkspaceIds.length > 0) {
@@ -3362,9 +3854,13 @@ export class Session {
       const trimmed = title?.trim() ?? "";
       const nextTitle = trimmed.length === 0 ? null : trimmed;
       const updatedAt = new Date().toISOString();
+      // Clearing the title hands naming back to Paseo: the workspace-title tracker
+      // adopts an "auto" workspace, so an empty rename is how a hand-named workspace
+      // (or one from before provenance existed) opts into tracking.
       const updated = await this.workspaceRegistry.update(workspaceId, (existing) => ({
         ...existing,
         title: nextTitle,
+        titleSource: nextTitle === null ? ("auto" as const) : ("manual" as const),
         updatedAt,
       }));
       if (!updated) {
@@ -3440,6 +3936,9 @@ export class Session {
       const updated = await this.workspaceRegistry.update(workspaceId, (existing) => ({
         ...existing,
         pinnedAt: nextPinnedAt,
+        // A person's own pin gesture is always manual, even upgrading a workspace the daemon
+        // auto-pinned; unpinning clears the source along with the pin itself.
+        pinSource: pinned ? "manual" : undefined,
         updatedAt,
       }));
       if (!updated) {
@@ -3463,6 +3962,26 @@ export class Session {
         },
       });
       emitResponse(false, null, getErrorMessageOr(error, "Failed to pin workspace"));
+    }
+  }
+
+  /**
+   * Auto-pins a workspace the first time Tyler starts a session in it over this client
+   * connection — a new workspace, or a new agent tab in an existing one. Callers only reach this
+   * for a human-attributable create; agent- and daemon-triggered creates go through the separate
+   * "mcp"-kind create path and never call it. See workspace-auto-pin.ts.
+   */
+  private async maybeAutoPinWorkspace(
+    workspaceId: string,
+    context?: WorkspaceMutationContext,
+  ): Promise<void> {
+    if (this.daemonConfigStore.get().autoPinSessions === false) return;
+    // Before the pin: starting a session is a use, and an expiry sweep racing this reads it.
+    this.autoPinExpiry?.noteWorkspaceUsed(workspaceId);
+    try {
+      await autoPinWorkspaceOnSessionStart(this.workspaceRegistry, workspaceId, { context });
+    } catch (error) {
+      this.sessionLogger.warn({ err: error, workspaceId }, "Failed to auto-pin new session");
     }
   }
 
@@ -3512,6 +4031,15 @@ export class Session {
   }
 
   /**
+   * Only an app client sends heartbeats, so a session with client activity is a person at the
+   * app, desktop or web UI; the CLI and MCP tools, which agents use too, never are. The away
+   * auto-reply counts only these as Tyler (docs/jev.md, "Feature 14").
+   */
+  private recordHumanPrompt(agentId: string, messageId: string | null): void {
+    if (this.clientActivity) this.agentManager.recordHumanPrompt(agentId, messageId);
+  }
+
+  /**
    * Handle text message to agent (with optional image attachments)
    */
   private async handleSendAgentMessage(
@@ -3543,7 +4071,7 @@ export class Session {
     const prompt = buildAgentPrompt(promptText, images, attachments);
 
     try {
-      await sendPromptToAgent({
+      const delivered = await sendPromptToAgent({
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         agentId,
@@ -3555,6 +4083,7 @@ export class Session {
         clearPendingPermissions: true,
         logger: this.sessionLogger,
       });
+      this.recordHumanPrompt(delivered.agentId, messageId ?? null);
       return { ok: true };
     } catch (error) {
       this.handleAgentRunError(agentId, error, "Failed to send agent message");
@@ -3669,17 +4198,26 @@ export class Session {
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
       };
       const workspacePromptTitle = resolveFirstAgentPromptTitle(firstAgentContext);
+      // The same caller rule auto-pin uses below: equivalent to checking resolvedIntent.intent.labels
+      // once it exists, since resolveCreateAgentIntent only ever injects a parent-agent-id label
+      // derived from callerAgentId itself.
+      const createdBy = resolveWorkspaceCreatedBy({
+        callerAgentId: msg.callerAgentId,
+        labels: msg.labels,
+      });
       const createdWorktree = await this.createAgentLifecycleDispatch.createWorktreeForRequest({
         cwd: config.cwd,
         target: worktree,
         firstAgentContext,
         hasLegacyGitOptions: Boolean(git),
+        createdBy,
       });
       createdWorktreeForCleanup = createdWorktree;
       const resolvedIntent = await this.resolveSessionCreateAgentIntent({
         request: msg,
         createdWorktree,
         workspacePromptTitle,
+        createdBy,
       });
       const resolvedCwd = resolve(resolvedIntent.config.cwd);
       if (!(await this.filesystem.isDirectory(resolvedCwd))) {
@@ -3700,6 +4238,7 @@ export class Session {
           agentId,
           config: resolvedIntent.config,
           workspaceId: resolvedIntent.intent.workspaceId,
+          callerAgentId: msg.callerAgentId,
           worktreeName,
           initialPrompt,
           clientMessageId,
@@ -3712,11 +4251,39 @@ export class Session {
           provisionalTitle,
           firstAgentContext,
           buildSessionConfig: (sessionConfig, gitOptions, legacyWorktreeName, ctx) =>
-            this.buildAgentSessionConfig(sessionConfig, gitOptions, legacyWorktreeName, ctx),
+            this.buildAgentSessionConfig(
+              sessionConfig,
+              gitOptions,
+              legacyWorktreeName,
+              ctx,
+              createdBy,
+            ),
         },
       );
       createdAgentId = snapshot.id;
       await this.agentUpdates.forwardLiveAgent(snapshot);
+      // Before anything else is awaited: the first turn is already running, and the auto-archive
+      // listens for its end with no replay, so a turn that ended during the auto-pin below was
+      // never archived.
+      this.createAgentLifecycleDispatch.registerAutoArchiveIfRequested({
+        autoArchive,
+        agentId: snapshot.id,
+        createdWorktree,
+      });
+      // No caller agent and no inherited parent-agent-id label means this "session" create came
+      // straight from a client connection (app or CLI), not on behalf of another agent. The label
+      // check covers a CLI invocation that clears PASEO_AGENT_ID: it looks like a human on
+      // callerAgentId alone, but still carries its creator's parent label through `labels`
+      // (docs/done-janitor.md#manual-pin-vs-auto-pin). Equivalent to `createdBy === "person"`.
+      if (
+        isHumanAttributableCreate({
+          callerAgentId: msg.callerAgentId,
+          labels: resolvedIntent.intent.labels,
+        })
+      ) {
+        await this.maybeAutoPinWorkspace(resolvedIntent.intent.workspaceId);
+        await this.emitWorkspaceUpdateForWorkspaceId(resolvedIntent.intent.workspaceId);
+      }
       if (resolvedIntent.createdDirectoryWorkspace && trimmedPrompt) {
         this.workspaceAutoName.scheduleForDirectory(
           {
@@ -3727,11 +4294,6 @@ export class Session {
           { currentSelection: this.getFocusedAgentSelectionForCwd(resolvedIntent.config.cwd) },
         );
       }
-      this.createAgentLifecycleDispatch.registerAutoArchiveIfRequested({
-        autoArchive,
-        agentId: snapshot.id,
-        createdWorktree,
-      });
       this.sessionLogger.info(
         { agentId: snapshot.id, provider: snapshot.provider },
         "Created agent",
@@ -3750,6 +4312,7 @@ export class Session {
     request: CreateAgentRequestMessage;
     createdWorktree: CreatePaseoWorktreeWorkflowResult | null;
     workspacePromptTitle: string | null;
+    createdBy: WorkspaceCreatedBy;
   }): Promise<ResolvedSessionCreateAgentIntent> {
     const { request, createdWorktree } = input;
     const callerAgent = request.callerAgentId
@@ -3782,6 +4345,9 @@ export class Session {
           createdWorktree: null,
           cwd: config.cwd,
           initialTitle: input.workspacePromptTitle,
+          // Derived from the first prompt, so the tracker owns it from here.
+          initialTitleSource: "auto",
+          createdBy: input.createdBy,
         }),
         cwd: config.cwd,
       }),
@@ -3965,7 +4531,11 @@ export class Session {
       let snapshot: ManagedAgent;
       const existing = this.agentManager.getAgent(agentId);
       if (existing) {
-        await this.interruptAgentIfRunning(agentId);
+        // A queued child has no turn to stop, and interrupting it would drop its held prompt,
+        // messages merged in from other senders included. The reload re-queues it in place.
+        if (!existing.turnQueued) {
+          await this.interruptAgentIfRunning(agentId);
+        }
         snapshot = await this.agentManager.reloadAgentSession(agentId, undefined, {
           rehydrateFromDisk: true,
         });
@@ -4178,6 +4748,7 @@ export class Session {
     gitOptions?: GitSetupOptions,
     legacyWorktreeName?: string,
     firstAgentContext?: FirstAgentContext,
+    createdBy?: WorkspaceCreatedBy,
   ): Promise<{
     sessionConfig: AgentSessionConfig;
     setupContinuation?: CreatePaseoWorktreeWorkflowResult["setupContinuation"];
@@ -4190,26 +4761,29 @@ export class Session {
         sessionLogger: this.sessionLogger,
         workspaceGitService: this.workspaceGitService,
         createPaseoWorktree: (input, serviceOptions) =>
-          this.createPaseoWorktreeWorkflow(input, {
-            ...serviceOptions,
-            setupContinuation: {
-              kind: "agent",
-              terminalManager: this.terminalManager,
-              appendTimelineItem: ({ agentId, item }) =>
-                appendTimelineItemIfAgentKnown({
-                  agentManager: this.agentManager,
-                  agentId,
-                  item,
-                }),
-              emitLiveTimelineItem: ({ agentId, item }) =>
-                emitLiveTimelineItemIfAgentKnown({
-                  agentManager: this.agentManager,
-                  agentId,
-                  item,
-                }),
-              logger: this.sessionLogger,
+          this.createPaseoWorktreeWorkflow(
+            { ...input, createdBy },
+            {
+              ...serviceOptions,
+              setupContinuation: {
+                kind: "agent",
+                terminalManager: this.terminalManager,
+                appendTimelineItem: ({ agentId, item }) =>
+                  appendTimelineItemIfAgentKnown({
+                    agentManager: this.agentManager,
+                    agentId,
+                    item,
+                  }),
+                emitLiveTimelineItem: ({ agentId, item }) =>
+                  emitLiveTimelineItemIfAgentKnown({
+                    agentManager: this.agentManager,
+                    agentId,
+                    item,
+                  }),
+                logger: this.sessionLogger,
+              },
             },
-          }),
+          ),
         checkoutExistingBranch: (cwd, branch) =>
           this.gitMutation.checkoutExistingBranch(cwd, branch),
         createBranchFromBase: (params) => this.gitMutation.createBranchFromBase(params),
@@ -4300,9 +4874,25 @@ export class Session {
     if (msg.appVisible && focusedTerminalId) {
       void this.clearFocusedTerminalAttention(focusedTerminalId);
     }
+    this.noteFocusedWorkspaceUsed(msg);
     if (this.registeredPushToken) {
       this.pushNotifications.renew(this.registeredPushToken);
     }
+  }
+
+  /**
+   * An agent focused in a visible app is Tyler using its workspace, as of his last input on that
+   * client. Keeps the workspace's auto pin alive (workspace-auto-pin.ts).
+   */
+  private noteFocusedWorkspaceUsed(msg: {
+    focusedAgentId: string | null;
+    lastActivityAt: string;
+    appVisible: boolean;
+  }): void {
+    if (!this.autoPinExpiry || !msg.appVisible || !msg.focusedAgentId) return;
+    const workspaceId = this.agentManager.getAgent(msg.focusedAgentId)?.workspaceId;
+    if (!workspaceId) return;
+    this.autoPinExpiry.noteWorkspaceUsed(workspaceId, Date.parse(msg.lastActivityAt));
   }
 
   private async clearFocusedTerminalAttention(terminalId: string): Promise<void> {
@@ -4327,8 +4917,85 @@ export class Session {
   }
 
   /**
-   * Handle list commands request for an agent
+   * Starts interactive OAuth for one brokered MCP gateway server (U6, R6's one-click auth
+   * action). Never throws to the caller — `AgentManager.startMcpGatewayAuthorization` rejects
+   * for an unknown server, a static-auth server (nothing to authorize interactively), or a
+   * disabled/unconfigured gateway, and all three land in the response's `error` field rather
+   * than an `rpc_error`, matching the workspace-script RPCs' error-in-payload convention.
    */
+  private async handleMcpGatewayAuthStartRequest(
+    request: McpGatewayAuthStartRequest,
+  ): Promise<void> {
+    try {
+      const { authorizationUrl } = await this.agentManager.startMcpGatewayAuthorization(
+        request.name,
+      );
+      this.emit({
+        type: "mcp_gateway.auth.start.response",
+        payload: {
+          requestId: request.requestId,
+          authorizationUrl,
+          error: null,
+          reason: null,
+          ...emptyGatewayRemedy(),
+        },
+      });
+    } catch (error) {
+      const failure = error instanceof McpGatewayActionError ? error : null;
+      this.sessionLogger.warn(
+        { err: error, name: request.name, reason: failure?.reason },
+        "Failed to start MCP gateway authorization",
+      );
+      this.emit({
+        type: "mcp_gateway.auth.start.response",
+        payload: {
+          requestId: request.requestId,
+          authorizationUrl: null,
+          error: getErrorMessageOr(error, "Failed to start MCP gateway authorization"),
+          reason: failure?.reason ?? null,
+          ...gatewayRemedyPayload(failure),
+        },
+      });
+    }
+  }
+
+  private async handleMcpGatewayServerAdoptRequest(
+    request: McpGatewayServerAdoptRequest,
+  ): Promise<void> {
+    try {
+      const { authorizationUrl } = await this.agentManager.adoptMcpGatewayServer({
+        name: request.name,
+        agentId: request.agentId,
+      });
+      this.emit({
+        type: "mcp_gateway.server.adopt.response",
+        payload: {
+          requestId: request.requestId,
+          authorizationUrl,
+          error: null,
+          reason: null,
+          ...emptyGatewayRemedy(),
+        },
+      });
+    } catch (error) {
+      const failure = error instanceof McpGatewayActionError ? error : null;
+      this.sessionLogger.warn(
+        { err: error, name: request.name, agentId: request.agentId, reason: failure?.reason },
+        "Failed to broker the MCP server",
+      );
+      this.emit({
+        type: "mcp_gateway.server.adopt.response",
+        payload: {
+          requestId: request.requestId,
+          authorizationUrl: null,
+          error: getErrorMessageOr(error, "Failed to broker the MCP server"),
+          reason: failure?.reason ?? null,
+          ...gatewayRemedyPayload(failure),
+        },
+      });
+    }
+  }
+
   private async handleListCommandsRequest(
     msg: Extract<SessionInboundMessage, { type: "list_commands_request" }>,
   ): Promise<void> {
@@ -4427,6 +5094,9 @@ export class Session {
         response,
         logger: this.sessionLogger,
       });
+      if (this.clientActivity) {
+        this.agentManager.recordHumanPermissionResponse(agentId, requestId, response);
+      }
     } catch (error) {
       this.sessionLogger.error(
         { err: error, agentId, requestId },
@@ -4526,6 +5196,8 @@ export class Session {
         markWorkspaceArchiving: (workspaceIds, archivingAt) =>
           this.markWorkspaceArchiving(workspaceIds, archivingAt),
         clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving(workspaceIds),
+        requestDiskUsageSample: (workspaceId, cwd) =>
+          this.requestWorktreeDiskUsageSample?.(workspaceId, cwd),
         killTerminalsForWorkspace: (workspaceId) =>
           this.terminalController.killTerminalsForWorkspace(workspaceId),
         sessionLogger: this.sessionLogger,
@@ -5005,6 +5677,7 @@ export class Session {
       name: resolveWorkspaceDisplayName(workspace),
       title: workspace.title,
       pinnedAt: workspace.pinnedAt,
+      createdBy: workspace.createdBy,
       ...(workspace.labels && workspace.labels.length > 0 ? { labels: workspace.labels } : {}),
       archivingAt: null,
       status: "done",
@@ -5097,6 +5770,7 @@ export class Session {
       }),
       title: result.workspace.title,
       pinnedAt: result.workspace.pinnedAt,
+      createdBy: result.workspace.createdBy,
       ...(result.workspace.labels && result.workspace.labels.length > 0
         ? { labels: result.workspace.labels }
         : {}),
@@ -6131,12 +6805,30 @@ export class Session {
 
     const explicitTitle = request.title?.trim() || null;
     const promptTitle = resolveFirstAgentPromptTitle(request.firstAgentContext);
-    const workspace = await this.workspaceProvisioning.createWorkspaceForDirectory(
+    // A title a person typed is theirs; an agent's (a CLI run under PASEO_AGENT_ID) and one
+    // derived from the first prompt may be refreshed.
+    const titleSource: WorkspaceTitleSource =
+      explicitTitle && !request.callerAgentId ? "manual" : "auto";
+    const createdWorkspace = await this.workspaceProvisioning.createWorkspaceForDirectory(
       cwd,
       explicitTitle ?? promptTitle,
       request.source.projectId,
-      { expectsInitialAgent: Boolean(request.firstAgentContext) },
+      {
+        expectsInitialAgent: Boolean(request.firstAgentContext),
+        titleSource,
+        createdBy: resolveWorkspaceCreatedBy({ callerAgentId: request.callerAgentId }),
+      },
     );
+    // This RPC is only reachable over a client connection (app or CLI), never from the
+    // agent-scoped create_workspace MCP tool. But the CLI itself runs inside an agent sometimes
+    // (PASEO_AGENT_ID set) — that create is still agent-attributable, not Tyler's, and never pins.
+    if (!request.callerAgentId) {
+      await this.maybeAutoPinWorkspace(createdWorkspace.workspaceId, {
+        expectsInitialAgent: Boolean(request.firstAgentContext),
+      });
+    }
+    const workspace =
+      (await this.workspaceRegistry.get(createdWorkspace.workspaceId)) ?? createdWorkspace;
     await this.syncWorkspaceGitObserverForWorkspace(workspace);
     const descriptor = await this.describeWorkspaceRecord(workspace);
     this.emit({
@@ -6198,7 +6890,7 @@ export class Session {
 
     const sourceCwd = await resolveWorktreeSourceCwd(source, this.projectRegistry);
 
-    const result = await this.createPaseoWorktreeWorkflow(
+    const workflowResult = await this.createPaseoWorktreeWorkflow(
       {
         cwd: sourceCwd,
         projectId: source.projectId,
@@ -6210,11 +6902,27 @@ export class Session {
         githubPrNumber: source.githubPrNumber,
         firstAgentContext: request.firstAgentContext,
         title: request.title,
+        ...(request.callerAgentId ? { titleSource: "auto" as const } : {}),
+        createdBy: resolveWorkspaceCreatedBy({ callerAgentId: request.callerAgentId }),
       },
       source.baseBranch
         ? { resolveDefaultBranch: async () => source.baseBranch as string }
         : undefined,
     );
+    // This RPC is only reachable over a client connection (app or CLI). But the CLI itself runs
+    // inside an agent sometimes (PASEO_AGENT_ID set) — that create is still agent-attributable,
+    // not Tyler's, and never pins.
+    if (!request.callerAgentId) {
+      await this.maybeAutoPinWorkspace(workflowResult.workspace.workspaceId, {
+        expectsInitialAgent: Boolean(request.firstAgentContext),
+      });
+    }
+    const refreshedWorkspace = await this.workspaceRegistry.get(
+      workflowResult.workspace.workspaceId,
+    );
+    const result = refreshedWorkspace
+      ? { ...workflowResult, workspace: refreshedWorkspace }
+      : workflowResult;
 
     const descriptor = await this.describeCreatedWorktreeWorkspace(result);
     this.emit({
@@ -6851,6 +7559,8 @@ export class Session {
           markWorkspaceArchiving: (workspaceIds, archivingAt) =>
             this.markWorkspaceArchiving(workspaceIds, archivingAt),
           clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving(workspaceIds),
+          requestDiskUsageSample: (workspaceId, cwd) =>
+            this.requestWorktreeDiskUsageSample?.(workspaceId, cwd),
           assertWorkspaceAutomationAllowed: (workspaceId) =>
             assertWorkspaceAutomationAllowedForWorkspace(this.workspaceRegistry, workspaceId),
           killTerminalsForWorkspace: (workspaceId) =>
@@ -7585,14 +8295,24 @@ export class Session {
     }
 
     try {
-      const agentId = resolved.agentId;
+      // A handle account failover retired takes no turns: the message goes where its
+      // conversation lives now, and that agent is the one loaded, prompted and waited on.
+      const target = await resolvePromptTarget({
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        agentId: resolved.agentId,
+      });
+      let agentId = target.agentId;
 
       const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
+      // Only an explicit "interrupt" may cancel the running turn. A client that sends no behavior
+      // predates steering, and a message is not a stop.
+      const activeTurnBehavior = msg.activeTurnBehavior ?? "steer";
       this.sessionLogger.trace(
         {
           agentId,
           messageId: msg.messageId,
-          activeTurnBehavior: msg.activeTurnBehavior,
+          activeTurnBehavior,
           textPrefix: msg.text.slice(0, 80),
         },
         "agent.session.send_agent_message",
@@ -7604,19 +8324,21 @@ export class Session {
           agentId,
           prompt,
           messageId: msg.messageId,
-          activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
+          activeTurnBehavior,
           clearPendingPermissions: true,
           logger: this.sessionLogger,
         });
+        agentId = result.agentId;
         if (result.disposition === "turn_started") {
           await waitForAgentRunStartWithTimeout(this.agentManager, agentId);
         }
       };
       if (msg.messageId) {
         await this.agentRequests.send({
-          agentId,
+          // Keyed on the agent the client addressed, so a retry dedupes however the move resolves.
+          agentId: resolved.agentId,
           messageId: msg.messageId,
-          request: { prompt, activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt" },
+          request: { prompt, activeTurnBehavior },
           prepare: async () => {
             await ensureAgentLoaded(agentId, {
               agentManager: this.agentManager,
@@ -7629,14 +8351,16 @@ export class Session {
       } else {
         await send();
       }
+      this.recordHumanPrompt(agentId, msg.messageId ?? null);
 
       this.emit({
         type: "send_agent_message_response",
         payload: {
           requestId: msg.requestId,
-          agentId,
+          agentId: resolved.agentId,
           accepted: true,
           error: null,
+          ...(agentId !== resolved.agentId ? { deliveredToAgentId: agentId } : {}),
         },
       });
     } catch (error) {
@@ -7800,13 +8524,7 @@ export class Session {
     if (!this.authorization.allowsOutbound(msg)) {
       return;
     }
-    if (
-      msg.type === "project.update" ||
-      msg.type === "providers_snapshot_update" ||
-      msg.type === "agent_attention_required" ||
-      msg.type === "agent_permission_request" ||
-      msg.type === "agent_permission_resolved"
-    ) {
+    if (isSubscriptionGatedEvent(msg.type)) {
       if (this.clientCapabilitiesBySource.size > 0 && this.onMessageToSource) {
         for (const source of this.clientCapabilitiesBySource.keys()) {
           if (this.wantsEvent(msg.type, source)) this.onMessageToSource(source, msg);
@@ -7908,6 +8626,10 @@ export class Session {
     this.unsubscribePluginChanges = null;
     this.unsubscribeWorkspaceMutations?.();
     this.unsubscribeWorkspaceMutations = null;
+    this.unsubscribeMcpGatewayStatus?.();
+    this.unsubscribeMcpGatewayStatus = null;
+    this.unsubscribeDeviceStatus?.();
+    this.unsubscribeDeviceStatus = null;
     this.workspaceLabelSubscription?.unsubscribe();
     this.workspaceLabelSubscription = null;
     this.agentUpdates.dispose();

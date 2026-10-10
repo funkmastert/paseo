@@ -1,18 +1,14 @@
 import { useMemo } from "react";
 import { Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
-import { clampPct, formatPct, formatResetLabel } from "./format";
+import { clampPct, formatPct, formatResetLabel, resolveUsedPct } from "./format";
 import { deriveTone } from "./tone";
 import type { ProviderUsageTone, ProviderUsageWindow } from "./types";
 
-function resolveUsedPct(window: ProviderUsageWindow): number | null {
-  if (window.usedPct != null) return window.usedPct;
-  if (window.remainingPct != null) return 100 - window.remainingPct;
-  return null;
-}
-
-function fillToneStyle(tone: ProviderUsageTone) {
+function fillToneStyle(tone: ProviderUsageTone | "emphasis") {
   switch (tone) {
+    case "emphasis":
+      return styles.fillEmphasis;
     case "ok":
       return styles.fillOk;
     case "warning":
@@ -24,15 +20,40 @@ function fillToneStyle(tone: ProviderUsageTone) {
   }
 }
 
-export function ProviderUsageWindowBar({ window }: { window: ProviderUsageWindow }) {
-  const usedPct = resolveUsedPct(window);
-  const tone = window.tone ?? deriveTone(usedPct);
-
-  const fillWidth = clampPct(usedPct ?? 0);
+/**
+ * The shared bar: a thin track and a fill to `pct` percent. Usage windows colour the fill by tone;
+ * other rows (JEV's answer distribution) use the default fill and `emphasis` for the one that won.
+ */
+export function MeterBar({
+  pct,
+  tone = "default",
+  testID,
+}: {
+  pct: number;
+  tone?: ProviderUsageTone | "emphasis";
+  testID?: string;
+}) {
+  const fillWidth = clampPct(pct);
   const fillStyle = useMemo<StyleProp<ViewStyle>>(
     () => [styles.fill, fillToneStyle(tone), { width: `${fillWidth}%` }],
     [fillWidth, tone],
   );
+  return (
+    <View style={styles.track} testID={testID}>
+      <View style={fillStyle} />
+    </View>
+  );
+}
+
+/** The track and tone-coloured fill alone, for callers that lay the label out themselves. */
+export function ProviderUsageMeter({ window }: { window: ProviderUsageWindow }) {
+  const usedPct = resolveUsedPct(window);
+  const tone = window.tone ?? deriveTone(usedPct);
+  return <MeterBar pct={usedPct ?? 0} tone={tone} />;
+}
+
+export function ProviderUsageWindowBar({ window }: { window: ProviderUsageWindow }) {
+  const usedPct = resolveUsedPct(window);
 
   const isAtRisk = window.runsOutAt != null && window.shortfallPct != null;
   const trailing = isAtRisk
@@ -52,9 +73,7 @@ export function ProviderUsageWindowBar({ window }: { window: ProviderUsageWindow
           ) : null}
         </Text>
       </View>
-      <View style={styles.track}>
-        <View style={fillStyle} />
-      </View>
+      <ProviderUsageMeter window={window} />
     </View>
   );
 }
@@ -108,5 +127,8 @@ const styles = StyleSheet.create((theme) => ({
   },
   fillDanger: {
     backgroundColor: theme.colors.statusDanger,
+  },
+  fillEmphasis: {
+    backgroundColor: theme.colors.foreground,
   },
 }));

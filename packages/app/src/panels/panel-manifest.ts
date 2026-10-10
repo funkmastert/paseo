@@ -58,6 +58,14 @@ const manifests = {
     supportedHosts: ["main", "explorer"],
     resourceKey: () => "pull_request",
   },
+  // Explorer hosting deferred — see docs/plans/2026-09-11-001-feat-orchestration-visibility-plan.md.
+  orchestration: {
+    kind: "orchestration",
+    supportedHosts: ["main"],
+    // The scoped tab and the host-wide one are different resources; opening one must not reveal
+    // the other (see workspace-tabs/identity.ts).
+    resourceKey: (target) => target.scopeAgentId ?? "all",
+  },
   file: {
     kind: "file",
     supportedHosts: ["main", "explorer"],

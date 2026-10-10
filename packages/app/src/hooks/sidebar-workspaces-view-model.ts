@@ -1,3 +1,4 @@
+import type { WorkspaceDiskUsage } from "@getpaseo/protocol/messages";
 import type { PrHint } from "@/git/pr-hint";
 import { selectPrHintFromStatus } from "@/git/pr-hint";
 import { type HostProjectListItem } from "@/projects/host-project-model";
@@ -43,6 +44,9 @@ export interface SidebarWorkspaceEntry extends SidebarStatusWorkspacePlacement {
   title: string | null;
   pinnedAt?: string | null;
   labels?: string[];
+  // COMPAT(workspaceCreatedBy): absent (an older daemon, or a record predating this field) reads
+  // as "person" — see resolveSidebarWorkspaceCreator.
+  createdBy?: "person" | "agent";
   // Checkout branch (null when not a git checkout or detached HEAD).
   currentBranch: string | null;
   archivingAt: string | null;
@@ -52,6 +56,7 @@ export interface SidebarWorkspaceEntry extends SidebarStatusWorkspacePlacement {
   archiveUnpushedCommitCount: number | null;
   scripts: WorkspaceDescriptor["scripts"];
   hasRunningScripts: boolean;
+  diskUsage: WorkspaceDiskUsage | null;
 }
 
 export interface SidebarProjectEntry {
@@ -168,6 +173,7 @@ export function createSidebarWorkspaceEntry(input: {
     title: input.workspace.title ?? null,
     pinnedAt: input.workspace.pinnedAt,
     labels: input.workspace.labels ?? EMPTY_WORKSPACE_LABELS,
+    createdBy: input.workspace.createdBy,
     currentBranch: normalizeCurrentBranch(input.workspace.gitRuntime?.currentBranch),
     statusBucket: effectiveStatus.status,
     statusEnteredAt: effectiveStatus.enteredAt,
@@ -181,6 +187,7 @@ export function createSidebarWorkspaceEntry(input: {
     archiveUnpushedCommitCount: input.workspace.gitRuntime?.aheadOfOrigin ?? null,
     scripts: input.workspace.scripts,
     hasRunningScripts: input.workspace.scripts.some((script) => script.lifecycle === "running"),
+    diskUsage: input.workspace.diskUsage ?? null,
   };
 }
 

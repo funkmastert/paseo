@@ -25,6 +25,9 @@ import type { AgentSnapshotPayload, SessionOutboundMessage } from "@getpaseo/pro
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import { createTerminalManager } from "../terminal/terminal-manager.js";
 import { AgentManager, type AgentManagerEvent, type ManagedAgent } from "./agent/agent-manager.js";
+import { startAgentRun } from "./agent/agent-prompt.js";
+import { ChildAdmissionController } from "./agent/child-admission.js";
+import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { ProviderSubagentDescriptor } from "./agent/provider-subagents/store.js";
 import { AgentStorage, type StoredAgentRecord } from "./agent/agent-storage.js";
 import type {
@@ -589,6 +592,7 @@ function createSessionForWorkspaceTests(
     clearAgentAttention: async () => {},
     markAgentUnread: async () => {},
     notifyAgentState: () => {},
+    onMcpGatewayStatusChange: () => () => {},
     ...options.agentManager,
   });
   const workspaceRegistry: SessionOptions["workspaceRegistry"] = options.workspaceRegistry ?? {
@@ -1351,9 +1355,12 @@ test("create_agent_request does not title an existing workspace from the agent p
     const [createdAgent] = agentManager.listAgents();
     expect(createdAgent?.workspaceId).toBe("ws-existing");
     expect(generateCalls).toBe(0);
+    // updatedAt moves because this human-attributable create auto-pins the workspace
+    // (docs/done-janitor.md#manual-pin-vs-auto-pin) — the title itself is untouched.
     await expect(workspaceRegistry.get("ws-existing")).resolves.toMatchObject({
       title: null,
-      updatedAt: "2026-05-07T00:00:00.000Z",
+      pinnedAt: expect.any(String),
+      pinSource: "auto",
     });
   } finally {
     vi.useRealTimers();
@@ -1571,6 +1578,7 @@ test("archive emits an authoritative agent_update upsert for subscribed clients"
       paseoHome: "/tmp/paseo-test",
       agentManager: asAgentManager({
         subscribe: () => () => {},
+        onMcpGatewayStatusChange: () => () => {},
         listAgents: () => [],
         getAgent: () => null,
         archiveAgent: async () => {
@@ -2054,6 +2062,7 @@ test("close_items_request archives agents and kills terminals in one batch", asy
       paseoHome: "/tmp/paseo-test",
       agentManager: asAgentManager({
         subscribe: () => () => {},
+        onMcpGatewayStatusChange: () => () => {},
         listAgents: () => [],
         getAgent: (agentId: string) => (agentId === "agent-1" ? { id: agentId } : null),
         hasInFlightRun: (agentId: string) => agentId === "agent-1",
@@ -2154,7 +2163,7 @@ test("close_items_request archives agents and kills terminals in one batch", asy
     requestId: "req-close-items",
   });
 
-  expect(cancelAgentRun).toHaveBeenCalledWith("agent-1");
+  expect(cancelAgentRun).toHaveBeenCalledWith("agent-1", "archive");
   expect(killTerminal).toHaveBeenCalledWith("term-1");
   expect(emitted.find((message) => message.type === "close_items_response")?.payload).toEqual({
     agents: [{ agentId: "agent-1", archivedAt }],
@@ -2223,6 +2232,7 @@ test("close_items_request archives stored agents that are not currently loaded",
       paseoHome: "/tmp/paseo-test",
       agentManager: asAgentManager({
         subscribe: () => () => {},
+        onMcpGatewayStatusChange: () => () => {},
         listAgents: () => [],
         getAgent: (agentId: string) => (agentId === "agent-live" ? { id: agentId } : null),
         hasInFlightRun: () => false,
@@ -2383,6 +2393,7 @@ test("close_items_request continues after an archive failure", async () => {
       paseoHome: "/tmp/paseo-test",
       agentManager: asAgentManager({
         subscribe: () => () => {},
+        onMcpGatewayStatusChange: () => () => {},
         listAgents: () => [],
         getAgent: (agentId: string) =>
           agentId === "agent-bad" || agentId === "agent-good" ? { id: agentId } : null,
@@ -3655,6 +3666,7 @@ test("workspace update stream keeps persisted workspace visible after agents sto
       paseoHome: "/tmp/paseo-test",
       agentManager: asAgentManager({
         subscribe: () => () => {},
+        onMcpGatewayStatusChange: () => () => {},
         listAgents: () => [],
         getAgent: () => null,
       }),
@@ -6404,6 +6416,7 @@ test("listWorkspaceDescriptorsSnapshot keeps git workspaces on the baseline desc
     statusEnteredAt: workspace.createdAt,
     activityAt: null,
     diffStat: null,
+    diskUsage: null,
   } as const;
   const gitDescriptor = {
     ...baselineDescriptor,
@@ -8109,6 +8122,83 @@ test("project.rename.request stores customName and emits an updated workspace de
   });
 });
 
+test("device.lease.release.request round-trips through Session to AgentManager", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const releaseDeviceLease = vi.fn(async (deviceId: string) => deviceId === "UDID-1");
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      onMessage: (message) => emitted.push(message),
+      agentManager: { releaseDeviceLease },
+    }),
+  );
+
+  await session.handleMessage({
+    type: "device.lease.release.request",
+    deviceId: "UDID-1",
+    requestId: "req-release-1",
+  });
+
+  expect(releaseDeviceLease).toHaveBeenCalledWith("UDID-1");
+  expect(findByType(emitted, "device.lease.release.response")?.payload).toEqual({
+    requestId: "req-release-1",
+    deviceId: "UDID-1",
+    released: true,
+  });
+});
+
+test("device.reserve.set.request round-trips through Session to AgentManager", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const setDeviceReservation = vi.fn(async () => undefined);
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      onMessage: (message) => emitted.push(message),
+      agentManager: { setDeviceReservation },
+    }),
+  );
+
+  await session.handleMessage({
+    type: "device.reserve.set.request",
+    deviceId: "UDID-1",
+    reserved: true,
+    requestId: "req-reserve-1",
+  });
+
+  expect(setDeviceReservation).toHaveBeenCalledWith("UDID-1", true);
+  expect(findByType(emitted, "device.reserve.set.response")?.payload).toEqual({
+    requestId: "req-reserve-1",
+    deviceId: "UDID-1",
+    reserved: true,
+  });
+});
+
+test("device.shutdown.request round-trips through Session to AgentManager, including the needs-confirmation status", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const shutdownDevice = vi.fn(async () => ({
+    status: "needs-confirmation" as const,
+    message: "agent-1 is mid-turn on this device.",
+  }));
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      onMessage: (message) => emitted.push(message),
+      agentManager: { shutdownDevice },
+    }),
+  );
+
+  await session.handleMessage({
+    type: "device.shutdown.request",
+    deviceId: "UDID-1",
+    requestId: "req-shutdown-1",
+  });
+
+  expect(shutdownDevice).toHaveBeenCalledWith({ deviceId: "UDID-1" });
+  expect(findByType(emitted, "device.shutdown.response")?.payload).toEqual({
+    requestId: "req-shutdown-1",
+    deviceId: "UDID-1",
+    status: "needs-confirmation",
+    message: "agent-1 is mid-turn on this device.",
+  });
+});
+
 test("project.rename.request updates a project with no workspaces", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const session = asTestSession(
@@ -9090,6 +9180,9 @@ test("workspace.create worktree source checks out a GitHub PR from githubPrNumbe
     expect(response?.payload.workspace).toMatchObject({
       workspaceDirectory: expect.any(String),
       gitRuntime: { currentBranch: fixture.headRef },
+      // Regression: describeCreatedWorktreeWorkspace used to omit createdBy, so the response
+      // clobbered the correct persisted value with "missing" the moment the client read it.
+      createdBy: "person",
     });
     const workspaceDirectory = response?.payload.workspace?.workspaceDirectory as string;
     expect(readCurrentBranch(workspaceDirectory)).toBe(fixture.headRef);
@@ -9621,4 +9714,73 @@ test("workspace.create.request reports an archived explicit project", async () =
     workspace: null,
     errorCode: "archived_project",
   });
+});
+
+test("refresh_agent_request keeps a queued child's held prompt in line, merged messages included", async () => {
+  const workdir = mkdtempSync(path.join(tmpdir(), "refresh-queued-child-"));
+  const logger = createTestLogger();
+  const manager = new AgentManager({ clients: { codex: new CreateAgentTestClient() }, logger });
+  const admission = new ChildAdmissionController({
+    readConfig: () => ({ maxConcurrentChildTurns: 4 }),
+    listAgents: () => manager.listAgentsForAdmission(),
+    logger,
+  });
+  manager.setChildAdmission(admission);
+  try {
+    const root = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+      labels: {},
+    });
+    const child = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+      labels: { [PARENT_AGENT_ID_LABEL]: root.id },
+    });
+    // Held by the memory brake: the child's turn waits in line, and a second sender joins it.
+    admission.setHold("memory-pressure", true);
+    await startAgentRun(manager, child.id, "the task", logger, { replaceRunning: true });
+    await startAgentRun(manager, child.id, "a message from another agent", logger, {
+      replaceRunning: true,
+    });
+    expect(admission.heldTurns().map((turn) => turn.prompt)).toEqual([
+      "the task\n\na message from another agent",
+    ]);
+
+    const emitted: SessionOutboundMessage[] = [];
+    const session = createSessionForWorkspaceTests({
+      onMessage: (message) => {
+        if (isSessionOutboundMessage(message)) emitted.push(message);
+      },
+    });
+    session.agentStorage.get = async () => null;
+    session.agentManager.getAgent = (id: string) => manager.getAgent(id);
+    session.agentManager.hasInFlightRun = (id: string) => manager.hasInFlightRun(id);
+    session.agentManager.cancelAgentRun = (id: string, reason?: string) =>
+      manager.cancelAgentRun(id, reason as Parameters<AgentManager["cancelAgentRun"]>[1]);
+    session.agentManager.reloadAgentSession = (
+      ...args: Parameters<AgentManager["reloadAgentSession"]>
+    ) => manager.reloadAgentSession(...args);
+    session.agentManager.hydrateTimelineFromProvider = async () => undefined;
+    session.agentManager.getTimeline = (id: string) => manager.getTimeline(id);
+    session.agentUpdates.forwardLiveAgent = async () => undefined;
+
+    await session.handleMessage({
+      type: "refresh_agent_request",
+      agentId: child.id,
+      requestId: "req-refresh-queued",
+    });
+
+    expect(findByType(emitted, "rpc_error")).toBeUndefined();
+    expect(admission.heldTurns()).toEqual([
+      expect.objectContaining({
+        agentId: child.id,
+        prompt: "the task\n\na message from another agent",
+      }),
+    ]);
+    expect(manager.getAgent(child.id)?.turnQueued).toBeDefined();
+  } finally {
+    for (const agent of manager.listAgents()) {
+      await manager.closeAgent(agent.id).catch(() => undefined);
+    }
+    rmSync(workdir, { recursive: true, force: true });
+  }
 });

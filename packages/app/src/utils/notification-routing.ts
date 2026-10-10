@@ -40,3 +40,38 @@ export function buildNotificationRoute(data: NotificationData): NotificationRout
   }
   return "/" as const;
 }
+
+/** An https link the notification asks to open outside the app (a shared build), or null. */
+function resolveNotificationExternalUrl(data: NotificationData): string | null {
+  const value = readNonEmptyString(data, "externalUrl");
+  if (!value) {
+    return null;
+  }
+  try {
+    return new URL(value).protocol === "https:" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export type NotificationTapAction =
+  | { kind: "open-external"; url: string }
+  | { kind: "open-agent"; serverId: string; workspaceId: string; agentId: string }
+  | { kind: "navigate"; route: NotificationRoute };
+
+/**
+ * What tapping a notification does. A shared build's push carries an https `externalUrl` that
+ * opens in the browser (the APK download or the iOS install page); any other scheme is ignored and
+ * the tap routes in the app as usual.
+ */
+export function resolveNotificationTapAction(data: NotificationData): NotificationTapAction {
+  const url = resolveNotificationExternalUrl(data);
+  if (url) {
+    return { kind: "open-external", url };
+  }
+  const { serverId, workspaceId, agentId } = resolveNotificationTarget(data);
+  if (serverId && workspaceId && agentId) {
+    return { kind: "open-agent", serverId, workspaceId, agentId };
+  }
+  return { kind: "navigate", route: buildNotificationRoute(data) };
+}

@@ -39,6 +39,8 @@ import {
   navigateToLastWorkspace,
   useActiveWorkspaceSelection,
 } from "@/stores/navigation-active-workspace-store";
+import { goBack, goForward } from "@/stores/navigation-history-store";
+import { buildNavigationHistoryReplayDeps } from "@/navigation/navigation-history-replay";
 import { dispatchTopWebOverlayKeyDown } from "@/lib/overlay-root";
 
 export function useKeyboardShortcuts({
@@ -185,6 +187,12 @@ export function useKeyboardShortcuts({
             return true;
           }
           router.replace(buildOpenProjectRoute());
+          return true;
+        case "navigate-history-back":
+          goBack(buildNavigationHistoryReplayDeps());
+          return true;
+        case "navigate-history-forward":
+          goForward(buildNavigationHistoryReplayDeps());
           return true;
         case "router-replace":
           router.replace(action.route as Parameters<typeof router.replace>[0]);

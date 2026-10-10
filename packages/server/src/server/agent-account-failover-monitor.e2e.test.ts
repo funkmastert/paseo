@@ -1,0 +1,1853 @@
+import { mkdir, mkdtemp, readdir, rename, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import pino from "pino";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import type { ProviderUsage } from "@getpaseo/protocol/messages";
+import type { AgentAccountAuth, AgentPromptInput } from "./agent/agent-sdk-types.js";
+import {
+  ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
+  HANDOFF_FROM_LABEL,
+} from "./agent/account-failover-detector.js";
+import { migrateStuckAgent, settleBackAgent } from "./agent/account-failover-migration.js";
+import type { AccountPoolProviderEntry } from "./agent/account-pool-providers.js";
+import type { AgentManager } from "./agent/agent-manager.js";
+import { createPaseoDaemon, type PaseoDaemon } from "./bootstrap.js";
+import type { PushPayload } from "./push/index.js";
+import type { PushSendMeta } from "./notify-policy/levels.js";
+import type { RemediationObservation } from "./remediation/contract.js";
+import { DaemonClient } from "./test-utils/daemon-client.js";
+import { createTestAgentClient } from "./test-utils/fake-agent-client.js";
+
+// The exact message a real account produced when it ran dry.
+const REAL_LIMIT_MESSAGE =
+  "You've hit your monthly spend limit · raise it at " +
+  "claude.ai/settings/usage?from=cc_cli_limit_message · your session limit resets " +
+  "3:10pm (America/Los_Angeles)";
+// The weekly cap that stranded claude-personal's agents on 2026-09-18, verbatim from a transcript.
+// It shares no phrase with the message above.
+const REAL_WEEKLY_LIMIT_MESSAGE = "You've hit your weekly limit · resets 7am (America/Los_Angeles)";
+const REACTIVE_TTL_MS = 5 * 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
+const HOUR_MS = 60 * MINUTE_MS;
+
+const POOL_PROVIDERS = ["claude", "claude-personal", "claude-backup"] as const;
+type PoolProvider = (typeof POOL_PROVIDERS)[number];
+
+interface Harness {
+  daemon: PaseoDaemon;
+  client: DaemonClient;
+  cwd: string;
+  pushes: PushPayload[];
+  /** Every push with the level it was sent at. */
+  sends: Array<{ payload: PushPayload; meta: PushSendMeta | undefined }>;
+  /** What the monitor told the remediation ladder. */
+  observations: RemediationObservation[];
+  prompts: Record<PoolProvider, string[]>;
+  /** Agents the test says restart recovery has claimed. */
+  claimedByRestartRecovery: Set<string>;
+  setUsage(providers: ProviderUsage[]): void;
+  /**
+   * Run `hook` once, inside the next sweep: after the monitor has listed the agents and before it
+   * plans and moves them. The live daemon's gap between planning a rescue and moving the agent is
+   * 15 to 60 seconds, time enough for a message or another mover to change the agent.
+   */
+  duringNextSweep(hook: () => Promise<void>): void;
+  /**
+   * Run `hook` once, when the next paced action is let through the resume pace and before it
+   * acts: what a turn starting while a move waited for its slot looks like.
+   */
+  duringNextPace(hook: () => Promise<void>): void;
+  /** Make the next `times` resume prompts on `provider` fail the way a busy provider would. */
+  failResumes(provider: PoolProvider, times: number): void;
+  /** What `describeAccountAuth` reports for a provider — which Claude login it runs as. */
+  setAccount(provider: PoolProvider, auth: AgentAccountAuth): void;
+  advanceClock(ms: number): void;
+  setClock(ms: number): void;
+  sweep(): Promise<void>;
+  close(): Promise<void>;
+}
+
+function promptText(prompt: AgentPromptInput): string {
+  return typeof prompt === "string" ? prompt : JSON.stringify(prompt);
+}
+
+function usageRow(
+  providerId: string,
+  usedPcts: number[],
+  status: ProviderUsage["status"] = "available",
+): ProviderUsage {
+  return {
+    providerId,
+    displayName: providerId,
+    status,
+    planLabel: null,
+    windows: usedPcts.map((usedPct, index) => ({
+      id: `window-${index}`,
+      label: `Window ${index}`,
+      usedPct,
+      remainingPct: Math.max(0, 100 - usedPct),
+      resetsAt: null,
+    })),
+    balances: [],
+    details: [],
+    error: null,
+  };
+}
+
+async function createHarness(): Promise<Harness> {
+  const homeRoot = await mkdtemp(path.join(tmpdir(), "paseo-failover-home-"));
+  const paseoHome = path.join(homeRoot, ".paseo");
+  await mkdir(paseoHome, { recursive: true });
+  const staticDir = await mkdtemp(path.join(tmpdir(), "paseo-failover-static-"));
+  const cwd = await mkdtemp(path.join(tmpdir(), "paseo-failover-cwd-"));
+
+  const pushes: PushPayload[] = [];
+  const sends: Harness["sends"] = [];
+  const observations: RemediationObservation[] = [];
+  const claimedByRestartRecovery = new Set<string>();
+  const prompts: Record<PoolProvider, string[]> = {
+    claude: [],
+    "claude-personal": [],
+    "claude-backup": [],
+  };
+  let usage: ProviderUsage[] = [];
+  let sweepHook: (() => Promise<void>) | null = null;
+  let paceHook: (() => Promise<void>) | null = null;
+  const resumeFailures: Record<PoolProvider, number> = {
+    claude: 0,
+    "claude-personal": 0,
+    "claude-backup": 0,
+  };
+  // "unknown" is what a config dir the CLI never wrote reports, and what every test that does not
+  // care about account identity gets: two shrugs never read as one account.
+  const accounts: Record<PoolProvider, AgentAccountAuth> = {
+    claude: { state: "unknown" },
+    "claude-personal": { state: "unknown" },
+    "claude-backup": { state: "unknown" },
+  };
+  // Sightings are dated by the failure's timeline row, clamped to the monitor clock. Starting the
+  // monitor clock before any real timestamp keeps that clamp in effect, so ages depend only on
+  // advanceClock and never on the wall clock the test happens to run at.
+  let clockMs = Date.parse("2000-01-01T00:00:00.000Z");
+
+  const daemon = await createPaseoDaemon(
+    {
+      listen: "127.0.0.1:0",
+      paseoHome,
+      daemonVersion: "0.8.0",
+      corsAllowedOrigins: [],
+      hostnames: true,
+      mcpEnabled: false,
+      staticDir,
+      mcpDebug: false,
+      agentClients: Object.fromEntries(
+        POOL_PROVIDERS.map((provider) => [
+          provider,
+          createTestAgentClient(provider, {
+            accountAuth: () => accounts[provider],
+            onStartTurn: (prompt) => {
+              const text = promptText(prompt);
+              if (text.includes("Account handoff") && resumeFailures[provider] > 0) {
+                resumeFailures[provider] -= 1;
+                throw new Error("provider is busy");
+              }
+              prompts[provider].push(text);
+            },
+          }),
+        ]),
+      ),
+      providerOverrides: {
+        "claude-personal": {
+          extends: "claude",
+          label: "Claude Personal",
+          env: { CLAUDE_CONFIG_DIR: path.join(homeRoot, "personal-config") },
+        },
+        "claude-backup": {
+          extends: "claude",
+          label: "Claude Backup",
+          env: { CLAUDE_CONFIG_DIR: path.join(homeRoot, "backup-config") },
+        },
+      },
+      pushNotificationSender: {
+        send: async (payload, meta) => {
+          pushes.push(payload);
+          sends.push({ payload, meta });
+        },
+      },
+      accountFailoverOverrides: {
+        providerUsage: {
+          listUsage: async () => {
+            const hook = sweepHook;
+            sweepHook = null;
+            await hook?.();
+            return { fetchedAt: new Date(clockMs).toISOString(), providers: usage };
+          },
+        },
+        sweepIntervalMs: 60 * MINUTE_MS,
+        now: () => clockMs,
+        remediationSink: {
+          observe: async (observation) => {
+            observations.push(observation);
+          },
+        },
+        isClaimedByRestartRecovery: (agentId) => claimedByRestartRecovery.has(agentId),
+        wrapPaceResume: (paceResume) => (resume, fn) =>
+          paceResume(resume, async () => {
+            const hook = paceHook;
+            paceHook = null;
+            await hook?.();
+            return fn();
+          }),
+      },
+      agentStoragePath: path.join(paseoHome, "agents"),
+      relayEnabled: false,
+      relayEndpoint: "relay.paseo.sh:443",
+      appBaseUrl: "https://app.paseo.sh",
+    },
+    pino({ level: "silent" }),
+  );
+
+  await daemon.start();
+  const target = daemon.getListenTarget();
+  if (!target || target.type !== "tcp") {
+    throw new Error("account failover test daemon did not bind a TCP port");
+  }
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${target.port}/ws`, appVersion: "0.8.0" });
+  await client.connect();
+  await client.fetchAgents({ subscribe: { subscriptionId: "account-failover" } });
+
+  // Tyler's live shape: the bare `claude` entry is the pool leader, two derived workers.
+  await client.patchDaemonConfig({
+    providers: {
+      claude: { params: { accountPool: { role: "leader", priority: 1 } } },
+      "claude-personal": {
+        extends: "claude",
+        label: "Claude Personal",
+        params: { accountPool: { role: "worker", priority: 1 } },
+      },
+      "claude-backup": {
+        extends: "claude",
+        label: "Claude Backup",
+        params: { accountPool: { role: "worker", priority: 2 } },
+      },
+    },
+  });
+
+  return {
+    daemon,
+    client,
+    cwd,
+    pushes,
+    sends,
+    observations,
+    prompts,
+    claimedByRestartRecovery,
+    failResumes: (provider, times) => {
+      resumeFailures[provider] = times;
+    },
+    setAccount: (provider, auth) => {
+      accounts[provider] = auth;
+    },
+    setUsage: (providers) => {
+      usage = providers;
+    },
+    duringNextPace: (hook) => {
+      paceHook = hook;
+    },
+    duringNextSweep: (hook) => {
+      sweepHook = hook;
+    },
+    advanceClock: (ms) => {
+      clockMs += ms;
+    },
+    setClock: (ms) => {
+      clockMs = ms;
+    },
+    sweep: async () => {
+      const monitor = daemon.getAccountFailoverMonitor();
+      if (!monitor) throw new Error("account failover monitor was not started");
+      await monitor.tick();
+    },
+    close: async () => {
+      await client.close();
+      await daemon.stop().catch(() => undefined);
+      await Promise.all([
+        rm(homeRoot, { recursive: true, force: true }),
+        rm(staticDir, { recursive: true, force: true }),
+        rm(cwd, { recursive: true, force: true }),
+      ]);
+    },
+  };
+}
+
+async function createAgent(
+  harness: Harness,
+  input: {
+    provider: PoolProvider;
+    title: string;
+    model?: string;
+    modeId?: string;
+    parentAgentId?: string;
+  },
+): Promise<string> {
+  const agent = await harness.client.createAgent({
+    provider: input.provider,
+    model: input.model ?? "sonnet",
+    modeId: input.modeId ?? "bypassPermissions",
+    cwd: harness.cwd,
+    title: input.title,
+    ...(input.parentAgentId ? { labels: { [PARENT_AGENT_ID_LABEL]: input.parentAgentId } } : {}),
+  });
+  await harness.client.setAgentThinkingOption(agent.id, "max");
+  return agent.id;
+}
+
+function managed(harness: Harness, agentId: string) {
+  const agent = harness.daemon.agentManager.getAgent(agentId);
+  if (!agent) throw new Error(`agent ${agentId} is not loaded`);
+  return agent;
+}
+
+async function converse(harness: Harness, agentId: string, reply: string): Promise<void> {
+  await harness.client.sendMessage(agentId, `respond with exactly: ${reply}`);
+  await expect
+    .poll(() => harness.daemon.agentManager.getLastAssistantMessage(agentId), { timeout: 10_000 })
+    .toBe(reply);
+  await expect.poll(() => managed(harness, agentId).lifecycle, { timeout: 10_000 }).toBe("idle");
+}
+
+async function failOnLimit(
+  harness: Harness,
+  agentId: string,
+  message: string = REAL_LIMIT_MESSAGE,
+): Promise<void> {
+  await harness.client.sendMessage(agentId, `emit a turn failure: ${message}`);
+  await expect.poll(() => managed(harness, agentId).lastError, { timeout: 10_000 }).toBe(message);
+  await expect
+    .poll(() => managed(harness, agentId).lifecycle, { timeout: 10_000 })
+    .not.toBe("running");
+}
+
+function successorOf(harness: Harness, agentId: string): string | undefined {
+  return managed(harness, agentId).labels[ACCOUNT_FAILOVER_MIGRATED_TO_LABEL];
+}
+
+function providerOf(harness: Harness, agentId: string): string {
+  return managed(harness, agentId).provider;
+}
+
+/**
+ * Put the monitor clock far enough past the wall clock that every real agent timestamp reads as
+ * long-settled and every reactive sighting has expired — the state of the pool five hours after a
+ * cap. The other tests deliberately keep the clock *behind* the wall clock so the failure-dating
+ * clamp is in effect.
+ */
+function windowHasReset(harness: Harness): void {
+  harness.setClock(Date.now() + REACTIVE_TTL_MS + HOUR_MS);
+}
+
+async function settle(harness: Harness, agentId: string): Promise<void> {
+  await expect.poll(() => managed(harness, agentId).lifecycle, { timeout: 10_000 }).toBe("idle");
+}
+
+function assistantText(harness: Harness, agentId: string): string {
+  return harness.daemon.agentManager
+    .getTimeline(agentId)
+    .flatMap((item) => (item.type === "assistant_message" ? [item.text] : []))
+    .join("");
+}
+
+function failoverPushes(harness: Harness): PushPayload[] {
+  return harness.pushes.filter((push) => push.data?.reason === "account_failover");
+}
+
+function agentCount(harness: Harness): number {
+  return harness.daemon.agentManager.listAgents().length;
+}
+
+function poolExhaustedPushes(harness: Harness): PushPayload[] {
+  return harness.pushes.filter((push) => push.data?.reason === "account_pool_exhausted");
+}
+
+function strandedObservations(harness: Harness): RemediationObservation[] {
+  return harness.observations.filter(
+    (observation) => observation.key === "account-failover-stranded",
+  );
+}
+
+function levelOf(harness: Harness, payload: PushPayload | undefined): string | undefined {
+  return harness.sends.find((send) => send.payload === payload)?.meta?.level;
+}
+
+/** A child of a leader that is not in the pool test, so only the label matters. */
+const PARENT_ID = "parent-leader";
+
+async function createChild(
+  harness: Harness,
+  input: { provider: PoolProvider; title: string; modeId?: string },
+): Promise<string> {
+  return createAgent(harness, { ...input, parentAgentId: PARENT_ID });
+}
+
+/** How many of these agents are on `provider` now. */
+function countOn(harness: Harness, agentIds: readonly string[], provider: PoolProvider): number {
+  let count = 0;
+  for (const agentId of agentIds) {
+    if (providerOf(harness, agentId) === provider) count += 1;
+  }
+  return count;
+}
+
+/** Same shape as usageRow, with every window resetting at `resetsAt`. */
+function cappedUntil(providerId: string, resetsAt: string): ProviderUsage {
+  const row = usageRow(providerId, [100]);
+  for (const window of row.windows) window.resetsAt = resetsAt;
+  return row;
+}
+
+// The lastError the stalled-agent sweep leaves when it cancels a turn that died on a capped
+// account (workstream S). Failover reads only its shape: limit-shaped, naming the account.
+function stallCancelError(provider: string): string {
+  return (
+    `Account ${provider} is at its usage limit or unusable, and this turn stalled in running ` +
+    "with no activity; the daemon canceled it so account failover can move the agent."
+  );
+}
+
+/** Every window named, so a test can put one model's weekly window at its cap. */
+function usageWindows(providerId: string, usedPcts: Record<string, number>): ProviderUsage {
+  return {
+    ...usageRow(providerId, []),
+    windows: Object.entries(usedPcts).map(([id, usedPct]) => ({
+      id,
+      label: id,
+      usedPct,
+      remainingPct: Math.max(0, 100 - usedPct),
+      resetsAt: null,
+    })),
+  };
+}
+
+/** The leader account after its reset: fresh, readable, and well clear of every line. */
+const RECOVERED_LEADER = usageWindows("claude", { five_hour: 10, weekly: 20 });
+
+const HOLD_TURN = "Please hold the turn open until you are interrupted.";
+
+async function startHeldTurn(harness: Harness, agentId: string): Promise<void> {
+  await harness.client.sendMessage(agentId, HOLD_TURN);
+  await expect.poll(() => managed(harness, agentId).lifecycle, { timeout: 10_000 }).toBe("running");
+}
+
+/** Sends `text` to a child and waits until child admission holds the turn in line. */
+async function queueTurnBehindHold(harness: Harness, agentId: string, text: string): Promise<void> {
+  const admission = harness.daemon.agentManager.getChildAdmission();
+  await harness.client.sendMessage(agentId, text);
+  await expect.poll(() => admission?.holdsTurnFor(agentId), { timeout: 10_000 }).toBe(true);
+}
+
+function subagentStatus(harness: Harness, agentId: string, subagentId: string) {
+  return harness.daemon.agentManager
+    .listProviderSubagents(agentId)
+    .find((subagent) => subagent.id === subagentId)?.status;
+}
+
+/** A Claude Task-tool subagent the agent starts in a turn and leaves running after it. */
+async function startBackgroundSubagent(
+  harness: Harness,
+  agentId: string,
+  subagentId: string,
+): Promise<void> {
+  await harness.client.sendMessage(agentId, `start a background subagent "${subagentId}"`);
+  await expect.poll(() => subagentStatus(harness, agentId, subagentId)).toBe("running");
+  await settle(harness, agentId);
+}
+
+async function finishBackgroundSubagent(
+  harness: Harness,
+  agentId: string,
+  subagentId: string,
+): Promise<void> {
+  await harness.client.sendMessage(agentId, `finish a background subagent "${subagentId}"`);
+  await expect.poll(() => subagentStatus(harness, agentId, subagentId)).toBe("completed");
+  await settle(harness, agentId);
+}
+
+const FAKE_HISTORY_ROOT = path.join(tmpdir(), "paseo-fake-provider-history");
+
+/**
+ * Hide a session's transcript from every account, so a move onto any of them is refused with
+ * `session_unreachable`. Returns the restore.
+ */
+async function hideTranscript(sessionId: string): Promise<() => Promise<void>> {
+  const hidden: string[] = [];
+  for (const provider of await readdir(FAKE_HISTORY_ROOT)) {
+    const transcript = path.join(FAKE_HISTORY_ROOT, provider, `${sessionId}.jsonl`);
+    const moved = await rename(transcript, `${transcript}.hidden`).then(
+      () => true,
+      () => false,
+    );
+    if (moved) hidden.push(transcript);
+  }
+  if (hidden.length === 0) throw new Error(`no transcript found for session ${sessionId}`);
+  return async () => {
+    for (const transcript of hidden) await rename(`${transcript}.hidden`, transcript);
+  };
+}
+
+function handoffPrompts(harness: Harness): string[] {
+  return POOL_PROVIDERS.flatMap((provider) =>
+    harness.prompts[provider].filter((prompt) => prompt.includes("Account handoff")),
+  );
+}
+
+async function endHeldTurn(harness: Harness, agentId: string): Promise<void> {
+  await harness.client.cancelAgent(agentId);
+  await expect
+    .poll(() => managed(harness, agentId).lifecycle, { timeout: 10_000 })
+    .not.toBe("running");
+}
+
+/** The pool createHarness configures, as the monitor resolves it. */
+const POOL_ENTRIES: AccountPoolProviderEntry[] = [
+  { providerId: "claude", role: "leader", priority: 1, enabled: true },
+  { providerId: "claude-personal", role: "worker", priority: 1, enabled: true },
+  { providerId: "claude-backup", role: "worker", priority: 2, enabled: true },
+];
+
+/**
+ * One rescue of an agent as a sweep planned it, with `beforeMove` run on the real agent right
+ * before the daemon moves it: a turn or another mover landing after every check the rescue makes.
+ * Any import is recorded and refused, so a test sees an attempted import as an import.
+ */
+async function rescueRacingTheMove(
+  harness: Harness,
+  input: {
+    agentId: string;
+    beforeMove: (agentId: string, targetProviderId: string) => Promise<void>;
+  },
+) {
+  const planned = harness.daemon.agentManager.getAccountFailoverSummary(input.agentId);
+  if (!planned) throw new Error(`agent ${input.agentId} is not loaded`);
+  const real = harness.daemon.agentManager;
+  const agentManager = new Proxy(real, {
+    get(target, property) {
+      if (property === "moveAgentToProvider") {
+        return async (agentId: string, targetProviderId: string) => {
+          await input.beforeMove(agentId, targetProviderId);
+          return target.moveAgentToProvider(agentId, targetProviderId);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as AgentManager;
+  const imports: unknown[] = [];
+  const outcome = await migrateStuckAgent({
+    agent: planned,
+    poolEntries: POOL_ENTRIES,
+    deadProviderIds: new Set([planned.provider]),
+    accounts: new Map(),
+    agentManager,
+    agentStorage: harness.daemon.agentStorage,
+    workspaceProvisioning: {
+      runInImportWorkspace: async (request) => {
+        imports.push(request);
+        throw new Error("the rescue tried to import the session");
+      },
+    },
+    logger: pino({ level: "silent" }),
+  });
+  return { outcome, imports };
+}
+
+describe("AccountFailoverMonitor (e2e)", () => {
+  let harness: Harness;
+
+  beforeEach(async () => {
+    harness = await createHarness();
+  }, 30_000);
+
+  afterEach(async () => {
+    await harness.close();
+  });
+
+  test("moves a capped leader to a healthy account without minting a second agent", async () => {
+    // Live counter-example: a worker whose usage cannot be read is still a valid target.
+    harness.setUsage([usageRow("claude-personal", [], "unavailable")]);
+    const leader = await createAgent(harness, { provider: "claude", title: "Build failover" });
+    await converse(harness, leader, "CONTEXT-MARKER-42");
+    await failOnLimit(harness, leader);
+    const agentsBeforeSweep = agentCount(harness);
+
+    await harness.sweep();
+
+    const moved = managed(harness, leader);
+    expect(moved.provider).toBe("claude-personal");
+    expect(agentCount(harness)).toBe(agentsBeforeSweep);
+    expect(successorOf(harness, leader)).toBeUndefined();
+    expect(moved.config).toMatchObject({
+      model: "sonnet",
+      thinkingOptionId: "max",
+      modeId: "bypassPermissions",
+    });
+    expect(assistantText(harness, leader)).toContain("CONTEXT-MARKER-42");
+    expect(moved.lastError).toBeUndefined();
+
+    const resumePrompt = harness.prompts["claude-personal"].find((prompt) =>
+      prompt.includes("Account handoff"),
+    );
+    expect(resumePrompt).toContain(`You are the same agent (${leader})`);
+    expect(resumePrompt).toContain('provider "claude-personal/sonnet"');
+
+    // Nothing is retired: there is no predecessor to retire.
+    const record = await harness.daemon.agentStorage.get(leader);
+    expect(record?.title).toBe("Build failover");
+    expect(record?.provider).toBe("claude-personal");
+    expect(record?.persistence?.provider).toBe("claude-personal");
+
+    expect(failoverPushes(harness)).toEqual([
+      expect.objectContaining({
+        title: "Agent moved to a new account",
+        body: expect.stringContaining(`still as ${leader}`),
+        data: expect.objectContaining({ agentId: leader, reason: "account_failover" }),
+      }),
+    ]);
+
+    // Same episode, second sweep: nothing new happens.
+    await expect.poll(() => managed(harness, leader).lifecycle, { timeout: 10_000 }).toBe("idle");
+    await harness.sweep();
+    expect(agentCount(harness)).toBe(agentsBeforeSweep);
+    expect(failoverPushes(harness)).toHaveLength(1);
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+  }, 60_000);
+
+  test("paces the resumes of a mass move through the shared resume budget", async () => {
+    // One resume a minute, burst one: of three capped leaders only the first restarts now.
+    await harness.client.patchDaemonConfig({ admission: { bulkResumesPerMinute: 1 } });
+    const leaders: string[] = [];
+    for (const title of ["First", "Second", "Third"]) {
+      const leader = await createAgent(harness, { provider: "claude", title });
+      await failOnLimit(harness, leader);
+      leaders.push(leader);
+    }
+    const resumes = () =>
+      harness.prompts["claude-personal"].filter((prompt) => prompt.includes("Account handoff"));
+
+    // The sweep waits on the budget; afterEach stops the daemon, which lets it go.
+    void harness.sweep().catch(() => undefined);
+    await expect.poll(() => resumes().length, { timeout: 10_000 }).toBe(1);
+    await expect
+      .poll(() => countOn(harness, leaders, "claude-personal"), { timeout: 10_000 })
+      .toBe(3);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(resumes()).toHaveLength(1);
+  }, 60_000);
+
+  test("moves an agent capped by the weekly limit, the cap that stranded agents on 2026-09-18", async () => {
+    const worker = await createChild(harness, { provider: "claude-personal", title: "Weekly" });
+    await converse(harness, worker, "WEEKLY-MARKER");
+    await failOnLimit(harness, worker, REAL_WEEKLY_LIMIT_MESSAGE);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, worker)).toBe("claude-backup");
+    expect(assistantText(harness, worker)).toContain("WEEKLY-MARKER");
+  }, 60_000);
+
+  test("retries a resume the target refused, and says nothing extra once it lands", async () => {
+    // The move itself succeeded, so the agent carries no limit error any more and the detector
+    // will never pick it up again: `planAccountFailoverSweep` only considers limit-shaped errors,
+    // and "provider is busy" is not one. Only the retry queue can finish this migration.
+    harness.failResumes("claude-personal", 1);
+    const leader = await createAgent(harness, { provider: "claude", title: "Build failover" });
+    await converse(harness, leader, "CONTEXT-MARKER-42");
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    expect(harness.prompts["claude-personal"]).toHaveLength(0);
+    expect(managed(harness, leader).lifecycle).toBe("error");
+    // The move is real and worth reporting; only the restart is outstanding.
+    expect(failoverPushes(harness)).toHaveLength(1);
+    expect(failoverPushes(harness)[0]?.title).toBe("Agent moved to a new account");
+
+    await harness.sweep();
+
+    const resumePrompt = harness.prompts["claude-personal"].find((prompt) =>
+      prompt.includes("Account handoff"),
+    );
+    expect(resumePrompt).toContain(`You are the same agent (${leader})`);
+    await expect.poll(() => managed(harness, leader).lifecycle, { timeout: 10_000 }).toBe("idle");
+    // A retry that worked is not news: no second push.
+    expect(failoverPushes(harness)).toHaveLength(1);
+
+    // Nothing left queued, so a later sweep does not prompt it again.
+    await harness.sweep();
+    expect(
+      harness.prompts["claude-personal"].filter((prompt) => prompt.includes("Account handoff")),
+    ).toHaveLength(1);
+  }, 60_000);
+
+  test("gives up after three resume attempts and tells Tyler the agent needs a prompt", async () => {
+    harness.failResumes("claude-personal", 99);
+    const leader = await createAgent(harness, { provider: "claude", title: "Build failover" });
+    await converse(harness, leader, "CONTEXT-MARKER-42");
+    await failOnLimit(harness, leader);
+
+    // The original send, then one retry per sweep.
+    await harness.sweep();
+    await harness.sweep();
+    await harness.sweep();
+
+    expect(failoverPushes(harness)).toHaveLength(2);
+    expect(failoverPushes(harness)[1]).toMatchObject({
+      title: "Agent moved but did not restart",
+      body: expect.stringContaining("could not be restarted"),
+      data: expect.objectContaining({
+        agentId: leader,
+        reason: "account_failover",
+        outcome: "needs_prompt",
+      }),
+    });
+    // It says what to do about it, since the agent is one message away from continuing.
+    expect(failoverPushes(harness)[1]?.body).toContain("send any message to continue");
+
+    // Given up means given up: no fourth attempt, and no second complaint.
+    await harness.sweep();
+    expect(failoverPushes(harness)).toHaveLength(2);
+    // The conversation is intact on the new account — it is stalled, not lost.
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    expect(assistantText(harness, leader)).toContain("CONTEXT-MARKER-42");
+    expect(successorOf(harness, leader)).toBeUndefined();
+  }, 60_000);
+
+  test("keeps the account it left out of rotation until the evidence expires", async () => {
+    const worker = await createChild(harness, { provider: "claude-personal", title: "Worker" });
+    await failOnLimit(harness, worker);
+    await harness.sweep();
+    expect(providerOf(harness, worker)).toBe("claude-backup");
+
+    // The failure moved with the agent and was cleared, so nothing on claude-personal still
+    // reports the cap. It must stay condemned anyway, or this next agent lands on it.
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude-backup");
+
+    // It is a five-hour window, not a permanent exclusion.
+    const later = await createAgent(harness, { provider: "claude", title: "Later leader" });
+    await failOnLimit(harness, later);
+    harness.advanceClock(REACTIVE_TTL_MS);
+    harness.setUsage([usageRow("claude", [100])]);
+    await harness.sweep();
+    expect(providerOf(harness, later)).toBe("claude-personal");
+  }, 60_000);
+
+  test("moves a subagent under its parent without telling the parent anything", async () => {
+    const busyParent = await createAgent(harness, {
+      provider: "claude",
+      title: "Busy leader",
+      modeId: "default",
+    });
+    const idleParent = await createAgent(harness, { provider: "claude", title: "Idle leader" });
+    await converse(harness, idleParent, "IDLE-LEADER-DONE");
+
+    const busyChild = await createAgent(harness, {
+      provider: "claude-personal",
+      title: "Busy child",
+      parentAgentId: busyParent,
+    });
+    const idleChild = await createAgent(harness, {
+      provider: "claude-personal",
+      title: "Idle child",
+      parentAgentId: idleParent,
+    });
+    await failOnLimit(harness, busyChild);
+    await failOnLimit(harness, idleChild);
+
+    // Hold the busy parent mid-turn on a permission prompt.
+    await harness.client.sendMessage(
+      busyParent,
+      'create a file named "hold.txt" with the content "x"',
+    );
+    await expect
+      .poll(() => managed(harness, busyParent).pendingPermissions.size, { timeout: 10_000 })
+      .toBe(1);
+    expect(managed(harness, busyParent).lifecycle).toBe("running");
+    const promptsBeforeSweep = harness.prompts.claude.length;
+
+    await harness.sweep();
+
+    // claude-personal is dead and the leader account is never a target: both go to backup.
+    expect(providerOf(harness, busyChild)).toBe("claude-backup");
+    expect(providerOf(harness, idleChild)).toBe("claude-backup");
+    expect(managed(harness, busyChild).labels[PARENT_AGENT_ID_LABEL]).toBe(busyParent);
+
+    // A moved subagent keeps its id, so the parent's handle to it and its finish notification
+    // still work. The steered message the import path needed has nothing left to say.
+    expect(harness.prompts.claude.slice(promptsBeforeSweep)).toEqual([]);
+    expect(managed(harness, idleParent).lifecycle).toBe("idle");
+  }, 60_000);
+
+  test("skips a worker whose usage is at 100% and picks the next one", async () => {
+    harness.setUsage([usageRow("claude-personal", [35, 100]), usageRow("claude-backup", [20])]);
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude-backup");
+  }, 60_000);
+
+  test("adopts a successor that a person already imported by hand instead of importing again", async () => {
+    const labeledLeader = await createAgent(harness, { provider: "claude", title: "Labeled" });
+    const unlabeledLeader = await createAgent(harness, { provider: "claude", title: "Unlabeled" });
+    await failOnLimit(harness, labeledLeader);
+    await failOnLimit(harness, unlabeledLeader);
+
+    const labeledSession = managed(harness, labeledLeader).persistence!.sessionId;
+    const unlabeledSession = managed(harness, unlabeledLeader).persistence!.sessionId;
+    const manual = await harness.client.importAgent({
+      provider: "claude-backup",
+      sessionId: labeledSession,
+      cwd: harness.cwd,
+      labels: { [HANDOFF_FROM_LABEL]: labeledLeader },
+    });
+    const unlabeledManual = await harness.client.importAgent({
+      provider: "claude-personal",
+      sessionId: unlabeledSession,
+      cwd: harness.cwd,
+    });
+    // Observed in production: a second import of the same session onto the same provider is
+    // rejected rather than returning the existing agent.
+    await expect(
+      harness.client.importAgent({
+        provider: "claude-backup",
+        sessionId: labeledSession,
+        cwd: harness.cwd,
+      }),
+    ).rejects.toThrow(/already imported/);
+    const agentsBeforeSweep = agentCount(harness);
+
+    await harness.sweep();
+
+    expect(agentCount(harness)).toBe(agentsBeforeSweep);
+    expect(successorOf(harness, labeledLeader)).toBe(manual.id);
+    expect(successorOf(harness, unlabeledLeader)).toBe(unlabeledManual.id);
+    expect((await harness.daemon.agentStorage.get(labeledLeader))?.title).toBe(
+      `[MOVED → ${manual.id}, out of budget] Labeled`,
+    );
+    expect(failoverPushes(harness)).toEqual([]);
+  }, 60_000);
+
+  test("waits while no worker is healthy and migrates once one recovers", async () => {
+    harness.setUsage([usageRow("claude-personal", [100]), usageRow("claude-backup", [100])]);
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude");
+
+    harness.setUsage([usageRow("claude-personal", [100]), usageRow("claude-backup", [10])]);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude-backup");
+  }, 60_000);
+
+  test("hops between accounts on one agent id, with no handles left behind", async () => {
+    const hopper = await createChild(harness, { provider: "claude-personal", title: "Hopper" });
+    await converse(harness, hopper, "HOP-MARKER");
+    const session = managed(harness, hopper).persistence?.sessionId;
+    const agentsBefore = agentCount(harness);
+    await failOnLimit(harness, hopper);
+
+    await harness.sweep();
+    expect(providerOf(harness, hopper)).toBe("claude-backup");
+
+    // Backup caps too, while personal's cap is still fresh: both workers are out, so the pool
+    // collapses onto the leader account rather than leaving the agent stuck on a dead one.
+    harness.advanceClock(REACTIVE_TTL_MS - MINUTE_MS);
+    await expect.poll(() => managed(harness, hopper).lifecycle, { timeout: 10_000 }).toBe("idle");
+    await failOnLimit(harness, hopper);
+    await harness.sweep();
+    expect(providerOf(harness, hopper)).toBe("claude");
+
+    // Personal's evidence expires while the leader account caps: the conversation goes back to
+    // an account it already left, on the same id and the same session.
+    harness.advanceClock(2 * MINUTE_MS);
+    await expect.poll(() => managed(harness, hopper).lifecycle, { timeout: 10_000 }).toBe("idle");
+    await failOnLimit(harness, hopper);
+    await harness.sweep();
+
+    expect(providerOf(harness, hopper)).toBe("claude-personal");
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(managed(harness, hopper).persistence?.sessionId).toBe(session);
+    expect(assistantText(harness, hopper)).toContain("HOP-MARKER");
+    expect(failoverPushes(harness).at(-1)?.data).toMatchObject({ agentId: hopper });
+  }, 60_000);
+
+  test("revives a retired handle an earlier import left on the target account", async () => {
+    // The shape a pre-move daemon left behind: a retired predecessor on one account and the
+    // imported successor on another, both on the same session.
+    const retired = await createChild(harness, { provider: "claude-personal", title: "Hopper" });
+    await converse(harness, retired, "IMPORTED-MARKER");
+    const session = managed(harness, retired).persistence!.sessionId;
+    const successor = await harness.client.importAgent({
+      providerId: "claude-backup",
+      providerHandleId: session,
+      cwd: harness.cwd,
+      labels: { [HANDOFF_FROM_LABEL]: retired, [PARENT_AGENT_ID_LABEL]: PARENT_ID },
+    });
+    await harness.client.updateAgent(retired, {
+      name: `[MOVED → ${successor.id}, out of budget] Hopper`,
+      labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: successor.id },
+    });
+    await failOnLimit(harness, successor.id);
+    const agentsBefore = agentCount(harness);
+
+    await harness.sweep();
+
+    // Moving in place would put a second live agent on claude-personal's copy of the session,
+    // so the monitor falls back to reusing the handle that is already there.
+    expect(providerOf(harness, successor.id)).toBe("claude-backup");
+    expect(successorOf(harness, successor.id)).toBe(retired);
+    expect(agentCount(harness)).toBe(agentsBefore);
+    const revived = managed(harness, retired);
+    expect(revived.labels[ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]).toBe("");
+    expect(revived.labels[HANDOFF_FROM_LABEL]).toBe(successor.id);
+    expect((await harness.daemon.agentStorage.get(retired))?.title).toBe("Hopper");
+  }, 60_000);
+
+  test("treats an old failure as history unless usage confirms the cap", async () => {
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+    // Seen from far in the future, the failure row is older than the reactive window: the same
+    // situation as a long-dead agent loaded after a daemon restart.
+    harness.setClock(Date.parse("2100-01-01T00:00:00.000Z"));
+
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude");
+
+    harness.setUsage([usageRow("claude", [100])]);
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+  }, 60_000);
+
+  test("does nothing while disabled in config, and resumes when re-enabled live", async () => {
+    await harness.client.patchDaemonConfig({ accountFailover: { enabled: false } });
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude");
+
+    await harness.client.patchDaemonConfig({ accountFailover: { enabled: true } });
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+  }, 60_000);
+
+  test("sends the agent to the account with the most budget left, not the lowest priority number", async () => {
+    // claude-personal is priority 1 and nearly spent; claude-backup is priority 2 and barely
+    // used. Priority order alone sends the agent to the account about to cap.
+    harness.setUsage([
+      usageRow("claude", [100]),
+      usageRow("claude-personal", [85]),
+      usageRow("claude-backup", [20]),
+    ]);
+    const leader = await createAgent(harness, { provider: "claude", title: "Build failover" });
+    await converse(harness, leader, "CONTEXT-MARKER-42");
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude-backup");
+  });
+
+  test("collapses onto the leader account when no worker can take the agent", async () => {
+    // Both workers out for the week, the leader account still has budget. Strict isolation
+    // stranded the agent here; a shared account runs it.
+    harness.setUsage([
+      usageRow("claude", [30]),
+      usageRow("claude-personal", [100]),
+      usageRow("claude-backup", [100]),
+    ]);
+    const worker = await createAgent(harness, {
+      provider: "claude-personal",
+      title: "Worker one",
+    });
+    await converse(harness, worker, "CONTEXT-MARKER-77");
+    await failOnLimit(harness, worker);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, worker)).toBe("claude");
+    // Moved in place, conversation intact — not handed to a second agent.
+    expect(successorOf(harness, worker)).toBeUndefined();
+    expect(assistantText(harness, worker)).toContain("CONTEXT-MARKER-77");
+  });
+
+  test("strands the agent and reports it to the ladder, not as a push of its own", async () => {
+    harness.setUsage([
+      cappedUntil("claude", "2026-09-26T14:00:00.000Z"),
+      cappedUntil("claude-personal", "2026-09-24T22:10:00.000Z"),
+      cappedUntil("claude-backup", "2026-09-26T14:00:00.000Z"),
+    ]);
+    const worker = await createChild(harness, {
+      provider: "claude-personal",
+      title: "Worker one",
+    });
+    await converse(harness, worker, "CONTEXT-MARKER-88");
+    await failOnLimit(harness, worker);
+
+    await harness.sweep();
+
+    // Nothing moved: every target would fail on its first turn.
+    expect(providerOf(harness, worker)).toBe("claude-personal");
+    expect(successorOf(harness, worker)).toBeUndefined();
+    expect(failoverPushes(harness)).toHaveLength(0);
+    expect(poolExhaustedPushes(harness)).toHaveLength(0);
+    expect(agentCount(harness)).toBe(1);
+
+    // The ladder owns the one push. No remedy is left and no agent could help: it would need an
+    // account to run on.
+    const [observation] = strandedObservations(harness);
+    expect(observation).toMatchObject({
+      key: "account-failover-stranded",
+      kind: "account-pool-exhausted",
+      active: true,
+      remedy: "none",
+      level: "urgent",
+    });
+    expect(observation?.escalation).toBeUndefined();
+    expect(observation?.evidence).toContain(worker);
+    expect(observation?.evidence).toContain("Worker one");
+    expect(observation?.evidence).toContain("2026-09-24T22:10:00.000Z");
+    expect(observation?.summary).toContain("claude-personal");
+
+    // Repeats while it holds are the contract, and all one episode.
+    await harness.sweep();
+    expect(strandedObservations(harness).every((o) => o.active)).toBe(true);
+    expect(new Set(strandedObservations(harness).map((o) => o.key)).size).toBe(1);
+  });
+
+  test("reports the stranding over once an account recovers and the agent moves", async () => {
+    harness.setUsage([
+      usageRow("claude", [100]),
+      usageRow("claude-personal", [100]),
+      usageRow("claude-backup", [100]),
+    ]);
+    const worker = await createChild(harness, {
+      provider: "claude-personal",
+      title: "Worker one",
+    });
+    await converse(harness, worker, "CONTEXT-MARKER-99");
+    await failOnLimit(harness, worker);
+    await harness.sweep();
+    expect(strandedObservations(harness)).toHaveLength(1);
+
+    harness.setUsage([
+      usageRow("claude", [100]),
+      usageRow("claude-personal", [100]),
+      usageRow("claude-backup", [10]),
+    ]);
+    await harness.sweep();
+
+    expect(providerOf(harness, worker)).toBe("claude-backup");
+    expect(strandedObservations(harness).at(-1)).toMatchObject({
+      key: "account-failover-stranded",
+      active: false,
+    });
+
+    // Closed once; a quiet pool says nothing more.
+    const count = strandedObservations(harness).length;
+    await harness.sweep();
+    expect(strandedObservations(harness)).toHaveLength(count);
+  });
+
+  test("pushes once when a pool entry shares another's login, and again only after it clears", async () => {
+    const shared: AgentAccountAuth = {
+      state: "signed-in",
+      accountLabel: "tyler@example.com",
+      accountUuid: "uuid-1",
+    };
+    harness.setAccount("claude", shared);
+    harness.setAccount("claude-personal", { ...shared });
+    harness.setAccount("claude-backup", {
+      state: "signed-in",
+      accountLabel: "worker@example.com",
+      accountUuid: "uuid-2",
+    });
+    const identityPushes = () =>
+      harness.pushes.filter((push) => push.data?.reason === "account_identity");
+
+    await harness.sweep();
+    expect(identityPushes()).toHaveLength(1);
+    expect(identityPushes()[0]?.body).toContain("claude-personal is signed into tyler@example.com");
+
+    await harness.sweep();
+    expect(identityPushes()).toHaveLength(1);
+
+    harness.setAccount("claude-personal", { ...shared, accountUuid: "uuid-3" });
+    await harness.sweep();
+    harness.setAccount("claude-personal", { ...shared });
+    await harness.sweep();
+    expect(identityPushes()).toHaveLength(2);
+  });
+
+  test("treats two providers signed into one Claude account as one account", async () => {
+    // Tyler's live shape: ~/.claude-personal and ~/.claude-leader on the same login. Their usage
+    // windows are the same windows, so moving between them buys no budget at all.
+    const shared: AgentAccountAuth = { state: "signed-in", accountLabel: "tyler@example.com" };
+    harness.setAccount("claude", shared);
+    harness.setAccount("claude-personal", { ...shared });
+    harness.setAccount("claude-backup", {
+      state: "signed-in",
+      accountLabel: "worker@example.com",
+    });
+
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+
+    // claude-personal is the higher-priority worker, and is skipped: it is the exhausted account
+    // under another name. The rescue goes to the one account that has its own budget.
+    expect(providerOf(harness, leader)).toBe("claude-backup");
+  }, 60_000);
+
+  test("moves an idle root off an exhausted account onto the leader account, and sends it nothing", async () => {
+    // 2026-09-24: "Check mobile support needs" sat on claude-backup, out for the week, while the
+    // leader account had nearly all its budget.
+    harness.setUsage([usageRow("claude", [12]), usageRow("claude-backup", [100])]);
+    const root = await createAgent(harness, {
+      provider: "claude-backup",
+      title: "Check mobile support needs",
+    });
+    await converse(harness, root, "ROOT-MARKER");
+    const promptsBefore = harness.prompts.claude.length;
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude");
+    expect(assistantText(harness, root)).toContain("ROOT-MARKER");
+    expect(harness.prompts.claude.slice(promptsBefore)).toEqual([]);
+    expect(managed(harness, root).lifecycle).toBe("idle");
+    // The move is on the record, not a push.
+    const [moved] = failoverPushes(harness);
+    expect(moved?.data).toMatchObject({ agentId: root });
+    expect(levelOf(harness, moved)).toBe("record");
+
+    // It answers the next message on the account it moved to.
+    await converse(harness, root, "ANSWERED");
+    expect(harness.prompts.claude.at(-1)).toContain("ANSWERED");
+  }, 60_000);
+
+  test("moves a root cut off mid-turn by the cap to the leader account and resumes it", async () => {
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Root" });
+    await converse(harness, root, "CUT-OFF-MARKER");
+    await failOnLimit(harness, root, REAL_WEEKLY_LIMIT_MESSAGE);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude");
+    const resume = harness.prompts.claude.find((prompt) => prompt.includes("Account handoff"));
+    expect(resume).toContain(`You are the same agent (${root})`);
+    expect(levelOf(harness, failoverPushes(harness)[0])).toBe("record");
+  }, 60_000);
+
+  test("leaves an agent restart recovery has claimed, and rescues it once recovery lets go", async () => {
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Root" });
+    await converse(harness, root, "CLAIMED-MARKER");
+    await failOnLimit(harness, root, REAL_WEEKLY_LIMIT_MESSAGE);
+    harness.claimedByRestartRecovery.add(root);
+
+    await harness.sweep();
+
+    // Recovery owns it: no move, no resume prompt, nothing on the record.
+    expect(providerOf(harness, root)).toBe("claude-backup");
+    expect(harness.prompts.claude.some((prompt) => prompt.includes("Account handoff"))).toBe(false);
+    expect(failoverPushes(harness)).toEqual([]);
+
+    harness.claimedByRestartRecovery.delete(root);
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude");
+    const resume = harness.prompts.claude.find((prompt) => prompt.includes("Account handoff"));
+    expect(resume).toContain(`You are the same agent (${root})`);
+  }, 60_000);
+
+  test("resumes a root whose dead turn the stalled-agent sweep cancelled", async () => {
+    // The stalled-agent sweep cancels a turn stuck in running on a capped account and leaves a
+    // limit-shaped lastError. That is a turn cut off mid-way, so it is resumed, not just moved.
+    // (It lands the agent idle rather than in error; the detector unit test covers that.)
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Stalled root" });
+    await converse(harness, root, "STALLED-MARKER");
+    await failOnLimit(harness, root, stallCancelError("claude-backup"));
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude");
+    expect(harness.prompts.claude.some((prompt) => prompt.includes("Account handoff"))).toBe(true);
+  }, 60_000);
+
+  test("leaves an idle child until asked, then rescues it to a worker or the leader account", async () => {
+    harness.setUsage([usageRow("claude-backup", [100]), usageRow("claude-personal", [30])]);
+    const child = await createChild(harness, { provider: "claude-backup", title: "Child one" });
+    await converse(harness, child, "CHILD-MARKER");
+
+    // A child answers its leader, not Tyler: nothing moves it while nobody asks it anything.
+    await harness.sweep();
+    expect(providerOf(harness, child)).toBe("claude-backup");
+
+    await failOnLimit(harness, child);
+    await harness.sweep();
+    expect(providerOf(harness, child)).toBe("claude-personal");
+    expect(
+      harness.prompts["claude-personal"].some((prompt) => prompt.includes("Account handoff")),
+    ).toBe(true);
+
+    // Both workers out: the next rescue collapses onto the leader account.
+    await settle(harness, child);
+    harness.setUsage([usageRow("claude-backup", [100]), usageRow("claude-personal", [100])]);
+    await failOnLimit(harness, child);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, child)).toBe("claude");
+  }, 60_000);
+
+  test("never moves an agent onto an account at 90% or more", async () => {
+    // claude-personal is the first worker by priority and is not dead, but at 92% it would cap
+    // the agent again within a turn or two.
+    harness.setUsage([usageRow("claude-personal", [92]), usageRow("claude-backup", [60])]);
+    const child = await createChild(harness, { provider: "claude", title: "Child" });
+    await failOnLimit(harness, child);
+    await harness.sweep();
+    expect(providerOf(harness, child)).toBe("claude-backup");
+
+    // With every other account at 90% or more, nothing can take the next one: it is stranded.
+    const other = await createChild(harness, { provider: "claude-backup", title: "Other" });
+    harness.setUsage([usageRow("claude-personal", [92]), usageRow("claude", [95])]);
+    await failOnLimit(harness, other);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, other)).toBe("claude-backup");
+    expect(strandedObservations(harness).at(-1)).toMatchObject({ active: true });
+  }, 60_000);
+
+  test("retires a duplicate record the leader account already holds, and never retries it", async () => {
+    // 2026-09-24: three moves failed three times each with "Provider 'claude' already holds
+    // agent Y for session Z". The conversation was already live under another record.
+    const holder = await createAgent(harness, { provider: "claude", title: "Review PR #87" });
+    await converse(harness, holder, "HOLDER-MARKER");
+    const session = managed(harness, holder).persistence!.sessionId;
+    const duplicate = await harness.client.importAgent({
+      provider: "claude-backup",
+      sessionId: session,
+      cwd: harness.cwd,
+    });
+    await failOnLimit(harness, duplicate.id);
+    const agentsBefore = agentCount(harness);
+
+    await harness.sweep();
+
+    expect(successorOf(harness, duplicate.id)).toBe(holder);
+    expect(providerOf(harness, duplicate.id)).toBe("claude-backup");
+    expect(providerOf(harness, holder)).toBe("claude");
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(harness.prompts.claude.filter((prompt) => prompt.includes("Account handoff"))).toEqual(
+      [],
+    );
+    // Done, not failed: nobody is told, and nothing is stranded.
+    expect(failoverPushes(harness)).toEqual([]);
+    expect(strandedObservations(harness)).toEqual([]);
+
+    await harness.sweep();
+    expect(successorOf(harness, duplicate.id)).toBe(holder);
+    expect(failoverPushes(harness)).toEqual([]);
+  }, 60_000);
+
+  test("skips a rescue whose agent started a turn after the sweep planned it, and moves it later", async () => {
+    // D1b-01: a parent's message, a finish report or Tyler can start a turn in the gap between
+    // planning and moving. Importing then would put a second live agent on the conversation.
+    const leader = await createAgent(harness, { provider: "claude", title: "Busy by the move" });
+    await failOnLimit(harness, leader);
+    const agentsBefore = agentCount(harness);
+    harness.duringNextSweep(() => startHeldTurn(harness, leader));
+
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude");
+    expect(managed(harness, leader).lifecycle).toBe("running");
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(successorOf(harness, leader)).toBeUndefined();
+    const records = await harness.daemon.agentStorage.list();
+    expect(records.filter((record) => record.labels[HANDOFF_FROM_LABEL] === leader)).toEqual([]);
+    expect(failoverPushes(harness)).toEqual([]);
+    expect(strandedObservations(harness)).toEqual([]);
+
+    // The turn it started fails on the cap too, and a later sweep rescues it in place.
+    await endHeldTurn(harness, leader);
+    await failOnLimit(harness, leader);
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    expect(agentCount(harness)).toBe(agentsBefore);
+  }, 60_000);
+
+  test("leaves a planned rescue alone once something else moved the agent", async () => {
+    // D3-01: the retired watcher moved agents while the daemon's sweep had them planned. The
+    // daemon's stale plan then moved them again, or tried to import them.
+    const leader = await createAgent(harness, { provider: "claude", title: "Moved by hand" });
+    await failOnLimit(harness, leader);
+    const agentsBefore = agentCount(harness);
+    harness.duringNextSweep(async () => {
+      await harness.daemon.agentManager.moveAgentToProvider(leader, "claude-backup");
+    });
+
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude-backup");
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(
+      harness.prompts["claude-personal"].filter((prompt) => prompt.includes("Account handoff")),
+    ).toEqual([]);
+    expect(failoverPushes(harness)).toEqual([]);
+  }, 60_000);
+
+  test("never imports when the move is refused because the agent is busy or already there", async () => {
+    const busy = await createAgent(harness, { provider: "claude", title: "Busy at the move" });
+    await failOnLimit(harness, busy);
+    const moved = await createAgent(harness, { provider: "claude", title: "Moved at the move" });
+    await failOnLimit(harness, moved);
+    const agentsBefore = agentCount(harness);
+
+    // agent_busy: a turn starts after the last check and before the move.
+    const whileBusy = await rescueRacingTheMove(harness, {
+      agentId: busy,
+      beforeMove: (agentId) => startHeldTurn(harness, agentId),
+    });
+    expect(whileBusy.outcome).toMatchObject({ kind: "skipped", agentId: busy, reason: "busy" });
+    expect(whileBusy.imports).toEqual([]);
+    expect(providerOf(harness, busy)).toBe("claude");
+
+    // same_provider: another mover put it on the same target first. That move is the rescue.
+    const alreadyThere = await rescueRacingTheMove(harness, {
+      agentId: moved,
+      beforeMove: async (agentId, targetProviderId) => {
+        await harness.daemon.agentManager.moveAgentToProvider(agentId, targetProviderId);
+      },
+    });
+    expect(alreadyThere.outcome).toMatchObject({
+      kind: "skipped",
+      agentId: moved,
+      reason: "moved",
+    });
+    expect(alreadyThere.imports).toEqual([]);
+    expect(providerOf(harness, moved)).toBe("claude-personal");
+
+    expect(agentCount(harness)).toBe(agentsBefore);
+    await endHeldTurn(harness, busy);
+  }, 60_000);
+
+  test("moves a capped child under a memory hold; its resume waits in line and runs on the new account", async () => {
+    // Child admission's memory brake meets the move: the move goes ahead, and the resume it sends
+    // is a child turn, so it waits for the hold like any other and is not read as a failed resume.
+    const admission = harness.daemon.agentManager.getChildAdmission();
+    if (!admission) throw new Error("child admission is not wired");
+    const handoffs = (provider: PoolProvider) =>
+      harness.prompts[provider].filter((prompt) => prompt.includes("Account handoff"));
+    const child = await createChild(harness, { provider: "claude-personal", title: "Held child" });
+    await converse(harness, child, "HELD-MARKER");
+    await failOnLimit(harness, child);
+    const agentsBefore = agentCount(harness);
+    admission.setHold("memory-pressure", true, "memory-pressure: test");
+
+    await harness.sweep();
+
+    expect(providerOf(harness, child)).toBe("claude-backup");
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(admission.holdsTurnFor(child)).toBe(true);
+    expect(managed(harness, child).lifecycle).toBe("running");
+    expect(handoffs("claude-backup")).toEqual([]);
+    const pushesAfterMove = failoverPushes(harness).length;
+
+    // Under the hold the child is pending, not stuck: a second sweep does nothing.
+    await harness.sweep();
+    expect(providerOf(harness, child)).toBe("claude-backup");
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(failoverPushes(harness)).toHaveLength(pushesAfterMove);
+
+    admission.setHold("memory-pressure", false);
+
+    await expect.poll(() => handoffs("claude-backup").length, { timeout: 10_000 }).toBe(1);
+    expect(handoffs("claude-backup")[0]).toContain(`You are the same agent (${child})`);
+    expect(handoffs("claude-personal")).toEqual([]);
+    await expect.poll(() => managed(harness, child).lifecycle, { timeout: 10_000 }).toBe("idle");
+    expect(assistantText(harness, child)).toContain("HELD-MARKER");
+
+    // The resume landed once: no retry follows.
+    await harness.sweep();
+    expect(handoffs("claude-backup")).toHaveLength(1);
+    expect(failoverPushes(harness)).toHaveLength(pushesAfterMove);
+  }, 60_000);
+
+  test("skips a planned rescue whose child got a turn queued behind a memory hold, and keeps the held prompt", async () => {
+    const admission = harness.daemon.agentManager.getChildAdmission();
+    if (!admission) throw new Error("child admission is not wired");
+    const child = await createChild(harness, {
+      provider: "claude-personal",
+      title: "Queued by the move",
+    });
+    await failOnLimit(harness, child);
+    const agentsBefore = agentCount(harness);
+    admission.setHold("memory-pressure", true, "memory-pressure: test");
+    harness.duringNextSweep(() =>
+      queueTurnBehindHold(harness, child, "respond with exactly: QUEUED-MARKER"),
+    );
+
+    await harness.sweep();
+
+    expect(providerOf(harness, child)).toBe("claude-personal");
+    expect(managed(harness, child).lifecycle).toBe("running");
+    expect(admission.holdsTurnFor(child)).toBe(true);
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(successorOf(harness, child)).toBeUndefined();
+    const records = await harness.daemon.agentStorage.list();
+    expect(records.filter((record) => record.labels[HANDOFF_FROM_LABEL] === child)).toEqual([]);
+    expect(failoverPushes(harness)).toEqual([]);
+
+    // Released, the held prompt runs where the agent is.
+    admission.setHold("memory-pressure", false);
+    await expect
+      .poll(() => harness.daemon.agentManager.getLastAssistantMessage(child), { timeout: 10_000 })
+      .toBe("QUEUED-MARKER");
+    expect(providerOf(harness, child)).toBe("claude-personal");
+  }, 60_000);
+
+  test("counts an Opus weekly cap against Opus agents only", async () => {
+    // D1b-07: a model's weekly window stops that model, not the account. The Sonnet agent keeps
+    // its account; the Opus agent moves, and not onto an account whose Opus window is at 95%.
+    const opus = await createAgent(harness, {
+      provider: "claude-personal",
+      title: "Opus root",
+      model: "claude-opus-5-5",
+    });
+    const sonnet = await createAgent(harness, {
+      provider: "claude-personal",
+      title: "Sonnet root",
+      model: "claude-sonnet-5",
+    });
+    for (const agentId of [opus, sonnet]) {
+      await failOnLimit(harness, agentId, "API Error: ECONNRESET");
+    }
+    harness.setUsage([
+      usageWindows("claude-personal", { five_hour: 20, weekly: 30, weekly_model_opus: 100 }),
+      usageWindows("claude", { five_hour: 10, weekly: 20, weekly_model_opus: 95 }),
+      usageWindows("claude-backup", { five_hour: 10, weekly: 40, weekly_model_opus: 10 }),
+    ]);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, opus)).toBe("claude-backup");
+    expect(providerOf(harness, sonnet)).toBe("claude-personal");
+    expect(strandedObservations(harness)).toEqual([]);
+  }, 60_000);
+
+  test("leaves an idle child on the leader account there while a worker has budget", async () => {
+    // Moving it back would restore isolation at the price of a full cache rebuild on its next turn,
+    // and most idle children never run again. New spawns already land on a worker.
+    const child = await createChild(harness, { provider: "claude", title: "Collapsed child" });
+    await converse(harness, child, "COLLAPSED-MARKER");
+    harness.setUsage([usageRow("claude-personal", [5]), usageRow("claude-backup", [5])]);
+
+    await harness.sweep();
+    harness.advanceClock(6 * HOUR_MS);
+    await harness.sweep();
+
+    expect(providerOf(harness, child)).toBe("claude");
+    expect(failoverPushes(harness)).toEqual([]);
+  }, 60_000);
+
+  test("settles a rescued root back onto the leader account once it recovers, and only once", async () => {
+    // 2026-10-01: the orchestrator stayed on a capped worker while the leader account had budget.
+    harness.setUsage([usageRow("claude", [100])]);
+    const root = await createAgent(harness, { provider: "claude", title: "Orchestrator" });
+    await converse(harness, root, "SETTLE-MARKER");
+    await failOnLimit(harness, root);
+    await harness.sweep();
+    expect(providerOf(harness, root)).toBe("claude-personal");
+    await settle(harness, root);
+    const agentsBefore = agentCount(harness);
+    const promptsBefore = harness.prompts.claude.length;
+
+    // The leader account resets and the root has been quiet for hours.
+    windowHasReset(harness);
+    harness.setUsage([RECOVERED_LEADER]);
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude");
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(successorOf(harness, root)).toBeUndefined();
+    expect(assistantText(harness, root)).toContain("SETTLE-MARKER");
+    // Moved between turns, never prompted: the next message Tyler sends runs there.
+    expect(harness.prompts.claude.slice(promptsBefore)).toEqual([]);
+    expect(managed(harness, root).lifecycle).toBe("idle");
+    const settledBack = failoverPushes(harness).at(-1);
+    expect(settledBack).toMatchObject({
+      title: "Agent returned to its own account",
+      data: expect.objectContaining({ agentId: root, outcome: "returned_home" }),
+    });
+    expect(levelOf(harness, settledBack)).toBe("record");
+
+    // Once per recovery episode: moved back onto a worker by hand, it stays there this episode.
+    await harness.daemon.agentManager.moveAgentToProvider(root, "claude-backup");
+    harness.advanceClock(5 * MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, root)).toBe("claude-backup");
+
+    // The leader account is out for a sweep and comes back: a new episode, one more try.
+    harness.setUsage([usageWindows("claude", { five_hour: 100, weekly: 40 })]);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, root)).toBe("claude-backup");
+    harness.setUsage([RECOVERED_LEADER]);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, root)).toBe("claude");
+
+    await converse(harness, root, "ANSWERED-ON-LEADER");
+    expect(harness.prompts.claude.at(-1)).toContain("ANSWERED-ON-LEADER");
+  }, 60_000);
+
+  test("paces settle-backs through the shared resume budget", async () => {
+    // One a minute, burst one: of three roots waiting on a recovered leader account, one moves now.
+    await harness.client.patchDaemonConfig({ admission: { bulkResumesPerMinute: 1 } });
+    const roots: string[] = [];
+    for (const title of ["First", "Second", "Third"]) {
+      const root = await createAgent(harness, { provider: "claude-backup", title });
+      await converse(harness, root, `${title.toUpperCase()}-MARKER`);
+      roots.push(root);
+    }
+    windowHasReset(harness);
+    harness.setUsage([RECOVERED_LEADER]);
+
+    // The sweep waits on the budget; afterEach stops the daemon, which lets it go.
+    void harness.sweep().catch(() => undefined);
+    await expect.poll(() => countOn(harness, roots, "claude"), { timeout: 10_000 }).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(countOn(harness, roots, "claude")).toBe(1);
+    expect(countOn(harness, roots, "claude-backup")).toBe(2);
+  }, 60_000);
+
+  test("never settles a child back, even onto the account its leader runs on", async () => {
+    const child = await createChild(harness, { provider: "claude-backup", title: "Child" });
+    await converse(harness, child, "CHILD-STAYS");
+    windowHasReset(harness);
+    harness.setUsage([RECOVERED_LEADER]);
+
+    await harness.sweep();
+    await harness.sweep();
+
+    expect(providerOf(harness, child)).toBe("claude-backup");
+    expect(failoverPushes(harness)).toEqual([]);
+  }, 60_000);
+
+  test("leaves a root on its worker while the leader account's usage is unreadable", async () => {
+    // The burden of proof is the reverse of a rescue's: moving an agent that runs fine needs a
+    // reading that shows the room.
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Root" });
+    await converse(harness, root, "UNREAD-MARKER");
+    windowHasReset(harness);
+    harness.setUsage([usageRow("claude", [], "unavailable")]);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude-backup");
+  }, 60_000);
+
+  test("stops settling back with settleBack: false, and picks it up again live", async () => {
+    await harness.client.patchDaemonConfig({ accountFailover: { settleBack: false } });
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Root" });
+    await converse(harness, root, "TOGGLE-MARKER");
+    windowHasReset(harness);
+    harness.setUsage([RECOVERED_LEADER]);
+
+    await harness.sweep();
+    expect(providerOf(harness, root)).toBe("claude-backup");
+
+    await harness.client.patchDaemonConfig({ accountFailover: { settleBack: true } });
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, root)).toBe("claude");
+  }, 60_000);
+
+  test("keeps settling back under an old config that set returnHome: false", async () => {
+    // returnHome configured the removed return leg. An old config must not silently undo what
+    // Tyler asked for.
+    await harness.client.patchDaemonConfig({ accountFailover: { returnHome: false } });
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Root" });
+    await converse(harness, root, "COMPAT-MARKER");
+    windowHasReset(harness);
+    harness.setUsage([RECOVERED_LEADER]);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude");
+  }, 60_000);
+
+  test("settles back by reviving the handle the leader account still holds, and sends nothing", async () => {
+    // The 2026-10-01 shape: the orchestrator was imported off the leader account onto a worker,
+    // leaving its retired handle on the leader account holding the conversation.
+    const original = await createAgent(harness, { provider: "claude", title: "Orchestrator" });
+    await converse(harness, original, "ORIGINAL-MARKER");
+    const session = managed(harness, original).persistence!.sessionId;
+    const imported = await harness.client.importAgent({
+      providerId: "claude-backup",
+      providerHandleId: session,
+      cwd: harness.cwd,
+      labels: { [HANDOFF_FROM_LABEL]: original },
+    });
+    await harness.client.updateAgent(original, {
+      name: `[MOVED → ${imported.id}, out of budget] Orchestrator`,
+      labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: imported.id },
+    });
+    await settle(harness, imported.id);
+    const agentsBefore = agentCount(harness);
+    const promptsBefore = harness.prompts.claude.length;
+    windowHasReset(harness);
+    harness.setUsage([RECOVERED_LEADER]);
+
+    await harness.sweep();
+
+    // Never a fresh import: the conversation's own handle on the leader account is live again.
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(successorOf(harness, imported.id)).toBe(original);
+    expect(providerOf(harness, imported.id)).toBe("claude-backup");
+    const revived = managed(harness, original);
+    expect(revived.provider).toBe("claude");
+    expect(revived.labels[ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]).toBe("");
+    expect(revived.labels[HANDOFF_FROM_LABEL]).toBe(imported.id);
+    expect((await harness.daemon.agentStorage.get(original))?.title).toBe("Orchestrator");
+    expect(harness.prompts.claude.slice(promptsBefore)).toEqual([]);
+    expect(failoverPushes(harness).at(-1)?.data).toMatchObject({
+      agentId: original,
+      outcome: "returned_home",
+    });
+
+    // Retired, the old handle is never a candidate again.
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, imported.id)).toBe("claude-backup");
+    expect(agentCount(harness)).toBe(agentsBefore);
+  }, 60_000);
+
+  test("leaves a planned settle-back alone when a turn started while it waited", async () => {
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Busy root" });
+    await converse(harness, root, "BUSY-MARKER");
+    windowHasReset(harness);
+    const planned = harness.daemon.agentManager.getAccountFailoverSummary(root);
+    if (!planned) throw new Error(`agent ${root} is not loaded`);
+    await startHeldTurn(harness, root);
+
+    const outcome = await settleBackAgent({
+      agent: planned,
+      targetProviderId: "claude",
+      nowMs: Date.now() + REACTIVE_TTL_MS,
+      agentManager: harness.daemon.agentManager,
+      agentStorage: harness.daemon.agentStorage,
+      logger: pino({ level: "silent" }),
+    });
+
+    expect(outcome).toMatchObject({ kind: "skipped", agentId: root, reason: "busy" });
+    expect(providerOf(harness, root)).toBe("claude-backup");
+    await endHeldTurn(harness, root);
+  }, 60_000);
+
+  test("rescues a root cut off on a capped worker onto the leader account, not the roomier worker", async () => {
+    // Item 3 of 2026-10-01: a root's live handle cut off on a capped account goes to the leader
+    // account whenever it has budget, even when a worker has more left.
+    harness.setUsage([
+      usageWindows("claude", { five_hour: 40, weekly: 60 }),
+      usageWindows("claude-personal", { five_hour: 5, weekly: 5 }),
+      usageWindows("claude-backup", { five_hour: 100, weekly: 100 }),
+    ]);
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Root" });
+    await converse(harness, root, "ITEM-3-MARKER");
+    await failOnLimit(harness, root, REAL_WEEKLY_LIMIT_MESSAGE);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude");
+    expect(harness.prompts.claude.some((prompt) => prompt.includes("Account handoff"))).toBe(true);
+    expect(harness.prompts["claude-personal"]).toEqual([]);
+  }, 60_000);
+
+  test("rescues an imported root onto the leader account by reviving its handle there", async () => {
+    // The same, in the 2026-10-01 shape: the leader account holds the conversation's retired
+    // handle, and the live handle is cut off on a capped worker.
+    harness.setUsage([
+      usageWindows("claude", { five_hour: 40, weekly: 60 }),
+      usageWindows("claude-personal", { five_hour: 5, weekly: 5 }),
+    ]);
+    const original = await createAgent(harness, { provider: "claude", title: "Orchestrator" });
+    await converse(harness, original, "RESCUE-REVIVE-MARKER");
+    const session = managed(harness, original).persistence!.sessionId;
+    const imported = await harness.client.importAgent({
+      providerId: "claude-backup",
+      providerHandleId: session,
+      cwd: harness.cwd,
+      labels: { [HANDOFF_FROM_LABEL]: original },
+    });
+    await harness.client.updateAgent(original, {
+      name: `[MOVED → ${imported.id}, out of budget] Orchestrator`,
+      labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: imported.id },
+    });
+    await failOnLimit(harness, imported.id, REAL_WEEKLY_LIMIT_MESSAGE);
+    const agentsBefore = agentCount(harness);
+
+    await harness.sweep();
+
+    expect(successorOf(harness, imported.id)).toBe(original);
+    expect(providerOf(harness, original)).toBe("claude");
+    expect(managed(harness, original).labels[ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]).toBe("");
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(harness.prompts.claude.some((prompt) => prompt.includes("Account handoff"))).toBe(true);
+  }, 60_000);
+
+  test("leaves a root whose background subagent is still running, and settles it once it finishes", async () => {
+    // Moving it closes the session, which cancels the Task-tool subagent still working for it.
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Root" });
+    await startBackgroundSubagent(harness, root, "bg-review");
+    windowHasReset(harness);
+    harness.setUsage([RECOVERED_LEADER]);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude-backup");
+    expect(subagentStatus(harness, root, "bg-review")).toBe("running");
+
+    // Not an attempt: once the subagent finishes, the next quiet sweep moves it.
+    await finishBackgroundSubagent(harness, root, "bg-review");
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, root)).toBe("claude");
+  }, 60_000);
+
+  test("leaves a planned settle-back alone when a background subagent started while it waited", async () => {
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Root" });
+    await converse(harness, root, "PLANNED-MARKER");
+    const planned = harness.daemon.agentManager.getAccountFailoverSummary(root);
+    if (!planned) throw new Error(`agent ${root} is not loaded`);
+    await startBackgroundSubagent(harness, root, "bg-late");
+
+    const outcome = await settleBackAgent({
+      agent: planned,
+      targetProviderId: "claude",
+      nowMs: Date.now() + REACTIVE_TTL_MS,
+      agentManager: harness.daemon.agentManager,
+      agentStorage: harness.daemon.agentStorage,
+      logger: pino({ level: "silent" }),
+    });
+
+    expect(outcome).toMatchObject({ kind: "skipped", agentId: root, reason: "busy" });
+    expect(providerOf(harness, root)).toBe("claude-backup");
+    expect(subagentStatus(harness, root, "bg-late")).toBe("running");
+  }, 60_000);
+
+  test("spends the episode's attempt on a refused settle-back and backs off for an hour", async () => {
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Unreachable" });
+    await converse(harness, root, "REFUSED-MARKER");
+    const session = managed(harness, root).persistence!.sessionId;
+    windowHasReset(harness);
+    harness.setUsage([RECOVERED_LEADER]);
+
+    // The leader account cannot see the transcript, so the daemon refuses the move.
+    const restoreTranscript = await hideTranscript(session);
+    await harness.sweep();
+    await restoreTranscript();
+    expect(providerOf(harness, root)).toBe("claude-backup");
+
+    // The move would work now, but this episode's attempt is spent.
+    harness.advanceClock(30 * MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, root)).toBe("claude-backup");
+
+    // A new episode inside the hour still waits out the backoff.
+    harness.setUsage([usageWindows("claude", { five_hour: 100, weekly: 40 })]);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    harness.setUsage([RECOVERED_LEADER]);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, root)).toBe("claude-backup");
+
+    harness.advanceClock(30 * MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, root)).toBe("claude");
+  }, 60_000);
+
+  test("does not count a settle-back skipped for a turn that started while it waited on the pace", async () => {
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Raced root" });
+    await converse(harness, root, "RACED-MARKER");
+    windowHasReset(harness);
+    harness.setUsage([RECOVERED_LEADER]);
+    harness.duringNextPace(() => startHeldTurn(harness, root));
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude-backup");
+    expect(managed(harness, root).lifecycle).toBe("running");
+
+    // Same episode, and the next quiet sweep still moves it: the skip spent nothing.
+    await endHeldTurn(harness, root);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, root)).toBe("claude");
+  }, 60_000);
+
+  test("does not read a revived handle's old cap as fresh evidence against the leader account", async () => {
+    // The 2026-10-01 shape, with the cap that moved the conversation still on the leader-side
+    // handle: it failed on the leader account and a rescue imported it onto a worker.
+    const original = await createAgent(harness, { provider: "claude", title: "Orchestrator" });
+    await converse(harness, original, "STALE-CAP-MARKER");
+    await failOnLimit(harness, original);
+    const session = managed(harness, original).persistence!.sessionId;
+    const imported = await harness.client.importAgent({
+      providerId: "claude-backup",
+      providerHandleId: session,
+      cwd: harness.cwd,
+      labels: { [HANDOFF_FROM_LABEL]: original },
+    });
+    await harness.client.updateAgent(original, {
+      name: `[MOVED → ${imported.id}, out of budget] Orchestrator`,
+      labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: imported.id },
+    });
+    await settle(harness, imported.id);
+    harness.setUsage([RECOVERED_LEADER]);
+
+    // While the cap is fresh the leader account is dead, and nothing settles back.
+    await harness.sweep();
+    expect(successorOf(harness, imported.id)).toBeUndefined();
+
+    // Long after the cap, with the clock just past the root's quiet period.
+    harness.setClock(Date.now() + 3 * MINUTE_MS);
+    await harness.sweep();
+    expect(successorOf(harness, imported.id)).toBe(original);
+    expect(managed(harness, original).lastError).toBe(REAL_LIMIT_MESSAGE);
+
+    // The revived handle still carries the old cap. It must not condemn the leader account, or
+    // the handle would be rescued straight back off it.
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, original)).toBe("claude");
+    expect(handoffPrompts(harness)).toEqual([]);
+    expect(strandedObservations(harness)).toEqual([]);
+  }, 60_000);
+});

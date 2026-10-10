@@ -1,10 +1,12 @@
 import pino from "pino";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import type { ProviderEvent, ProviderRegistration } from "@getpaseo/plugin/server/provider";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
+import { createClaudeCatalogRuntimeSettings } from "../test-utils/claude-catalog-runtime.js";
 import type {
   AgentClient,
   AgentMode,
@@ -1278,6 +1280,43 @@ describe("ProviderSnapshotManager public surface", () => {
     }
   });
 
+  test("resolveCreateConfig turns unattended into bypassPermissions for Claude's real catalog (week review D1b-03)", async () => {
+    // The production registry path with Claude's own catalog, which marks no mode unattended;
+    // only the provider manifest does.
+    const dir = mkdtempSync(join(tmpdir(), "claude-catalog-"));
+    const manager = new ProviderSnapshotManager({
+      logger: createTestLogger(),
+      providerOverrides: {
+        codex: { enabled: false },
+        copilot: { enabled: false },
+        opencode: { enabled: false },
+        pi: { enabled: false },
+        omp: { enabled: false },
+      },
+      runtimeSettings: { claude: createClaudeCatalogRuntimeSettings(dir) },
+    });
+    try {
+      const create = (unattended: boolean) =>
+        manager.resolveCreateConfig({
+          cwd: dir,
+          provider: "claude",
+          requestedMode: undefined,
+          featureValues: undefined,
+          parent: null,
+          unattended,
+        });
+      expect((await create(true)).modeId).toBe("bypassPermissions");
+      expect((await create(false)).modeId).toBeUndefined();
+      const modes = await manager.listModes({ provider: "claude", cwd: dir, wait: true });
+      expect(modes.filter((mode) => mode.isUnattended).map((mode) => mode.id)).toEqual([
+        "bypassPermissions",
+      ]);
+    } finally {
+      manager.destroy();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("resolveCreateConfig passes explicit unattended intent to provider policy", async () => {
     const resolverInputs: ResolveAgentCreateConfigInput[] = [];
     const modes: AgentMode[] = [{ id: "worker", label: "Worker", isUnattended: true }];
@@ -1419,6 +1458,32 @@ describe("ProviderSnapshotManager applyMutableProviderConfig", () => {
           .records.map(({ entry }) => entry)
           .find((entry) => entry.provider === "zai-claude")?.source,
       ).toBe("custom");
+    } finally {
+      manager.destroy();
+    }
+  });
+
+  test("a derived provider's snapshot entry names the provider it extends", async () => {
+    const manager = new ProviderSnapshotManager({
+      logger: createTestLogger(),
+      providerOverrides: {
+        claude: { enabled: false },
+        codex: { enabled: false },
+        copilot: { enabled: false },
+        opencode: { enabled: false },
+        pi: { enabled: false },
+      },
+    });
+    try {
+      manager.applyMutableProviderConfig({
+        "zai-claude": { extends: "claude", label: "ZAI", enabled: true },
+      });
+
+      const zaiClaudeEntry = manager
+        .getSnapshot()
+        .records.map(({ entry }) => entry)
+        .find((entry) => entry.provider === "zai-claude");
+      expect(zaiClaudeEntry?.derivedFromProviderId).toBe("claude");
     } finally {
       manager.destroy();
     }

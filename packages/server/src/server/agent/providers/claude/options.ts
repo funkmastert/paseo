@@ -42,11 +42,35 @@ const SandboxFilesystemSchema = z
   })
   .strict();
 
+/**
+ * `agents.providers.claude.params`: Paseo-owned knobs for the built-in Claude provider, read once
+ * per client. The object stays open because other owners keep their own keys in the same slot
+ * (the account-pool plugin's `accountPool`). docs/custom-providers.md "Claude `params`".
+ */
+export const ClaudeProviderParamsSchema = z.object({
+  // Default on. Moves cwd, platform, shell and git status out of the system prompt and into
+  // the first user message, so sessions in different worktrees share one cached prefix.
+  excludeDynamicSections: z.boolean().default(true),
+});
+
+export type ClaudeProviderParams = z.infer<typeof ClaudeProviderParamsSchema>;
+
 // Claude Agent SDK Options, maintained against @anthropic-ai/claude-agent-sdk 0.3.246.
 export const ClaudeProviderOptionsSchema = z
   .object({
     allowedTools: z.array(z.string()).optional(),
     disallowedTools: z.array(z.string()).optional(),
+    // Paseo-owned, not an SDK option. The SDK's own channel is
+    // `systemPrompt: { type: "preset", preset: "claude_code", append }`, a single
+    // string that the daemon already spends on the user's `systemPrompt` and the
+    // daemon-wide `daemon.appendSystemPrompt`. A caller that restricts an agent
+    // through the other options here — `disallowedTools` above, `sandbox`,
+    // `settings.permissions` — has no way to tell the agent it did, and an agent
+    // that has to discover its own restrictions by hitting them burns tokens
+    // doing it. This field is the supported way to say so. `buildOptions()`
+    // strips it and folds it into that one `append` string, so it never reaches
+    // the SDK as an unknown key and never clobbers the other two parts.
+    appendSystemPrompt: z.string().optional(),
     additionalDirectories: z.array(z.string()).optional(),
     sandbox: z
       .object({

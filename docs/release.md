@@ -2,6 +2,8 @@
 
 All workspaces share one version and release together.
 
+Releasing desktop builds from the `funkmastert/paseo` fork: see [fork-releases.md](fork-releases.md).
+
 ## Two steps
 
 A release has exactly two steps. The agent does the first, the user authorizes the second.

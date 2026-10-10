@@ -1,3 +1,4 @@
+import { conditionNames } from "@getpaseo/protocol/schedule/condition";
 import type { OutputSchema } from "../../output/index.js";
 import { formatCadence, formatTarget, type ScheduleRow } from "./shared.js";
 import type { ScheduleRecord, ScheduleRunRecord } from "./types.js";
@@ -85,6 +86,9 @@ export function createScheduleInspectRows(schedule: ScheduleRecord): ScheduleIns
     { key: "PausedAt", value: schedule.pausedAt ?? "null" },
     { key: "ExpiresAt", value: schedule.expiresAt ?? "null" },
     { key: "MaxRuns", value: schedule.maxRuns == null ? "null" : `${schedule.maxRuns}` },
+    ...(schedule.condition
+      ? [{ key: "When", value: conditionNames(schedule.condition).join(",") }]
+      : []),
     { key: "RunCount", value: `${schedule.runs.length}` },
   ];
 }

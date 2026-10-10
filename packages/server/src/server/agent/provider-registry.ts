@@ -26,6 +26,8 @@ import {
 } from "./create-agent-mode.js";
 import { normalizeAgentModelDefinition } from "./agent-sdk-types.js";
 import { runProviderRefreshActivity } from "./provider-refresh-deadline.js";
+import type { FileReadObserver } from "../jev/read-check/observer.js";
+import type { DeviceLaunchGate } from "./device-lease-manager.js";
 import type { WorkspaceGitService } from "../workspace-git-service.js";
 import type { ManagedProcessRegistry } from "../managed-processes/managed-processes.js";
 import type {
@@ -34,7 +36,7 @@ import type {
   ProviderProfileModel,
   ProviderRuntimeSettings,
 } from "./provider-launch-config.js";
-import { ClaudeAgentClient } from "./providers/claude/agent.js";
+import { ClaudeAgentClient, type AskUserQuestionCheckOptions } from "./providers/claude/agent.js";
 import { CodexAppServerAgentClient } from "./providers/codex-app-server-agent.js";
 import { CopilotACPAgentClient } from "./providers/copilot-acp-agent.js";
 import { CursorACPAgentClient } from "./providers/cursor-acp-agent.js";
@@ -108,6 +110,14 @@ export interface ProviderDefinition extends AgentProviderDefinition {
 export interface BuildProviderRegistryOptions {
   runtimeSettings?: AgentProviderRuntimeSettingsMap;
   providerOverrides?: Record<string, ProviderOverride>;
+  /** The device cap's launch gate (docs/device-leases.md). Absent means no cap is enforced. */
+  deviceLaunchGate?: DeviceLaunchGate;
+  /** The catastrophe gate's kill switch (docs/catastrophe-gate.md). Absent means on. */
+  isCatastropheGateEnabled?: () => boolean;
+  /** Feature 16's read check (docs/jev.md). Claude only; absent means no read-check hook. */
+  fileReadObserver?: FileReadObserver;
+  /** The AskUserQuestion check (docs/ask-user-question.md). Claude only; absent means no check. */
+  askUserQuestionCheck?: AskUserQuestionCheckOptions;
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   managedProcesses?: ManagedProcessRegistry;
   isDev?: boolean;
@@ -117,7 +127,13 @@ export interface BuildProviderRegistryOptions {
 
 interface ProviderClientFactoryOptions extends Pick<
   BuildProviderRegistryOptions,
-  "workspaceGitService" | "managedProcesses" | "ompRuntime"
+  | "workspaceGitService"
+  | "managedProcesses"
+  | "ompRuntime"
+  | "deviceLaunchGate"
+  | "isCatastropheGateEnabled"
+  | "fileReadObserver"
+  | "askUserQuestionCheck"
 > {
   openCodeBridge?: OpenCodeBridge;
   providerParams?: unknown;
@@ -194,26 +210,35 @@ const HUB_E2E_PROVIDER_CONTRACT: ProviderContract = {
 };
 
 const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
-  claude: (logger, runtimeSettings) =>
+  claude: (logger, runtimeSettings, options) =>
     new ClaudeAgentClient({
       logger,
       runtimeSettings,
+      providerParams: options?.providerParams,
+      configDir: runtimeSettings?.env?.CLAUDE_CONFIG_DIR,
+      deviceLaunchGate: options?.deviceLaunchGate,
+      isCatastropheGateEnabled: options?.isCatastropheGateEnabled,
+      fileReadObserver: options?.fileReadObserver,
+      askUserQuestionCheck: options?.askUserQuestionCheck,
     }),
   codex: (logger, runtimeSettings, options) =>
     new CodexAppServerAgentClient(logger, runtimeSettings, {
       workspaceGitService: options?.workspaceGitService,
       customProvider: options?.customProvider,
+      deviceLaunchGate: options?.deviceLaunchGate,
     }),
-  copilot: (logger, runtimeSettings) =>
+  copilot: (logger, runtimeSettings, options) =>
     new CopilotACPAgentClient({
       logger,
       runtimeSettings,
+      deviceLaunchGate: options?.deviceLaunchGate,
     }),
-  cursor: (logger, runtimeSettings) =>
+  cursor: (logger, runtimeSettings, options) =>
     new CursorACPAgentClient({
       logger,
       command: getCursorACPCommand(runtimeSettings),
       env: runtimeSettings?.env,
+      deviceLaunchGate: options?.deviceLaunchGate,
     }),
   opencode: (logger, runtimeSettings, options) =>
     new OpenCodeAgentClient(logger, runtimeSettings, {
@@ -232,6 +257,7 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
       runtimeSettings,
       providerParams: options?.providerParams,
       runtime: options?.ompRuntime,
+      deviceLaunchGate: options?.deviceLaunchGate,
     }),
   mock: (logger) => new MockLoadTestAgentClient(logger),
   "mock-slow": () => new MockSlowProviderClient(),
@@ -441,8 +467,17 @@ function mergeModelAdditions(
   );
 }
 
+/**
+ * Every AgentSession member, the optional ones made required, so leaving one out of the wrapper
+ * is a type error rather than a silently missing capability. Dropping `steerActiveTurn` here made
+ * every derived provider (each account-pool account) interrupt its running turn — and the
+ * background workflows inside it — whenever a message arrived. Tests are not typechecked, so the
+ * guard has to live in this file.
+ */
+type ForwardedAgentSession = { [K in keyof Required<AgentSession>]: AgentSession[K] };
+
 export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession): AgentSession {
-  return {
+  const wrapped: ForwardedAgentSession = {
     provider,
     id: inner.id,
     capabilities: inner.capabilities,
@@ -451,6 +486,7 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
     },
     run: (prompt, options) => inner.run(prompt, options),
     startTurn: (prompt, options) => inner.startTurn(prompt, options),
+    steerActiveTurn: inner.steerActiveTurn?.bind(inner),
     subscribe: (callback) => inner.subscribe((event) => callback(mapStreamEvent(provider, event))),
     async *streamHistory() {
       for await (const event of inner.streamHistory()) {
@@ -467,6 +503,7 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
     interrupt: () => inner.interrupt(),
     close: () => inner.close(),
     listCommands: inner.listCommands?.bind(inner),
+    getContextUsage: inner.getContextUsage?.bind(inner),
     setModel: inner.setModel?.bind(inner),
     setThinkingOption: inner.setThinkingOption?.bind(inner),
     setFeature: inner.setFeature?.bind(inner),
@@ -475,9 +512,28 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
     revertBoth: inner.revertBoth?.bind(inner),
     tryHandleOutOfBand: inner.tryHandleOutOfBand?.bind(inner),
   };
+  return wrapped;
 }
 
-function wrapClientProvider(
+/** `method` bound to `inner` and called with the base provider's id in place of the derived one. */
+function asBaseProvider<Arg extends { provider: AgentProvider }, Result>(
+  inner: AgentClient,
+  method: ((arg: Arg) => Promise<Result>) | undefined,
+): ((arg: Arg) => Promise<Result>) | undefined {
+  if (!method) return undefined;
+  const bound = method.bind(inner);
+  return async (arg) => await bound({ ...arg, provider: inner.provider });
+}
+
+/**
+ * Every AgentClient member, the optional ones made required, so leaving one out of the client
+ * wrapper is a type error — the same guard as ForwardedAgentSession. Every account-pool account
+ * is a derived provider behind this wrapper; it had silently dropped createSession's options
+ * (`persistSession: false` from the title/branch generators) and four members.
+ */
+type ForwardedAgentClient = { [K in keyof Required<AgentClient>]: AgentClient[K] };
+
+export function wrapClientProvider(
   provider: AgentProvider,
   inner: AgentClient,
   profileModels: ProviderProfileModel[],
@@ -487,11 +543,15 @@ function wrapClientProvider(
   const listImportableSessions = inner.listImportableSessions?.bind(inner);
   const importSession = inner.importSession?.bind(inner);
   const listFeatures = inner.listFeatures?.bind(inner);
+  const canResumeHandle = inner.canResumeHandle?.bind(inner);
 
-  return {
+  const wrapped: ForwardedAgentClient = {
     provider,
     capabilities: inner.capabilities,
-    createSession: async (config, launchContext) =>
+    // Dropping this left every account-pool provider launching with no brokered MCP servers,
+    // so each account fell back to its own per-dir login for servers the gateway holds.
+    acceptsMcpGatewayServers: inner.acceptsMcpGatewayServers,
+    createSession: async (config, launchContext, options) =>
       wrapSessionProvider(
         provider,
         await inner.createSession(
@@ -500,6 +560,7 @@ function wrapClientProvider(
             provider: inner.provider,
           },
           launchContext,
+          options,
         ),
       ),
     resumeSession: async (handle, overrides, launchContext, options) =>
@@ -538,8 +599,18 @@ function wrapClientProvider(
             signal,
           })
       : undefined,
+    canResumeHandle: canResumeHandle
+      ? async (handle) => await canResumeHandle({ ...handle, provider: inner.provider })
+      : undefined,
     resolveCreateConfig: inner.resolveCreateConfig?.bind(inner),
     resolveConfiguredModel: inner.resolveConfiguredModel?.bind(inner),
+    // Bound, not re-derived: a derived provider's base client already carries that account's
+    // own runtime settings, so its scope is the derived account's config dir. Dropping this
+    // here left every `extends`-based provider unable to adopt a session-reported MCP server.
+    resolveMcpConfigScope: inner.resolveMcpConfigScope?.bind(inner),
+    // Same reason, same account: a derived provider answers for its own config dir, not the
+    // base provider's, so dropping this would report the wrong account's sign-in state.
+    describeAccountAuth: inner.describeAccountAuth?.bind(inner),
     isCreateConfigUnattended: inner.isCreateConfigUnattended?.bind(inner),
     listFeatures: listFeatures
       ? async (config) => await listFeatures({ ...config, provider: inner.provider })
@@ -578,7 +649,13 @@ function wrapClientProvider(
     getCatalogCacheKey: inner.getCatalogCacheKey?.bind(inner),
     isAvailable: (signal, options) => inner.isAvailable(signal, options),
     getDiagnostic: inner.getDiagnostic?.bind(inner),
+    listCommands: asBaseProvider(inner, inner.listCommands),
+    archiveNativeSession: asBaseProvider(inner, inner.archiveNativeSession),
+    unarchiveNativeSession: asBaseProvider(inner, inner.unarchiveNativeSession),
+    // Idempotent by contract, and each derived provider owns its own base client.
+    shutdown: inner.shutdown ? async () => await inner.shutdown?.() : undefined,
   };
+  return wrapped;
 }
 
 function createRegistryEntry(
@@ -598,14 +675,19 @@ function createRegistryEntry(
     ? profileModels.map((model) => mapModel(provider, model))
     : [];
 
+  // A runtime catalog may carry only ids and labels (Claude's does). The manifest supplies the
+  // visuals and `isUnattended`; without the flag, an unattended create (remediation agents, schedule
+  // runs) finds no unattended mode and starts in the provider's default one.
   const decorateModes = (modes: AgentMode[]): AgentMode[] =>
     modes.map((mode) => {
-      if (mode.icon && mode.colorTier) return mode;
       const definitionMode = resolved.definition.modes.find((d) => d.id === mode.id);
       if (!definitionMode) return mode;
+      const isUnattended = mode.isUnattended ?? definitionMode.isUnattended;
+      if (mode.icon && mode.colorTier && mode.isUnattended === isUnattended) return mode;
       return Object.assign({}, mode, {
         icon: mode.icon ?? definitionMode.icon,
         colorTier: mode.colorTier ?? definitionMode.colorTier,
+        ...(isUnattended !== undefined ? { isUnattended } : {}),
       });
     });
 
@@ -710,7 +792,14 @@ function buildResolvedBuiltinProviders(
   runtimeSettings: AgentProviderRuntimeSettingsMap | undefined,
   options: Pick<
     BuildProviderRegistryOptions,
-    "workspaceGitService" | "managedProcesses" | "ompRuntime" | "openCodeBridge"
+    | "workspaceGitService"
+    | "managedProcesses"
+    | "ompRuntime"
+    | "openCodeBridge"
+    | "deviceLaunchGate"
+    | "isCatastropheGateEnabled"
+    | "fileReadObserver"
+    | "askUserQuestionCheck"
   >,
   isDev: boolean,
 ): Map<string, ResolvedProvider> {
@@ -743,6 +832,10 @@ function buildResolvedBuiltinProviders(
           managedProcesses: options.managedProcesses,
           ompRuntime: options.ompRuntime,
           openCodeBridge: options.openCodeBridge,
+          deviceLaunchGate: options.deviceLaunchGate,
+          isCatastropheGateEnabled: options.isCatastropheGateEnabled,
+          fileReadObserver: options.fileReadObserver,
+          askUserQuestionCheck: options.askUserQuestionCheck,
           providerParams: override?.params,
         }),
       contract: PROVIDER_CONTRACTS[definition.id] ?? UNSUPPORTED_PROVIDER_CONTRACT,
@@ -755,7 +848,15 @@ function buildResolvedBuiltinProviders(
 function addDerivedProviders(
   resolvedProviders: Map<string, ResolvedProvider>,
   providerOverrides: Record<string, ProviderOverride>,
-  options: Pick<BuildProviderRegistryOptions, "managedProcesses" | "openCodeBridge">,
+  options: Pick<
+    BuildProviderRegistryOptions,
+    | "managedProcesses"
+    | "openCodeBridge"
+    | "deviceLaunchGate"
+    | "isCatastropheGateEnabled"
+    | "fileReadObserver"
+    | "askUserQuestionCheck"
+  >,
 ): void {
   for (const [providerId, override] of Object.entries(providerOverrides)) {
     if (resolvedProviders.has(providerId) || BUILTIN_PROVIDER_IDS.includes(providerId)) {
@@ -800,6 +901,8 @@ function addDerivedProviders(
             providerId,
             label: override.label ?? providerId,
             providerParams: override.params,
+            // A custom ACP provider runs against the same machine and the same devices.
+            deviceLaunchGate: options.deviceLaunchGate,
           };
           if (providerId === "cursor") {
             return new CursorACPAgentClient(acpOptions);
@@ -852,6 +955,12 @@ function addDerivedProviders(
         baseFactory(logger, mergedRuntimeSettings, {
           managedProcesses: options.managedProcesses,
           openCodeBridge: options.openCodeBridge,
+          // A derived Claude provider (a second account) runs on the same machine and against
+          // the same devices, so it is gated identically.
+          deviceLaunchGate: options.deviceLaunchGate,
+          isCatastropheGateEnabled: options.isCatastropheGateEnabled,
+          fileReadObserver: options.fileReadObserver,
+          askUserQuestionCheck: options.askUserQuestionCheck,
           providerParams,
           customProvider: {
             id: providerId,
@@ -878,12 +987,20 @@ export function buildProviderRegistry(
       managedProcesses: options?.managedProcesses,
       ompRuntime: options?.ompRuntime,
       openCodeBridge: options?.openCodeBridge,
+      deviceLaunchGate: options?.deviceLaunchGate,
+      isCatastropheGateEnabled: options?.isCatastropheGateEnabled,
+      fileReadObserver: options?.fileReadObserver,
+      askUserQuestionCheck: options?.askUserQuestionCheck,
     },
     options?.isDev === true,
   );
   addDerivedProviders(resolvedProviders, providerOverrides, {
     managedProcesses: options?.managedProcesses,
     openCodeBridge: options?.openCodeBridge,
+    deviceLaunchGate: options?.deviceLaunchGate,
+    isCatastropheGateEnabled: options?.isCatastropheGateEnabled,
+    fileReadObserver: options?.fileReadObserver,
+    askUserQuestionCheck: options?.askUserQuestionCheck,
   });
 
   return Object.fromEntries(

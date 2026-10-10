@@ -4,6 +4,11 @@ import { withOutput } from "../../output/index.js";
 import { addJsonAndDaemonHostOptions } from "../../utils/command-options.js";
 import { parseDuration } from "../../utils/duration.js";
 import {
+  SCHEDULE_CONDITION_NAMES,
+  conditionFromNames,
+  parseConditionNames,
+} from "@getpaseo/protocol/schedule/condition";
+import {
   connectScheduleClient,
   toScheduleCommandError,
   toScheduleRow,
@@ -17,6 +22,7 @@ interface HeartbeatOptions extends CommandOptions {
   name?: string;
   maxRuns?: string;
   expiresIn?: string;
+  when?: string;
 }
 
 interface HeartbeatDeleteRow {
@@ -38,6 +44,22 @@ function requireCallerAgentId(): string {
     throw new Error("Heartbeat commands must run inside a Paseo agent");
   }
   return agentId;
+}
+
+function parseWhen(value: string | undefined) {
+  return value === undefined ? undefined : conditionFromNames(parseConditionNames(value));
+}
+
+// COMPAT(scheduleConditions): added in v0.8.0, remove gate after 2027-09-23. An older daemon
+// drops the field and would fire the heartbeat on every tick, so refuse instead.
+function assertConditionsSupported(
+  client: Awaited<ReturnType<typeof connectScheduleClient>>["client"],
+): void {
+  if (client.getLastServerInfoMessage()?.features?.scheduleConditions !== true) {
+    throw new Error(
+      "This daemon does not support heartbeat conditions. Update the daemon, or omit --when.",
+    );
+  }
 }
 
 async function requireOwnedHeartbeat(
@@ -64,8 +86,12 @@ async function runCreateHeartbeat(
   if (!cron) {
     throw new Error("--cron is required");
   }
+  const condition = parseWhen(options.when);
   const { client } = await connectScheduleClient(options.host);
   try {
+    if (condition) {
+      assertConditionsSupported(client);
+    }
     const maxRuns = options.maxRuns ? Number.parseInt(options.maxRuns, 10) : undefined;
     if (maxRuns !== undefined && (!Number.isSafeInteger(maxRuns) || maxRuns <= 0)) {
       throw new Error("--max-runs must be a positive integer");
@@ -83,6 +109,7 @@ async function runCreateHeartbeat(
       ...(options.expiresIn
         ? { expiresAt: new Date(Date.now() + parseDuration(options.expiresIn)).toISOString() }
         : {}),
+      ...(condition ? { condition } : {}),
     });
     if (payload.error || !payload.schedule) {
       throw new Error(payload.error ?? "Heartbeat creation failed");
@@ -102,19 +129,28 @@ async function runUpdateHeartbeat(
 ): Promise<SingleResult<ScheduleRow>> {
   const agentId = requireCallerAgentId();
   const cron = options.cron?.trim();
-  if (!cron) {
-    throw new Error("--cron is required");
+  const condition = parseWhen(options.when);
+  if (!cron && !condition) {
+    throw new Error("--cron or --when is required");
   }
   const { client } = await connectScheduleClient(options.host);
   try {
+    if (condition) {
+      assertConditionsSupported(client);
+    }
     await requireOwnedHeartbeat(client, id, agentId);
     const payload = await client.scheduleUpdate({
       id,
-      cadence: {
-        type: "cron",
-        expression: cron,
-        ...(options.timezone?.trim() ? { timezone: options.timezone.trim() } : {}),
-      },
+      ...(cron
+        ? {
+            cadence: {
+              type: "cron" as const,
+              expression: cron,
+              ...(options.timezone?.trim() ? { timezone: options.timezone.trim() } : {}),
+            },
+          }
+        : {}),
+      ...(condition ? { condition: condition.type === "always" ? null : condition } : {}),
     });
     if (payload.error || !payload.schedule) {
       throw new Error(payload.error ?? `Heartbeat update failed: ${id}`);
@@ -152,6 +188,8 @@ async function runDeleteHeartbeat(
   }
 }
 
+const WHEN_DESCRIPTION = `Fire only when a condition holds: ${SCHEDULE_CONDITION_NAMES.join(", ")}. A comma list fires when any holds. A tick that does not fire costs no turn`;
+
 export function createHeartbeatCommand(): Command {
   const heartbeat = new Command("heartbeat").description("Manage this agent's heartbeats");
   addJsonAndDaemonHostOptions(
@@ -163,15 +201,17 @@ export function createHeartbeatCommand(): Command {
       .option("--timezone <iana>", "IANA time zone")
       .option("--name <name>", "Heartbeat name")
       .option("--max-runs <n>", "Maximum number of runs")
-      .option("--expires-in <duration>", "Time to live"),
+      .option("--expires-in <duration>", "Time to live")
+      .option("--when <conditions>", WHEN_DESCRIPTION),
   ).action(withOutput(runCreateHeartbeat));
   addJsonAndDaemonHostOptions(
     heartbeat
       .command("update")
-      .description("Change a heartbeat cron cadence")
+      .description("Change a heartbeat cron cadence or condition")
       .argument("<id>", "Heartbeat ID")
-      .requiredOption("--cron <expr>", "Five-field cron cadence")
-      .option("--timezone <iana>", "IANA time zone"),
+      .option("--cron <expr>", "Five-field cron cadence")
+      .option("--timezone <iana>", "IANA time zone")
+      .option("--when <conditions>", `${WHEN_DESCRIPTION}. "always" clears it`),
   ).action(withOutput(runUpdateHeartbeat));
   addJsonAndDaemonHostOptions(
     heartbeat.command("delete").description("Delete a heartbeat").argument("<id>", "Heartbeat ID"),

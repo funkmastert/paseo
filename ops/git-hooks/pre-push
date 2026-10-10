@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fallback for Apple's git, which ignores the config hook in ~/.gitconfig; steps aside otherwise.
+exec python3 /Users/tylerthackray/bozeo-ops/push-scan.py "$1" "$2" --from-hooks-dir

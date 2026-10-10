@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   describeCompactTimeAgo,
   formatCompactTimeAgo,
+  formatDayRelativeTime,
   formatDuration,
   formatMessageTimestamp,
   formatTimeAgo,
@@ -113,6 +114,39 @@ describe("formatMessageTimestamp", () => {
     const date = new Date(2026, 3, 1, 9, 5);
     const formatted = formatMessageTimestamp(date, now);
     expect(formatted).toMatch(/Apr|April/);
+    expect(formatted).toMatch(/2026/);
+  });
+});
+
+describe("formatDayRelativeTime", () => {
+  it("shows only the time for today, so 'from {{when}}' reads naturally", () => {
+    const now = new Date(2026, 8, 30, 15, 42);
+    const date = new Date(2026, 8, 30, 13, 54);
+    const formatted = formatDayRelativeTime(date, now);
+    expect(formatted).toMatch(/1:54 PM|13:54/);
+    expect(formatted).not.toMatch(/yesterday/i);
+  });
+
+  it("says 'yesterday' for the previous calendar day", () => {
+    const now = new Date(2026, 8, 30, 8, 0);
+    const date = new Date(2026, 8, 29, 13, 54);
+    const formatted = formatDayRelativeTime(date, now);
+    expect(formatted).toMatch(/^yesterday/);
+    expect(formatted).toMatch(/1:54 PM|13:54/);
+  });
+
+  it("names the weekday within the last 6 days", () => {
+    // 2026-09-30 is a Wednesday; 2026-09-27 is a Sunday.
+    const now = new Date(2026, 8, 30, 8, 0);
+    const date = new Date(2026, 8, 27, 13, 54);
+    expect(formatDayRelativeTime(date, now)).toMatch(/^Sunday/);
+  });
+
+  it("falls back to a full date past a week", () => {
+    const now = new Date(2026, 8, 30, 8, 0);
+    const date = new Date(2026, 7, 1, 9, 5);
+    const formatted = formatDayRelativeTime(date, now);
+    expect(formatted).toMatch(/Aug|August/);
     expect(formatted).toMatch(/2026/);
   });
 });

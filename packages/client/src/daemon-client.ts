@@ -8,6 +8,12 @@ import {
 import type { z } from "zod";
 import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-capabilities";
 import type { AgentAttentionNotificationPayload } from "@getpaseo/protocol/agent-attention-notification";
+import type { NotificationsPolicyPayload } from "@getpaseo/protocol/notify-policy/rpc-schemas";
+import type {
+  NotifyLedgerEntry,
+  NotifyPolicySettings,
+} from "@getpaseo/protocol/notify-policy/types";
+import type { ScheduleCondition } from "@getpaseo/protocol/schedule/condition";
 import { parsePluginSourceReference } from "@getpaseo/protocol/plugin-source-reference";
 import {
   AgentCreateFailedStatusPayloadSchema,
@@ -94,6 +100,7 @@ import type {
   DaemonGetStatusResponse,
   DaemonGetPairingOfferResponse,
   DaemonConfigReloadResponse,
+  DaemonDoctorResponse,
   DiagnosticsResponse,
   AgentRewindResponseMessage,
   ListTerminalsResponse,
@@ -161,6 +168,9 @@ import {
   normalizeProvidersSnapshotPayload,
 } from "./compat/normalize-provider-models.js";
 import { TerminalStreamRouter, type TerminalStreamEvent } from "./terminal-stream-router.js";
+import type { RestartRecoveryPlan } from "@getpaseo/protocol/restart-recovery/rpc-schemas";
+import type { JevQuestion, JevQuestions } from "@getpaseo/protocol/jev/rpc-schemas";
+import type { TokenUsageRange } from "@getpaseo/protocol/token-usage/rpc-schemas";
 import type {
   BrowserAutomationExecuteRequest,
   BrowserAutomationExecuteResponse,
@@ -358,6 +368,17 @@ export interface SendMessageOptions {
   attachments?: SendAgentMessageRequest["attachments"];
 }
 
+export interface SendAgentMessageResult {
+  /** The agent the message was addressed to, resolved from the id, prefix or title sent. */
+  agentId: string;
+  /**
+   * Where the message was delivered when that agent had moved to another account (account
+   * failover); null when it had not. An older daemon never sets it. A wait for the turn this
+   * message started belongs on `deliveredToAgentId ?? agentId`.
+   */
+  deliveredToAgentId: string | null;
+}
+
 export interface AgentAttentionRequiredNotification {
   agentId: string;
   reason: "finished" | "error" | "permission";
@@ -473,6 +494,46 @@ type GetProvidersSnapshotPayload = GetProvidersSnapshotResponseMessage["payload"
 type RefreshProvidersSnapshotPayload = RefreshProvidersSnapshotResponseMessage["payload"];
 type ProviderDiagnosticPayload = ProviderDiagnosticResponseMessage["payload"];
 type ProviderUsageListPayload = ProviderUsageListResponseMessage["payload"];
+type UsageHistoryGetPayload = Extract<
+  SessionOutboundMessage,
+  { type: "usage.history.get.response" }
+>["payload"];
+export type TokenUsageGetBreakdownPayload = Extract<
+  SessionOutboundMessage,
+  { type: "usage.tokens.get_breakdown.response" }
+>["payload"];
+export type AgentContextUsageReadPayload = Extract<
+  SessionOutboundMessage,
+  { type: "agent.context_usage.read.response" }
+>["payload"];
+export type JevDecidePayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.decide.response" }
+>["payload"];
+export type JevStatusPayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.status.response" }
+>["payload"];
+export type JevScopeCheckPayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.scope.check.response" }
+>["payload"];
+export type JevDecisionsListPayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.decisions.list.response" }
+>["payload"];
+export type JevAskPayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.ask.response" }
+>["payload"];
+export type JevSavingsSummaryPayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.savings.summary.response" }
+>["payload"];
+export type JevSavingsEventsPayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.savings.events.response" }
+>["payload"];
 type DaemonStatusPayload = DaemonGetStatusResponse["payload"];
 type DaemonPairingOfferPayload = DaemonGetPairingOfferResponse["payload"];
 type DiagnosticsPayload = DiagnosticsResponse["payload"];
@@ -715,6 +776,14 @@ export type WorkspaceLabelDeleteInspectPayload = Extract<
   SessionOutboundMessage,
   { type: "workspace.label.delete.inspect.response" }
 >["payload"];
+export type McpGatewayAuthStartPayload = Extract<
+  SessionOutboundMessage,
+  { type: "mcp_gateway.auth.start.response" }
+>["payload"];
+export type McpGatewayServerAdoptPayload = Extract<
+  SessionOutboundMessage,
+  { type: "mcp_gateway.server.adopt.response" }
+>["payload"];
 export type ProjectListPayload = Extract<
   SessionOutboundMessage,
   { type: "project.list.response" }
@@ -759,6 +828,7 @@ export interface CreateScheduleOptions {
   maxRuns?: number;
   expiresAt?: string;
   runOnCreate?: boolean;
+  condition?: ScheduleCondition;
   requestId?: string;
 }
 export interface InspectScheduleOptions {
@@ -786,6 +856,8 @@ export interface UpdateScheduleOptions {
   newAgentConfig?: UpdateScheduleNewAgentConfig;
   maxRuns?: number | null;
   expiresAt?: string | null;
+  /** Null clears the condition. */
+  condition?: ScheduleCondition | null;
   requestId?: string;
 }
 export interface RenameBranchInput {
@@ -910,6 +982,17 @@ class DaemonProtocolError extends Error {
   }
 }
 
+/** A daemon refusal of a provider move. `code` is the daemon's vocabulary; see messages.ts. */
+export class AgentProviderMoveRejection extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "AgentProviderMoveRejection";
+  }
+}
+
 class PingTimeoutError extends Error {
   constructor(readonly timeoutMs: number) {
     super(`Ping timed out (${timeoutMs}ms)`);
@@ -927,6 +1010,16 @@ function toTimeoutError(error: unknown, label: string, timeoutMs: number): Error
 const DEFAULT_RECONNECT_BASE_DELAY_MS = 1500;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30000;
 const DEFAULT_SESSION_RPC_TIMEOUT_MS = 60_000;
+// JEV calls are made from plugin hooks with a 30-second budget, and every JEV answer is optional:
+// a caller that forgets a timeout must fail open well inside that budget, not after 60 s.
+const JEV_DEFAULT_DEADLINE_MS = 1_500; // spawnHint's default deadline, the only feature served
+const JEV_DECIDE_TIMEOUT_MARGIN_MS = 500;
+const JEV_MAX_RPC_TIMEOUT_MS = 20_000;
+const JEV_DEFAULT_RPC_TIMEOUT_MS = 10_000;
+// `jev.ask` has a person waiting, not a hook budget: the daemon's own ceiling is 30 s
+// (`agents.jev.askJev.timeoutMs`), and the reply needs a moment past the deadline to arrive.
+const JEV_ASK_DEFAULT_DEADLINE_MS = 15_000;
+const JEV_ASK_TIMEOUT_MARGIN_MS = 2_000;
 const PUSH_TOKEN_REVOCATION_TIMEOUT_MS = 2_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_LIVENESS_TIMEOUT_MS = 5000;
@@ -2667,6 +2760,27 @@ export class DaemonClient {
     }
   }
 
+  /**
+   * Re-open a live agent under another provider, keeping its id and conversation. Rejects with
+   * `AgentProviderMoveRejection` so a caller can branch on `code` instead of matching prose.
+   */
+  async moveAgentToProvider(agentId: string, providerId: string): Promise<void> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.provider.move.response">({
+        message: {
+          type: "agent.provider.move.request",
+          agentId,
+          providerId,
+        },
+      });
+    if (!payload.accepted) {
+      throw new AgentProviderMoveRejection(
+        payload.code ?? "move_failed",
+        payload.error ?? `Could not move agent ${agentId} to provider '${providerId}'`,
+      );
+    }
+  }
+
   async updateAgent(
     agentId: string,
     updates: { name?: string; labels?: Record<string, string> },
@@ -2718,6 +2832,47 @@ export class DaemonClient {
       throw new Error(payload.error ?? "renameProject rejected");
     }
     return { customName: payload.customName };
+  }
+
+  // COMPAT(deviceManagement): callers gate on server_info.features.deviceManagement; an older
+  // daemon answers these with an unknown_schema rpc_error. See docs/device-leases.md.
+
+  async releaseDeviceLease(deviceId: string, requestId?: string): Promise<boolean> {
+    const payload = await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "device.lease.release.request", deviceId },
+      responseType: "device.lease.release.response",
+    });
+    return payload.released;
+  }
+
+  async setDeviceReservation(
+    deviceId: string,
+    reserved: boolean,
+    requestId?: string,
+  ): Promise<void> {
+    await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "device.reserve.set.request", deviceId, reserved },
+      responseType: "device.reserve.set.response",
+    });
+  }
+
+  async shutdownDevice(
+    input: { deviceId: string; confirmMidTurnHolder?: boolean },
+    requestId?: string,
+  ) {
+    return await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: {
+        type: "device.shutdown.request",
+        deviceId: input.deviceId,
+        ...(input.confirmMidTurnHolder === undefined
+          ? {}
+          : { confirmMidTurnHolder: input.confirmMidTurnHolder }),
+      },
+      responseType: "device.shutdown.response",
+    });
   }
 
   async setProjectIcon(
@@ -2787,6 +2942,52 @@ export class DaemonClient {
       throw new Error(payload.error ?? "setWorkspacePinned rejected");
     }
     return { pinnedAt: payload.pinnedAt };
+  }
+
+  /** Agents the last daemon stop cut off mid-turn. Gate on `features.restartRecovery`. */
+  async getRestartRecoveryPlan(requestId?: string): Promise<RestartRecoveryPlan> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.restart_recovery.get_plan.response">(
+        {
+          requestId,
+          message: { type: "agent.restart_recovery.get_plan.request" },
+        },
+      );
+    return requireRestartRecoveryPlan(payload);
+  }
+
+  /** Resume the selected entries, or every resumable one, leaders first. */
+  async applyRestartRecovery(
+    options: { agentIds?: string[] } = {},
+    requestId?: string,
+  ): Promise<RestartRecoveryPlan> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.restart_recovery.apply.response">({
+        requestId,
+        message: {
+          type: "agent.restart_recovery.apply.request",
+          ...(options.agentIds ? { agentIds: options.agentIds } : {}),
+        },
+        // Each depth waits for its agents' runs to start, up to a minute per provider start.
+        timeout: 600_000,
+      });
+    return requireRestartRecoveryPlan(payload);
+  }
+
+  /** Settle the selected pending entries so no later daemon offers them again. */
+  async dismissRestartRecovery(
+    options: { agentIds?: string[] } = {},
+    requestId?: string,
+  ): Promise<RestartRecoveryPlan> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.restart_recovery.dismiss.response">({
+        requestId,
+        message: {
+          type: "agent.restart_recovery.dismiss.request",
+          ...(options.agentIds ? { agentIds: options.agentIds } : {}),
+        },
+      });
+    return requireRestartRecoveryPlan(payload);
   }
 
   async inspectWorkspaceRecovery(
@@ -3092,6 +3293,17 @@ export class DaemonClient {
       "agent_permission_request",
       "agent_permission_resolved",
     ];
+    // COMPAT(mcpStatus): added in v0.8.1. An older daemon's SessionEventSubscription enum
+    // doesn't know "mcp_status_update" and parses the array strictly, so sending it
+    // unconditionally would reject the whole subscription request. Remove gating once the
+    // daemon floor is >= v0.8.1.
+    if (this.lastServerInfoMessage?.features?.mcpStatus === true) {
+      events.push("mcp_status_update");
+    }
+    // COMPAT(deviceLeases): added in v0.8.1, gated for the same reason as mcpStatus above.
+    if (this.lastServerInfoMessage?.features?.deviceLeases === true) {
+      events.push("device_status_update");
+    }
     if (this.eventListeners.size === 0 && !this.messageHandlers.has("providers_snapshot_update")) {
       this.providerSnapshotUpdates.clear();
     }
@@ -3190,7 +3402,7 @@ export class DaemonClient {
     agentId: string,
     text: string,
     options?: SendMessageOptions,
-  ): Promise<void> {
+  ): Promise<SendAgentMessageResult> {
     const requestId = this.createRequestId();
     const messageId = options?.messageId ?? crypto.randomUUID();
     const message = SessionInboundMessageSchema.parse({
@@ -3220,10 +3432,16 @@ export class DaemonClient {
     if (!payload.accepted) {
       throw new Error(payload.error ?? "sendAgentMessage rejected");
     }
+    return { agentId: payload.agentId, deliveredToAgentId: payload.deliveredToAgentId ?? null };
   }
 
-  async sendMessage(agentId: string, text: string, options?: SendMessageOptions): Promise<void> {
-    await this.sendAgentMessage(agentId, text, options);
+  /** See {@link SendAgentMessageResult}: wait on `deliveredToAgentId ?? agentId`. */
+  async sendMessage(
+    agentId: string,
+    text: string,
+    options?: SendMessageOptions,
+  ): Promise<SendAgentMessageResult> {
+    return await this.sendAgentMessage(agentId, text, options);
   }
 
   async rewindAgent(
@@ -4338,6 +4556,7 @@ export class DaemonClient {
     input: {
       source: WorkspaceCreateRequest["source"];
       title?: string;
+      callerAgentId?: string;
       firstAgentContext?: WorkspaceCreateRequest["firstAgentContext"];
     },
     requestId?: string,
@@ -4348,6 +4567,7 @@ export class DaemonClient {
         type: "workspace.create.request",
         source: input.source,
         ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(input.callerAgentId ? { callerAgentId: input.callerAgentId } : {}),
         ...(input.firstAgentContext !== undefined
           ? { firstAgentContext: input.firstAgentContext }
           : {}),
@@ -4837,6 +5057,56 @@ export class DaemonClient {
     });
   }
 
+  async getNotificationPolicy(requestId?: string): Promise<NotificationsPolicyPayload> {
+    this.requireNotificationPolicySupport();
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId,
+      message: { type: "notifications.policy.get.request" },
+    });
+  }
+
+  /** Every field is optional, so one call can change the dials, the availability, or both. */
+  async setNotificationPolicy(
+    changes: Partial<NotifyPolicySettings>,
+    requestId?: string,
+  ): Promise<NotificationsPolicyPayload> {
+    this.requireNotificationPolicySupport();
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId,
+      message: { type: "notifications.policy.set.request", ...changes },
+    });
+  }
+
+  async listNotificationLedger(
+    options: { unreachedOnly?: boolean; limit?: number; requestId?: string } = {},
+  ): Promise<{ entries: NotifyLedgerEntry[]; unreachedCount: number }> {
+    this.requireNotificationPolicySupport();
+    const { requestId, ...filters } = options;
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId,
+      message: { type: "notifications.ledger.list.request", ...filters },
+    });
+  }
+
+  /** True when the connected daemon can run `paseo doctor` itself (`daemon.doctor.request`). */
+  supportsDaemonDoctor(): boolean {
+    // COMPAT(daemonDoctor): added in v0.8.1, remove gate after 2027-03-23.
+    return this.lastServerInfoMessage?.features?.daemonDoctor === true;
+  }
+
+  /** Read-only diagnosis run inside the daemon. Callers gate on `supportsDaemonDoctor()`. */
+  async runDaemonDoctor(options?: {
+    deep?: boolean;
+    requestId?: string;
+    timeout?: number;
+  }): Promise<DaemonDoctorResponse["payload"]> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "daemon.doctor.request", ...(options?.deep ? { deep: true } : {}) },
+      timeout: options?.timeout,
+    });
+  }
+
   async connectHub(
     hubUrl: string,
     token: string,
@@ -4978,6 +5248,221 @@ export class DaemonClient {
       },
       responseType: "provider_diagnostic_response",
       timeout: 180000,
+    });
+  }
+
+  /**
+   * Starts interactive OAuth for one brokered MCP gateway server (U6, R6's one-click auth
+   * action). Returns `{authorizationUrl, error}` rather than throwing on a known failure
+   * (unknown server, static-auth server) — the caller opens `authorizationUrl` via the
+   * existing external-URL opener; completion arrives later via `mcp_status_update`.
+   */
+  async startMcpGatewayAuth(
+    name: string,
+    options?: { requestId?: string },
+  ): Promise<McpGatewayAuthStartPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: {
+        type: "mcp_gateway.auth.start.request",
+        name,
+      },
+    });
+  }
+
+  /**
+   * Brokers a server the given agent reported from its own per-dir MCP config and starts
+   * sign-in when it needs OAuth. Gate on `server_info.features.mcpGatewayAdopt`.
+   */
+  async adoptMcpGatewayServer(
+    name: string,
+    agentId: string,
+    options?: { requestId?: string },
+  ): Promise<McpGatewayServerAdoptPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: {
+        type: "mcp_gateway.server.adopt.request",
+        name,
+        agentId,
+      },
+    });
+  }
+
+  async getUsageHistory(options?: {
+    agentId?: string;
+    requestId?: string;
+  }): Promise<UsageHistoryGetPayload> {
+    // COMPAT(usageHistory): callers gate on `server_info.features.usageHistory`; an older daemon
+    // answers an unknown request type with nothing, so an ungated call would only time out.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: {
+        type: "usage.history.get.request",
+        ...(options?.agentId ? { agentId: options.agentId } : {}),
+      },
+    });
+  }
+
+  /**
+   * Token usage by provider, model and role over a range, from the transcripts on disk. See
+   * docs/token-usage.md.
+   */
+  async getTokenUsageBreakdown(options: {
+    range: TokenUsageRange;
+    requestId?: string;
+  }): Promise<TokenUsageGetBreakdownPayload> {
+    // COMPAT(tokenUsage): callers gate on `server_info.features.tokenUsage`; an older daemon
+    // answers an unknown request type with nothing, so an ungated call would only time out.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: { type: "usage.tokens.get_breakdown.request", range: options.range },
+    });
+  }
+
+  /**
+   * What an agent's context window is made of, from its provider's own `/context`. The daemon
+   * reads it out of band of the agent's turns and caches it; see docs/context-usage.md.
+   */
+  async readAgentContextUsage(
+    agentId: string,
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<AgentContextUsageReadPayload> {
+    // COMPAT(agentContextUsage): callers gate on `server_info.features.agentContextUsage`; an older
+    // daemon answers an unknown request type with nothing, so an ungated call would only time out.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout,
+      message: { type: "agent.context_usage.read.request", agentId },
+    });
+  }
+
+  /**
+   * Feature 2's client-facing RPC (docs/jev.md, "RPCs"): only `feature: "spawnHint"` is served.
+   * The default timeout is the caller's deadline plus a margin, capped under a plugin hook's
+   * 30-second budget.
+   */
+  async jevDecide(
+    input: {
+      feature: string;
+      callSite: string;
+      state: unknown;
+      questions: JevQuestions;
+      scope?: { cwd: string; parentAgentId?: string };
+      deadlineMs?: number;
+      shadow?: true;
+    },
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<JevDecidePayload> {
+    // COMPAT(jevPaseoApi): callers gate on `server_info.features.jev`; an older daemon answers an
+    // unknown request type with an `unknown_schema` rpc_error.
+    const deadlineMs = Math.max(0, input.deadlineMs ?? JEV_DEFAULT_DEADLINE_MS);
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout:
+        options?.timeout ??
+        Math.min(deadlineMs + JEV_DECIDE_TIMEOUT_MARGIN_MS, JEV_MAX_RPC_TIMEOUT_MS),
+      message: { type: "jev.decide.request", ...input },
+    });
+  }
+
+  /**
+   * Feature 15 (docs/jev.md, "Feature 15: Ask JEV"): a person's own question. The daemon sends it
+   * through the same JEV service as every feature, on the `interactive` lane. The default timeout
+   * is the deadline plus a margin.
+   */
+  async jevAsk(
+    input: {
+      context: string;
+      question: JevQuestion;
+      agentId?: string;
+      deadlineMs?: number;
+    },
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<JevAskPayload> {
+    // COMPAT(jevAsk): callers gate on `server_info.features.jevAsk`; an older daemon answers an
+    // unknown request type with an `unknown_schema` rpc_error.
+    const deadlineMs = Math.max(0, input.deadlineMs ?? JEV_ASK_DEFAULT_DEADLINE_MS);
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout ?? deadlineMs + JEV_ASK_TIMEOUT_MARGIN_MS,
+      message: { type: "jev.ask.request", ...input, deadlineMs },
+    });
+  }
+
+  /** `JevStatus` from `contract.ts`. Defaults to a timeout under a plugin hook's budget. */
+  async jevStatus(options?: { requestId?: string; timeout?: number }): Promise<JevStatusPayload> {
+    // COMPAT(jevPaseoApi): callers gate on `server_info.features.jev`; an older daemon answers an
+    // unknown request type with an `unknown_schema` rpc_error.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout ?? JEV_DEFAULT_RPC_TIMEOUT_MS,
+      message: { type: "jev.status.request" },
+    });
+  }
+
+  /** The D7 check alone (docs/jev.md, "The D7 exclusion"). The plugin asks before an agent exists. */
+  async jevScopeCheck(
+    input: { cwd: string; parentAgentId?: string },
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<JevScopeCheckPayload> {
+    // COMPAT(jevPaseoApi): callers gate on `server_info.features.jev`; an older daemon answers an
+    // unknown request type with an `unknown_schema` rpc_error.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout ?? JEV_DEFAULT_RPC_TIMEOUT_MS,
+      message: { type: "jev.scope.check.request", ...input },
+    });
+  }
+
+  /**
+   * The savings ledger's totals for a range (docs/jev.md, "Savings"): tokens saved live and
+   * would-have in shadow, per feature, against JEV's cost.
+   */
+  async jevSavingsSummary(
+    range: "today" | "7d" | "all",
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<JevSavingsSummaryPayload> {
+    // COMPAT(jevSavings): callers gate on `server_info.features.jevSavings`; an older daemon
+    // answers an unknown request type with an `unknown_schema` rpc_error.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout ?? JEV_DEFAULT_RPC_TIMEOUT_MS,
+      message: { type: "jev.savings.summary.request", range },
+    });
+  }
+
+  /** One page of savings involvements, newest first. Pass the last page's `nextCursor` for more. */
+  async jevSavingsEvents(
+    query: {
+      range: "today" | "7d" | "all";
+      feature?: string;
+      agentId?: string;
+      cursor?: string;
+      limit?: number;
+    },
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<JevSavingsEventsPayload> {
+    // COMPAT(jevSavings): callers gate on `server_info.features.jevSavings`; an older daemon
+    // answers an unknown request type with an `unknown_schema` rpc_error.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout ?? JEV_DEFAULT_RPC_TIMEOUT_MS,
+      message: { type: "jev.savings.events.request", ...query },
+    });
+  }
+
+  /** An agent's `JevDecisionRecord`s, newest first, including its spawn hint. */
+  async listJevDecisions(
+    agentId: string,
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<JevDecisionsListPayload> {
+    // COMPAT(jevPaseoApi): callers gate on `server_info.features.jev`; an older daemon answers an
+    // unknown request type with an `unknown_schema` rpc_error.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout,
+      message: { type: "jev.decisions.list.request", agentId },
     });
   }
 
@@ -5612,6 +6097,7 @@ export class DaemonClient {
         ...(typeof options.maxRuns === "number" ? { maxRuns: options.maxRuns } : {}),
         ...(options.expiresAt ? { expiresAt: options.expiresAt } : {}),
         ...(typeof options.runOnCreate === "boolean" ? { runOnCreate: options.runOnCreate } : {}),
+        ...(options.condition ? { condition: options.condition } : {}),
       },
       responseType: "schedule/create/response",
     });
@@ -5705,6 +6191,7 @@ export class DaemonClient {
         ...(options.newAgentConfig !== undefined ? { newAgentConfig: options.newAgentConfig } : {}),
         ...(options.maxRuns !== undefined ? { maxRuns: options.maxRuns } : {}),
         ...(options.expiresAt !== undefined ? { expiresAt: options.expiresAt } : {}),
+        ...(options.condition !== undefined ? { condition: options.condition } : {}),
       },
       responseType: "schedule/update/response",
     });
@@ -5751,6 +6238,13 @@ export class DaemonClient {
     // COMPAT(hubRelationship): added in v0.1.X, drop the gate when floor >= v0.1.X.
     if (this.lastServerInfoMessage?.features?.hubRelationship !== true) {
       throw new Error("Update the host to use Hub relationship management.");
+    }
+  }
+
+  private requireNotificationPolicySupport(): void {
+    // COMPAT(notificationPolicy): added in v0.8.1, remove gate after 2027-09-23.
+    if (this.lastServerInfoMessage?.features?.notificationPolicy !== true) {
+      throw new Error("Update the host to change notification settings.");
     }
   }
 
@@ -6493,4 +6987,14 @@ function resolveAgentConfig(options: CreateAgentRequestOptions): AgentSessionCon
     provider: merged.provider,
     cwd: merged.cwd,
   };
+}
+
+function requireRestartRecoveryPlan(payload: {
+  plan: RestartRecoveryPlan | null;
+  error: string | null;
+}): RestartRecoveryPlan {
+  if (!payload.plan) {
+    throw new Error(payload.error ?? "Restart recovery request failed");
+  }
+  return payload.plan;
 }

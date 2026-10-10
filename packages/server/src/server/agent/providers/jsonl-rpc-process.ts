@@ -66,6 +66,7 @@ function spawnJsonlRpcProcess(launch: JsonlRpcLaunch): ChildProcessWithoutNullSt
   const child = spawnProcess(launch.command, launch.args, {
     cwd: launch.cwd,
     envOverlay: launch.env,
+    priority: "agent",
     stdio: ["pipe", "pipe", "pipe"],
   });
   assertChildWithPipes(child);

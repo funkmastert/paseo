@@ -66,7 +66,9 @@ describe("daemon E2E (real codex) - send while running recovery", () => {
 
       await primary.close();
 
-      await secondary.sendMessage(agent.id, "Reply with exactly: state saved");
+      await secondary.sendMessage(agent.id, "Reply with exactly: state saved", {
+        activeTurnBehavior: "interrupt",
+      });
       await secondary.waitForAgentUpsert(
         agent.id,
         (snapshot) => snapshot.status === "running",

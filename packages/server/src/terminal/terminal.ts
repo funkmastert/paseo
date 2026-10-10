@@ -11,6 +11,7 @@ import { writePrivateFileAtomicSync } from "../server/private-files.js";
 import { findExecutable } from "../executable-resolution/executable-resolution.js";
 import type { TerminalCell, TerminalState } from "@getpaseo/protocol/messages";
 import { TerminalInputModeTracker } from "@getpaseo/protocol/terminal-input-mode";
+import { lowerProcessPriority } from "../utils/process-priority.js";
 import { TerminalActivityTracker } from "./activity/terminal-activity-tracker.js";
 import type { TerminalActivity, TerminalActivityState } from "@getpaseo/protocol/terminal-activity";
 
@@ -128,6 +129,12 @@ export interface CreateTerminalOptions {
   title?: string;
   command?: string;
   args?: string[];
+  /**
+   * Lowers the shell's priority to this nice right after spawn; its children inherit it. Set for
+   * terminals an agent creates (resolveAgentNice), unset for terminals a person opens. The
+   * terminal worker is a separate process, so the daemon resolves the number and passes it.
+   */
+  nice?: number;
 }
 
 function toTerminalActivity(snapshot: {
@@ -895,6 +902,7 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
     title: presetTitle,
     command,
     args = [],
+    nice,
   } = options;
   const resolvedShell = shell ?? resolveDefaultTerminalShell();
 
@@ -955,6 +963,9 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
       },
     }),
   });
+  if (nice !== undefined) {
+    lowerProcessPriority(ptyProcess.pid, nice);
+  }
 
   function emitTitleChange(nextTitle: string | undefined): void {
     if (title === nextTitle) {

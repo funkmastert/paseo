@@ -22,6 +22,7 @@ on:
       - "scripts/update-nix.sh"
       - "scripts/fix-lockfile.mjs"
       - ".github/workflows/nix.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -32,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -111,11 +112,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
 
       - uses: cachix/install-nix-action@v31
         with:
           nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Update lockfile + Nix hash if stale
+        run: ./scripts/update-nix.sh
 
       - name: Build Nix desktop package
         run: nix build .#desktop -o result-desktop
@@ -124,8 +133,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          app="result-desktop/Applications/Paseo.app"
-          test -x "$app/Contents/MacOS/Paseo"
+          # electron-builder names the bundle after executableName/productName,
+          # which a rebranded fork overrides — never hardcode "Paseo" here.
+          app_name="$(node -e "console.log(require('./packages/desktop/scripts/executable-name.js').readExecutableNameFromConfig())")"
+          app="result-desktop/Applications/${app_name}.app"
+          test -x "$app/Contents/MacOS/${app_name}"
           test -L result-desktop/bin/paseo-desktop
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = "sh.paseo.desktop"
+          app_id="$(node -e "console.log(require('./packages/desktop/scripts/executable-name.js').readAppIdFromConfig())")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = "$app_id"
           find "$app" -name Info.plist -print0 | xargs -0 -n 1 plutil -lint

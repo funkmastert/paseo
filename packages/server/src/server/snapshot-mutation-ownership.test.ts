@@ -110,6 +110,7 @@ describe("snapshot mutation ownership boundary", () => {
         paseoHome: "/tmp/paseo-test",
         agentManager: createStub<SessionOptions["agentManager"]>({
           subscribe: () => () => {},
+          onMcpGatewayStatusChange: () => () => {},
           listAgents: () => [],
           getAgent: () => null,
           archiveSnapshot,

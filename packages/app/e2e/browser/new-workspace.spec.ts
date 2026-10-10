@@ -51,7 +51,6 @@ import {
   type LocalGhPrFixture,
 } from "../support/helpers/github-fixtures";
 import { getServerId } from "../support/helpers/server-id";
-import { selectSidebarStatusGrouping } from "../support/helpers/sidebar";
 import { getE2EDaemonPort } from "../support/helpers/daemon-port";
 import { chooseAddProjectMethod, expectAddProjectPage } from "../support/helpers/add-project-flow";
 import { seedSavedSettingsHosts } from "../support/helpers/settings";
@@ -70,65 +69,56 @@ const BACKGROUND_RESOLUTION_FILE = {
   buffer: Buffer.from(JSON.stringify({ composer: "background-resolution" })),
 };
 
-interface WorkspaceStatusGroupEvent {
+interface PinnedRowStatusEvent {
   rowTestId: string;
-  bucket: string;
-  indicatorTestId: string | null;
-  label: string;
+  hasStatusBadge: boolean;
+  statusLabel: string | null;
   at: number;
 }
 
-async function switchSidebarToStatusGrouping(page: import("@playwright/test").Page) {
-  await selectSidebarStatusGrouping(page);
-  await expect(page.getByTestId("sidebar-status-group-done")).toBeVisible({ timeout: 30_000 });
-}
-
-async function startTrackingSidebarStatusGroups(page: import("@playwright/test").Page) {
+// A session-start auto pin (workspace-auto-pin.ts) hoists a newly created workspace straight into
+// the sidebar's Pinned section, which sits outside every status bucket. A pinned row shows its
+// status via `project-status-badge` (role="status") rather than `workspace-status-indicator-*`,
+// and that badge is omitted entirely for the "done" bucket — so "never looks done" reads as "the
+// badge is never absent" while this tracker is running.
+async function startTrackingPinnedRowStatus(page: import("@playwright/test").Page) {
   await page.evaluate(() => {
-    interface StatusGroupEvent {
+    interface StatusEvent {
       rowTestId: string;
-      bucket: string;
-      indicatorTestId: string | null;
-      label: string;
+      hasStatusBadge: boolean;
+      statusLabel: string | null;
       at: number;
     }
     const win = window as typeof window & {
-      __workspaceStatusGroupEvents?: StatusGroupEvent[];
-      __workspaceStatusGroupObserver?: MutationObserver;
+      __pinnedRowStatusEvents?: StatusEvent[];
+      __pinnedRowStatusObserver?: MutationObserver;
     };
-    win.__workspaceStatusGroupEvents = [];
-    win.__workspaceStatusGroupObserver?.disconnect();
+    win.__pinnedRowStatusEvents = [];
+    win.__pinnedRowStatusObserver?.disconnect();
 
     const capture = () => {
-      const events = win.__workspaceStatusGroupEvents;
+      const events = win.__pinnedRowStatusEvents;
       if (!events) return;
-      const groups = document.querySelectorAll<HTMLElement>(
-        '[data-testid^="sidebar-status-group-"]',
+      const pinnedSection = document.querySelector('[data-testid="sidebar-pinned-section"]');
+      if (!pinnedSection) return;
+      const rows = pinnedSection.querySelectorAll<HTMLElement>(
+        '[data-testid^="sidebar-workspace-row-"]',
       );
-      for (const group of groups) {
-        const groupTestId = group.getAttribute("data-testid") ?? "";
-        const bucket = groupTestId.replace("sidebar-status-group-", "");
-        const label = group.textContent ?? "";
-        const block = group.parentElement?.parentElement;
-        if (!block) continue;
-        const rows = block.querySelectorAll<HTMLElement>('[data-testid^="sidebar-workspace-row-"]');
-        for (const row of rows) {
-          const rowTestId = row.getAttribute("data-testid");
-          if (!rowTestId) continue;
-          const indicatorTestId =
-            row
-              .querySelector<HTMLElement>('[data-testid^="workspace-status-indicator-"]')
-              ?.getAttribute("data-testid") ?? null;
-          const last = events.at(-1);
-          if (
-            last?.rowTestId === rowTestId &&
-            last.bucket === bucket &&
-            last.indicatorTestId === indicatorTestId
-          ) {
-            continue;
-          }
-          events.push({ rowTestId, bucket, indicatorTestId, label, at: performance.now() });
+      for (const row of rows) {
+        const rowTestId = row.getAttribute("data-testid");
+        if (!rowTestId) continue;
+        const badge = row.querySelector<HTMLElement>('[data-testid="project-status-badge"]');
+        const hasStatusBadge = badge !== null;
+        const statusLabel = badge?.getAttribute("aria-label") ?? null;
+        const last = events.at(-1);
+        if (
+          last?.rowTestId === rowTestId &&
+          last.hasStatusBadge === hasStatusBadge &&
+          last.statusLabel === statusLabel
+        ) {
+          continue;
         }
+        events.push({ rowTestId, hasStatusBadge, statusLabel, at: performance.now() });
       }
     };
 
@@ -139,67 +129,74 @@ async function startTrackingSidebarStatusGroups(page: import("@playwright/test")
       subtree: true,
       characterData: true,
       attributes: true,
-      attributeFilter: ["data-testid"],
+      attributeFilter: ["data-testid", "aria-label"],
     });
-    win.__workspaceStatusGroupObserver = observer;
+    win.__pinnedRowStatusObserver = observer;
   });
 }
 
-async function getTrackedSidebarStatusGroups(
+async function getTrackedPinnedRowStatusEvents(
   page: import("@playwright/test").Page,
-): Promise<WorkspaceStatusGroupEvent[]> {
+): Promise<PinnedRowStatusEvent[]> {
   return page.evaluate(() => {
     const win = window as typeof window & {
-      __workspaceStatusGroupEvents?: WorkspaceStatusGroupEvent[];
+      __pinnedRowStatusEvents?: PinnedRowStatusEvent[];
     };
-    return win.__workspaceStatusGroupEvents ?? [];
+    return win.__pinnedRowStatusEvents ?? [];
   });
 }
 
-async function waitForWorkspaceStatusGroupEvent(input: {
+async function waitForPinnedRowStatusBadge(input: {
   page: import("@playwright/test").Page;
   rowTestId: string;
-  bucket: string;
 }) {
   await input.page.waitForFunction(
-    ({ expectedRowTestId, expectedBucket }) => {
+    (expectedRowTestId) => {
       const win = window as typeof window & {
-        __workspaceStatusGroupEvents?: WorkspaceStatusGroupEvent[];
+        __pinnedRowStatusEvents?: PinnedRowStatusEvent[];
       };
-      for (const event of win.__workspaceStatusGroupEvents ?? []) {
-        if (event.rowTestId === expectedRowTestId && event.bucket === expectedBucket) {
-          return true;
-        }
+      for (const event of win.__pinnedRowStatusEvents ?? []) {
+        if (event.rowTestId === expectedRowTestId && event.hasStatusBadge) return true;
       }
       return false;
     },
-    { expectedRowTestId: input.rowTestId, expectedBucket: input.bucket },
+    input.rowTestId,
     { timeout: 30_000 },
   );
 }
 
-async function expectWorkspaceStatusGroupEvents(input: {
+/**
+ * Guards that a pinned row's status badge is never absent — absent is how "done"/idle reads on a
+ * hoisted row, and that must never happen while its initial agent starts or runs.
+ */
+async function expectPinnedRowNeverLooksDone(input: {
   page: import("@playwright/test").Page;
   rowTestId: string;
-  includes: string;
-  excludes: string;
-  excludesIndicator?: string;
 }) {
-  await waitForWorkspaceStatusGroupEvent({
-    page: input.page,
-    rowTestId: input.rowTestId,
-    bucket: input.includes,
-  });
-  const createdWorkspaceEvents = (await getTrackedSidebarStatusGroups(input.page)).filter(
+  await waitForPinnedRowStatusBadge(input);
+  const events = (await getTrackedPinnedRowStatusEvents(input.page)).filter(
     (event) => event.rowTestId === input.rowTestId,
   );
-  expect(createdWorkspaceEvents.map((event) => event.bucket)).toContain(input.includes);
-  expect(createdWorkspaceEvents.filter((event) => event.bucket === input.excludes)).toEqual([]);
-  if (input.excludesIndicator) {
-    expect(
-      createdWorkspaceEvents.filter((event) => event.indicatorTestId === input.excludesIndicator),
-    ).toEqual([]);
-  }
+  expect(events.filter((event) => !event.hasStatusBadge)).toEqual([]);
+}
+
+/** Guards that a pinned row with no agent never shows a running/loading badge. */
+async function expectPinnedRowNeverLooksRunning(input: {
+  page: import("@playwright/test").Page;
+  rowTestId: string;
+}) {
+  const events = (await getTrackedPinnedRowStatusEvents(input.page)).filter(
+    (event) => event.rowTestId === input.rowTestId,
+  );
+  expect(events.filter((event) => event.hasStatusBadge)).toEqual([]);
+}
+
+async function fetchWorkspaceStatus(
+  client: Awaited<ReturnType<typeof connectNewWorkspaceDaemonClient>>,
+  workspaceId: string,
+): Promise<string | undefined> {
+  const { entries } = await client.fetchWorkspaces();
+  return entries.find((entry) => entry.id === workspaceId)?.status;
 }
 
 async function submitNewWorkspaceWithoutPrompt(page: import("@playwright/test").Page) {
@@ -583,7 +580,7 @@ test.describe("New workspace flow", () => {
     }
   });
 
-  test("new workspace with initial agent never appears in the Done status group", async ({
+  test("new workspace with initial agent lands in Pinned and never looks done while it starts", async ({
     page,
   }) => {
     const serverId = getServerId();
@@ -607,8 +604,7 @@ test.describe("New workspace flow", () => {
         subtitle: openedProject.projectDisplayName,
       });
 
-      await switchSidebarToStatusGrouping(page);
-      await startTrackingSidebarStatusGroups(page);
+      await startTrackingPinnedRowStatus(page);
 
       await openGlobalNewWorkspaceComposer(page);
       await expectNewWorkspaceProjectSelected(page, openedProject.projectDisplayName);
@@ -625,18 +621,18 @@ test.describe("New workspace flow", () => {
       createdWorktreeDirectories.add(createdWorkspace.workspaceDirectory);
 
       const rowTestId = `sidebar-workspace-row-${serverId}:${createdWorkspace.workspaceId}`;
-      await expectWorkspaceStatusGroupEvents({
-        page,
-        rowTestId,
-        includes: "running",
-        excludes: "done",
+      // A session start auto-pins the new workspace (workspace-auto-pin.ts), so it lands in
+      // Pinned rather than a status group.
+      await expect(page.getByTestId("sidebar-pinned-section").getByTestId(rowTestId)).toBeVisible({
+        timeout: 30_000,
       });
+      await expectPinnedRowNeverLooksDone({ page, rowTestId });
     } finally {
       await tempRepo.cleanup();
     }
   });
 
-  test("new workspace without an initial agent appears in the Done status group", async ({
+  test("new workspace without an initial agent lands in Pinned and never looks running", async ({
     page,
   }) => {
     const serverId = getServerId();
@@ -660,8 +656,7 @@ test.describe("New workspace flow", () => {
         subtitle: openedProject.projectDisplayName,
       });
 
-      await switchSidebarToStatusGrouping(page);
-      await startTrackingSidebarStatusGroups(page);
+      await startTrackingPinnedRowStatus(page);
 
       await openGlobalNewWorkspaceComposer(page);
       await expectNewWorkspaceProjectSelected(page, openedProject.projectDisplayName);
@@ -676,20 +671,20 @@ test.describe("New workspace flow", () => {
       createdWorktreeDirectories.add(createdWorkspace.workspaceDirectory);
 
       const rowTestId = `sidebar-workspace-row-${serverId}:${createdWorkspace.workspaceId}`;
-      await expectWorkspaceStatusGroupEvents({
-        page,
-        rowTestId,
-        includes: "done",
-        excludes: "running",
-        excludesIndicator: "workspace-status-indicator-loading",
+      // A session start auto-pins the new workspace (workspace-auto-pin.ts), so it lands in
+      // Pinned rather than a status group.
+      await expect(page.getByTestId("sidebar-pinned-section").getByTestId(rowTestId)).toBeVisible({
+        timeout: 30_000,
       });
-      await expectWorkspaceStatusGroupEvents({
-        page,
-        rowTestId,
-        includes: "done",
-        excludes: "running",
-        excludesIndicator: "workspace-status-indicator-running",
-      });
+      await expect
+        .poll(() => fetchWorkspaceStatus(client, createdWorkspace.workspaceId), {
+          timeout: 30_000,
+        })
+        .toBe("done");
+      await expect(
+        page.getByTestId(rowTestId).locator('[data-testid="workspace-status-indicator-loading"]'),
+      ).toHaveCount(0);
+      await expectPinnedRowNeverLooksRunning({ page, rowTestId });
     } finally {
       await tempRepo.cleanup();
     }

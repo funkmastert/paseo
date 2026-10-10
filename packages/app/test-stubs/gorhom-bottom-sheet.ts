@@ -25,3 +25,9 @@ export function useBottomSheetInternal() {
     animatedPosition: sharedValue(0),
   };
 }
+
+// Real hook reads a React context the native sheet provides; outside one (every browser unit
+// test's case, called with `unsafe: true`) it returns null rather than throwing.
+export function useBottomSheetModalInternal(_unsafe?: boolean) {
+  return null;
+}

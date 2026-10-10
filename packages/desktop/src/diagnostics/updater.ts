@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import { app } from "electron";
 import { tailFile } from "./tail-file.js";
 
-const SHIPIT_DIRECTORY_NAME = "sh.paseo.desktop.ShipIt";
+// Must track `appId` in electron-builder.yml: Squirrel.Mac derives this
+// cache directory from the bundle identifier.
+const SHIPIT_DIRECTORY_NAME = "sh.bozeo.desktop.ShipIt";
 const SHIPIT_LOG_TAIL_LINES = 100;
 
 export interface DesktopUpdaterDiagnosticFile {

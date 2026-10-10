@@ -5,12 +5,25 @@ import type {
   SidebarWorkspacePlacement,
 } from "@/hooks/use-sidebar-workspaces-list";
 import { buildSidebarProjection } from "./sidebar-projection";
+import type { SidebarWorkspaceGroup } from "./sidebar-labels";
+
+function workspaceIdsOf(entries: readonly { workspaceId: string }[] | undefined): string[] {
+  return (entries ?? []).map((entry) => entry.workspaceId);
+}
+
+function findWorkspaceGroup(
+  groups: readonly SidebarWorkspaceGroup[],
+  key: string,
+): SidebarWorkspaceGroup | undefined {
+  return groups.find((group) => group.key === key);
+}
 
 function makeWorkspace(
   id: string,
   statusBucket: SidebarWorkspaceEntry["statusBucket"] = "done",
   labels: string[] = [],
   projectViewKey = "project",
+  createdBy?: SidebarWorkspaceEntry["createdBy"],
 ) {
   const placement: SidebarWorkspacePlacement = {
     workspaceKey: `srv:${id}`,
@@ -37,7 +50,9 @@ function makeWorkspace(
     archiveUnpushedCommitCount: null,
     scripts: [],
     hasRunningScripts: false,
+    diskUsage: null,
     labels,
+    createdBy,
   };
   return { placement, entry };
 }
@@ -172,5 +187,88 @@ describe("buildSidebarProjection", () => {
     expect(projection.shortcutModel.shortcutTargets).toEqual([
       { serverId: "srv", workspaceId: "unpinned" },
     ]);
+  });
+
+  describe("agent-made workspaces", () => {
+    for (const groupMode of ["project", "status"] as const) {
+      it(`partitions agent workspaces into one collapsed group in ${groupMode} mode`, () => {
+        const person = makeWorkspace("person-made", "done", [], "project", "person");
+        const agent = makeWorkspace("agent-made", "done", [], "project", "agent");
+        const projection = buildSidebarProjection({
+          ...projectionInput({ groupMode }),
+          projects: [makeProject([person.placement, agent.placement])],
+          pinnedKeys: { pinnedWorkspaceKeys: [], pinnedAtByKey: {} },
+          workspaceEntriesByKey: new Map([
+            [person.entry.workspaceKey, person.entry],
+            [agent.entry.workspaceKey, agent.entry],
+          ]),
+        });
+
+        const agentGroup = findWorkspaceGroup(projection.workspaceGroups, "agent-workspaces");
+        expect(workspaceIdsOf(agentGroup?.rows)).toEqual(["agent-made"]);
+        expect(agentGroup?.label).toBe("Agent workspaces (1)");
+
+        const remainingPersonRows =
+          groupMode === "project"
+            ? projection.pinnedGroups.unpinnedProjects[0]?.workspaces
+            : findWorkspaceGroup(projection.workspaceGroups, "done")?.rows;
+        expect(workspaceIdsOf(remainingPersonRows)).toEqual(["person-made"]);
+      });
+    }
+
+    it("a missing createdBy counts as person", () => {
+      const legacy = makeWorkspace("legacy", "done", [], "project", undefined);
+      const projection = buildSidebarProjection({
+        ...projectionInput({ groupMode: "project" }),
+        projects: [makeProject([legacy.placement])],
+        pinnedKeys: { pinnedWorkspaceKeys: [], pinnedAtByKey: {} },
+        workspaceEntriesByKey: new Map([[legacy.entry.workspaceKey, legacy.entry]]),
+      });
+
+      expect(findWorkspaceGroup(projection.workspaceGroups, "agent-workspaces")).toBeUndefined();
+      expect(workspaceIdsOf(projection.pinnedGroups.unpinnedProjects[0]?.workspaces)).toEqual([
+        "legacy",
+      ]);
+    });
+
+    it("a manually pinned agent workspace shows in Pinned, not in the agent group", () => {
+      const agent = makeWorkspace("agent-pinned", "done", [], "project", "agent");
+      const projection = buildSidebarProjection({
+        ...projectionInput({ groupMode: "project" }),
+        projects: [makeProject([agent.placement])],
+        pinnedKeys: {
+          pinnedWorkspaceKeys: [agent.placement.workspaceKey],
+          pinnedAtByKey: { [agent.placement.workspaceKey]: "2026-07-12T12:00:00.000Z" },
+        },
+        workspaceEntriesByKey: new Map([[agent.entry.workspaceKey, agent.entry]]),
+      });
+
+      expect(workspaceIdsOf(projection.pinnedGroups.pinnedChats)).toEqual(["agent-pinned"]);
+      expect(findWorkspaceGroup(projection.workspaceGroups, "agent-workspaces")).toBeUndefined();
+    });
+
+    it("the agent group's header needs attention when a row inside needs input or has failed", () => {
+      const quiet = makeWorkspace("quiet", "done", [], "project", "agent");
+      const quietProjection = buildSidebarProjection({
+        ...projectionInput({ groupMode: "project" }),
+        projects: [makeProject([quiet.placement])],
+        pinnedKeys: { pinnedWorkspaceKeys: [], pinnedAtByKey: {} },
+        workspaceEntriesByKey: new Map([[quiet.entry.workspaceKey, quiet.entry]]),
+      });
+      expect(
+        findWorkspaceGroup(quietProjection.workspaceGroups, "agent-workspaces")?.leading,
+      ).toEqual({ kind: "agent", needsAttention: false });
+
+      const stuck = makeWorkspace("stuck", "needs_input", [], "project", "agent");
+      const stuckProjection = buildSidebarProjection({
+        ...projectionInput({ groupMode: "project" }),
+        projects: [makeProject([stuck.placement])],
+        pinnedKeys: { pinnedWorkspaceKeys: [], pinnedAtByKey: {} },
+        workspaceEntriesByKey: new Map([[stuck.entry.workspaceKey, stuck.entry]]),
+      });
+      expect(
+        findWorkspaceGroup(stuckProjection.workspaceGroups, "agent-workspaces")?.leading,
+      ).toEqual({ kind: "agent", needsAttention: true });
+    });
   });
 });

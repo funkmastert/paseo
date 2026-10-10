@@ -1,6 +1,13 @@
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { useState, useCallback, useMemo } from "react";
-import { View, Text, Pressable, type PressableStateCallbackType } from "react-native";
+import {
+  View,
+  Text,
+  Pressable,
+  type PressableStateCallbackType,
+  type StyleProp,
+  type TextStyle,
+} from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { Check, X } from "lucide-react-native";
@@ -25,6 +32,8 @@ interface QuestionFormCardProps {
   permission: PendingPermission;
   onRespond: (response: AgentPermissionResponse) => void;
   isResponding: boolean;
+  /** False in a glance surface (the pinned grid): typed answers belong in the full conversation. */
+  allowFreeText?: boolean;
 }
 
 const IS_WEB = isWeb;
@@ -266,6 +275,30 @@ interface QuestionOtherInputProps {
   onSubmit: () => void;
 }
 
+interface QuestionFreeTextAreaProps extends QuestionOtherInputProps {
+  visible: boolean;
+  allowFreeText: boolean;
+  hintStyle: StyleProp<TextStyle>;
+}
+
+// A question that wants a typed answer either gets the real input, or — in a glance surface that
+// forbids typing (`allowFreeText: false`) — a hint pointing at the full conversation instead.
+function QuestionFreeTextArea({
+  visible,
+  allowFreeText,
+  hintStyle,
+  ...inputProps
+}: QuestionFreeTextAreaProps) {
+  const { t } = useTranslation();
+  if (!visible) {
+    return null;
+  }
+  if (!allowFreeText) {
+    return <Text style={hintStyle}>{t("message.question.answerInConversation")}</Text>;
+  }
+  return <QuestionOtherInput {...inputProps} />;
+}
+
 function QuestionOtherInput({
   qIndex,
   accessibilityLabel,
@@ -317,7 +350,12 @@ function QuestionOtherInput({
   );
 }
 
-export function QuestionFormCard({ permission, onRespond, isResponding }: QuestionFormCardProps) {
+export function QuestionFormCard({
+  permission,
+  onRespond,
+  isResponding,
+  allowFreeText = true,
+}: QuestionFormCardProps) {
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const isMobile = useIsCompactFormFactor();
@@ -484,6 +522,10 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
     () => [styles.questionText, { color: theme.colors.foreground }],
     [theme.colors.foreground],
   );
+  const freeTextHintStyle = useMemo(
+    () => [styles.freeTextHint, { color: theme.colors.foregroundMuted }],
+    [theme.colors.foregroundMuted],
+  );
   // Single-select radios need a group; checkboxes are valid standalone.
   const optionsGroupAccessibility = useMemo(
     () =>
@@ -516,7 +558,7 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
   const dismissLabel = resolveDismissLabel(questions, t("common.actions.dismiss"));
   const selected = selections[resolvedActiveQuestionIndex] ?? new Set<number>();
   const otherText = otherTexts[resolvedActiveQuestionIndex] ?? "";
-  const showTextInput = activeQuestion ? questionShowsTextInput(activeQuestion) : false;
+  const questionWantsTextInput = activeQuestion ? questionShowsTextInput(activeQuestion) : false;
 
   return (
     <View style={containerStyle} testID="question-form-card">
@@ -551,21 +593,22 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
               ))}
             </View>
           ) : null}
-          {showTextInput ? (
-            <QuestionOtherInput
-              qIndex={resolvedActiveQuestionIndex}
-              accessibilityLabel={activeQuestion.question}
-              value={otherText}
-              placeholder={getQuestionInputPlaceholder({
-                question: activeQuestion,
-                answerPlaceholder: t("message.question.answerPlaceholder"),
-                otherPlaceholder: t("message.question.otherPlaceholder"),
-              })}
-              isResponding={isResponding}
-              onChange={setOtherText}
-              onSubmit={handlePrimaryAction}
-            />
-          ) : null}
+          <QuestionFreeTextArea
+            visible={questionWantsTextInput}
+            allowFreeText={allowFreeText}
+            hintStyle={freeTextHintStyle}
+            qIndex={resolvedActiveQuestionIndex}
+            accessibilityLabel={activeQuestion.question}
+            value={otherText}
+            placeholder={getQuestionInputPlaceholder({
+              question: activeQuestion,
+              answerPlaceholder: t("message.question.answerPlaceholder"),
+              otherPlaceholder: t("message.question.otherPlaceholder"),
+            })}
+            isResponding={isResponding}
+            onChange={setOtherText}
+            onSubmit={handlePrimaryAction}
+          />
         </View>
       ) : null}
 
@@ -712,6 +755,10 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[3],
     fontSize: theme.fontSize.base,
+  },
+  freeTextHint: {
+    fontSize: theme.fontSize.sm,
+    fontStyle: "italic",
   },
   actionsContainer: {
     gap: theme.spacing[2],

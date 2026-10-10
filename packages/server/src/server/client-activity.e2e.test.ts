@@ -57,6 +57,9 @@ describe("client activity tracking", () => {
       messageQueueLimit: null,
     });
     await client.connect();
+    // Attention goes only to sessions whose agent directory covers the agent, as the app's
+    // does; a bare connection is not watching anything (#4088, #4470).
+    await client.fetchAgents({ subscribe: { subscriptionId: "activity-test" } });
     return client;
   }
 

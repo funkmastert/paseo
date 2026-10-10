@@ -53,6 +53,7 @@ interface RestartDaemonClient {
       };
     }>;
   }>;
+  setWorkspacePinned(workspaceId: string, pinned: boolean): Promise<{ pinnedAt: string | null }>;
 }
 
 interface RestartDaemonClientConfig {
@@ -462,6 +463,9 @@ test.describe("Workspace model restart regressions", () => {
       if (!createdWorkspaceId) {
         throw new Error(`Expected browser to navigate to created workspace, got ${page.url()}`);
       }
+      // The browser-driven create above auto-pins its workspace (workspace-auto-pin.ts). Settle
+      // it so the status-bucket assertions below read a row outside Pinned.
+      await client.setWorkspacePinned(createdWorkspaceId, false);
 
       await expect
         .poll(() =>

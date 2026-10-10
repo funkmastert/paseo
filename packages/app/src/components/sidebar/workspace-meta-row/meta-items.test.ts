@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
+import type { WorkspaceDiskUsage } from "@getpaseo/protocol/messages";
 import type { WorkspaceLabelDefinition } from "@getpaseo/protocol/workspace-labels";
 import type { PrHint } from "@/git/pr-hint";
 import { DEFAULT_SIDEBAR_CHECKS_DISPLAY } from "@/components/sidebar/display-preferences/checks-display";
 import { DEFAULT_SIDEBAR_ROW_ITEMS } from "@/components/sidebar/display-preferences/row-items";
+import { DISK_USAGE_FLOOR_BYTES } from "@/utils/disk-usage-tone-model";
 import { selectMetaRowItems } from "./meta-items";
 import type { WorkspaceServiceSummary } from "./service-summary";
 
@@ -18,6 +20,11 @@ const SERVICE: WorkspaceServiceSummary = { name: "web", health: null };
 
 const LABELS: WorkspaceLabelDefinition[] = [{ name: "Urgent", color: "red" }];
 
+const DISK_USAGE: WorkspaceDiskUsage = {
+  bytes: DISK_USAGE_FLOOR_BYTES,
+  sampledAt: "2026-09-12T00:00:00.000Z",
+};
+
 function select(overrides: Partial<Parameters<typeof selectMetaRowItems>[0]> = {}) {
   return selectMetaRowItems({
     currentBranch: "feature/sidebar-badges",
@@ -25,6 +32,7 @@ function select(overrides: Partial<Parameters<typeof selectMetaRowItems>[0]> = {
     hasHostBadge: true,
     prHint: PR_HINT,
     serviceSummary: SERVICE,
+    diskUsage: null,
     labels: LABELS,
     visible: DEFAULT_SIDEBAR_ROW_ITEMS,
     checksDisplay: DEFAULT_SIDEBAR_CHECKS_DISPLAY,
@@ -141,5 +149,40 @@ describe("selectMetaRowItems", () => {
   it("keeps a change request whose forge reports no checks", () => {
     const items = select({ prHint: { ...PR_HINT, checksStatus: undefined } });
     expect(kinds(items)).toEqual(["host", "changeRequest", "services", "labels"]);
+  });
+
+  it("omits disk usage when it is switched off", () => {
+    const items = select({
+      diskUsage: DISK_USAGE,
+      visible: { ...DEFAULT_SIDEBAR_ROW_ITEMS, diskUsage: false },
+    });
+    expect(kinds(items)).toEqual(["host", "changeRequest", "checks", "services", "labels"]);
+  });
+
+  it("omits disk usage when the workspace has never been sampled", () => {
+    const items = select({ diskUsage: null });
+    expect(kinds(items)).toEqual(["host", "changeRequest", "checks", "services", "labels"]);
+  });
+
+  it("omits disk usage below the tone model's floor", () => {
+    const items = select({ diskUsage: { ...DISK_USAGE, bytes: DISK_USAGE_FLOOR_BYTES - 1 } });
+    expect(kinds(items)).toEqual(["host", "changeRequest", "checks", "services", "labels"]);
+  });
+
+  it("draws disk usage at the floor, right after services, with its resolved tone", () => {
+    const items = select({ diskUsage: DISK_USAGE });
+    expect(kinds(items)).toEqual([
+      "host",
+      "changeRequest",
+      "checks",
+      "services",
+      "diskUsage",
+      "labels",
+    ]);
+    expect(items.find((item) => item.kind === "diskUsage")).toEqual({
+      kind: "diskUsage",
+      diskUsage: DISK_USAGE,
+      tone: "muted",
+    });
   });
 });

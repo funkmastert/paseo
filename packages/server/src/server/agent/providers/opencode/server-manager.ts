@@ -333,6 +333,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     );
     const serverProcess = this.spawnServerProcess(launchPrefix.command, serverArgs, {
       cwd: serverCwd,
+      priority: "agent",
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
       ...createProviderEnvSpec({

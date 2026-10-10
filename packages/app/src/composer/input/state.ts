@@ -12,6 +12,15 @@ export function resolveActiveSendBehavior(
   return sendBehavior === "queue" && hasPendingPermission ? "interrupt" : sendBehavior;
 }
 
+/**
+ * What the daemon is told to do with a running turn. Only the explicit "interrupt" setting may
+ * cancel one: a queued message goes out once the agent looks idle, and a background task that
+ * woke it in the meantime would die with the interrupted turn.
+ */
+export function toActiveTurnBehavior(sendBehavior: SendBehavior): ActiveTurnBehavior {
+  return sendBehavior === "interrupt" ? "interrupt" : "steer";
+}
+
 interface ComposerSurfaceState {
   opacity: 0 | 1;
   pointerEvents: "auto" | "none";

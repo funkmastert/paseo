@@ -8,7 +8,7 @@ import {
   openMobileAgentSidebar,
   pinWorkspaceFromSidebar,
 } from "../support/helpers/sidebar";
-import { seedWorkspace } from "../support/helpers/seed-client";
+import { seedWorkspace, settleAutoPin } from "../support/helpers/seed-client";
 import { expectWorkspaceHeader } from "../support/helpers/workspace-ui";
 import { getServerId } from "../support/helpers/server-id";
 import { projectEquivalenceViewKey } from "../support/helpers/project-view-key";
@@ -213,6 +213,9 @@ test.describe("Sidebar workspace list", () => {
       await workspace.client.waitForFinish(workspace.agentId, 20_000);
       await workspace.client.clearWorkspaceAttention(workspace.workspaceId);
       expect(workspace.client.getLastServerInfoMessage()?.features?.workspaceMarkUnread).toBe(true);
+      // This test reads `workspace-status-indicator-done` on the row directly, which a pinned row
+      // doesn't render — settle the session-start auto pin first.
+      await settleAutoPin(workspace.client, workspace.workspaceId);
       await gotoAppShell(page);
 
       const row = await waitForSidebarWorkspace(page, workspace.workspaceId);
@@ -257,6 +260,9 @@ test.describe("Mobile sidebar panelState transition", () => {
     const workspace = await seedWorkspace({ repoPrefix: "sidebar-retained-pin-" });
 
     try {
+      // This test drives the manual pin gesture itself — start from unpinned so that gesture is
+      // what's under test, not the session-start auto pin.
+      await settleAutoPin(workspace.client, workspace.workspaceId);
       await gotoAppShell(page);
       await openMobileAgentSidebar(page);
       await expectMobileAgentSidebarVisible(page);
@@ -283,6 +289,9 @@ test.describe("Half-screen desktop layout", () => {
     const workspace = await seedWorkspace({ repoPrefix: "sidebar-retained-scroll-" });
 
     try {
+      // This test scrolls a project's grouped workspace list — settle each auto pin so all 25
+      // stay grouped under the project instead of hoisting into Pinned.
+      await settleAutoPin(workspace.client, workspace.workspaceId);
       let lastWorkspaceId = workspace.workspaceId;
       for (let index = 0; index < 24; index += 1) {
         const created = await workspace.client.createWorkspace({
@@ -297,6 +306,7 @@ test.describe("Half-screen desktop layout", () => {
           throw new Error(created.error ?? "Failed to fill the retained sidebar");
         }
         lastWorkspaceId = created.workspace.id;
+        await settleAutoPin(workspace.client, lastWorkspaceId);
       }
 
       await gotoAppShell(page);

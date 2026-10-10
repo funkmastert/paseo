@@ -581,6 +581,7 @@ test("captures session IDs from fixture-driven init message variants", async () 
         handleSystemMessage: (message: Record<string, unknown>) => {
           threadStartedSessionId: string | null;
           notice: AgentTimelineItem | null;
+          mcpServerStatuses: { name: string; status: string }[];
         };
       } = asInternals(session);
       try {
@@ -594,6 +595,7 @@ test("captures session IDs from fixture-driven init message variants", async () 
         expect(started).toEqual({
           threadStartedSessionId: fixture.expected,
           notice: null,
+          mcpServerStatuses: [],
         });
         expect(session.describePersistence()?.sessionId).toBe(fixture.expected);
       } finally {

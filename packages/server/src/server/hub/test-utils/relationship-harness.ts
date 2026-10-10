@@ -1571,7 +1571,7 @@ export class HubRelationshipHarness {
           },
           input,
         ),
-      interruptAgent: (agentId) => manager.cancelAgentRun(agentId),
+      interruptAgent: (agentId) => manager.cancelAgentRun(agentId, "hub"),
       archiveWorkspace: async () => undefined,
     });
   }

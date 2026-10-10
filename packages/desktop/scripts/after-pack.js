@@ -2,8 +2,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { smokePackagedDesktopApp } = require("../e2e/packaged-app-smoke.js");
-
-const EXECUTABLE_NAME = "Paseo";
+const { resolveExecutableNameFromContext } = require("./executable-name.js");
 
 // electron-builder arch enum → Node.js arch string
 const ARCH_MAP = { 0: "ia32", 1: "x64", 2: "armv7l", 3: "arm64", 4: "universal" };
@@ -73,12 +72,44 @@ function pruneSharpLibvips(nodeModules, platform, arch) {
   }
 }
 
-function pruneNativeModules(appOutDir, platform, arch) {
+function getResourcesDir(appOutDir, platform, executableName) {
   const resourcesDir =
     platform === "darwin"
-      ? path.join(appOutDir, `${EXECUTABLE_NAME}.app`, "Contents", "Resources")
+      ? path.join(appOutDir, `${executableName}.app`, "Contents", "Resources")
       : path.join(appOutDir, "resources");
 
+  // The resources dir is derived from the packaged executable name (see
+  // executable-name.js). If it doesn't exist, that name resolution is wrong
+  // rather than there being nothing to prune — fail loudly instead of
+  // silently shipping an unpruned, oversized bundle.
+  if (!fs.existsSync(resourcesDir)) {
+    throw new Error(
+      `afterPack: expected packaged resources at ${resourcesDir} but it does not exist. ` +
+        `Executable name resolution (${executableName}) may not match the actual packaged app.`,
+    );
+  }
+
+  return resourcesDir;
+}
+
+// bin/paseo and bin/paseo.cmd are checked in with the upstream "Paseo" brand
+// hardcoded (Helper.app name on macOS, main executable name on every
+// platform). A rebranded fork (executableName != "Paseo") ships them
+// unmodified via extraResources, so the shim looks for an executable that
+// was never packaged. Patch the literal brand token post-copy instead of
+// templating the scripts, since this must stay a no-op for upstream.
+function patchCliShim(resourcesDir, platform, executableName) {
+  const shimPath = path.join(resourcesDir, "bin", platform === "win32" ? "paseo.cmd" : "paseo");
+  if (!fs.existsSync(shimPath)) return;
+
+  const original = fs.readFileSync(shimPath, "utf8");
+  const patched = original.replaceAll("Paseo", executableName);
+  if (patched !== original) {
+    fs.writeFileSync(shimPath, patched);
+  }
+}
+
+function pruneNativeModules(resourcesDir, platform, arch) {
   const nodeModules = path.join(resourcesDir, "app.asar.unpacked", "node_modules");
   if (!fs.existsSync(nodeModules)) return;
 
@@ -112,8 +143,11 @@ function fmtMB(bytes) {
 exports.default = async function afterPack(context) {
   const platform = context.electronPlatformName;
   const arch = ARCH_MAP[context.arch] || process.arch;
+  const executableName = resolveExecutableNameFromContext(context);
+  const resourcesDir = getResourcesDir(context.appOutDir, platform, executableName);
 
-  pruneNativeModules(context.appOutDir, platform, arch);
+  pruneNativeModules(resourcesDir, platform, arch);
+  patchCliShim(resourcesDir, platform, executableName);
 
   if (platform === "linux" || platform === "win32") {
     if (arch !== process.arch) {
@@ -121,17 +155,18 @@ exports.default = async function afterPack(context) {
         `Skipping packaged-app smoke: build arch ${arch} differs from host ${process.arch}.`,
       );
     } else {
-      await smokeUnpackedAppIfRequested(context.appOutDir);
+      await smokeUnpackedAppIfRequested(context.appOutDir, executableName);
     }
   }
 };
 
-async function smokeUnpackedAppIfRequested(appOutDir) {
+async function smokeUnpackedAppIfRequested(appOutDir, executableName) {
   if (process.env.PASEO_DESKTOP_SMOKE !== "1") {
     return;
   }
 
   await smokePackagedDesktopApp({
     appPath: appOutDir,
+    executableName,
   });
 }

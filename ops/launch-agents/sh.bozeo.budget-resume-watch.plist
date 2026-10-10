@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>sh.bozeo.budget-resume-watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/tylerthackray/.nvm/versions/node/v24.18.0/bin/node</string>
+    <string>/Users/tylerthackray/bozeo-ops/budget-resume-watch.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>StartInterval</key><integer>900</integer>
+  <key>RunAtLoad</key><true/>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/Users/tylerthackray/Library/Logs/Bozeo/budget-resume-watch.log</string>
+  <key>StandardErrorPath</key><string>/Users/tylerthackray/Library/Logs/Bozeo/budget-resume-watch.log</string>
+</dict>
+</plist>
