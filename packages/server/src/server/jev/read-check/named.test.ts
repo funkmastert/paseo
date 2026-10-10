@@ -79,6 +79,30 @@ describe("isNamedRead", () => {
     ).toBe(false);
   });
 
+  test("a root-level file's path is its own base name: the denylist still applies to it", () => {
+    // `displayPath`/`namedPath` equal the bare base name for any file at the agent's cwd root —
+    // the direct-path shortcut must not let a generic name skip the denylist just because of that.
+    expect(
+      isNamedRead(
+        { namedPath: "package.json", displayPath: "package.json", realPath: "/repo/package.json" },
+        { texts: ["assistant: check package.json for the dependency"] },
+      ),
+    ).toBe(false);
+  });
+
+  test("a root-level file's path still matches when its base name is not generic", () => {
+    expect(
+      isNamedRead(
+        {
+          namedPath: "webpack.config.js",
+          displayPath: "webpack.config.js",
+          realPath: "/repo/webpack.config.js",
+        },
+        { texts: ["assistant: check webpack.config.js for the alias"] },
+      ),
+    ).toBe(true);
+  });
+
   test("nothing in context is a non-match, not a throw", () => {
     expect(
       isNamedRead(

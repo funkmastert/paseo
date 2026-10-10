@@ -46,8 +46,17 @@ export interface NamedReadContext {
 export function isNamedRead(paths: NamedReadPaths, context: NamedReadContext): boolean {
   const haystack = context.texts.filter((text): text is string => Boolean(text)).join("\n");
   if (haystack.length === 0) return false;
-  if (haystack.includes(paths.namedPath) || haystack.includes(paths.displayPath)) return true;
   const baseName = path.basename(paths.realPath);
+  // A root-level file's named or display path IS its base name: that match has to clear the
+  // same length floor and denylist the base-name rule enforces below, or `package.json` at the
+  // repo root would get a free pass from any text that merely says "package.json" in passing.
+  const isBareBaseName = (candidate: string) => candidate === baseName;
+  if (
+    (!isBareBaseName(paths.namedPath) && haystack.includes(paths.namedPath)) ||
+    (!isBareBaseName(paths.displayPath) && haystack.includes(paths.displayPath))
+  ) {
+    return true;
+  }
   if (baseName.length < MIN_NAMED_BASENAME_CHARS) return false;
   if (GENERIC_BASENAMES.has(baseName.toLowerCase())) return false;
   return haystack.includes(baseName);
