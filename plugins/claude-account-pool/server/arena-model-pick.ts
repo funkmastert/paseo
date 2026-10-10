@@ -129,17 +129,24 @@ function bestRowFor(
     return { row: exact, proxy: false };
   }
   const plannedRank = EFFORT_RANK[plannedEffort];
-  let best = candidates[0];
+  // An operator-configured effort id outside EFFORT_RANK's known ids (thinking.byTaskClass is
+  // validated only by a free-form regex, not this closed set) gives no reasoned "nearest" to pick:
+  // refuse to proxy rather than silently landing on candidates[0] by construction.
+  if (plannedRank === undefined) {
+    return undefined;
+  }
+  let best: ArenaRankingRow | undefined;
   let bestDistance = Infinity;
   for (const row of candidates) {
     const rank = EFFORT_RANK[row.effort];
-    const distance = plannedRank === undefined || rank === undefined ? Infinity : Math.abs(rank - plannedRank);
+    const distance = rank === undefined ? Infinity : Math.abs(rank - plannedRank);
     if (distance < bestDistance) {
       bestDistance = distance;
       best = row;
     }
   }
-  return { row: best, proxy: true };
+  // Every candidate row has an unrecognized effort id too: same "no reasoned nearest" refusal.
+  return best ? { row: best, proxy: true } : undefined;
 }
 
 interface RankedCandidate {
@@ -154,13 +161,41 @@ function ciOverlaps(a: ArenaRankingRow, b: ArenaRankingRow): boolean {
   return !(a.ratingLower > b.ratingUpper || b.ratingLower > a.ratingUpper);
 }
 
-/** Ranked candidates by score (CI-overlap ties broken by operator order), then unranked ones in operator order. */
+/**
+ * Ranked candidates by score (CI-overlap ties broken by operator order), then
+ * unranked ones in operator order.
+ *
+ * CI overlap is not transitive — A can overlap B and B can overlap C while A
+ * and C don't — so a pairwise comparator handed to `Array.sort` is not a
+ * total order, and the result for 3+ candidates would depend on the engine's
+ * sort algorithm rather than a well-defined rule. Sorting purely by score
+ * first (always transitive) and then merging each run of adjacent,
+ * CI-overlapping candidates into one tie-group — settled internally by
+ * operator order — is transitive by construction. A chain (A-B and B-C
+ * overlap, A-C doesn't) merges into one group rather than three isolated
+ * pairs: the alternative, requiring every pair in a group to overlap
+ * directly, has no well-defined answer either once a chain like that exists.
+ */
 function orderCandidates(candidates: readonly RankedCandidate[]): RankedCandidate[] {
-  const ranked = candidates.filter((c): c is RankedCandidate & { row: ArenaRankingRow } => c.row !== undefined);
   const unranked = candidates.filter((c) => c.row === undefined);
-  ranked.sort((a, b) => (ciOverlaps(a.row, b.row) ? a.poolIndex - b.poolIndex : b.row.rating - a.row.rating));
   unranked.sort((a, b) => a.poolIndex - b.poolIndex);
-  return [...ranked, ...unranked];
+
+  const byScore = candidates
+    .filter((c): c is RankedCandidate & { row: ArenaRankingRow } => c.row !== undefined)
+    .sort((a, b) => b.row.rating - a.row.rating);
+
+  const ordered: Array<RankedCandidate & { row: ArenaRankingRow }> = [];
+  let groupStart = 0;
+  for (let i = 1; i <= byScore.length; i++) {
+    const extendsGroup = i < byScore.length && ciOverlaps(byScore[i - 1].row, byScore[i].row);
+    if (extendsGroup) {
+      continue;
+    }
+    const group = byScore.slice(groupStart, i).sort((a, b) => a.poolIndex - b.poolIndex);
+    ordered.push(...group);
+    groupStart = i;
+  }
+  return [...ordered, ...unranked];
 }
 
 function toSnapshot(candidate: RankedCandidate & { row: ArenaRankingRow }): ArenaScoreSnapshot {

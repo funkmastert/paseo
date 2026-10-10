@@ -24,7 +24,7 @@ describe("createArenaRankingCache", () => {
   });
 
   it("reads the file once refreshed", async () => {
-    const file = { fetchedAt: Date.now(), publishDate: "2026-10-08", boards: {}, unmatched: {} };
+    const file = { fetchedAt: Date.now(), publishDate: "2026-10-08", boards: {}, unmatched: {}, failedBoards: [] };
     await fs.writeFile(path.join(tempDir, "arena-rankings.json"), JSON.stringify(file), "utf-8");
 
     const cache = createArenaRankingCache(tempDir, noInterval);
@@ -51,7 +51,7 @@ describe("createArenaRankingCache", () => {
   });
 
   it("re-reads getMaxAgeHours on every poll, picking up a live policy edit", async () => {
-    const file = { fetchedAt: Date.now() - 80 * 60 * 60 * 1000, publishDate: "2026-10-05", boards: {}, unmatched: {} };
+    const file = { fetchedAt: Date.now() - 80 * 60 * 60 * 1000, publishDate: "2026-10-05", boards: {}, unmatched: {}, failedBoards: [] };
     await fs.writeFile(path.join(tempDir, "arena-rankings.json"), JSON.stringify(file), "utf-8");
 
     let maxAgeHours = 72;

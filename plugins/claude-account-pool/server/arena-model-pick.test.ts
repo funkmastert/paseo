@@ -22,7 +22,7 @@ function row(overrides: Partial<ArenaRankingRow> & { ours: string }): ArenaRanki
 }
 
 function rankings(boards: Record<string, ArenaRankingRow[]>, overrides: Partial<ArenaRankingsFile> = {}): ArenaRankingsFile {
-  return { fetchedAt: NOW - 60 * 60 * 1000, publishDate: "2026-10-08", boards, unmatched: {}, ...overrides };
+  return { fetchedAt: NOW - 60 * 60 * 1000, publishDate: "2026-10-08", boards, unmatched: {}, failedBoards: [], ...overrides };
 }
 
 function input(overrides: Partial<ArenaPickInput> = {}): ArenaPickInput {
@@ -131,6 +131,27 @@ describe("decideArenaPick — ordinary ranked picks", () => {
     expect(result).toMatchObject({ outcome: "ranked", ref: "codex/gpt-6-sol" });
   });
 
+  it("a chained CI overlap (A-B overlap, B-C overlap, A-C don't) merges into one tie-group settled by operator order (finding #7)", () => {
+    // Deliberately scrambled operator order so the winner proves the group-merge rule rather
+    // than coinciding with score order or pool order by accident.
+    const result = decideArenaPick(
+      input({
+        pool: ["codex/gpt-6-luna", "claude-sonnet-5-5", "codex/gpt-6-sol"],
+        rankings: rankings({
+          "webdev/webdev-react": [
+            row({ ours: "codex/gpt-6-luna", rating: 85, ratingLower: 70, ratingUpper: 95 }), // C
+            row({ ours: "claude-sonnet-5-5", rating: 115, ratingLower: 100, ratingUpper: 120 }), // A: highest score
+            row({ ours: "codex/gpt-6-sol", rating: 100, ratingLower: 90, ratingUpper: 105 }), // B: overlaps both A and C
+          ],
+        }),
+      }),
+    );
+    // A and C do not directly overlap, but both overlap B, so all three merge into one group;
+    // operator order within that group picks codex/gpt-6-luna (listed first), not
+    // claude-sonnet-5-5 (the highest raw score).
+    expect(result).toMatchObject({ outcome: "ranked", ref: "codex/gpt-6-luna" });
+  });
+
   it("an unranked candidate sorts after ranked ones", () => {
     const result = decideArenaPick(
       input({
@@ -174,6 +195,21 @@ describe("decideArenaPick — ordinary ranked picks", () => {
       }),
     );
     expect(result).toMatchObject({ outcome: "ranked", tier: "mid" });
+  });
+
+  it("refuses to proxy a row when plannedEffort is outside EFFORT_RANK's known ids, rather than landing on an arbitrary row", () => {
+    // Neither candidate has a row at "turbo" (not a real effort id), so with no reasoned
+    // "nearest" to pick, both candidates are treated as unranked and the board never reaches
+    // the two-candidate floor.
+    const result = decideArenaPick(
+      input({
+        plannedEffort: "turbo",
+        rankings: rankings({
+          "webdev/webdev-react": [row({ ours: "claude-sonnet-5-5", effort: "xhigh" }), row({ ours: "codex/gpt-6-sol", effort: "max" })],
+        }),
+      }),
+    );
+    expect(result).toEqual({ outcome: "fallback", reason: "no-ranked-board" });
   });
 });
 

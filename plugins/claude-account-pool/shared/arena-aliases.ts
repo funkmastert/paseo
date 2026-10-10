@@ -91,6 +91,14 @@ export const ArenaRankingsFileSchema = z.object({
   ),
   /** Count of unmatched rows per board. */
   unmatched: z.record(z.string(), z.number()),
+  /**
+   * Board ids whose fetch failed and are therefore absent from `boards`
+   * entirely — distinct from a board that fetched successfully but is
+   * legitimately small or empty. Default empty for a file written before
+   * this field existed. Lets a degraded day be audited from the file
+   * itself, not only from a `daemon.log` line that may have rotated out.
+   */
+  failedBoards: z.array(z.string()).default([]),
 });
 
 export type ArenaRankingsFile = z.infer<typeof ArenaRankingsFileSchema>;

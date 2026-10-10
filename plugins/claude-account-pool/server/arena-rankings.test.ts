@@ -2,6 +2,17 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
+
+// A real ES module namespace is not configurable, so `vi.spyOn(fs, "rename")` cannot work (see
+// the "writes an interrupted-write-safe file" test below). Mocking the module itself, with every
+// export delegating to the real implementation by default, gives that one test a seam to reject
+// `rename` exactly once while every other test in this file keeps using real fs/promises behavior
+// unchanged — including inside arena-rankings.ts's own `writeRankingsFile`, the function under test.
+vi.mock("fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs/promises")>();
+  return { ...actual, rename: vi.fn(actual.rename) };
+});
+
 import {
   canonicalArenaName,
   loadArenaRankings,
@@ -223,6 +234,7 @@ describe("loadArenaRankings", () => {
         ],
       },
       unmatched: { "agent/overall": 2 },
+      failedBoards: [],
     };
     await fs.writeFile(path.join(tempDir, "arena-rankings.json"), JSON.stringify(freshFile), "utf-8");
     expect(await loadArenaRankings(tempDir, 72)).toEqual(freshFile);
@@ -231,6 +243,31 @@ describe("loadArenaRankings", () => {
   it("returns null on malformed JSON", async () => {
     await fs.writeFile(path.join(tempDir, "arena-rankings.json"), "{not json", "utf-8");
     expect(await loadArenaRankings(tempDir)).toBeNull();
+  });
+
+  describe("corruption is distinguishable from a missing file (finding #5)", () => {
+    it("logs nothing for a missing file: the expected 'job hasn't run yet' case", async () => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      await loadArenaRankings(tempDir);
+      expect(errors).not.toHaveBeenCalled();
+      errors.mockRestore();
+    });
+
+    it("logs an error for malformed JSON: a genuine corruption bug", async () => {
+      await fs.writeFile(path.join(tempDir, "arena-rankings.json"), "{not json", "utf-8");
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      await loadArenaRankings(tempDir);
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("failed to parse"));
+      errors.mockRestore();
+    });
+
+    it("logs an error for valid JSON that fails the schema: also a genuine corruption bug", async () => {
+      await fs.writeFile(path.join(tempDir, "arena-rankings.json"), JSON.stringify({ not: "the right shape" }), "utf-8");
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      await loadArenaRankings(tempDir);
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("failed to parse"));
+      errors.mockRestore();
+    });
   });
 });
 
@@ -304,6 +341,31 @@ describe("refreshArenaRankings", () => {
     expect(calls).toBeGreaterThan(1); // The retry happened.
   });
 
+  it("persists which boards failed when one config's boards fail entirely but others succeed (finding #6)", async () => {
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      const config = u.searchParams.get("config");
+      if (config === "webdev") {
+        throw new Error("persistent network error for webdev");
+      }
+      const offset = Number(u.searchParams.get("offset"));
+      if (offset > 0) {
+        return new Response(JSON.stringify({ rows: [], num_rows_total: 1 }), { status: 200 });
+      }
+      const row = { model_name: "claude-sonnet-5.5-high", category: "overall", rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-08" };
+      return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await refreshArenaRankings(tempDir);
+    expect(result.status).toBe("success");
+
+    const written = await loadArenaRankings(tempDir);
+    // A degraded day is auditable from the file itself: the failed board ids are persisted,
+    // not only logged to a console line that may have rotated out.
+    expect(written?.failedBoards).toEqual(expect.arrayContaining(["webdev/webdev-react", "webdev/overall"]));
+    expect(written?.boards["webdev/webdev-react"]).toBeUndefined();
+  });
+
   it("keeps the previous file when every board fetch fails", async () => {
     const oldFile = { fetchedAt: Date.now() - 1000 * 60 * 60, publishDate: "2026-10-01", boards: { "agent/overall": [] }, unmatched: {} };
     const filePath = path.join(tempDir, "arena-rankings.json");
@@ -319,18 +381,26 @@ describe("refreshArenaRankings", () => {
   });
 
   it("writes an interrupted-write-safe file: a mid-write crash leaves the old file whole", async () => {
-    const oldFile = { fetchedAt: Date.now() - 1000 * 60 * 60, publishDate: "2026-10-01", boards: {}, unmatched: {} };
+    const oldFile = { fetchedAt: Date.now() - 1000 * 60 * 60, publishDate: "2026-10-01", boards: {}, unmatched: {}, failedBoards: [] };
     const filePath = path.join(tempDir, "arena-rankings.json");
     await fs.writeFile(filePath, JSON.stringify(oldFile), "utf-8");
 
-    // Simulate a crash mid-refresh: the temp file gets written, but rename never happens
-    // because the process dies first. The target file must be untouched.
-    await fs.writeFile(`${filePath}.tmp-99999`, "{partial", "utf-8");
+    global.fetch = singlePageFetchMock() as unknown as typeof fetch;
+
+    // Exercise the real write path (writeRankingsFile) under a simulated crash between the temp
+    // write and the rename that makes it visible, rather than writing an unrelated sibling file
+    // that proves nothing about writeRankingsFile's own atomicity.
+    vi.mocked(fs.rename).mockRejectedValueOnce(new Error("simulated crash before rename"));
+
+    const result = await refreshArenaRankings(tempDir);
+    expect(result.status).toBe("failed");
 
     const content = await fs.readFile(filePath, "utf-8");
     expect(JSON.parse(content).publishDate).toBe("2026-10-01");
 
-    await fs.unlink(`${filePath}.tmp-99999`);
+    // Clean up the stray temp file the simulated crash left behind.
+    const files = await fs.readdir(tempDir);
+    await Promise.all(files.filter((f) => f.includes(".tmp-")).map((f) => fs.unlink(path.join(tempDir, f))));
   });
 });
 

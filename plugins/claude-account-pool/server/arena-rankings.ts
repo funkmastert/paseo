@@ -246,11 +246,29 @@ async function writeRankingsFile(paseoHome: string, file: ArenaRankingsFile): Pr
   await fs.rename(tempPath, targetPath);
 }
 
+/**
+ * Split by failure kind so a genuine corruption bug is distinguishable in
+ * `daemon.log` from the expected "no file yet" case, which logs nothing
+ * (KTD-10's debugging contract — a human reading the log after a "rankings
+ * never update" report needs to tell "the job hasn't run yet" apart from
+ * "every refresh since some date has written something that fails to parse
+ * back"). Either way the return contract is unchanged: `null`, R8 fail-open.
+ */
 async function readRankingsFile(paseoHome: string): Promise<ArenaRankingsFile | null> {
+  const targetPath = rankingsFilePath(paseoHome);
+  let content: string;
   try {
-    const content = await fs.readFile(rankingsFilePath(paseoHome), "utf-8");
+    content = await fs.readFile(targetPath, "utf-8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      console.error(`arena-rankings: failed to read ${targetPath}: ${e instanceof Error ? e.message : e}`);
+    }
+    return null;
+  }
+  try {
     return ArenaRankingsFileSchema.parse(JSON.parse(content));
-  } catch {
+  } catch (e) {
+    console.error(`arena-rankings: ${targetPath} failed to parse (corrupt or schema mismatch): ${e instanceof Error ? e.message : e}`);
     return null;
   }
 }
@@ -277,6 +295,7 @@ export async function refreshArenaRankings(
       publishDate: new Date().toISOString().slice(0, 10),
       boards,
       unmatched,
+      failedBoards,
     };
 
     await writeRankingsFile(paseoHome, file);
