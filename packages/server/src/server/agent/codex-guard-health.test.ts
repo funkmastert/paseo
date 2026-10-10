@@ -47,6 +47,7 @@ describe("evaluateCodexGuardSelfTest", () => {
     canaryDecision: "decline" as const,
     canaryDeclinedByCanaryRule: true,
     canaryFileExists: false,
+    catastropheRuleSeen: true,
   };
 
   test("green when the ok command ran and the canary was declined by the canary rule", () => {
@@ -79,6 +80,12 @@ describe("evaluateCodexGuardSelfTest", () => {
 
   test("red when the canary was accepted instead of declined", () => {
     expect(evaluateCodexGuardSelfTest({ ...passing, canaryDecision: "accept" }).status).toBe("red");
+  });
+
+  test("red when the catastrophe gate's force-push-main refusal was never observed (review finding #5)", () => {
+    expect(evaluateCodexGuardSelfTest({ ...passing, catastropheRuleSeen: false }).status).toBe(
+      "red",
+    );
   });
 });
 
@@ -237,10 +244,137 @@ describe("runCodexGuardSelfTest", () => {
     });
     await appServer.waitForCommandApprovalDecision("canary-item");
 
+    // The force-push command (review finding #5) is declined by the real catastrophe gate --
+    // reached via the same guarded-mode approval handler as a production Codex child -- before
+    // the fake device gate above is ever consulted.
+    appServer.requestCommandApproval({
+      itemId: "force-push-item",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "git push --force origin main",
+      cwd: "/tmp",
+      reason: "force push",
+    });
+    await appServer.waitForCommandApprovalDecision("force-push-item");
+
     appServer.completeTurn({ threadId: "thread-1" });
 
     await runPromise;
 
     expect(getCodexGuardHealthState()).toMatchObject({ status: "green" });
+  });
+
+  test("sets health red when the force-push command's catastrophe-gate refusal is never observed (review finding #5)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+
+    const runPromise = runCodexGuardSelfTest({
+      createClient: createGuardedClient(appServer),
+      model: "gpt-6-luna",
+      codexVersion: "0.160.0",
+      timeoutMs: 5_000,
+    });
+
+    const turnStartParams = await appServer.waitForTurnStart();
+    appServer.startsTurn({ threadId: "thread-1", turnId: "native-A" });
+    const okPath = extractGuardPath(turnStartParams, "paseo-guard-ok");
+    const canaryPath = extractGuardPath(turnStartParams, "paseo-guard-canary");
+
+    appServer.requestCommandApproval({
+      itemId: "ok-item",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: `touch ${okPath}`,
+      cwd: "/tmp",
+      reason: "ok",
+    });
+    await appServer.waitForCommandApprovalDecision("ok-item");
+    writeFileSync(okPath, "");
+
+    appServer.requestCommandApproval({
+      itemId: "canary-item",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: `touch ${canaryPath}`,
+      cwd: "/tmp",
+      reason: "canary",
+    });
+    await appServer.waitForCommandApprovalDecision("canary-item");
+
+    // The model never attempts the third command at all -- no force-push approval request, so no
+    // catastrophe-gate refusal was ever observed.
+    appServer.completeTurn({ threadId: "thread-1" });
+
+    await runPromise;
+
+    expect(getCodexGuardHealthState()).toMatchObject({ status: "red" });
+  });
+
+  test("a live-detection red that lands mid-run stays sticky against this self-test's own green verdict (review finding #6)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+
+    const runPromise = runCodexGuardSelfTest({
+      createClient: createGuardedClient(appServer),
+      model: "gpt-6-luna",
+      codexVersion: "0.160.0",
+      timeoutMs: 5_000,
+    });
+
+    const turnStartParams = await appServer.waitForTurnStart();
+    appServer.startsTurn({ threadId: "thread-1", turnId: "native-A" });
+    const okPath = extractGuardPath(turnStartParams, "paseo-guard-ok");
+    const canaryPath = extractGuardPath(turnStartParams, "paseo-guard-canary");
+
+    // A different, concurrently-running guarded child's live detection turns health red while
+    // this self-test is still in flight.
+    setCodexGuardHealthState({
+      status: "red",
+      reason: "live detection landed mid-run",
+      codexVersion: "0.160.0",
+    });
+
+    appServer.requestCommandApproval({
+      itemId: "ok-item",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: `touch ${okPath}`,
+      cwd: "/tmp",
+      reason: "ok",
+    });
+    await appServer.waitForCommandApprovalDecision("ok-item");
+    writeFileSync(okPath, "");
+
+    appServer.requestCommandApproval({
+      itemId: "canary-item",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: `touch ${canaryPath}`,
+      cwd: "/tmp",
+      reason: "canary",
+    });
+    await appServer.waitForCommandApprovalDecision("canary-item");
+
+    appServer.requestCommandApproval({
+      itemId: "force-push-item",
+      threadId: "thread-1",
+      turnId: "native-A",
+      command: "git push --force origin main",
+      cwd: "/tmp",
+      reason: "force push",
+    });
+    await appServer.waitForCommandApprovalDecision("force-push-item");
+
+    appServer.completeTurn({ threadId: "thread-1" });
+
+    // This self-test's own observations would otherwise compute a green verdict here.
+    await runPromise;
+
+    expect(getCodexGuardHealthState()).toMatchObject({
+      status: "red",
+      reason: "live detection landed mid-run",
+    });
   });
 });
