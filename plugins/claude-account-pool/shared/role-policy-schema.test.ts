@@ -78,6 +78,41 @@ describe("RoleModelPolicySchema", () => {
     });
   });
 
+  describe("arena (KTD-13)", () => {
+    it("parses an old policy with no arena key unchanged, with arena undefined", () => {
+      const result = RoleModelPolicySchema.safeParse(policy({}));
+      expect(result.success).toBe(true);
+      expect(result.success && result.data.arena).toBeUndefined();
+    });
+
+    it("fills in defaults for a partial arena block", () => {
+      // A stored document only ever sets what it changed from the default; cast past the
+      // helper's strict typing to exercise the parser the way real partial JSON would.
+      const result = RoleModelPolicySchema.safeParse({ ...policy({}), arena: { enabled: true } });
+      expect(result.success).toBe(true);
+      expect(result.success && result.data.arena).toEqual({
+        enabled: true,
+        shadow: true,
+        roles: ["worker", "reviewer"],
+        topTier: [],
+        topTierMarginCi: 0,
+        maxAgeHours: 72,
+      });
+    });
+
+    it("accepts bare and pinned topTier refs and rejects a malformed one", () => {
+      expect(
+        RoleModelPolicySchema.safeParse({ ...policy({}), arena: { topTier: ["claude-opus-5-5", "codex/gpt-6-astra"] } })
+          .success,
+      ).toBe(true);
+      expect(RoleModelPolicySchema.safeParse({ ...policy({}), arena: { topTier: ["has space"] } }).success).toBe(false);
+    });
+
+    it("rejects a negative topTierMarginCi", () => {
+      expect(RoleModelPolicySchema.safeParse({ ...policy({}), arena: { topTierMarginCi: -1 } }).success).toBe(false);
+    });
+  });
+
   describe("thinking", () => {
     it("defaults the whole block — leaders at Extra High, the three task-class levels — for a stored document that predates the field", () => {
       // Tyler's live v4 document, shaped exactly as `~/.paseo/config.json`

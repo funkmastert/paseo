@@ -4,6 +4,7 @@ import type { ResolvedPool } from "../shared/pool-config";
 import {
   AGENT_ROLE_LABEL,
   AGENT_TYPE_LABEL,
+  ARENA_PICK_LABEL,
   DEFAULT_POLICY as SHIPPED_POLICY,
   JEV_CALL_LABEL,
   JEV_SPAWN_LABEL,
@@ -14,6 +15,7 @@ import {
   THINKING_OVERRIDDEN_LABEL,
   TOOLS_DENIED_LABEL,
   UNADVERTISED_MODEL_LABEL,
+  WORK_KIND_LABEL,
   type RoleModelPolicy,
 } from "../shared/role-policy-schema";
 import { createHealthTracker } from "./health";
@@ -2611,6 +2613,156 @@ describe("JEV's labels", () => {
 
       expect(notice).toContain("[tool profile: read-only]");
       expect(notice).toContain("ask_jev");
+    });
+  });
+
+  describe("paseo.work-kind (U7, KTD-12)", () => {
+    const workKindHint = (status: "answered" | "shadow", choice: string): SpawnHint => ({
+      status,
+      callId: "jev-call-kind",
+      answers: { workKind: { choice, confidence: 0.9 } },
+      proposal: {},
+      applyHard: false,
+      applyRole: false,
+      declaredAudit: status === "shadow",
+    });
+
+    it("an unlabelled worker's call includes work_kind, and the answer lands in the label", () => {
+      const result = createRoleRouter(jevOptions())({ ...unlabelled(), jevHint: workKindHint("answered", "coding") }, fakeContext);
+
+      expect(result?.labels?.[WORK_KIND_LABEL]).toBe("coding");
+    });
+
+    it("a declared child: the kind is recorded, and the model is unchanged", () => {
+      const declaredHard = request({
+        callerAgentId: "c1",
+        labels: { [AGENT_ROLE_LABEL]: "worker", [TASK_CLASS_LABEL]: "hard" },
+        initialPrompt: "Implement the retry helper.",
+        config: { provider: "claude", cwd: "/tmp/work" },
+      });
+      const withoutHint = createRoleRouter(jevOptions())(declaredHard, fakeContext);
+
+      const result = createRoleRouter(jevOptions())(
+        { ...declaredHard, jevHint: workKindHint("shadow", "frontend") },
+        fakeContext,
+      );
+
+      expect(result?.config.model).toBe(withoutHint?.config.model);
+      expect(result?.labels?.[WORK_KIND_LABEL]).toBe("frontend");
+    });
+
+    it("a reviewer with no answer gets no label invented", () => {
+      const result = createRoleRouter(jevOptions())(unlabelled(), fakeContext);
+
+      expect(result?.labels?.[WORK_KIND_LABEL]).toBeUndefined();
+    });
+
+    it("JEV unavailable: no label value is invented", () => {
+      const result = createRoleRouter(jevOptions())(
+        { ...unlabelled(), jevHint: { status: "unavailable", reason: "no-status" } },
+        fakeContext,
+      );
+
+      expect(result?.labels?.[WORK_KIND_LABEL]).toBeUndefined();
+    });
+
+    it("writes nothing for an unrecognized kind value, rather than passing it through", () => {
+      const result = createRoleRouter(jevOptions())(
+        { ...unlabelled(), jevHint: workKindHint("answered", "not-a-real-kind") },
+        fakeContext,
+      );
+
+      expect(result?.labels?.[WORK_KIND_LABEL]).toBeUndefined();
+    });
+  });
+
+  describe("paseo.arena-pick (U8)", () => {
+    /** Two usable, non-overlapping-CI candidates in the worker's standard pool; arena enabled, live. */
+    function arenaOptions(): RoleRouterOptions {
+      const policy: RoleModelPolicy = {
+        ...DEFAULT_POLICY,
+        roles: DEFAULT_POLICY.roles.map((role) =>
+          role.id === "worker" ? { ...role, models: ["claude-haiku-4-5", "claude-sonnet-5"], mechanicalModels: [], hardModels: [] } : role,
+        ),
+        arena: { enabled: true, shadow: false, roles: ["worker", "reviewer"], topTier: [], topTierMarginCi: 0, maxAgeHours: 72 },
+      };
+      return baseOptions({
+        policyCache: fakePolicyCache(policy),
+        catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5", "claude-haiku-4-5"] })),
+        poolCache: fakePoolCache({ workers: [{ providerId: "claude-backup", priority: 1 }], leader: { providerId: "leader" } }),
+        arenaRankingCache: {
+          get: () => ({
+            fetchedAt: Date.now(),
+            publishDate: "2026-10-08",
+            boards: {
+              "webdev/webdev-react": [
+                { arenaName: "claude-sonnet-5-high", ours: "claude-sonnet-5", effort: "high", rating: 1700, ratingLower: 1680, ratingUpper: 1720, votes: 500 },
+                { arenaName: "claude-haiku-4-5-high", ours: "claude-haiku-4-5", effort: "high", rating: 1400, ratingLower: 1380, ratingUpper: 1420, votes: 500 },
+              ],
+            },
+            unmatched: {},
+            failedBoards: [],
+          }),
+        },
+      });
+    }
+
+    const frontendKindHint = (status: "answered" | "shadow" = "answered"): SpawnHint => ({
+      status,
+      callId: "jev-call-arena",
+      answers: { workKind: { choice: "frontend", confidence: 0.9 } },
+      proposal: {},
+      applyHard: false,
+      applyRole: false,
+      declaredAudit: status === "shadow",
+    });
+
+    const unlabelledFrontend = () =>
+      request({
+        callerAgentId: "c1",
+        labels: { [AGENT_ROLE_LABEL]: "worker" },
+        initialPrompt: "Add a hover state to the submit button.",
+        config: { provider: "claude", cwd: "/tmp/work" },
+      });
+
+    it("two test workers, one frontend: the label names the board, the credit's date, and that it applied", () => {
+      const result = createRoleRouter(arenaOptions())({ ...unlabelledFrontend(), jevHint: frontendKindHint() }, fakeContext);
+
+      expect(result?.config.model).toBe("claude-sonnet-5");
+      expect(result?.labels?.[ARENA_PICK_LABEL]).toBe("v1;ref=claude-sonnet-5;tier=mid;board=webdev/webdev-react;date=2026-10-08;applied=1;proxy=0");
+    });
+
+    it("writes nothing for a fallback (no kind answer): the decision log alone carries the reason", () => {
+      const result = createRoleRouter(arenaOptions())(unlabelledFrontend(), fakeContext);
+
+      expect(result?.labels?.[ARENA_PICK_LABEL]).toBeUndefined();
+    });
+
+    it("a leader never carries the label, even with arena.enabled true", () => {
+      const result = createRoleRouter(arenaOptions())(
+        { ...request({ initialPrompt: "lead this" }), jevHint: frontendKindHint() },
+        fakeContext,
+      );
+
+      expect(result?.labels?.[ARENA_PICK_LABEL]).toBeUndefined();
+    });
+
+    it("an honored explicit request never carries the label, even when a different ref would have ranked higher", () => {
+      const result = createRoleRouter(arenaOptions())(
+        {
+          ...request({
+            callerAgentId: "c1",
+            labels: { [AGENT_ROLE_LABEL]: "worker" },
+            initialPrompt: "Add a hover state to the submit button.",
+            config: { provider: "claude", model: "claude-haiku-4-5", cwd: "/tmp/work" },
+          }),
+          jevHint: frontendKindHint(),
+        },
+        fakeContext,
+      );
+
+      expect(result?.config.model).toBe("claude-haiku-4-5");
+      expect(result?.labels?.[ARENA_PICK_LABEL]).toBeUndefined();
     });
   });
 });

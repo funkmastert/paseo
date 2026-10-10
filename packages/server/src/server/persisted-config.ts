@@ -392,6 +392,9 @@ const AgentDeviceLeasesSchema = z
     // 0 disables the backstop.
     maxLeaseHours: z.number().nonnegative().optional(),
     queueTimeoutMinutes: z.number().positive().optional(),
+    // How long a lease may sit unused before it releases on its own, reason `idle`. 0 disables
+    // it, like `maxLeaseHours`. See docs/device-leases.md#a-lease-cannot-leak.
+    idleReleaseMinutes: z.number().nonnegative().optional(),
     // On unless `enabled` is false, but it acts on leases, so it needs the cap on too. Honors
     // `dryRun` above. See docs/device-leases.md#shutdown.
     simulatorTeardown: z
@@ -574,6 +577,16 @@ const AgentRefocusSchema = z
 const AgentCatastropheGateSchema = z
   .object({
     enabled: z.boolean().optional(),
+  })
+  .strict();
+
+// Live-toggleable, and on unless `enabled` is false: the kill switch for the AskUserQuestion
+// check. `mode: "log"` logs what it would have blocked and lets the turn end. See
+// docs/ask-user-question.md.
+const AgentAskUserQuestionSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    mode: z.enum(["enforce", "log"]).optional(),
   })
   .strict();
 
@@ -1061,6 +1074,7 @@ export const PersistedConfigSchema = z
         admission: AgentAdmissionSchema.optional(),
         refocus: AgentRefocusSchema.optional(),
         catastropheGate: AgentCatastropheGateSchema.optional(),
+        askUserQuestion: AgentAskUserQuestionSchema.optional(),
         buildGate: AgentBuildGateSchema.optional(),
         childEnv: AgentChildEnvSchema.optional(),
         remediation: AgentRemediationSchema.optional(),

@@ -136,15 +136,28 @@ That message only reaches Android. `launchd_sim` is reparented to pid 1 the mome
 
 ## A lease cannot leak
 
-Reconciliation runs every sweep against the process scan:
+Reconciliation runs every sweep against the process scan, and `agent-gone` also runs the moment
+an agent archives or closes — the agent manager's closed-agent event reconciles both lease
+managers right then, so a device frees in that tick rather than waiting for the next sweep (up to
+a minute for a simulator or emulator) or the physical manager's next 15-second poll:
 
-| Release reason   | When                                                             |
-| ---------------- | ---------------------------------------------------------------- |
-| `released`       | The agent called `device_checkin`                                |
-| `device-stopped` | Its device is gone from the scan                                 |
-| `never-started`  | It never became a device within `pendingTtlMinutes` (25)         |
-| `agent-gone`     | The daemon no longer knows the agent — archived, closed, crashed |
-| `expired`        | `maxLeaseHours` (12), the backstop                               |
+| Release reason   | When                                                                                                                                                  |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `released`       | The agent called `device_checkin`                                                                                                                     |
+| `device-stopped` | Its device is gone from the scan                                                                                                                      |
+| `never-started`  | It never became a device within `pendingTtlMinutes` (25)                                                                                              |
+| `agent-gone`     | The daemon no longer knows the agent — archived, closed, crashed                                                                                      |
+| `idle`           | Its holder has not used it for `idleReleaseMinutes` (default 15; 0 off). Never a `booted: true` simulator lease — the teardown valve above owns those |
+| `expired`        | `maxLeaseHours` (12), the backstop                                                                                                                    |
+
+"Used" is the idle release's own definition, shared with the teardown valve above: the holder is
+mid-turn, the holder still has a live shell under its root, or any process outside the device's
+own tree names its id (an Android AVD name or adb serial, an iOS UDID or devicectl identifier,
+matched as a whole token in argv — `device-detection.ts`'s `collectDeviceIdReferences`). A
+checkout, an install-gate or launch-gate decision that touches the lease counts as use too, so an
+agent that keeps calling back in never trips the clock. A phone lease ([below](#physical-devices))
+is idle-released the same way, off the resource monitor's sweep sample — that manager has no `ps`
+of its own.
 
 The `never-started` clock runs from the last launch the gate saw, not from checkout. A cold `expo run:ios` spends its first several minutes on pods and a native build before it boots anything, and a lease that expired mid-build would hand the slot to another agent moments before the device it was holding it for appeared — putting the machine over the cap, which is the state this exists to prevent. The gate restarts that clock, so the TTL only has to cover one build rather than a whole session. It deliberately does not touch `acquiredAtMs`: that is the clock a device binds against, and moving it forward would put the device the lease is waiting for in its own past.
 
@@ -183,20 +196,21 @@ The teardown reads leases, and only the cap binds them, so it does nothing while
 
 Under `agents.deviceLeases` (`persisted-config.ts`), live-toggleable like its siblings.
 
-| Key                             | Default | What it does                                                                                                |
-| ------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
-| `enabled`                       | `false` | Nothing is counted, refused or queued while off                                                             |
-| `dryRun`                        | `false` | Report what would have been refused; refuse nothing                                                         |
-| `totalSlots`                    | derived | Devices at once, all platforms                                                                              |
-| `slotsPerPlatform`              | derived | Per platform; clamped to `totalSlots`                                                                       |
-| `requireHeadroom`               | `true`  | Also refuse when memory is gone                                                                             |
-| `minAvailableBytes`             | 0.5 GiB | Free-memory floor                                                                                           |
-| `maxSwapUsedRatio`              | 0.85    | Swap ceiling                                                                                                |
-| `pendingTtlMinutes`             | 25      | How long a lease may wait for its device to appear                                                          |
-| `maxLeaseHours`                 | 12      | Backstop; 0 disables                                                                                        |
-| `queueTimeoutMinutes`           | 20      | How long `device_checkout` waits                                                                            |
-| `simulatorTeardown.enabled`     | `true`  | Shut down agent-booted simulators at daemon stop and when idle; needs `enabled` too ([Shutdown](#shutdown)) |
-| `simulatorTeardown.idleMinutes` | 30      | How long an agent-booted simulator may go unused before the sweep shuts it down                             |
+| Key                             | Default | What it does                                                                                                                                                                    |
+| ------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                       | `false` | Nothing is counted, refused or queued while off                                                                                                                                 |
+| `dryRun`                        | `false` | Report what would have been refused; refuse nothing                                                                                                                             |
+| `totalSlots`                    | derived | Devices at once, all platforms                                                                                                                                                  |
+| `slotsPerPlatform`              | derived | Per platform; clamped to `totalSlots`                                                                                                                                           |
+| `requireHeadroom`               | `true`  | Also refuse when memory is gone                                                                                                                                                 |
+| `minAvailableBytes`             | 0.5 GiB | Free-memory floor                                                                                                                                                               |
+| `maxSwapUsedRatio`              | 0.85    | Swap ceiling                                                                                                                                                                    |
+| `pendingTtlMinutes`             | 25      | How long a lease may wait for its device to appear                                                                                                                              |
+| `maxLeaseHours`                 | 12      | Backstop; 0 disables                                                                                                                                                            |
+| `queueTimeoutMinutes`           | 20      | How long `device_checkout` waits                                                                                                                                                |
+| `idleReleaseMinutes`            | 15      | How long a lease may sit unused before it releases, reason `idle` ([A lease cannot leak](#a-lease-cannot-leak)); 0 disables. Shared with the physical leases below — one toggle |
+| `simulatorTeardown.enabled`     | `true`  | Shut down agent-booted simulators at daemon stop and when idle; needs `enabled` too ([Shutdown](#shutdown))                                                                     |
+| `simulatorTeardown.idleMinutes` | 30      | How long an agent-booted simulator may go unused before the sweep shuts it down                                                                                                 |
 
 A dry-run `device_checkout` that the real cap would have made wait still hands back a lease, so the agent carries on, but that lease does not fill a slot — an agent waiting in a real run holds nothing. It shows in the status readout with its holder; only the count is the real cap's. Without that, a dry run inflates its own occupancy and reports refusals the real run would never have made, on the one readout a dry run exists to be trusted on.
 
@@ -233,6 +247,10 @@ A Wi-Fi iPhone without an open tunnel is **idle**. devicectl lists it for as lon
 ### The grace period
 
 A disconnected device keeps its lease for `graceMinutes` (30) — phones get unplugged and re-paired constantly, and dropping the holder on the first missed poll would hand a mid-session device to the next agent that asks. The clock starts at the sweep that first notices the disconnect, not retroactively at the real disconnect time (nothing was watching before that sweep ran), the same way the emulator cap's `pendingTtlMinutes` works. Reconnecting inside the window keeps the same holder; past it, the lease releases as `device-disconnected`.
+
+### Idle release
+
+A connected device's lease is also released, reason `idle`, once its holder has not used it for `idleReleaseMinutes` ([A lease cannot leak](#a-lease-cannot-leak)) — this is what brings back a phone a finished agent installed to and then went idle on without calling `device_checkin`. `PhysicalDeviceLeaseManager` has no `ps` sampler of its own (its detection is push-based: `adb track-devices`, a devicectl poll), so it reads the resource monitor's sweep sample the same way the emulator cap does, through its own `reportProcessSample` entry point; between sweeps the idle check uses that sweep's verdict rather than taking a fresh one. A reservation is not a lease, so a reserved-but-unheld device has nothing to idle-release.
 
 ### What the gate checks
 

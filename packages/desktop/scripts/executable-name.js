@@ -50,6 +50,20 @@ function readExecutableNameFromConfig() {
   );
 }
 
+/**
+ * Reads `appId` out of electron-builder.yml so callers never hardcode the
+ * bundle identifier, which a rebranded fork overrides. Used by the Nix
+ * desktop check to assert the packaged CFBundleIdentifier.
+ */
+function readAppIdFromConfig() {
+  const yml = fs.readFileSync(ELECTRON_BUILDER_YML, "utf8");
+  const appId = matchTopLevelScalar(yml, "appId");
+  if (!appId) {
+    throw new Error(`Could not resolve appId from ${ELECTRON_BUILDER_YML}.`);
+  }
+  return appId;
+}
+
 function matchTopLevelScalar(yml, key) {
   const match = yml.match(new RegExp(`^${key}:\\s*(.+?)\\s*$`, "m"));
   if (!match) {
@@ -61,4 +75,5 @@ function matchTopLevelScalar(yml, key) {
 module.exports = {
   resolveExecutableNameFromContext,
   readExecutableNameFromConfig,
+  readAppIdFromConfig,
 };

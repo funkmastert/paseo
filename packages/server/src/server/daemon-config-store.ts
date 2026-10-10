@@ -36,6 +36,7 @@ interface SupportedMutableConfigPatch {
   admission?: MutableDaemonConfig["admission"];
   refocus?: MutableDaemonConfig["refocus"];
   catastropheGate?: MutableDaemonConfig["catastropheGate"];
+  askUserQuestion?: MutableDaemonConfig["askUserQuestion"];
   buildGate?: MutableDaemonConfig["buildGate"];
   remediation?: MutableDaemonConfig["remediation"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
@@ -226,6 +227,7 @@ const RELOADABLE_PATHS = [
   "agents.admission",
   "agents.refocus",
   "agents.catastropheGate",
+  "agents.askUserQuestion",
   "agents.buildGate",
   "agents.remediation",
   "agents.skills.selection",
@@ -285,6 +287,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.admission", "admission"],
   ["agents.refocus", "refocus"],
   ["agents.catastropheGate", "catastropheGate"],
+  ["agents.askUserQuestion", "askUserQuestion"],
   ["agents.buildGate", "buildGate"],
   ["agents.remediation", "remediation"],
   ["agents.skills.selection", "skills.selection"],
@@ -431,6 +434,12 @@ function pickCatastropheGatePatch(
   return catastropheGate === undefined ? {} : { catastropheGate };
 }
 
+function pickAskUserQuestionPatch(
+  askUserQuestion: MutableDaemonConfigPatch["askUserQuestion"],
+): Pick<SupportedMutableConfigPatch, "askUserQuestion"> {
+  return askUserQuestion === undefined ? {} : { askUserQuestion };
+}
+
 function pickBuildGatePatch(
   buildGate: MutableDaemonConfigPatch["buildGate"],
 ): Pick<SupportedMutableConfigPatch, "buildGate"> {
@@ -480,6 +489,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickAdmissionPatch(patch.admission),
     ...pickRefocusPatch(patch.refocus),
     ...pickCatastropheGatePatch(patch.catastropheGate),
+    ...pickAskUserQuestionPatch(patch.askUserQuestion),
     ...pickBuildGatePatch(patch.buildGate),
     ...pickRemediationPatch(patch.remediation),
     ...pickDiskSweeperPatch(patch.diskSweeper),
@@ -1091,6 +1101,19 @@ function mergeCatastropheGateForPersist(
   return { ...persisted, ...patch } as PersistedCatastropheGate;
 }
 
+type PersistedAskUserQuestion = NonNullable<PersistedConfig["agents"]>["askUserQuestion"];
+
+// Flat, like catastropheGate: scalars only, so a shallow merge keeps the rest.
+function mergeAskUserQuestionForPersist(
+  persisted: PersistedAskUserQuestion,
+  patch: SupportedMutableConfigPatch["askUserQuestion"],
+): PersistedAskUserQuestion {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch } as PersistedAskUserQuestion;
+}
+
 type PersistedBuildGate = NonNullable<PersistedConfig["agents"]>["buildGate"];
 
 // Flat, like catastropheGate: scalars only, so a shallow merge keeps the rest.
@@ -1172,6 +1195,7 @@ function touchesAgentConfig(
     patch.admission !== undefined ||
     patch.refocus !== undefined ||
     patch.catastropheGate !== undefined ||
+    patch.askUserQuestion !== undefined ||
     patch.buildGate !== undefined ||
     patch.remediation !== undefined ||
     patch.skills !== undefined ||
@@ -1198,6 +1222,11 @@ function mergeProcessPolicySectionsForPersist(
     patch.catastropheGate,
   );
   if (catastropheGate !== undefined) next["catastropheGate"] = catastropheGate;
+  const askUserQuestion = mergeAskUserQuestionForPersist(
+    persistedAgents?.askUserQuestion,
+    patch.askUserQuestion,
+  );
+  if (askUserQuestion !== undefined) next["askUserQuestion"] = askUserQuestion;
   const buildGate = mergeBuildGateForPersist(persistedAgents?.buildGate, patch.buildGate);
   if (buildGate !== undefined) next["buildGate"] = buildGate;
 }

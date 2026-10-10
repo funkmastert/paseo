@@ -5,11 +5,14 @@ import {
   TASK_CLASS_IDS,
   LEADER_ROLE_ID,
   classModels,
+  type ArenaPolicy,
   type RoleModelPolicy,
   type RoleRecord,
   type TaskClassId,
 } from "../shared/role-policy-schema";
 import { DEFAULT_TOOL_PROFILE, profileDeniedTools, type ToolProfile } from "../shared/tool-profiles";
+import { WORK_KINDS, type ArenaRankingsFile, type WorkKind } from "../shared/arena-aliases";
+import { decideArenaPick, moveRefToFront, type ArenaPickDecision } from "./arena-model-pick";
 import {
   clampThinkingOption,
   THINKING_LEVEL_LABELS,
@@ -33,6 +36,7 @@ import {
   evaluateRequestedModel,
   familyOfProvider,
   formatModelRef,
+  isModelRefUsable,
   selectModel,
   unadvertisedPoolEntries,
   type AvailabilityHealth,
@@ -174,6 +178,13 @@ interface ClassifierWorldBase {
    * `jevTools` and no label is written.
    */
   jevToolsAvailable?: JevToolsWorld;
+  /**
+   * The day's LMArena rankings (U6, `server/arena-rankings.ts`), cached like
+   * `catalog`/`pool` above. Omitted, or stale past `policy.arena.maxAgeHours`,
+   * means today's pool order (R8) — `decideModel` never waits on the network,
+   * so this is always a snapshot already on disk, never a live fetch.
+   */
+  arenaRanking?: ArenaRankingsFile;
 }
 
 /** What the role hook knows about the JEV agent tools at create. Data, like pool health. */
@@ -330,6 +341,15 @@ export interface ModelDecision {
      */
     missingFromCatalog?: true;
   };
+  /**
+   * U8's arena-ranked pick (KTD-1, KTD-2, KTD-11, KTD-13), present whenever
+   * `policy.arena` exists and the role/class/kind qualified for evaluation —
+   * including a fallback, so a leader, a declared class or a stale file is as
+   * visible in the decision line as a successful pick. Absent entirely when
+   * `policy.arena` is undefined (an old config): zero behavior change, zero
+   * extra computation worth recording.
+   */
+  ranking?: ArenaPickDecision & { applied: boolean };
 }
 
 export interface ToolDecision {
@@ -627,6 +647,39 @@ function poolPhrase(slot: ModelPoolSlot, fellBack: boolean): string {
 }
 
 /**
+ * A shallow clone of `role` with the one array `resolvePoolSlot`'s
+ * `(slot, fellBack)` selected replaced by `newPool` — the same array
+ * `classModels` would read back out. `selectModel` recomputes its pool from
+ * the role record itself rather than accepting an ordered list, so this is
+ * how U8's ranking reorders without a second, divergent copy of that walk.
+ */
+function roleWithReorderedPool(role: RoleRecord, slot: ModelPoolSlot, fellBack: boolean, newPool: readonly string[]): RoleRecord {
+  const pool = [...newPool];
+  if (!fellBack && slot === "mechanical") {
+    return { ...role, mechanicalModels: pool };
+  }
+  if (!fellBack && slot === "hard") {
+    return { ...role, hardModels: pool };
+  }
+  return { ...role, models: pool };
+}
+
+/**
+ * The kind of work for U8's ranking (KTD-12): a JEV `work_kind` answer
+ * (answered or shadowed — shadow here reflects JEV's own global switch, not
+ * arena's; see jev-hint.ts's `planSpawnHint`), else `review` for a reviewer
+ * with no answer, else undefined — never guessed from a keyword.
+ */
+function resolveWorkKind(jevHint: SpawnHint | undefined, role: RoleRecord): WorkKind | undefined {
+  const choice =
+    jevHint && (jevHint.status === "answered" || jevHint.status === "shadow") ? jevHint.answers.workKind?.choice : undefined;
+  if (choice !== undefined && (WORK_KINDS as readonly string[]).includes(choice)) {
+    return choice as WorkKind;
+  }
+  return role.id === "reviewer" ? "review" : undefined;
+}
+
+/**
  * The model half: an explicit request first when it clears the same bar
  * ordered selection holds every other candidate to, then ordered selection.
  *
@@ -639,6 +692,18 @@ function decideModel(
   world: ClassifierWorld,
   role: RoleRecord,
   taskClass: TaskClassId | undefined,
+  /**
+   * Whether a `paseo.task-class` label decided THIS create's real class —
+   * a fact about the create, not about whichever hypothetical (role,
+   * taskClass) this particular call is evaluating, so it is the same value
+   * across all of `classifyAgent`'s real/wouldBe/base calls for one create.
+   * Passed in rather than re-derived from `input` here: `classifyAgent`
+   * already computed it once (`classResolution.source === "declared"`),
+   * and re-deriving it a second, narrower way only agreed by construction
+   * (`resolveTaskClass` happening to check the declared label before its
+   * `jev` argument) rather than by an enforced contract.
+   */
+  taskClassDeclared: boolean,
 ): ModelDecision {
   const pool = classModels(role, taskClass);
   const { slot, fellBack } = resolvePoolSlot(role, taskClass);
@@ -654,13 +719,50 @@ function decideModel(
     allowUnlistedModels: world.policy.allowUnlistedModels,
     taskClass,
   };
+
+  // U8's arena-ranked pick (KTD-1, KTD-2, KTD-11, KTD-13): evaluated whenever `policy.arena` exists
+  // AND the role isn't the leader, so a fallback is as visible in the decision line as a successful
+  // pick (R8) — except for a leader, which never carries a ranking at all (not even a "leader"
+  // fallback note): leaders are never a candidate for this feature, policy or no policy. Absent
+  // `policy.arena` (an old config) skips this entirely — zero extra computation. Explicit beats
+  // inferred (the file header's own rule): an honored explicit request below never consults this,
+  // and ranking only ever reorders the SAME operator-approved pool, never adds to it.
+  let ranking: ModelDecision["ranking"];
+  let selectionRole = role;
+  if (world.policy.arena && role.id !== LEADER_ROLE_ID) {
+    const arena = world.policy.arena;
+    const decision = decideArenaPick({
+      isLeader: false,
+      roleId: role.id,
+      taskClass,
+      taskClassDeclared,
+      kind: resolveWorkKind(input.jevHint, role),
+      pool,
+      isUsable: (ref) =>
+        isModelRefUsable(ref, world.catalog, world.pool, world.health, {
+          modelBudgetThresholdPct: world.policy.modelBudgetThresholdPct,
+          allowUnlistedModels: world.policy.allowUnlistedModels,
+        }),
+      arena,
+      rankings: world.arenaRanking,
+      plannedEffort: world.policy.thinking.byTaskClass[taskClass ?? "standard"],
+    });
+    const applied = decision.outcome === "ranked" && !arena.shadow;
+    ranking = { ...decision, applied };
+    if (applied && decision.outcome === "ranked") {
+      selectionRole = roleWithReorderedPool(role, slot, fellBack, moveRefToFront(pool, decision.ref));
+    }
+  }
+  const effectivePool = selectionRole === role ? pool : classModels(selectionRole, taskClass);
+
   const base = {
-    pool,
+    pool: effectivePool,
     poolSlot: slot,
     fellBackToStandardPool: fellBack,
     crossesRequestedFamily: false,
     unadvertisedPoolEntries: unadvertisedPoolEntries(role, world.catalog, taskClass, world.policy.allowUnlistedModels),
     ...(requestedRef !== undefined ? { requestedRef } : {}),
+    ...(ranking ? { ranking } : {}),
   } as const;
 
   if (pool.length === 0) {
@@ -686,8 +788,13 @@ function decideModel(
     );
     if (evaluation.eligible) {
       const unverified = evaluation.unadvertised === true;
+      // An honored explicit request never carries a ranking: explicit beats inferred, and `base`'s
+      // `ranking` (if any) was computed for the ordered-selection path, not this one. Spreading it
+      // in unconditionally would let the decision claim a ranked model "applied" while a different,
+      // explicitly-requested model actually runs.
+      const { ranking: _ignoredForHonoredRequest, ...baseWithoutRanking } = base;
       return {
-        ...base,
+        ...baseWithoutRanking,
         outcome: "honored-request",
         provider: input.requestedProvider ?? null,
         model: input.requestedModel,
@@ -701,7 +808,7 @@ function decideModel(
     missingFromCatalog = evaluation.missingFromCatalog === true;
   }
 
-  const outcome = selectModel(role, world.catalog, world.pool, world.health, selectionOptions);
+  const outcome = selectModel(selectionRole, world.catalog, world.pool, world.health, selectionOptions);
   if (outcome.outcome === "unconfigured") {
     // Unreachable: pool.length > 0 above. Kept because selectModel's type says
     // it can, and inventing a model here would be worse than passing through.
@@ -1557,7 +1664,7 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     reason: describeTaskClass(classPartial) + hintNote(input.jevHint, classResolution.taskClass, wouldBeClass),
   };
 
-  const model = decideModel(input, world, roleDecision.role, taskClass.taskClass);
+  const model = decideModel(input, world, roleDecision.role, taskClass.taskClass, classResolution.source === "declared");
   const tools = decideTools(world, toolRole, hasCaller);
   const account = decideAccount(input, world, model, asChild, hasCaller);
   const thinking = decideThinking(input, world, model, taskClass.taskClass, roleDecision, asChild);
@@ -1617,8 +1724,13 @@ function decideJevRecord(
     resolved.hasCaller && hint.proposal.roleId !== undefined
       ? resolveRole(world.policy, textInput, { roleId: hint.proposal.roleId, apply: true }).role
       : resolved.role.role;
-  const wouldBeModel = decideModel(input, world, wouldBeRole, resolved.wouldBeClass);
-  const baseModel = decideModel(input, world, resolved.baseRole, baselineClass);
+  // `resolved.source === "declared"` is the same "a label decided the real class" fact
+  // `classifyAgent` computed once — true/false identically for every hypothetical (role,
+  // taskClass) pair on this create, since whether a label was declared never depends on which
+  // class/role is being evaluated.
+  const taskClassDeclared = resolved.source === "declared";
+  const wouldBeModel = decideModel(input, world, wouldBeRole, resolved.wouldBeClass, taskClassDeclared);
+  const baseModel = decideModel(input, world, resolved.baseRole, baselineClass, taskClassDeclared);
   const rankDelta = classRank(resolved.wouldBeClass) - classRank(baselineClass);
   return {
     status: hint.status,

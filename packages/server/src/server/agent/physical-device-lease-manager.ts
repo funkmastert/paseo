@@ -25,11 +25,54 @@ import {
   type PhysicalDevicePlatform,
   type PhysicalLeaseRelease,
 } from "./physical-device-registry.js";
-import type { DeviceLaunchGateDecision, DeviceLeaseAgentSummary } from "./device-lease-manager.js";
+import {
+  hasLiveCommands,
+  type DeviceLaunchGateDecision,
+  type DeviceLeaseAgentSummary,
+} from "./device-lease-manager.js";
+import { collectDeviceIdReferences, type DeviceIdReference } from "./device-detection.js";
+import type { AgentProcessTree } from "./process-attribution.js";
+import type { ProcessSampleRow } from "./process-sampler.js";
 
 const DEFAULT_GRACE_MINUTES = 30;
 const DEFAULT_MAX_LEASE_HOURS = 12;
 const DEFAULT_WAIT_TIMEOUT_MS = 20 * 60_000;
+/**
+ * R1 (docs/plans/2026-10-09-002-fix-device-idle-release-plan.md): the same default the emulator
+ * cap uses, since both read `idleReleaseMinutes` off the one shared `agents.deviceLeases` block.
+ */
+const DEFAULT_IDLE_RELEASE_MINUTES = 15;
+
+/** Process evidence from one resource-monitor sweep (device-lease-manager.ts's DeviceUseEvidence,
+ * duplicated here rather than imported — a phone lease has no RunningDevice to pair it with). */
+interface PhysicalUseEvidence {
+  rows: readonly ProcessSampleRow[];
+  agentTrees: readonly AgentProcessTree[];
+  references: ReadonlyMap<string, DeviceIdReference>;
+}
+
+/**
+ * R2's "used", for a phone: the holder mid-turn, a live shell under its root, or any other
+ * process naming the device's serial/UDID. Unlike a simulator or emulator, a physical device is
+ * never itself a process in the sample — nothing to exclude as "the device's own pids" — so any
+ * naming pid at all is somebody using it.
+ */
+function isPhysicalLeaseInUse(input: {
+  lease: PhysicalDeviceLease;
+  holder: DeviceLeaseAgentSummary | undefined;
+  evidence: PhysicalUseEvidence | undefined;
+}): boolean {
+  const { evidence } = input;
+  if (input.holder?.isRunning || !evidence) return true;
+  const tree = evidence.agentTrees.find((entry) => entry.agentId === input.lease.agentId);
+  // No tree at all is not evidence of nothing running — Codex's `app-server` and OpenCode's
+  // shared `serve` never carry the `callerAgentId` marker attribution keys on
+  // (docs/stalled-agents.md), so every non-Claude agent would otherwise read as permanently
+  // idle. Treat a missing tree as inconclusive, the same as no evidence at all.
+  if (!tree) return true;
+  if (hasLiveCommands(evidence.rows, tree)) return true;
+  return (evidence.references.get(input.lease.deviceId)?.pids.length ?? 0) > 0;
+}
 /** How often a waiting checkout looks again when nothing has notified it — a disconnect grace
  * period runs out without anybody calling in. */
 const WAIT_RECHECK_MS = 5_000;
@@ -102,7 +145,9 @@ export interface PhysicalDeviceLeaseManagerOptions {
   countAndroidEmulators?: () => number;
   listAgents: () => readonly DeviceLeaseAgentSummary[];
   reservations: PhysicalDeviceReservations;
-  readDaemonConfig: () => { deviceLeases?: { enabled?: boolean; dryRun?: boolean } };
+  readDaemonConfig: () => {
+    deviceLeases?: { enabled?: boolean; dryRun?: boolean; idleReleaseMinutes?: number };
+  };
   logger: PhysicalDeviceLeaseManagerLogger;
   now?: () => number;
   graceMinutes?: number;
@@ -170,6 +215,66 @@ export class PhysicalDeviceLeaseManager {
     // reconcile() already notified for a lease it changed (a disconnect starting the grace
     // clock, an expiry). Don't notify twice for the same event.
     if (fingerprintChanged && !leasesChanged) this.notify();
+  }
+
+  /**
+   * KTD-3 (docs/plans/2026-10-09-002-fix-device-idle-release-plan.md): the resource-monitor
+   * sweep's `ps` sample, the only process evidence a phone lease has — this manager has no `ps`
+   * sampler of its own, since detection is push-based (adb's `track-devices`, a devicectl poll).
+   * Between sweeps the idle check uses this sweep's verdict; it never takes a fresh sample.
+   */
+  reportProcessSample(input: {
+    rows: readonly ProcessSampleRow[];
+    agentTrees: readonly AgentProcessTree[];
+  }): void {
+    this.reconcile();
+    this.releaseIdleLeases(input);
+  }
+
+  /**
+   * R1, R2, R4, R6: a phone lease nothing has used for `idleReleaseMinutes` is released, reason
+   * `idle`, so an install lease a finished agent forgot to check in comes back on its own.
+   * Releasing costs the agent nothing it was using — a phone has no slot to free, only a holder
+   * to clear.
+   */
+  private releaseIdleLeases(sample: {
+    rows: readonly ProcessSampleRow[];
+    agentTrees: readonly AgentProcessTree[];
+  }): void {
+    const idleReleaseMs =
+      (this.readDaemonConfig().deviceLeases?.idleReleaseMinutes ?? DEFAULT_IDLE_RELEASE_MINUTES) *
+      60_000;
+    if (idleReleaseMs <= 0) return;
+    const agentsById = new Map(this.listAgents().map((agent) => [agent.agentId, agent]));
+    const knownDeviceIds = this.leases.map((lease) => lease.deviceId);
+    const references = collectDeviceIdReferences(sample.rows, knownDeviceIds);
+    const idle: PhysicalDeviceLease[] = [];
+    for (const lease of this.leases) {
+      const inUse = isPhysicalLeaseInUse({
+        lease,
+        holder: agentsById.get(lease.agentId),
+        evidence: { ...sample, references },
+      });
+      if (inUse || lease.lastUsedAtMs === undefined) {
+        lease.lastUsedAtMs = this.now();
+        continue;
+      }
+      if (this.now() - lease.lastUsedAtMs >= idleReleaseMs) idle.push(lease);
+    }
+    if (idle.length === 0) return;
+    if (this.isDryRun()) {
+      for (const lease of idle) {
+        lease.lastUsedAtMs = this.now();
+        this.logger.info(
+          { dryRun: true, leaseId: lease.id, agentId: lease.agentId, deviceId: lease.deviceId },
+          "Would release an idle device lease",
+        );
+      }
+      return;
+    }
+    this.leases = this.leases.filter((lease) => !idle.includes(lease));
+    this.logRelease(idle.map((lease) => ({ lease, reason: "idle" as const })));
+    this.notify();
   }
 
   private connectedFingerprint(): string {
@@ -306,6 +411,7 @@ export class PhysicalDeviceLeaseManager {
       const named = connected.find((device) => physicalDeviceMatches(device, target));
       const lease = named ? this.leases.find((entry) => entry.deviceId === named.id) : undefined;
       if (named && lease?.agentId === input.agentId) {
+        lease.lastUsedAtMs = this.now();
         return {
           status: "granted",
           leaseId: lease.id,
@@ -476,7 +582,10 @@ export class PhysicalDeviceLeaseManager {
   ): string | undefined {
     const lease = this.leases.find((entry) => entry.deviceId === device.id);
     // Whoever holds it keeps using it: reserving a device doesn't evict its holder.
-    if (lease?.agentId === agentId) return undefined;
+    if (lease?.agentId === agentId) {
+      lease.lastUsedAtMs = this.now();
+      return undefined;
+    }
     const label = device.name ?? device.id;
     if (lease) {
       const harm = intent.stateOnly
@@ -599,6 +708,7 @@ export class PhysicalDeviceLeaseManager {
       agentId: input.agentId,
       source: input.source,
       acquiredAtMs: this.now(),
+      lastUsedAtMs: this.now(),
       transport: input.device.transport,
       ...(input.device.name ? { name: input.device.name } : {}),
       ...(input.reason ? { reason: input.reason } : {}),

@@ -557,6 +557,19 @@ interface ResolveConfigFromPersistedOptions {
   relayEnabledFallback?: boolean;
 }
 
+// The agents.* sections that limit how the daemon treats agent processes rather than monitor
+// them. Split out of resolveAgentMonitorConfig to keep it under the complexity limit.
+function resolveAgentProcessPolicyConfig(
+  agents: PersistedConfig["agents"],
+): Pick<PaseoDaemonConfig, "catastropheGate" | "askUserQuestion" | "buildGate" | "childEnvStrip"> {
+  return {
+    catastropheGate: agents?.catastropheGate,
+    askUserQuestion: agents?.askUserQuestion,
+    buildGate: agents?.buildGate,
+    childEnvStrip: agents?.childEnv?.strip,
+  };
+}
+
 // Every monitor defaults to off or to report-only, so a section missing here is indistinguishable
 // from one configured off. resourceMonitor and deviceLeases were missing, and on every real boot
 // and reload the reaper and the device cap ran on their defaults — the same gap mcpGateway had.
@@ -582,6 +595,7 @@ function resolveAgentMonitorConfig(
   | "daemonVitals"
   | "restartRecovery"
   | "catastropheGate"
+  | "askUserQuestion"
   | "buildGate"
   | "childEnvStrip"
 > {
@@ -602,9 +616,7 @@ function resolveAgentMonitorConfig(
     remediation: agents?.remediation,
     daemonVitals: agents?.daemonVitals,
     restartRecovery: agents?.restartRecovery,
-    catastropheGate: agents?.catastropheGate,
-    buildGate: agents?.buildGate,
-    childEnvStrip: agents?.childEnv?.strip,
+    ...resolveAgentProcessPolicyConfig(agents),
   };
 }
 

@@ -1,6 +1,8 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
+import { WORK_KINDS, type ArenaRankingsFile, type WorkKind } from "../shared/arena-aliases";
 import {
   AGENT_TYPE_LABEL,
+  ARENA_PICK_LABEL,
   JEV_CALL_LABEL,
   JEV_SPAWN_LABEL,
   JEV_TOOLS_LABEL,
@@ -9,6 +11,7 @@ import {
   THINKING_OVERRIDDEN_LABEL,
   TOOLS_DENIED_LABEL,
   UNADVERTISED_MODEL_LABEL,
+  WORK_KIND_LABEL,
   type RoleModelPolicy,
   type TaskClassId,
 } from "../shared/role-policy-schema";
@@ -185,6 +188,12 @@ export interface RoleRouterOptions {
    * Optional: without it every agent keeps every server, as before scoping.
    */
   mcpGatewayCache?: Pick<McpGatewayCache, "get">;
+  /**
+   * U6's daily LMArena rankings cache. Optional: without it (or on a daemon
+   * that never started the poller), `decideModel`'s ranking always falls back
+   * to `"no-file"` — R8's intended behavior for a missing file, not an error.
+   */
+  arenaRankingCache?: { get(): ArenaRankingsFile | undefined };
   /** Called (deduplicated per caller+values) when labels[paseo.mcp] named something no gateway server is called. */
   onDeclaredMcpUnknown?: (episode: DeclaredMcpUnknownEpisode) => void;
   /**
@@ -544,7 +553,9 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
         parentUnresolvedSeen,
       );
       const scoped = applyMcpDecision(input.request, routed, decided.decision, options, declaredMcpUnknownSeen);
-      return applyJevLabels(input.request, scoped, decided.decision);
+      const withWorkKind = applyWorkKindLabel(input.request, scoped, input.jevHint);
+      const withArenaPick = applyArenaPickLabel(input.request, withWorkKind, decided.decision);
+      return applyJevLabels(input.request, withArenaPick, decided.decision);
     } catch (error) {
       // Defense-in-depth on the never-block contract: every code path below
       // is meant to fail open already, but a throw anywhere in classification
@@ -625,6 +636,63 @@ function applyMcpDecision(
   }
   const base = routed ?? request;
   return withMcpScope(base, decision.mcp) ?? routed;
+}
+
+/**
+ * Records the kind of work JEV named for this child (KTD-12), straight off
+ * the request's own `jevHint` rather than the classifier's decision: U8 adds
+ * no `workKind` field to `AgentDecision`, since ranking reads the raw answer
+ * as world data, not a classification output. Written whenever `work_kind`
+ * was answered or shadowed — including on a declared child, where the label
+ * already fixed the model and this is purely a record of what the kind would
+ * have reordered. An unknown or malformed choice writes nothing: never
+ * invented, never guessed (KTD-12, "no keyword guessing").
+ */
+function applyWorkKindLabel(
+  request: PluginBeforeRequests["agent.create"],
+  routed: PluginBeforeRequests["agent.create"] | void,
+  jevHint: SpawnHint | undefined,
+): PluginBeforeRequests["agent.create"] | void {
+  if (!jevHint || (jevHint.status !== "answered" && jevHint.status !== "shadow")) {
+    return routed;
+  }
+  const choice = jevHint.answers.workKind?.choice;
+  if (!choice || !(WORK_KINDS as readonly string[]).includes(choice)) {
+    return routed;
+  }
+  const base = (routed ?? request) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
+  return { ...base, labels: { ...base.labels, [WORK_KIND_LABEL]: choice as WorkKind } };
+}
+
+/**
+ * `v1;ref=<ref>;tier=<top|mid>;board=<board>;date=<publishDate>;applied=<0|1>;proxy=<0|1>`.
+ * `;` in a ref is impossible (`MODEL_REF_RE`), and the board id's own `/` never collides with the
+ * label's `;`-joined fields, so this needs no escaping.
+ */
+function formatArenaPickLabel(ranking: NonNullable<AgentDecision["model"]["ranking"]> & { outcome: "ranked" }): string {
+  return `v1;ref=${ranking.ref};tier=${ranking.tier};board=${ranking.board};date=${ranking.publishDate};applied=${ranking.applied ? 1 : 0};proxy=${ranking.pick.proxy ? 1 : 0}`;
+}
+
+/**
+ * U8's `paseo.arena-pick` label (KTD-1, KTD-2, KTD-11, KTD-13): written only
+ * for a `"ranked"` outcome, whether applied or shadowed — a fallback writes
+ * nothing here, since the decision log alone records its reason. A leader
+ * never reaches this: `decideModel` never evaluates ranking for one, so
+ * `decision.model.ranking` is undefined.
+ */
+function applyArenaPickLabel(
+  request: PluginBeforeRequests["agent.create"],
+  routed: PluginBeforeRequests["agent.create"] | void,
+  decision: AgentDecision | undefined,
+): PluginBeforeRequests["agent.create"] | void {
+  const ranking = decision?.model.ranking;
+  // Second layer, belt-and-suspenders: an honored explicit request must never carry this label even
+  // if a future regression lets `ranking` leak through onto that outcome again.
+  if (!ranking || ranking.outcome !== "ranked" || decision?.model.outcome === "honored-request") {
+    return routed;
+  }
+  const base = (routed ?? request) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
+  return { ...base, labels: { ...base.labels, [ARENA_PICK_LABEL]: formatArenaPickLabel(ranking) } };
 }
 
 /**
@@ -764,6 +832,7 @@ function routeRoleForCreateUnguarded(
       health: options.health,
       callerDenials: callerDenialsFor(options, policy, callerAgentId),
       mcpGateway: options.mcpGatewayCache?.get(),
+      arenaRanking: options.arenaRankingCache?.get(),
       ...(input.jevTools ? { jevToolsAvailable: input.jevTools } : {}),
     },
   );

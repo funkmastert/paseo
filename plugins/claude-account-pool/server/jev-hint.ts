@@ -1,5 +1,7 @@
 import type { PluginHookContext } from "@getpaseo/plugin/server";
+import { WORK_KINDS, type WorkKind } from "../shared/arena-aliases";
 import {
+  classModels,
   LEADER_ROLE_ID,
   TASK_CLASS_IDS,
   TASK_CLASS_LABEL,
@@ -63,6 +65,7 @@ export const ROLE_CONFIDENCE_FLOOR = 0.7;
 const TASK_CLASS_QUESTION = "task_class";
 const REASONING_QUESTION = "reasoning";
 const ROLE_QUESTION = "role";
+const WORK_KIND_QUESTION = "work_kind";
 const OTHER_OPTION = "other";
 
 /** The answers this plugin reads, one per question asked. */
@@ -70,6 +73,13 @@ export interface SpawnHintAnswers {
   taskClass?: { choice: string; confidence: number };
   reasoning?: { score: number; confidence: number };
   role?: { choice: string; confidence: number };
+  /**
+   * The kind of work JEV named (KTD-12). Recorded whenever asked, with no
+   * confidence floor: unlike `taskClass`/`role`, a wrong kind only misorders
+   * an already-approved pool (U8's ranking), never moves capability or
+   * class, so there is nothing for a floor to protect against.
+   */
+  workKind?: { choice: string; confidence: number };
 }
 
 /** What the answers propose once past their floors. Precedence against labels and seeds is the classifier's. */
@@ -87,7 +97,8 @@ export interface SpawnHintProposal {
  * - `declared`: a `paseo.task-class` label decides the class, and the role is not asked.
  * - `hard-seed`: a risk keyword made it hard, which JEV cannot lower, and the role is not asked.
  * - `no-text`: no title or prompt to judge.
- * - `no-effect`: every class runs the same model at the same thinking level for this role.
+ * - `no-effect`: every class runs the same model at the same thinking level for this role, AND
+ *   arena ranking is off or the resolved class has fewer than two candidates to reorder (KTD-12).
  */
 export type SpawnHintSkip = "leader" | "declared" | "hard-seed" | "no-text" | "no-effect";
 
@@ -139,6 +150,12 @@ export type SpawnHintPlan =
       taskClass: boolean;
       role: boolean;
       /**
+       * Whether `work_kind` rides this call (KTD-12): ranking is on (live or shadow) and the
+       * resolved class has at least two approved candidates for it to reorder. Independent of
+       * `taskClass`/`role` — a create can ask only the kind question when neither of those applies.
+       */
+      workKind: boolean;
+      /**
        * A declared `paseo.task-class` label decided this create already; the answer is asked only
        * to measure it (`agents.jev.spawnHint.auditDeclared`, docs/jev.md "Feature 2") and must
        * never move the label, model or thinking. `fetchSpawnHint` sends it as `shadow: true` so
@@ -170,17 +187,28 @@ function outcomeKey(input: ClassifierInput, world: ClassifierWorld, taskClass: s
  * change with the class, and even where a policy made them, a person started
  * it and chose what it runs.
  *
+ * `work_kind` (KTD-12) rides the same call whenever `options.rankingActive`
+ * is on and the resolved class has at least two approved candidates to
+ * reorder — independent of whether the class or role also matters, since a
+ * kind answer never moves either of those, only U8's ranking. `rankingActive`
+ * is a plain caller-supplied flag rather than a read off `world.policy.arena`:
+ * that key is optional and PR B's own addition (KTD-13), so this function
+ * stays buildable and testable without it existing yet.
+ *
  * With `auditDeclared` on, a child with a caller and a valid `paseo.task-class`
  * label is asked the class alone, in shadow (`declaredAudit: true`) — unless a
  * live `applyRole` ask on the same child's guessed role would also apply, which
  * wins instead, since one call cannot serve both. A schedule-run root create,
  * placed like a child only for role resolution, stays unasked like any other
- * root create.
+ * root create. A declared child whose kind could still matter (ranking would
+ * reorder its already-fixed class's pool) gets the same shadow treatment for
+ * `work_kind` alone, even with `auditDeclared` off: the declared label still
+ * decides the model, so recording the kind can only ever be in shadow for it.
  */
 export function planSpawnHint(
   input: ClassifierInput,
   world: ClassifierWorld,
-  options: { applyRole: boolean; auditDeclared: boolean },
+  options: { applyRole: boolean; auditDeclared: boolean; rankingActive: boolean },
 ): SpawnHintPlan {
   const hasCaller = input.callerAgentId !== undefined && input.callerAgentId !== "";
   if (!hasCaller && !placesRootAsChild(world.policy, input.labels)) {
@@ -197,22 +225,40 @@ export function planSpawnHint(
       : baseline.source === "classified" && baseline.taskClass === "hard"
         ? "hard-seed"
         : null;
-  const roleGuessed = hasCaller && resolveRole(world.policy, textInput).tier >= 3;
+  const roleResolution = resolveRole(world.policy, textInput);
+  const roleGuessed = hasCaller && roleResolution.tier >= 3;
+  const workKindMatters =
+    options.rankingActive && classModels(roleResolution.role, baseline.taskClass ?? "standard").length >= 2;
   // The audit only measures a genuine child's own declared label: a schedule-run root create is
   // placed like a child for role resolution, but it is a person's or a daemon job's own call, not
   // another agent's, and stays unasked like any other root create. A live role ask wins over it
   // when both apply — `shadow: true` covers the whole call, so one ask cannot serve both, and the
   // plan's stop condition forbids the audit silently stopping today's `applyRole` from working.
-  if (fixed === "declared" && options.auditDeclared && hasCaller && !(roleGuessed && options.applyRole)) {
-    return { ask: true, taskClass: true, role: false, declaredAudit: true, declaredTaskClass: baseline.taskClass };
+  if (
+    fixed === "declared" &&
+    hasCaller &&
+    !(roleGuessed && options.applyRole) &&
+    (options.auditDeclared || workKindMatters)
+  ) {
+    return {
+      ask: true,
+      taskClass: options.auditDeclared,
+      role: false,
+      workKind: workKindMatters,
+      declaredAudit: true,
+      declaredTaskClass: baseline.taskClass,
+    };
   }
   const classMatters =
     fixed === null && new Set(TASK_CLASS_IDS.map((taskClass) => outcomeKey(input, world, taskClass))).size > 1;
-  if (classMatters) {
-    return { ask: true, taskClass: true, role: roleGuessed, declaredAudit: false };
+  if (classMatters || (fixed === null && workKindMatters)) {
+    return { ask: true, taskClass: classMatters, role: roleGuessed, workKind: workKindMatters, declaredAudit: false };
   }
   if (roleGuessed && options.applyRole) {
-    return { ask: true, taskClass: false, role: true, declaredAudit: false };
+    return { ask: true, taskClass: false, role: true, workKind: workKindMatters, declaredAudit: false };
+  }
+  if (fixed === "hard-seed" && workKindMatters) {
+    return { ask: true, taskClass: false, role: roleGuessed, workKind: true, declaredAudit: false };
   }
   return { ask: false, skip: fixed ?? "no-effect" };
 }
@@ -226,6 +272,8 @@ export function spawnHintPreview(
   input: ClassifierInput,
   world: ClassifierWorld,
   availability: SpawnHintAvailability | undefined,
+  /** Whether arena ranking (live or shadow) is on. Defaults off: a caller that predates U8's `arena` policy key never asks `work_kind`. */
+  rankingActive = false,
 ): SpawnHint | undefined {
   if (!availability?.active || availability.shadow) {
     return undefined;
@@ -233,6 +281,7 @@ export function spawnHintPreview(
   const plan = planSpawnHint(input, world, {
     applyRole: availability.applyRole,
     auditDeclared: availability.auditDeclared,
+    rankingActive,
   });
   // A declared-audit ask never decides anything — the label already did — so the preview says
   // nothing, the same as any other declared create.
@@ -284,10 +333,21 @@ function roleCriteria(policy: RoleModelPolicy): Record<string, string> {
   return criteria;
 }
 
+/** `work_kind`'s options (KTD-12): the boards KTD-11 ranks, plus `other` for anything else. */
+const WORK_KIND_CRITERIA: Record<WorkKind, string> = {
+  coding: "Implements, fixes, or refactors code; writes or updates tests; runs builds",
+  frontend: "Builds or styles UI: screens, components, layout, CSS, web pages",
+  research: "Investigates or compares options without changing code: a root-cause hunt, a design survey",
+  review: "Judges existing work without changing it: reviews a diff, verifies a claim, audits for defects",
+  writing: "Produces prose: documentation, a changelog, a commit message, a plan or report",
+  ops: "Runs or recovers infrastructure: deploys, incident response, environment or process repair",
+  other: "None of these, or too little text to tell",
+};
+
 /** The questions for a plan that asks. */
 export function buildSpawnHintQuestions(
   policy: RoleModelPolicy,
-  plan: { taskClass: boolean; role: boolean },
+  plan: { taskClass: boolean; role: boolean; workKind: boolean },
 ): Record<string, ChoiceQuestion | ScoreQuestion> {
   const questions: Record<string, ChoiceQuestion | ScoreQuestion> = {};
   if (plan.taskClass) {
@@ -319,6 +379,13 @@ export function buildSpawnHintQuestions(
       type: "choice",
       instructions: "Which kind of agent does `prompt` ask for?",
       criteria: roleCriteria(policy),
+    };
+  }
+  if (plan.workKind) {
+    questions[WORK_KIND_QUESTION] = {
+      type: "choice",
+      instructions: "Which kind of work does `prompt` hand to the new agent?",
+      criteria: WORK_KIND_CRITERIA,
     };
   }
   return questions;
@@ -353,7 +420,7 @@ function readScore(value: unknown): { score: number; confidence: number } | null
  */
 export function readSpawnHintAnswers(
   raw: unknown,
-  plan: { taskClass: boolean; role: boolean },
+  plan: { taskClass: boolean; role: boolean; workKind: boolean },
 ): SpawnHintAnswers | null {
   if (!isRecord(raw)) {
     return null;
@@ -374,6 +441,13 @@ export function readSpawnHintAnswers(
       return null;
     }
     answers.role = role;
+  }
+  if (plan.workKind) {
+    const workKind = readChoice(raw[WORK_KIND_QUESTION]);
+    if (!workKind) {
+      return null;
+    }
+    answers.workKind = workKind;
   }
   return answers;
 }
@@ -436,6 +510,12 @@ export interface FetchSpawnHintOptions {
    */
   availability: SpawnHintAvailability | undefined;
   paseo: SpawnHintPaseo;
+  /**
+   * Whether arena ranking (live or shadow) is on, so `work_kind` (KTD-12) can
+   * ride this call. Defaults off: a caller that predates U8's `arena` policy
+   * key never asks it.
+   */
+  rankingActive?: boolean;
   /** Tests only. */
   timeoutMs?: number;
 }
@@ -473,6 +553,7 @@ export async function fetchSpawnHint(options: FetchSpawnHintOptions): Promise<Sp
     const plan = planSpawnHint(input, world, {
       applyRole: availability?.applyRole ?? false,
       auditDeclared: availability?.auditDeclared ?? false,
+      rankingActive: options.rankingActive ?? false,
     });
     if (!plan.ask) {
       return { status: "not-needed", reason: plan.skip };

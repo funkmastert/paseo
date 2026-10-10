@@ -304,7 +304,12 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
         nowMs: Date.now(),
         mcpGateway: deps.mcpGatewayCache?.get(),
       };
-      const preview = spawnHintPreview(classifierInput, world, deps.jevAvailability?.get()?.spawnHint);
+      const preview = spawnHintPreview(
+        classifierInput,
+        world,
+        deps.jevAvailability?.get()?.spawnHint,
+        freshPolicy.arena?.enabled === true,
+      );
       const decision = classifyAgent(preview ? { ...classifierInput, jevHint: preview } : classifierInput, world);
 
       const { role, taskClass, model, tools, account, thinking, outputStyle, mcp } = decision;

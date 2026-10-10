@@ -15,9 +15,9 @@ import {
   normalizeSavingsModel,
   priceSavings,
   priceWeight,
-  usdToOpusTokens,
   type JevSavingsFacts,
 } from "./savings-formulas.js";
+import { usdToOpusTokens } from "@getpaseo/protocol/jev/pricing";
 
 function price(
   feature: JevSavingsFeature,
@@ -36,6 +36,11 @@ function price(
 }
 
 const held: JevSavingsValidation = { outcome: "held", signal: null, afterMinutes: 60 };
+const falseSkip: JevSavingsValidation = {
+  outcome: "false-skip",
+  signal: "reread",
+  afterMinutes: 2,
+};
 
 describe("the unit", () => {
   test("price weights against Opus 5.5, whatever the spelling", () => {
@@ -541,7 +546,67 @@ describe("evidence rules", () => {
         validation: held,
         price: priced,
       }),
-    ).toEqual({ bigWouldSkip: 1, bigWouldSkipProjected: 123_750 });
+      // No `facts["subagent"]` is the main agent (R5): split into its own bucket too.
+    ).toEqual({ bigWouldSkip: 1, "bigWouldSkip.main": 1, bigWouldSkipProjected: 123_750 });
+  });
+
+  test("R5: false skips split by reader, main and subagent counted apart", () => {
+    const decision = { did: "read", wouldBe: "would-skip", changed: false };
+    const mainFacts = { contextTokens: 9_000, model: "claude-opus-5-5", subagent: false };
+    const subagentFacts = { contextTokens: 9_000, model: "claude-opus-5-5", subagent: true };
+    expect(
+      evidenceCounters({
+        feature: "readCheck",
+        mode: "shadow",
+        decision,
+        facts: mainFacts,
+        validation: falseSkip,
+        price: priceSavings({
+          feature: "readCheck",
+          mode: "shadow",
+          decision,
+          facts: mainFacts,
+          validation: falseSkip,
+        }),
+      }),
+    ).toMatchObject({ "bigWouldSkip.main": 1, "bigWouldSkipFalse.main": 1 });
+    expect(
+      evidenceCounters({
+        feature: "readCheck",
+        mode: "shadow",
+        decision,
+        facts: subagentFacts,
+        validation: falseSkip,
+        price: priceSavings({
+          feature: "readCheck",
+          mode: "shadow",
+          decision,
+          facts: subagentFacts,
+          validation: falseSkip,
+        }),
+      }),
+    ).toMatchObject({ "bigWouldSkip.subagent": 1, "bigWouldSkipFalse.subagent": 1 });
+  });
+
+  test("R5: the reader split is reported beside the live rule, never inside it", () => {
+    const base = {
+      bigWouldSkip: 200,
+      bigWouldSkipFalse: 60,
+      bigWouldSkipProjected: 1_000,
+      "bigWouldSkip.main": 150,
+      "bigWouldSkipFalse.main": 40,
+      "bigWouldSkip.subagent": 50,
+      "bigWouldSkipFalse.subagent": 20,
+    };
+    const plain = evaluateEvidence(
+      "readCheck",
+      { bigWouldSkip: 200, bigWouldSkipFalse: 60, bigWouldSkipProjected: 1_000 },
+      0,
+    );
+    const withSplit = evaluateEvidence("readCheck", base, 0);
+    expect(withSplit.observed).toContain("main 150 would-skip, 27% false");
+    expect(withSplit.observed).toContain("subagent 50 would-skip, 40% false");
+    expect(withSplit.met).toBe(plain.met);
   });
 
   // D12: these reads can never be denied, so they get their own counters and must never move the

@@ -36,7 +36,7 @@ import type {
   ProviderProfileModel,
   ProviderRuntimeSettings,
 } from "./provider-launch-config.js";
-import { ClaudeAgentClient } from "./providers/claude/agent.js";
+import { ClaudeAgentClient, type AskUserQuestionCheckOptions } from "./providers/claude/agent.js";
 import { CodexAppServerAgentClient } from "./providers/codex-app-server-agent.js";
 import { CopilotACPAgentClient } from "./providers/copilot-acp-agent.js";
 import { CursorACPAgentClient } from "./providers/cursor-acp-agent.js";
@@ -116,6 +116,8 @@ export interface BuildProviderRegistryOptions {
   isCatastropheGateEnabled?: () => boolean;
   /** Feature 16's read check (docs/jev.md). Claude only; absent means no read-check hook. */
   fileReadObserver?: FileReadObserver;
+  /** The AskUserQuestion check (docs/ask-user-question.md). Claude only; absent means no check. */
+  askUserQuestionCheck?: AskUserQuestionCheckOptions;
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   managedProcesses?: ManagedProcessRegistry;
   isDev?: boolean;
@@ -131,6 +133,7 @@ interface ProviderClientFactoryOptions extends Pick<
   | "deviceLaunchGate"
   | "isCatastropheGateEnabled"
   | "fileReadObserver"
+  | "askUserQuestionCheck"
 > {
   openCodeBridge?: OpenCodeBridge;
   providerParams?: unknown;
@@ -216,6 +219,7 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
       deviceLaunchGate: options?.deviceLaunchGate,
       isCatastropheGateEnabled: options?.isCatastropheGateEnabled,
       fileReadObserver: options?.fileReadObserver,
+      askUserQuestionCheck: options?.askUserQuestionCheck,
     }),
   codex: (logger, runtimeSettings, options) =>
     new CodexAppServerAgentClient(logger, runtimeSettings, {
@@ -796,6 +800,7 @@ function buildResolvedBuiltinProviders(
     | "deviceLaunchGate"
     | "isCatastropheGateEnabled"
     | "fileReadObserver"
+    | "askUserQuestionCheck"
   >,
   isDev: boolean,
 ): Map<string, ResolvedProvider> {
@@ -831,6 +836,7 @@ function buildResolvedBuiltinProviders(
           deviceLaunchGate: options.deviceLaunchGate,
           isCatastropheGateEnabled: options.isCatastropheGateEnabled,
           fileReadObserver: options.fileReadObserver,
+          askUserQuestionCheck: options.askUserQuestionCheck,
           providerParams: override?.params,
         }),
       contract: PROVIDER_CONTRACTS[definition.id] ?? UNSUPPORTED_PROVIDER_CONTRACT,
@@ -850,6 +856,7 @@ function addDerivedProviders(
     | "deviceLaunchGate"
     | "isCatastropheGateEnabled"
     | "fileReadObserver"
+    | "askUserQuestionCheck"
   >,
 ): void {
   for (const [providerId, override] of Object.entries(providerOverrides)) {
@@ -954,6 +961,7 @@ function addDerivedProviders(
           deviceLaunchGate: options.deviceLaunchGate,
           isCatastropheGateEnabled: options.isCatastropheGateEnabled,
           fileReadObserver: options.fileReadObserver,
+          askUserQuestionCheck: options.askUserQuestionCheck,
           providerParams,
           customProvider: {
             id: providerId,
@@ -983,6 +991,7 @@ export function buildProviderRegistry(
       deviceLaunchGate: options?.deviceLaunchGate,
       isCatastropheGateEnabled: options?.isCatastropheGateEnabled,
       fileReadObserver: options?.fileReadObserver,
+      askUserQuestionCheck: options?.askUserQuestionCheck,
     },
     options?.isDev === true,
   );
@@ -992,6 +1001,7 @@ export function buildProviderRegistry(
     deviceLaunchGate: options?.deviceLaunchGate,
     isCatastropheGateEnabled: options?.isCatastropheGateEnabled,
     fileReadObserver: options?.fileReadObserver,
+    askUserQuestionCheck: options?.askUserQuestionCheck,
   });
 
   return Object.fromEntries(

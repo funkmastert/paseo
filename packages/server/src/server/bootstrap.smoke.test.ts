@@ -373,6 +373,7 @@ describe("paseo daemon bootstrap", () => {
         admission: { maxConcurrentChildTurns: 6, bulkResumesPerMinute: 3 },
         refocus: { enabled: true, dryRun: true, growthTokens: 250_000 },
         catastropheGate: { enabled: false },
+        askUserQuestion: { enabled: false },
         buildGate: { enabled: true, dryRun: true, maxConcurrent: 2 },
         remediation: {
           escalation: { enabled: true, maxPerDay: 3 },
@@ -433,6 +434,7 @@ describe("paseo daemon bootstrap", () => {
       expect(booted.admission).toEqual(bootPersisted.agents.admission);
       expect(booted.refocus).toEqual(bootPersisted.agents.refocus);
       expect(booted.catastropheGate).toEqual(bootPersisted.agents.catastropheGate);
+      expect(booted.askUserQuestion).toEqual(bootPersisted.agents.askUserQuestion);
       expect(booted.buildGate).toEqual(bootPersisted.agents.buildGate);
       // Startup-only: it reaches the running service, not the mutable config.
       expect((await client.getRestartRecoveryPlan()).mode).toBe("off");
@@ -448,6 +450,7 @@ describe("paseo daemon bootstrap", () => {
         "account-pressure": { enabled: false, dryRun: undefined },
         refocus: { enabled: true, dryRun: true },
         "catastrophe-gate": { enabled: false, dryRun: undefined },
+        "ask-user-question": { enabled: false, dryRun: false },
         "build-gate": { enabled: true, dryRun: true },
         "remediation-escalation": { enabled: true, dryRun: undefined },
         "remediation-notify": { enabled: false, dryRun: undefined },
@@ -487,6 +490,7 @@ describe("paseo daemon bootstrap", () => {
           admission: { enabled: false },
           refocus: { enabled: true, dryRun: false, growthTokens: 250_000 },
           catastropheGate: { enabled: true },
+          askUserQuestion: { mode: "log" as const },
           buildGate: { enabled: false },
           remediation: {
             escalation: { enabled: false },
@@ -504,6 +508,7 @@ describe("paseo daemon bootstrap", () => {
         "agents.accountFailover",
         "agents.admission",
         "agents.artifactJanitor",
+        "agents.askUserQuestion",
         "agents.budgetPacing",
         "agents.buildGate",
         "agents.catastropheGate",
@@ -541,6 +546,7 @@ describe("paseo daemon bootstrap", () => {
       expect(reloaded.admission).toEqual(reloadedPersisted.agents.admission);
       expect(reloaded.refocus).toEqual(reloadedPersisted.agents.refocus);
       expect(reloaded.catastropheGate).toEqual(reloadedPersisted.agents.catastropheGate);
+      expect(reloaded.askUserQuestion).toEqual(reloadedPersisted.agents.askUserQuestion);
       expect(reloaded.buildGate).toEqual(reloadedPersisted.agents.buildGate);
       expect(reloaded.remediation).toEqual(reloadedPersisted.agents.remediation);
       // The ladder re-reads its config on every poll; drive one instead of waiting a minute.
@@ -552,6 +558,7 @@ describe("paseo daemon bootstrap", () => {
         "spend-governor": { enabled: true, dryRun: false },
         refocus: { enabled: true, dryRun: false },
         "catastrophe-gate": { enabled: true },
+        "ask-user-question": { enabled: true, dryRun: true },
         "build-gate": { enabled: false, dryRun: false },
         "leader-compaction": { enabled: true, dryRun: false },
         "remediation-escalation": { enabled: false },
