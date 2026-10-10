@@ -92,7 +92,10 @@ import { toWorktreeArchiveRisk } from "@/git/worktree-archive-warning";
 import { hasVisibleOrderChanged, mergeWithRemainder } from "@/utils/sidebar-reorder";
 import { confirmDialog } from "@/utils/confirm-dialog";
 import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
-import { SidebarStatusWorkspaceList } from "@/components/sidebar/sidebar-status-list";
+import {
+  SidebarStatusWorkspaceList,
+  StatusGroupList,
+} from "@/components/sidebar/sidebar-status-list";
 import type { SidebarWorkspaceGroup } from "@/components/sidebar/sidebar-labels";
 import {
   SidebarWorkspaceContextMenu,
@@ -2021,6 +2024,7 @@ export function SidebarWorkspaceList({
     ) : (
       <ProjectModeList
         projects={projects}
+        workspaceGroups={workspaceGroups}
         pinnedGroups={pinnedGroups}
         workspaceEntriesByKey={workspaceEntriesByKey}
         projectIconByProjectViewKey={projectIconByProjectViewKey}
@@ -2117,6 +2121,7 @@ function SidebarGroupedModeList({
 
 function ProjectModeList({
   projects,
+  workspaceGroups,
   pinnedGroups,
   workspaceEntriesByKey,
   projectIconByProjectViewKey,
@@ -2140,12 +2145,7 @@ function ProjectModeList({
   onPinnedWorkspaceReorder,
 }: Omit<
   SidebarWorkspaceListProps,
-  | "workspaceGroups"
-  | "projectIconTargets"
-  | "groupMode"
-  | "hasProjectsBeforeFilter"
-  | "isRefreshing"
-  | "onRefresh"
+  "projectIconTargets" | "groupMode" | "hasProjectsBeforeFilter" | "isRefreshing" | "onRefresh"
 > & {
   /** Swaps the list body for the label filter's empty state. Never the header above it. */
   sidebarFilterEmpty: boolean;
@@ -2166,6 +2166,9 @@ function ProjectModeList({
   const pinnedCollapsed = useSidebarCollapsedSectionsStore((state) => state.collapsedPinned);
   const togglePinnedCollapsed = useSidebarCollapsedSectionsStore(
     (state) => state.togglePinnedCollapsed,
+  );
+  const collapsedWorkspaceGroupKeys = useSidebarCollapsedSectionsStore(
+    (state) => state.collapsedWorkspaceGroupKeys,
   );
 
   const getProjectOrder = useSidebarOrderStore((state) => state.getProjectOrder);
@@ -2502,6 +2505,22 @@ function ProjectModeList({
         ? listHeaderComponent
         : null}
       {sidebarFilterEmpty ? <SidebarFilterEmptyState /> : projectBody}
+      {/* Project mode keeps its own project headers for everything else, but agent-made
+          workspaces (R3) never get one — they sit in the one collapsed group every grouping
+          mode shares, reusing the same header/row component status mode renders. */}
+      {sidebarFilterEmpty ? null : (
+        <StatusGroupList
+          groups={workspaceGroups}
+          collapsedWorkspaceGroupKeys={collapsedWorkspaceGroupKeys}
+          projectIconByProjectViewKey={projectIconByProjectViewKey}
+          shortcutIndex={shortcutIndexByWorkspaceKey}
+          showShortcutBadges={showShortcutBadges}
+          onWorkspacePress={onWorkspacePress}
+          hostBadgeByServerId={hostBadgeByServerId}
+          supportsPinningByServerId={supportsPinningByServerId}
+          onToggleWorkspacePin={onToggleWorkspacePin}
+        />
+      )}
       {listFooterComponent}
     </>
   );

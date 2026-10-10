@@ -7,7 +7,7 @@ export interface SidebarWorkspaceGroup {
   key: string;
   label: string;
   rows: SidebarWorkspaceEntry[];
-  leading: { kind: "status"; bucket: StatusBucket };
+  leading: { kind: "status"; bucket: StatusBucket } | { kind: "agent"; needsAttention: boolean };
 }
 
 export function statusWorkspaceGroups(groups: readonly StatusGroup[]): SidebarWorkspaceGroup[] {
@@ -17,6 +17,47 @@ export function statusWorkspaceGroups(groups: readonly StatusGroup[]): SidebarWo
     rows: group.rows,
     leading: { kind: "status", bucket: group.bucket },
   }));
+}
+
+/** The statuses that mean an agent in the group is waiting on Tyler: a permission or an error. */
+const AGENT_GROUP_ATTENTION_BUCKETS: ReadonlySet<StatusBucket> = new Set(["needs_input", "failed"]);
+
+export const AGENT_WORKSPACES_GROUP_KEY = "agent-workspaces";
+
+/**
+ * The one collapsed "Agent workspaces (N)" section for every workspace an agent made
+ * (R3, docs/done-janitor.md#manual-pin-vs-auto-pin). Returns null when there are none, so a
+ * caller can skip it rather than render an empty, permanently-collapsible section.
+ */
+export function agentWorkspacesGroup(
+  rows: readonly SidebarWorkspaceEntry[],
+): SidebarWorkspaceGroup | null {
+  if (rows.length === 0) return null;
+  const needsAttention = rows.some((row) => AGENT_GROUP_ATTENTION_BUCKETS.has(row.statusBucket));
+  return {
+    key: AGENT_WORKSPACES_GROUP_KEY,
+    label: `Agent workspaces (${rows.length})`,
+    rows: [...rows],
+    leading: { kind: "agent", needsAttention },
+  };
+}
+
+/**
+ * Whether `group`'s header should render collapsed, from the one persisted
+ * `collapsedWorkspaceGroupKeys` set every workspace group shares.
+ *
+ * Every ordinary group (status) defaults open: the set holds the keys a person collapsed by
+ * hand, so absence means expanded. The agent-workspaces group defaults the other way — closed
+ * until a person opens it — so for it alone the set holds an explicit *expand*, and absence
+ * means collapsed. `toggleWorkspaceGroupCollapsed(group.key)` still just flips membership either
+ * way, so the store and its persistence stay the single mechanism for both.
+ */
+export function isSidebarWorkspaceGroupCollapsed(
+  group: SidebarWorkspaceGroup,
+  collapsedWorkspaceGroupKeys: ReadonlySet<string>,
+): boolean {
+  const inSet = collapsedWorkspaceGroupKeys.has(group.key);
+  return group.leading.kind === "agent" ? !inSet : inSet;
 }
 
 /**
