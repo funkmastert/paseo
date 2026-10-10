@@ -1,10 +1,14 @@
-import { describe, expect, test } from "vitest";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import nodePath from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import {
   decideCodexGuardedCommand,
   describeGuardedSensitiveFileChangePath,
   describeGuardedSensitiveGitConfigCommand,
   describeGuardedSensitiveGitInvocation,
+  resolveGuardedFileChangePath,
 } from "./codex-guard.js";
 import type { DeviceLaunchGate, DeviceLaunchGateDecision } from "./device-lease-manager.js";
 
@@ -238,5 +242,74 @@ describe("describeGuardedSensitiveGitInvocation (re-review finding #1)", () => {
       resolveCurrentBranch: fakeBranchResolver("main"),
     });
     expect(result.decision).toBe("decline");
+  });
+});
+
+describe("describeGuardedSensitiveFileChangePath (.ssh, re-review finding #3)", () => {
+  test.each([
+    "/workspace/project/.ssh/config",
+    "/workspace/project/.ssh/authorized_keys",
+    "/home/x/.ssh/id_rsa",
+  ])("flags %s", (sshPath) => {
+    expect(describeGuardedSensitiveFileChangePath(sshPath)).not.toBeNull();
+  });
+
+  test("clears an ordinary path with 'ssh' in its name but not a .ssh directory", () => {
+    expect(describeGuardedSensitiveFileChangePath("/workspace/project/ssh-notes.md")).toBeNull();
+  });
+});
+
+describe("resolveGuardedFileChangePath (re-review finding #2)", () => {
+  let scratch: string;
+
+  beforeEach(() => {
+    // realpathSync's own normalization, so the test's expectations match on a machine where
+    // the OS temp dir itself is a symlink (/var -> /private/var on macOS).
+    scratch = realpathSync(mkdtempSync(nodePath.join(os.tmpdir(), "codex-guard-resolve-test-")));
+  });
+
+  afterEach(() => {
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  test("resolves a plain existing file to itself", () => {
+    const file = nodePath.join(scratch, "notes.md");
+    writeFileSync(file, "hello");
+    expect(resolveGuardedFileChangePath("notes.md", scratch)).toBe(file);
+  });
+
+  test("resolves a non-existent file to its reconstructed absolute path", () => {
+    const file = nodePath.join(scratch, "new-file.md");
+    expect(resolveGuardedFileChangePath("new-file.md", scratch)).toBe(file);
+  });
+
+  test("follows a symlink file target to its real path", () => {
+    mkdirSync(nodePath.join(scratch, ".git"), { recursive: true });
+    const gitConfig = nodePath.join(scratch, ".git", "config");
+    writeFileSync(gitConfig, "[core]\n");
+    const link = nodePath.join(scratch, "notes.md");
+    symlinkSync(gitConfig, link);
+
+    const resolved = resolveGuardedFileChangePath("notes.md", scratch);
+    expect(resolved).toBe(gitConfig);
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
+  });
+
+  test("follows a symlinked directory ancestor to its real path", () => {
+    const realDir = nodePath.join(scratch, "real-target");
+    mkdirSync(nodePath.join(realDir, ".git"), { recursive: true });
+    const gitConfig = nodePath.join(realDir, ".git", "config");
+    writeFileSync(gitConfig, "[core]\n");
+    const linkDir = nodePath.join(scratch, "evil-link");
+    symlinkSync(realDir, linkDir);
+
+    // The target file under the symlinked directory doesn't exist yet -- resolution must still
+    // follow the directory symlink and reconstruct the remaining segment.
+    const resolved = resolveGuardedFileChangePath(
+      nodePath.join("evil-link", ".git", "config"),
+      scratch,
+    );
+    expect(resolved).toBe(gitConfig);
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
   });
 });

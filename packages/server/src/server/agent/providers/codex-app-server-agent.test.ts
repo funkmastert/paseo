@@ -1,7 +1,16 @@
 import { describe, expect, test, vi } from "vitest";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { type Dirent, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  type Dirent,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -237,9 +246,10 @@ describe("Codex guarded mode approval handling", () => {
   async function startGuardedSession(
     appServer: FakeCodexAppServer,
     deps: { deviceLaunchGate?: DeviceLaunchGate; isCatastropheGateEnabled?: () => boolean } = {},
+    cwd = "/workspace/project",
   ): Promise<{ session: AgentSession; paseoTurnId: string }> {
     const session = new CodexAppServerAgentSession(
-      createConfig({ cwd: "/workspace/project", modeId: "guarded" }),
+      createConfig({ cwd, modeId: "guarded" }),
       null,
       createTestLogger(),
       async () => appServer.child,
@@ -378,12 +388,14 @@ describe("Codex guarded mode approval handling", () => {
     appServer.assertNoErrors();
   });
 
-  test("approves an apply_patch request outright", async () => {
+  test("declines an apply_patch request whose changed paths were never tracked (re-review finding #4)", async () => {
     const appServer = createFakeCodexAppServer({
       "turn/steer": () => ({ turn: { id: "native-A" } }),
     });
     const { session } = await startGuardedSession(appServer);
 
+    // No appServer.startsFileChange(...) call -- this item's paths were never tracked at all
+    // (a malformed/missing changes payload, or a notification that never arrived).
     appServer.requestFileChangeApproval({
       itemId: "file-1",
       threadId: "thread-1",
@@ -392,7 +404,7 @@ describe("Codex guarded mode approval handling", () => {
     });
     const result = await appServer.waitForCommandApprovalDecision("file-1");
 
-    expect(result).toEqual({ decision: "accept" });
+    expect(result).toEqual({ decision: "decline" });
     expect(session.getPendingPermissions()).toHaveLength(0);
 
     await session.close();
@@ -463,6 +475,88 @@ describe("Codex guarded mode approval handling", () => {
       appServer.assertNoErrors();
     },
   );
+
+  test("declines an apply_patch request whose reported path is a symlink into .git/ (re-review finding #2)", async () => {
+    const scratch = realpathSync(await mkdtemp(path.join(tmpdir(), "codex-guard-symlink-test-")));
+    try {
+      mkdirSync(path.join(scratch, ".git"), { recursive: true });
+      const gitConfig = path.join(scratch, ".git", "config");
+      writeFileSync(gitConfig, "[core]\n");
+      const link = path.join(scratch, "notes.md");
+      symlinkSync(gitConfig, link);
+
+      const appServer = createFakeCodexAppServer({
+        "turn/steer": () => ({ turn: { id: "native-A" } }),
+      });
+      const { session } = await startGuardedSession(appServer, {}, scratch);
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+
+      appServer.startsFileChange({
+        threadId: "thread-1",
+        itemId: "file-symlink",
+        // Codex reports the literal path it was asked to write ("notes.md") -- a symlink, not
+        // a path with ".git" anywhere in its own text.
+        changes: [{ path: link, kind: "update" }],
+      });
+      appServer.requestFileChangeApproval({
+        itemId: "file-symlink",
+        threadId: "thread-1",
+        turnId: "native-A",
+        reason: "Apply the patch",
+      });
+      const result = await appServer.waitForCommandApprovalDecision("file-symlink");
+
+      expect(result).toEqual({ decision: "decline" });
+      const assistantMessage = events.find(
+        (event) => event.type === "timeline" && event.item.type === "assistant_message",
+      );
+      expect(assistantMessage).toBeDefined();
+
+      await session.close();
+      appServer.assertNoErrors();
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test("tracks file-change paths from the legacy patch_apply_started channel too (re-review finding #4)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session as unknown as CodexTestSession).handleNotification(
+      "codex/event/patch_apply_begin",
+      {
+        threadId: "thread-1",
+        msg: {
+          type: "patch_apply_begin",
+          call_id: "legacy-patch-1",
+          changes: [{ path: "/workspace/project/.gitattributes", kind: "add" }],
+        },
+      },
+    );
+
+    appServer.requestFileChangeApproval({
+      itemId: "legacy-patch-1",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("legacy-patch-1");
+
+    expect(result).toEqual({ decision: "decline" });
+    const assistantMessage = events.find(
+      (event) => event.type === "timeline" && event.item.type === "assistant_message",
+    );
+    expect(assistantMessage).toBeDefined();
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
 
   test("declines a command that sets a git alias (review finding #2's catastrophe-gate blind spot)", async () => {
     const appServer = createFakeCodexAppServer({

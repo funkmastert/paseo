@@ -1,3 +1,6 @@
+import { realpathSync } from "node:fs";
+import nodePath from "node:path";
+
 import {
   checkCatastrophe,
   formatCatastropheDenial,
@@ -65,7 +68,48 @@ export function describeGuardedSensitiveFileChangePath(path: string): string | n
   if (SHELL_RC_BASENAMES.has(basename)) {
     return "a shell startup file";
   }
+  // Review finding #3: a ~/.ssh/config `Host * ProxyCommand ...` stanza runs arbitrary shell on
+  // the next ssh or git-over-ssh call, which is not itself a catastrophe-gate pattern. The whole
+  // directory is sensitive, not just config -- authorized_keys and the private keys live there
+  // too.
+  if (segments.includes(".ssh")) {
+    return "a path inside a .ssh directory";
+  }
   return null;
+}
+
+/**
+ * The sensitivity check above keys on the literal reported path string -- a symlink planted at
+ * an ordinary in-workspace path (never itself gated, since in-workspace writes raise no approval
+ * request at all) can redirect an always-accepted write into a sensitive location with a name
+ * that never matches (review finding #2). Resolves to what the path will actually touch on disk
+ * by realpath-ing the deepest existing ancestor and reapplying any remaining segments, which
+ * follows a symlink at any point in the chain, including the target itself if it already exists.
+ * Returns null when resolution fails for any reason -- the caller declines on an unresolved path
+ * rather than assume it is safe.
+ */
+export function resolveGuardedFileChangePath(rawPath: string, cwd: string): string | null {
+  try {
+    let current = nodePath.isAbsolute(rawPath) ? rawPath : nodePath.resolve(cwd, rawPath);
+    const unresolvedSuffix: string[] = [];
+    for (;;) {
+      try {
+        const resolvedAncestor = realpathSync(current);
+        return unresolvedSuffix.length > 0
+          ? nodePath.join(resolvedAncestor, ...unresolvedSuffix.toReversed())
+          : resolvedAncestor;
+      } catch {
+        const parent = nodePath.dirname(current);
+        if (parent === current) {
+          return null;
+        }
+        unresolvedSuffix.push(nodePath.basename(current));
+        current = parent;
+      }
+    }
+  } catch {
+    return null;
+  }
 }
 
 // Matches `alias.<name>`, `core.hooksPath`, `core.sshCommand`, or any `<section>.helper` key as a

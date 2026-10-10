@@ -58,6 +58,7 @@ import type { DeviceLaunchGate } from "../device-lease-manager.js";
 import {
   decideCodexGuardedCommand,
   describeGuardedSensitiveFileChangePath,
+  resolveGuardedFileChangePath,
 } from "../codex-guard.js";
 import {
   getCodexGuardHealthState,
@@ -6496,6 +6497,11 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (parsed.callId) {
       outputDeltas.delete(parsed.callId);
     }
+    // Review finding #4: this legacy codex/event/patch_apply_begin channel is still parsed and
+    // still dispatched, but never fed guardedFileChangePathsByItemId -- a guarded child on this
+    // channel left the approval check with nothing tracked for the item, which fell through to
+    // an accept. Both notification channels now populate the map identically.
+    this.trackGuardedFileChangePaths("fileChange", parsed.callId ?? undefined, parsed.changes);
     const timelineItem = mapCodexPatchNotificationToToolCall({
       callId: parsed.callId,
       changes: parsed.changes,
@@ -7122,6 +7128,16 @@ export class CodexAppServerAgentSession implements AgentSession {
     });
   }
 
+  private declineUntrackedGuardedFileChange(itemId: string): Promise<unknown> {
+    const reason = `Blocked by the Paseo guard: no file-change paths were ever tracked for item ${itemId}, so it cannot be proven safe.`;
+    this.emitEvent({
+      type: "timeline",
+      provider: CODEX_PROVIDER,
+      item: { type: "assistant_message", text: formatOutOfBandStatusMessage(reason) },
+    });
+    return Promise.resolve({ decision: "decline" });
+  }
+
   private handleFileChangeApprovalRequest(params: unknown): Promise<unknown> {
     const parsed = z
       .object({
@@ -7135,17 +7151,33 @@ export class CodexAppServerAgentSession implements AgentSession {
     // Guarded mode approves most file changes, matching Claude: the catastrophe gate covers
     // shell commands only (docs/catastrophe-gate.md). The exception is a path through which a
     // pure file write can later weaponize an otherwise-innocuous shell command -- a `.git/config`
-    // alias, a hook, a `.gitattributes` filter driver, or a shell rc file (review finding #2).
-    // The approval request itself carries no path info (confirmed against the real app-server
-    // protocol); the touched paths were captured off the `item/started` notification for this
-    // item id, which always precedes the approval request for the same change.
+    // alias, a hook, a `.gitattributes` filter driver, a `.ssh/` file, or a shell rc file (review
+    // finding #2, re-review findings #2-4). The approval request itself carries no path info
+    // (confirmed against the real app-server protocol); the touched paths were captured off the
+    // `item/started`/legacy `patch_apply_started` notification for this item id, which always
+    // precedes the approval request for the same change.
     if (this.currentMode === "guarded") {
+      if (!this.guardedFileChangePathsByItemId.has(parsed.itemId)) {
+        // Review finding #4: no entry means the paths were never tracked at all -- a malformed
+        // or missing changes payload, a notification that never arrived, or a future channel
+        // this code doesn't know about yet. Unproven is not safe; decline rather than accept.
+        return this.declineUntrackedGuardedFileChange(parsed.itemId);
+      }
       const changedPaths = this.guardedFileChangePathsByItemId.get(parsed.itemId) ?? [];
+      const cwd = this.config.cwd ?? process.cwd();
       const sensitivePath = changedPaths
-        .map((changedPath) => ({
-          path: changedPath,
-          reason: describeGuardedSensitiveFileChangePath(changedPath),
-        }))
+        .map((changedPath) => {
+          const resolved = resolveGuardedFileChangePath(changedPath, cwd);
+          return {
+            path: changedPath,
+            // Review finding #2: test the resolved real path, not the reported literal one, and
+            // treat a path realpath couldn't resolve at all as sensitive rather than safe.
+            reason:
+              resolved === null
+                ? "a path that could not be resolved to a real location"
+                : describeGuardedSensitiveFileChangePath(resolved),
+          };
+        })
         .find((entry) => entry.reason !== null);
       if (sensitivePath) {
         const reason = `Blocked by the Paseo guard: ${sensitivePath.path} is ${sensitivePath.reason}.`;
