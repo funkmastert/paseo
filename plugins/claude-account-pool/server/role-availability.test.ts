@@ -4,6 +4,7 @@ import type { RoleRecord } from "../shared/role-policy-schema";
 import { createHealthTracker } from "./health";
 import {
   evaluateRequestedModel,
+  isModelRefUsable,
   isRequestedModelApproved,
   selectModel,
   unadvertisedPoolEntries,
@@ -550,5 +551,48 @@ describe("dated snapshot vs alias spelling", () => {
     expect(
       unadvertisedPoolEntries(r, catalog({ claude: ["claude-opus-5"] }), undefined, ["claude-opus-5-5"]),
     ).toEqual([]);
+  });
+});
+
+describe("isModelRefUsable", () => {
+  it("usable: in the catalog, with a viable pool and no budget gate", () => {
+    expect(
+      isModelRefUsable("claude-sonnet-5", catalog({ claude: ["claude-sonnet-5"] }), ONE_WORKER_POOL, createHealthTracker()),
+    ).toBe(true);
+  });
+
+  it("unusable: absent from the catalog and not allowlisted", () => {
+    expect(isModelRefUsable("claude-ghost", catalog({ claude: ["claude-sonnet-5"] }), ONE_WORKER_POOL, createHealthTracker())).toBe(
+      false,
+    );
+  });
+
+  it("usable: absent from the catalog but named in allowUnlistedModels", () => {
+    expect(
+      isModelRefUsable("claude-ghost", catalog({ claude: [] }), ONE_WORKER_POOL, createHealthTracker(), {
+        allowUnlistedModels: ["claude-ghost"],
+      }),
+    ).toBe(true);
+  });
+
+  it("unusable: a Fable ref over the budget threshold on every pool member", () => {
+    const health = createHealthTracker();
+    health.reportUsage("worker-a", [{ window: "weekly_model_fable", usedPct: 100 }]);
+    health.reportUsage("leader", [{ window: "weekly_model_fable", usedPct: 100 }]);
+    expect(isModelRefUsable("claude-fable-5-1", catalog({ claude: ["claude-fable-5-1"] }), ONE_WORKER_POOL, health)).toBe(false);
+  });
+
+  it("usable: a non-pool-family ref (codex/...) is never Fable-budget-gated", () => {
+    expect(isModelRefUsable("codex/gpt-6-sol", catalog({ codex: ["gpt-6-sol"] }), EMPTY_POOL, createHealthTracker())).toBe(true);
+  });
+
+  it("unusable: an unparseable ref", () => {
+    expect(isModelRefUsable("not a valid ref!!", catalog({}), ONE_WORKER_POOL, createHealthTracker())).toBe(false);
+  });
+
+  it("unusable: the pool has no viable member for a pool-family ref", () => {
+    expect(isModelRefUsable("claude-sonnet-5", catalog({ claude: ["claude-sonnet-5"] }), EMPTY_POOL, createHealthTracker())).toBe(
+      false,
+    );
   });
 });

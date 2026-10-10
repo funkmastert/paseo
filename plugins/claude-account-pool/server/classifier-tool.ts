@@ -252,7 +252,7 @@ export function handleMcpMessage(
       try {
         const input = queryToInput((params.arguments ?? {}) as ClassifierToolQuery);
         const current = world();
-        const preview = spawnHintPreview(input, current, spawnHintAvailability?.());
+        const preview = spawnHintPreview(input, current, spawnHintAvailability?.(), current.policy.arena?.enabled === true);
         const decision = classifyAgent(preview ? { ...input, jevHint: preview } : input, current);
         return result({ content: [{ type: "text", text: describeDecision(decision) }] });
       } catch (error) {
