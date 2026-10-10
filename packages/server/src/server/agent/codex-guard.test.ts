@@ -302,6 +302,26 @@ describe("describeGuardedSensitiveFileChangePath (.ssh, re-review finding #3)", 
   });
 });
 
+describe("describeGuardedSensitiveFileChangePath -- case and Unicode insensitivity (verify finding #1, round 3)", () => {
+  test.each([
+    "/workspace/project/.GIT/HOOKS/post-update",
+    "/workspace/project/.Git/hooks/post-update",
+    "/workspace/project/.git/Hooks/post-update",
+    "/workspace/project/.GITCONFIG",
+    "/workspace/project/.GitAttributes",
+    "/workspace/project/.SSH/config",
+    "/workspace/project/.ssh/Config",
+    "/workspace/project/.ZSHRC",
+    "/workspace/project/.ZshRC",
+  ])("flags a case-variant sensitive path on a case-insensitive volume: %s", (path) => {
+    expect(describeGuardedSensitiveFileChangePath(path)).not.toBeNull();
+  });
+
+  test("still clears an ordinary path regardless of case", () => {
+    expect(describeGuardedSensitiveFileChangePath("/workspace/project/NOTES.MD")).toBeNull();
+  });
+});
+
 describe("resolveGuardedFileChangePath (re-review finding #2)", () => {
   let scratch: string;
 
@@ -405,6 +425,62 @@ describe("resolveGuardedFileChangePath (re-review finding #2)", () => {
     symlinkSync(linkA, linkB);
 
     expect(resolveGuardedFileChangePath("a", scratch)).toBeNull();
+  });
+
+  test("resolves `..` against the symlink's real target directory, not the symlink's own location (verify finding #3, round 3)", () => {
+    // objlink's target is nested two levels below scratch, so "objlink/.." landing on scratch
+    // itself (what a naive path.resolve/path.normalize text collapse would produce, treating
+    // objlink as if it were just its own name) is a different, wrong answer from the correct
+    // one (the target's real parent, one level below scratch).
+    const nestedDir = nodePath.join(scratch, "alpha", "beta");
+    mkdirSync(nestedDir, { recursive: true });
+    const objlink = nodePath.join(scratch, "objlink");
+    symlinkSync(nestedDir, objlink);
+
+    // Built with plain "/" concatenation, not nodePath.join -- path.join would itself collapse
+    // "objlink/.." textually before resolveGuardedFileChangePath ever saw it, defeating the
+    // point of this test.
+    const resolved = resolveGuardedFileChangePath("objlink/../hooks/x", scratch);
+    expect(resolved).toBe(nodePath.join(scratch, "alpha", "hooks", "x"));
+  });
+
+  test("the objlink/../hooks/x bypass is declined end-to-end -- a naive text collapse would miss the sensitive ancestor entirely (verify finding #3, round 3)", () => {
+    // objlink's target lives inside a REAL .git directory; "hooks/post-update" (the suffix)
+    // never spells ".git" anywhere in the rawPath string itself -- only correctly following the
+    // symlink before applying ".." reveals that the ancestor is sensitive.
+    const nestedDir = nodePath.join(scratch, ".git", "beta");
+    mkdirSync(nestedDir, { recursive: true });
+    const objlink = nodePath.join(scratch, "objlink");
+    symlinkSync(nestedDir, objlink);
+
+    // Same caution as above: plain "/" concatenation, not nodePath.join.
+    const resolved = resolveGuardedFileChangePath("objlink/../hooks/post-update", scratch);
+    expect(resolved).toBe(nodePath.join(scratch, ".git", "hooks", "post-update"));
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
+
+    // What a naive path.resolve/path.normalize-before-the-walk collapse would have produced
+    // instead -- provably NOT sensitive, confirming this is a real verdict change (an accept
+    // that should be a decline), not just a differently-shaped sensitive string.
+    const naiveCollapse = nodePath.join(scratch, "hooks", "post-update");
+    expect(describeGuardedSensitiveFileChangePath(naiveCollapse)).toBeNull();
+  });
+
+  test("a relative symlink target containing its own `..` resolves relative to the symlink's own directory", () => {
+    const realDir = nodePath.join(scratch, "real-target");
+    mkdirSync(nodePath.join(realDir, ".git"), { recursive: true });
+    const gitDir = nodePath.join(realDir, ".git");
+    const nested = nodePath.join(scratch, "nested");
+    mkdirSync(nested, { recursive: true });
+    const relLink = nodePath.join(nested, "rel-link");
+    // Relative target: from `nested/`, "../real-target" is scratch/real-target.
+    symlinkSync(nodePath.join("..", "real-target"), relLink);
+
+    const resolved = resolveGuardedFileChangePath(
+      nodePath.join("nested", "rel-link", ".git"),
+      scratch,
+    );
+    expect(resolved).toBe(gitDir);
+    expect(describeGuardedSensitiveFileChangePath(resolved ?? "")).not.toBeNull();
   });
 });
 

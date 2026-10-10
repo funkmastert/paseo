@@ -1349,6 +1349,11 @@ interface CodexPatchFileChange {
   path: string;
   kind?: string;
   content?: string;
+  /** A rename/move's destination (review finding #2, round 3): the real Codex app-server
+   * protocol reports a rename's `kind` as an object, `{type: "update", move_path: "<dest>"}`,
+   * not a bare string -- moving notes.md into .git/hooks/post-checkout is otherwise checked
+   * against notes.md's own (harmless) path, never against where it actually lands. */
+  movePath?: string;
 }
 
 function extractPatchLikeText(value: unknown): string | undefined {
@@ -1444,6 +1449,31 @@ function normalizeCodexCommandValue(value: unknown): string | string[] | null {
   return parts;
 }
 
+/**
+ * `record.kind` is either a bare string (`"add"`/`"delete"`/...), or -- for a rename, per the
+ * real app-server protocol -- an object `{type: "update", move_path: "<dest>" | null}`. Only the
+ * object form carries a destination at all; a bare-string `kind` (or none) never does.
+ */
+function resolveKindAndMovePath(record: Record<string, unknown>): {
+  kind: string | undefined;
+  movePath: string | undefined;
+} {
+  if (typeof record.kind === "string") {
+    return { kind: record.kind, movePath: undefined };
+  }
+  const kindRecord = toObjectRecord(record.kind);
+  if (kindRecord) {
+    const kind = typeof kindRecord.type === "string" ? kindRecord.type : undefined;
+    const movePathRaw = kindRecord.move_path ?? kindRecord.movePath;
+    const movePath =
+      typeof movePathRaw === "string" && movePathRaw.trim().length > 0
+        ? movePathRaw.trim()
+        : undefined;
+    return { kind, movePath };
+  }
+  return { kind: typeof record.type === "string" ? record.type : undefined, movePath: undefined };
+}
+
 function parseCodexPatchChanges(changes: unknown): CodexPatchFileChange[] {
   const resolvePathFromRecord = (record: Record<string, unknown>): string => {
     const directPath =
@@ -1474,14 +1504,8 @@ function parseCodexPatchChanges(changes: unknown): CodexPatchFileChange[] {
         if (!pathValue) {
           return null;
         }
-        return {
-          path: pathValue,
-          kind:
-            (typeof record.kind === "string" && record.kind) ||
-            (typeof record.type === "string" && record.type) ||
-            undefined,
-          content: extractPatchLikeText(record),
-        };
+        const { kind, movePath } = resolveKindAndMovePath(record);
+        return { path: pathValue, kind, movePath, content: extractPatchLikeText(record) };
       })
       .filter((entry): entry is CodexPatchFileChange => entry !== null);
   }
@@ -1492,15 +1516,9 @@ function parseCodexPatchChanges(changes: unknown): CodexPatchFileChange[] {
   }
   const directPathValue = resolvePathFromRecord(recordChanges);
   if (directPathValue) {
+    const { kind, movePath } = resolveKindAndMovePath(recordChanges);
     return [
-      {
-        path: directPathValue,
-        kind:
-          (typeof recordChanges.kind === "string" && recordChanges.kind) ||
-          (typeof recordChanges.type === "string" && recordChanges.type) ||
-          undefined,
-        content: extractPatchLikeText(recordChanges),
-      },
+      { path: directPathValue, kind, movePath, content: extractPatchLikeText(recordChanges) },
     ];
   }
 
@@ -1510,16 +1528,11 @@ function parseCodexPatchChanges(changes: unknown): CodexPatchFileChange[] {
       if (!normalizedPath) {
         return null;
       }
-      return {
-        path: normalizedPath,
-        kind:
-          value &&
-          typeof value === "object" &&
-          typeof (value as { type?: unknown }).type === "string"
-            ? ((value as { type?: string }).type ?? undefined)
-            : undefined,
-        content: extractPatchLikeText(value),
-      };
+      const valueRecord = toObjectRecord(value);
+      const { kind, movePath } = valueRecord
+        ? resolveKindAndMovePath(valueRecord)
+        : { kind: undefined, movePath: undefined };
+      return { path: normalizedPath, kind, movePath, content: extractPatchLikeText(value) };
     })
     .filter((entry): entry is CodexPatchFileChange => entry !== null);
 }
@@ -6835,7 +6848,12 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (this.currentMode !== "guarded" || normalizedItemType !== "fileChange" || !itemId) {
       return;
     }
-    const changedPaths = parseCodexPatchChanges(changes).map((file) => file.path);
+    // Review finding #2 (round 3): a rename's destination carries its own risk independent of
+    // its source -- moving notes.md into .git/hooks/post-checkout must be checked against where
+    // it lands, not just where it came from -- so both are tracked.
+    const changedPaths = parseCodexPatchChanges(changes).flatMap((file) =>
+      file.movePath ? [file.path, file.movePath] : [file.path],
+    );
     if (changedPaths.length === 0) {
       return;
     }

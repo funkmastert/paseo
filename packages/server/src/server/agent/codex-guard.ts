@@ -33,8 +33,17 @@ const SHELL_RC_BASENAMES = new Set([
   ".inputrc",
 ]);
 
+// Verify finding #1 (round 3): macOS (APFS/HFS+ default) and Windows volumes are
+// case-insensitive, so `.GIT`/`.Git`/`.SSH` land on the same directory as `.git`/`.ssh`. NFC
+// normalization covers the Unicode equivalent -- a combining-character sequence that renders
+// identically to an ASCII name but compares unequal to it code-point-by-code-point. Comparing
+// lowercased-NFC segments is strictly more inclusive than exact comparison, never less: on a
+// case-sensitive volume this flags nothing a case-sensitive check would have missed, and catches
+// the case-insensitive-volume write a case-sensitive check otherwise would.
 function pathSegments(path: string): string[] {
   return path
+    .normalize("NFC")
+    .toLowerCase()
     .replace(/\\/g, "/")
     .split("/")
     .filter((segment) => segment.length > 0);
@@ -78,22 +87,30 @@ export function describeGuardedSensitiveFileChangePath(path: string): string | n
   return null;
 }
 
+/**
+ * `rawPath`'s own root (empty when relative) and the rest of its components, in original order,
+ * with no empty segments -- but `.`/`..` are left in place, not collapsed. `path.resolve`/
+ * `path.join` collapse `..` against whatever segment happens to precede it in the TEXT, with no
+ * idea whether that segment is a real directory or a symlink (review finding #3): `objlink/..`
+ * textually cancels to nothing, silently assuming `objlink` is transparent, when `..` after a
+ * symlink must instead go to the PARENT OF WHATEVER THE SYMLINK'S TARGET RESOLVED TO. Splitting
+ * without collapsing, and only ever resolving `..` against the real, already-substituted
+ * location inside the walk below, is what keeps that distinction intact.
+ */
+function splitRawSegments(rawPath: string): string[] {
+  const { root } = nodePath.parse(rawPath);
+  return rawPath
+    .slice(root.length)
+    .split(/[\\/]/)
+    .filter((segment) => segment.length > 0 && segment !== ".");
+}
+
 // Verify re-review finding #2 (round 2): resolving an already-dangling symlink (its target does
 // not exist yet) requires an lstat+readlink hop, not realpathSync -- realpathSync throws on the
 // whole chain the moment the final target is missing, with no way to recover the target it was
 // pointing at. A hop limit (incremented once per symlink actually followed, not per path
 // component) is the fail-closed backstop against a symlink cycle.
 const MAX_SYMLINK_RESOLUTION_HOPS = 40;
-
-/** `absolutePath`'s own root and the rest of its components, in order, with no empty segments. */
-function splitAbsolutePath(absolutePath: string): { root: string; segments: string[] } {
-  const { root } = nodePath.parse(absolutePath);
-  const segments = absolutePath
-    .slice(root.length)
-    .split(nodePath.sep)
-    .filter((segment) => segment.length > 0);
-  return { root, segments };
-}
 
 /**
  * The sensitivity check above keys on the literal reported path string -- a symlink planted at
@@ -103,46 +120,57 @@ function splitAbsolutePath(absolutePath: string): { root: string; segments: stri
  * with an explicit component-by-component walk: a queue of remaining path components, each
  * `lstat`-ed against the real location built up so far. A component that doesn't exist ends the
  * walk -- nothing past it can be a symlink, so the rest is appended literally. A component that
- * is a symlink is `readlink`-ed, and the target's own components (absolute: restart from `/`;
- * relative: resolved against the symlink's own directory) are pushed onto the FRONT of the
- * queue, so every one of them -- and everything already queued after the symlink -- gets
- * `lstat`-ed again from scratch. A fixed substitution that stops re-walking the remaining
- * components (an earlier, broken version of this function) misses a second symlink anywhere
- * past the first one found: an ordinary symlinked ancestor (macOS's `/tmp` -> `/private/tmp`, or
- * a symlinked home directory) would otherwise shadow an attack symlink further down the same
- * path. `cwd` is resolved the same way before a relative `rawPath` is joined onto it, so a
- * symlinked workspace root is covered too, not only the path requested within it. Returns null
- * when resolution fails for any reason, or exceeds the symlink-hop limit -- the caller declines
- * on an unresolved path rather than assume it is safe.
+ * is a symlink is `readlink`-ed, and the target's own components (absolute: restart from the
+ * root; relative: resolved against the symlink's own directory, which is exactly the location
+ * already built up) are pushed onto the FRONT of the queue, so every one of them -- and
+ * everything already queued after the symlink, `..` included -- gets `lstat`-ed (or, for `..`,
+ * popped against the real location) again from scratch. A fixed substitution that stops
+ * re-walking the remaining components (an earlier, broken version of this function) misses a
+ * second symlink anywhere past the first one found: an ordinary symlinked ancestor (macOS's
+ * `/tmp` -> `/private/tmp`, or a symlinked home directory) would otherwise shadow an attack
+ * symlink further down the same path. `cwd` is resolved the same way before a relative `rawPath`
+ * is joined onto it -- never via `path.resolve`, which would collapse a `..` in `rawPath` against
+ * `cwd`'s own un-substituted text (review finding #3) -- so a symlinked workspace root is
+ * covered too, not only the path requested within it. Returns null when resolution fails for any
+ * reason, or exceeds the symlink-hop limit -- the caller declines on an unresolved path rather
+ * than assume it is safe.
  */
 export function resolveGuardedFileChangePath(rawPath: string, cwd: string): string | null {
   try {
     if (nodePath.isAbsolute(rawPath)) {
-      return resolveFollowingSymlinks(rawPath);
+      return walkSegments(nodePath.parse(rawPath).root, splitRawSegments(rawPath));
     }
-    const resolvedCwd = resolveFollowingSymlinks(cwd);
+    const resolvedCwd = walkSegments(nodePath.parse(cwd).root, splitRawSegments(cwd));
     if (resolvedCwd === null) {
       return null;
     }
-    return resolveFollowingSymlinks(nodePath.resolve(resolvedCwd, rawPath));
+    return walkSegments(resolvedCwd, splitRawSegments(rawPath));
   } catch {
     return null;
   }
 }
 
-function resolveFollowingSymlinks(absolutePath: string): string | null {
-  const { root, segments: remaining } = splitAbsolutePath(absolutePath);
-  let resolvedSoFar = root;
+function walkSegments(startResolved: string, segments: string[]): string | null {
+  let resolvedSoFar = startResolved;
+  const remaining = [...segments];
   let hops = 0;
   while (remaining.length > 0) {
     const segment = remaining.shift() as string;
+    if (segment === "..") {
+      // Popped against the real location built up so far, not the original (possibly
+      // symlinked) text -- the whole point of finding #3's fix.
+      resolvedSoFar = nodePath.dirname(resolvedSoFar);
+      continue;
+    }
     const candidate = nodePath.join(resolvedSoFar, segment);
     let stat;
     try {
       stat = lstatSync(candidate);
     } catch {
       // Nothing exists here yet (the common case for a file apply_patch is about to create) --
-      // nothing past this point can be a symlink, so the rest of the path is literal.
+      // nothing past this point can be a symlink, so the rest of the path is literal. Any
+      // trailing `..` here is safe to collapse textually: once nothing exists, there is no more
+      // symlink substitution left to lose.
       return nodePath.join(candidate, ...remaining);
     }
     if (!stat.isSymbolicLink()) {
@@ -154,15 +182,13 @@ function resolveFollowingSymlinks(absolutePath: string): string | null {
       return null;
     }
     const linkTarget = readlinkSync(candidate);
-    const resolvedLinkTarget = nodePath.isAbsolute(linkTarget)
-      ? linkTarget
-      : nodePath.resolve(resolvedSoFar, linkTarget);
-    const { root: targetRoot, segments: targetSegments } = splitAbsolutePath(resolvedLinkTarget);
-    resolvedSoFar = targetRoot;
-    // The target's own components go back through lstat too -- including whatever was already
-    // queued after this symlink, so a second symlink anywhere later in the original path is
-    // never skipped.
-    remaining.unshift(...targetSegments);
+    if (nodePath.isAbsolute(linkTarget)) {
+      resolvedSoFar = nodePath.parse(linkTarget).root;
+    }
+    // A relative target resolves against the symlink's own directory -- resolvedSoFar, right
+    // now, before this hop, is exactly that directory (fully resolved already, with every
+    // component already verified real) -- so it needs no change for that case.
+    remaining.unshift(...splitRawSegments(linkTarget));
   }
   return resolvedSoFar;
 }
@@ -176,7 +202,7 @@ function resolveFollowingSymlinks(absolutePath: string): string | null {
  * git executes as a hook-shaped command on every status check once set.
  */
 function isSensitiveGitConfigKey(key: string): boolean {
-  const lower = key.trim().toLowerCase();
+  const lower = key.trim().normalize("NFC").toLowerCase();
   return (
     lower.startsWith("alias.") ||
     lower === "core.hookspath" ||

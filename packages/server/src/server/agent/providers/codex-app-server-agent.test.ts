@@ -587,6 +587,52 @@ describe("Codex guarded mode approval handling", () => {
     appServer.assertNoErrors();
   });
 
+  test("declines a rename whose destination (kind.move_path) is sensitive, even though the source path isn't (verify finding #2, round 3)", async () => {
+    const scratch = realpathSync(await mkdtemp(path.join(tmpdir(), "codex-guard-move-path-test-")));
+    try {
+      mkdirSync(path.join(scratch, ".git", "hooks"), { recursive: true });
+      const hookTarget = path.join(scratch, ".git", "hooks", "post-checkout");
+
+      const appServer = createFakeCodexAppServer({
+        "turn/steer": () => ({ turn: { id: "native-A" } }),
+      });
+      const { session } = await startGuardedSession(appServer, {}, scratch);
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+
+      appServer.startsFileChange({
+        threadId: "thread-1",
+        itemId: "file-rename",
+        // The real app-server protocol's rename shape: kind is an object carrying move_path,
+        // not a bare string -- notes.md itself is harmless; only the destination is sensitive.
+        changes: [
+          {
+            path: path.join(scratch, "notes.md"),
+            kind: { type: "update", move_path: hookTarget },
+          },
+        ],
+      });
+      appServer.requestFileChangeApproval({
+        itemId: "file-rename",
+        threadId: "thread-1",
+        turnId: "native-A",
+        reason: "Apply the patch",
+      });
+      const result = await appServer.waitForCommandApprovalDecision("file-rename");
+
+      expect(result).toEqual({ decision: "decline" });
+      const assistantMessage = events.find(
+        (event) => event.type === "timeline" && event.item.type === "assistant_message",
+      );
+      expect(assistantMessage).toBeDefined();
+
+      await session.close();
+      appServer.assertNoErrors();
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
   test("tracks file-change paths from the legacy patch_apply_started channel too (re-review finding #4)", async () => {
     const appServer = createFakeCodexAppServer({
       "turn/steer": () => ({ turn: { id: "native-A" } }),
@@ -614,6 +660,49 @@ describe("Codex guarded mode approval handling", () => {
       reason: "Apply the patch",
     });
     const result = await appServer.waitForCommandApprovalDecision("legacy-patch-1");
+
+    expect(result).toEqual({ decision: "decline" });
+    const assistantMessage = events.find(
+      (event) => event.type === "timeline" && event.item.type === "assistant_message",
+    );
+    expect(assistantMessage).toBeDefined();
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("tracks a rename's move_path destination from the legacy patch_apply_started channel too (verify finding #2, round 3)", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+    });
+    const { session } = await startGuardedSession(appServer);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session as unknown as CodexTestSession).handleNotification(
+      "codex/event/patch_apply_begin",
+      {
+        threadId: "thread-1",
+        msg: {
+          type: "patch_apply_begin",
+          call_id: "legacy-rename-1",
+          changes: [
+            {
+              path: "/workspace/project/notes.md",
+              kind: { type: "update", move_path: "/workspace/project/.ssh/config" },
+            },
+          ],
+        },
+      },
+    );
+
+    appServer.requestFileChangeApproval({
+      itemId: "legacy-rename-1",
+      threadId: "thread-1",
+      turnId: "native-A",
+      reason: "Apply the patch",
+    });
+    const result = await appServer.waitForCommandApprovalDecision("legacy-rename-1");
 
     expect(result).toEqual({ decision: "decline" });
     const assistantMessage = events.find(
