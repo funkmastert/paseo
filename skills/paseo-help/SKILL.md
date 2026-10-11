@@ -99,6 +99,36 @@ paseo.sh, check whether the question touches something the fork changed.
 - **Install.** Follow `.claude/commands/install.md`; it automates `docs/install.md` and
   is authoritative on ordering and consent.
 
+### Settle the direction and the address before diagnosing
+
+Two questions, in this order, before touching any config:
+
+1. **Which way does the connection go?** A client connects _out_ to a daemon. To see
+   machine B's sessions on machine A, **B's daemon** must be reachable — making A
+   reachable does nothing for it. Getting this backwards sends you scanning ports on the
+   wrong host.
+2. **Is a daemon actually at that address?** Run
+   `node scripts/check-remote-host.mjs <host[:port]>`. It prints the Host, Port and
+   Use SSL to enter, or why the address will fail. HTML on `/` is not evidence: the web UI
+   is static assets and a tunnel can serve them with no daemon behind the WebSocket. Only
+   a `/ws` upgrade proves one.
+
+Cross-machine visibility is usually the **relay**, which the daemon dials out to — not
+Tailscale and not an open port. A fresh home disables the relay, so "it used to see my
+other machines" most often means relay got switched off, not that a listen address is
+wrong.
+
+### A replaced home is three stores, not one
+
+`~/.paseo` is only the daemon's. The **app profile**
+(`~/Library/Application Support/<productName>`) holds the **host list**, and
+`~/.paseo/projects/{projects,workspaces}.json` holds the **workspace registry**. A
+rebrand renames the profile directory, so a renamed app starts with no hosts even though
+the old profile is intact on disk — which reads exactly like a broken connection. An
+unrestored registry makes every workspace read "unavailable". See
+[docs/install.md](../../docs/install.md#replace-an-existing-install); the profile can be
+migrated only because both apps keep the `paseo://` scheme, so never rename it.
+
 ### Fork gotchas worth checking before diagnosing
 
 Each of these has cost real time. They look like different bugs than they are.
