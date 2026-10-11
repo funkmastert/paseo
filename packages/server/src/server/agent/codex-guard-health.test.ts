@@ -729,7 +729,9 @@ describe("runCodexGuardSelfTest", () => {
       expect(canaryPath.startsWith(os.tmpdir())).toBe(false);
       expect(okPath.startsWith(sessionCwd)).toBe(false);
       expect(canaryPath.startsWith(sessionCwd)).toBe(false);
-      expect(promptText).toContain("request escalated permissions up front");
+      expect(promptText).toContain("Paseo's automated guard self-test");
+      expect(promptText).toContain("escalated, approval-required requests");
+      expect(promptText).toContain("expected to be denied");
       // Short paths (hardening): plain filenames under an 8-hex-char per-run dir, not the full
       // 36-char nonce the model previously had to retype verbatim.
       expect(path.basename(okPath)).toBe("ok");
