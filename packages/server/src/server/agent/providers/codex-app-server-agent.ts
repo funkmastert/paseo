@@ -3435,6 +3435,9 @@ export class CodexAppServerAgentSession implements AgentSession {
   private readonly providerOptions: CodexProviderOptions;
   /** Logged once per session, not once per call site, when guardedProviderOptions() strips something. */
   private loggedGuardedProviderOptionsOverride = false;
+  /** Logged once per session (review finding #1), when a guarded turn's sandboxPolicy would
+   * otherwise have carried the host's own networkAccess: true through to Codex. */
+  private loggedGuardedNetworkAccessOverride = false;
   private resolvedWorkspaceWrite: NonNullable<
     CodexProviderOptions["sandbox_workspace_write"]
   > | null = null;
@@ -4260,15 +4263,66 @@ export class CodexAppServerAgentSession implements AgentSession {
         ...this.resolvedWorkspaceWrite,
         ...providerOptions.sandbox_workspace_write,
       };
-      params.sandboxPolicy =
+      const policy =
         this.resolvedSandboxPolicy?.type === nativeType
           ? this.resolvedSandboxPolicy
           : toSandboxPolicy(sandboxPolicyType, workspaceWrite);
+      params.sandboxPolicy = this.pinGuardedNetworkAccess(policy, nativeType);
     }
     if (this.hasWorkflowModeOverride) {
       applyApprovalsReviewerParam(params, preset);
     }
     return { approvalPolicy, sandboxPolicyType };
+  }
+
+  /**
+   * Guarded turns always send `networkAccess: false` (review finding #1), whatever the host's
+   * own Codex config or a prior turn's resolved policy says -- the catastrophe/device gates
+   * assume a network action (a push, `adb` over `localhost:5037`) must escalate, which only holds
+   * when the sandbox itself never lets one through unescalated. Logged once per session (the same
+   * pattern as `guardedProviderOptionsOverride` above) so a host whose own config enables network
+   * access for guarded turns is still visible, without spamming `daemon.log` on every turn.
+   *
+   * Also updates `resolvedSandboxPolicy` to the pinned policy actually being sent, for guarded
+   * workspaceWrite turns: unlike `thread/start`, `turn/start`'s own response is never run through
+   * `rememberResolvedSandboxPolicy`, so without this the live re-check (which reads
+   * `resolvedSandboxPolicy` to decide whether this session's sandbox is containing) would keep
+   * seeing the pre-pin, thread-start-time snapshot -- stale the moment this pins the policy that
+   * is actually in effect for this and every later turn.
+   */
+  private pinGuardedNetworkAccess(
+    policy: Record<string, unknown>,
+    nativeType: string,
+  ): Record<string, unknown> {
+    if (this.currentMode !== "guarded" || nativeType !== "workspaceWrite") {
+      return policy;
+    }
+    if (policy.networkAccess === true && !this.loggedGuardedNetworkAccessOverride) {
+      this.loggedGuardedNetworkAccessOverride = true;
+      this.logger.warn(
+        {},
+        "Guarded Codex session pinned a turn's networkAccess to false; the host's own Codex config had it enabled",
+      );
+    }
+    const pinned = { ...policy, networkAccess: false };
+    this.resolvedSandboxPolicy = pinned;
+    return pinned;
+  }
+
+  /**
+   * Whether this session's actual, most-recently-resolved sandbox policy (review finding #1) is
+   * a containing `workspaceWrite`: network access off, and no writable roots beyond the
+   * sandbox's own defaults. Only under this configuration can the live re-check assume a
+   * non-zero exit means the sandbox itself stopped the command, rather than the command simply
+   * failing for an unrelated reason while still able to reach outside the sandbox.
+   */
+  private isGuardedSandboxContaining(): boolean {
+    const policy = this.resolvedSandboxPolicy;
+    if (!policy || policy.type !== "workspaceWrite" || policy.networkAccess !== false) {
+      return false;
+    }
+    const writableRoots = policy.writableRoots;
+    return !Array.isArray(writableRoots) || writableRoots.length === 0;
   }
 
   private logTurnStartSummary({
@@ -6484,6 +6538,7 @@ export class CodexAppServerAgentSession implements AgentSession {
           isCatastropheGateEnabled: this.deps.isCatastropheGateEnabled,
           approvalRequestSeen,
           exitCode,
+          sandboxIsContaining: this.isGuardedSandboxContaining(),
         },
         this.logger,
       );

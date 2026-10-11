@@ -432,8 +432,8 @@ export function createFakeCodexAppServer(
         type: "exec_command_end",
         call_id: params.callId,
         command: params.command,
-        exit_code: 0,
-        success: true,
+        exit_code: params.exitCode ?? 0,
+        success: (params.exitCode ?? 0) === 0,
       });
     },
     appliesLegacyPatch(params) {

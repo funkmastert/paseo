@@ -242,6 +242,68 @@ describe("Codex guarded mode resists a caller's own providerOptions (review find
   });
 });
 
+describe("Codex guarded turns pin networkAccess to false (review finding #1)", () => {
+  test("a guarded turn's sandboxPolicy carries networkAccess: false even when the host's own Codex config enables it", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+      "config/read": () => ({ config: { sandbox_workspace_write: { network_access: true } } }),
+    });
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project", modeId: "guarded" }),
+      null,
+      logger,
+      async () => appServer.child,
+      {},
+      false,
+      false,
+      false,
+      "agent-guarded-network-pin",
+    );
+    try {
+      await session.startTurn("first");
+      const turnStartParams = await appServer.waitForTurnStart();
+      const sandboxPolicy = (turnStartParams as { sandboxPolicy?: Record<string, unknown> })
+        .sandboxPolicy;
+      expect(sandboxPolicy).toMatchObject({ type: "workspaceWrite", networkAccess: false });
+      expect(warn).toHaveBeenCalledWith(
+        {},
+        "Guarded Codex session pinned a turn's networkAccess to false; the host's own Codex config had it enabled",
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("auto mode (not guarded) is unaffected -- the host's own network_access passes through", async () => {
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+      "config/read": () => ({ config: { sandbox_workspace_write: { network_access: true } } }),
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project", modeId: "auto" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+      {},
+      false,
+      false,
+      false,
+      "agent-auto-network-pass-through",
+    );
+    try {
+      await session.startTurn("first");
+      const turnStartParams = await appServer.waitForTurnStart();
+      const sandboxPolicy = (turnStartParams as { sandboxPolicy?: Record<string, unknown> })
+        .sandboxPolicy;
+      expect(sandboxPolicy).toMatchObject({ networkAccess: true });
+    } finally {
+      await session.close();
+    }
+  });
+});
+
 describe("Codex guarded mode approval handling", () => {
   async function startGuardedSession(
     appServer: FakeCodexAppServer,
@@ -992,6 +1054,67 @@ describe("Codex guarded mode approval handling", () => {
     appServer.completesCommand({
       threadId: "thread-1",
       callId: "unapproved-nonzero-1",
+      command: "git push --force origin main",
+      output: "",
+      exitCode: 1,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getCodexGuardHealthState().status).toBe("unknown");
+    expect(interrupted).toBe(false);
+
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("still turns health red for a non-zero exit when the host's own Codex config grants extra writable roots (review finding #1)", async () => {
+    resetCodexGuardHealthStateForTests();
+    let interrupted = false;
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+      "turn/interrupt": () => {
+        interrupted = true;
+        return {};
+      },
+      // networkAccess is always pinned to false for a guarded turn (review finding #1), so the
+      // only way left for the host's own config to make this session's sandbox non-containing is
+      // an extra writable root.
+      "config/read": () => ({
+        config: { sandbox_workspace_write: { writable_roots: ["/opt/extra"] } },
+      }),
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.completesCommand({
+      threadId: "thread-1",
+      callId: "unapproved-nonzero-extra-root-1",
+      command: "git push --force origin main",
+      output: "",
+      exitCode: 1,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getCodexGuardHealthState().status).toBe("red");
+    expect(interrupted).toBe(true);
+
+    await session.close();
+  });
+
+  test("the legacy exec_command_end channel also skips a non-zero exit under a containing sandbox (review finding #12)", async () => {
+    resetCodexGuardHealthStateForTests();
+    let interrupted = false;
+    const appServer = createFakeCodexAppServer({
+      "turn/steer": () => ({ turn: { id: "native-A" } }),
+      "turn/interrupt": () => {
+        interrupted = true;
+        return {};
+      },
+    });
+    const { session } = await startGuardedSession(appServer);
+
+    appServer.runsLegacyCommand({
+      threadId: "thread-1",
+      callId: "legacy-unapproved-nonzero-1",
       command: "git push --force origin main",
       output: "",
       exitCode: 1,
