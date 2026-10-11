@@ -17,42 +17,100 @@ The macOS build steps below were run on an Apple Silicon Mac. The Windows steps 
 An isolated instance is the safe default and needs nothing here. These steps are for
 giving Bozeo the default home and port that an existing Paseo or Bozeo install holds.
 
-Quit the app and stop the daemon first, then move the home aside rather than deleting it:
+**Your setup lives in three separate stores, not one.** Replacing the home moves only the
+first. Missing the other two is what makes a replacement look like a broken install:
+
+| Store              | Where                                          | Holds                                         | Lost if you skip it                             |
+| ------------------ | ---------------------------------------------- | --------------------------------------------- | ----------------------------------------------- |
+| Daemon home        | `~/.paseo`                                     | config, agents, schedules, loops, `server-id` | agent history, schedules, loops                 |
+| **App profile**    | `~/Library/Application Support/<ProductName>`  | **the host list and its pairings**            | **every other machine disappears from the app** |
+| Workspace registry | `~/.paseo/projects/{projects,workspaces}.json` | your projects and workspaces                  | every workspace reads "unavailable"             |
+
+A rebrand creates a _new_ app profile, because the directory is named after
+`productName` in `electron-builder.yml`. Installing `Bozeo.app` beside a previous
+`Paseo.app` therefore starts with an empty host list even though the old one is still on
+disk, untouched.
+
+### 1. Move the home aside
 
 ```bash
 paseo daemon status                     # confirm nothing is running for ~/.paseo
 mv ~/.paseo ~/.paseo.pre-bozeo-$(date +%Y%m%d)
 ```
 
-`~/.paseo` holds `daemon-keypair.json` and `server-id`, which are the daemon's identity:
-a new home generates new ones, so every paired phone has to pair again. It also holds
-`agents/`, `loops/`, `schedules/` and `worktrees/`. Moving the directory keeps all of it.
+`~/.paseo` holds `daemon-keypair.json` and `server-id`, the daemon's identity: a new home
+generates new ones, so other machines' saved entries for this host point at a `server-id`
+that no longer exists and will never reconnect. Delete those stale entries by hand.
 
-Two things are worth copying into the new home once `/install` has created it, because
-nothing else recreates them:
+### 2. Carry the home's keepers across
 
-```bash
-cp -R ~/.paseo.pre-bozeo-<date>/agent-context ~/.paseo/agent-context   # if you use it
-cp -R ~/.paseo.pre-bozeo-<date>/models ~/.paseo/models                 # saves a ~1 GB re-download
-```
-
-**Your schedules and loops do not come back on their own.** Copy them too, then restart
-the daemon:
+Run `/install` first so it creates the home, then:
 
 ```bash
-cp -R ~/.paseo.pre-bozeo-<date>/schedules/. ~/.paseo/schedules/
-cp -R ~/.paseo.pre-bozeo-<date>/loops/. ~/.paseo/loops/
+OLD=~/.paseo.pre-bozeo-<date>
+cp -R  "$OLD/agent-context" ~/.paseo/agent-context     # if you use it
+cp -R  "$OLD/models"        ~/.paseo/models            # saves a ~1 GB re-download
+cp -R  "$OLD/schedules/."   ~/.paseo/schedules/
+cp -R  "$OLD/loops/."       ~/.paseo/loops/
 ```
 
-**Agent history does not survive the move, and copying `agents/` back does not restore
-it.** Measured on a 0.8.0 daemon: 45 records copied from an old home into a new one, and
-`paseo ls -a -g --json` still returned `[]`. The records are inert in the new home, so
-treat the backup as an archive you read directly, not as something you can graft back.
-If the sessions matter, keep the old home and run the new instance beside it instead
-(**Isolated instance**).
+**Agent history does not survive, and copying `agents/` back does not restore it.**
+Measured on a 0.8.0 daemon: 45 records copied into a new home, and
+`paseo ls -a -g --json` still returned `[]`. Treat the old home as an archive you read
+directly. If the sessions matter, keep it and run the new instance beside it
+(**Isolated instance**) instead.
 
-Re-run `node scripts/install-preflight.mjs` after the move. It reports `clear`, and
-`/install` then offers a fresh install.
+### 3. Migrate the app profile — this is the one that restores your other machines
+
+Quit the app first; its LevelDB is locked while it runs.
+
+```bash
+OLDP="$HOME/Library/Application Support/Paseo"
+NEWP="$HOME/Library/Application Support/Bozeo"
+cp -Rc "$NEWP/Local Storage" "$NEWP.profile-bak/"      # keep a way back
+for d in "Local Storage" "IndexedDB" "Session Storage"; do
+  rm -rf "$NEWP/$d" && cp -Rc "$OLDP/$d" "$NEWP/$d"
+done
+```
+
+This works **only because both apps keep the same URL scheme.** The profile's
+`localStorage` is keyed by origin (`paseo://app`), so `APP_SCHEME` in
+`packages/desktop/src/main.ts` and `protocols.schemes` in `electron-builder.yml` are
+load-bearing: rename the scheme and the old profile's keys become unreadable, taking the
+host list with them. Rebrand `productName`, `appId` and the artifact names; leave the
+scheme alone.
+
+Confirm the hosts came across:
+
+```bash
+strings "$NEWP/Local Storage/leveldb/"* | grep -oE 'srv_[A-Za-z0-9_-]+' | sort -u
+```
+
+### 4. Restore the workspace registry
+
+A fresh home registers only what you open in it, so every previously known workspace
+reads "unavailable" until you merge the old registry back. Merge by `projectId` and
+`workspaceId`, keep what the new home already has, give added workspaces the
+`titleSource` the new entries use, and skip any whose `cwd` or `worktreeRoot` no longer
+exists — restoring those just produces more "unavailable" rows:
+
+```bash
+ls ~/.paseo.pre-bozeo-<date>/projects/     # projects.json, workspaces.json
+paseo reload --host 127.0.0.1:6767         # the registry is live after a reload
+```
+
+### 5. Check the transport before blaming the app
+
+Cross-machine visibility does **not** require Tailscale or an open port: it is usually the
+relay, which the daemon dials out to. A fresh home is written with
+`daemon.relay.enabled: false`, so turning the relay back on is often the whole fix.
+
+```bash
+paseo daemon status --home ~/.paseo | grep -E 'Listen|Relay'
+```
+
+Then re-run `node scripts/install-preflight.mjs`. It reports `clear`, and `/install`
+offers a fresh install.
 
 ## After a fresh install the app looks empty
 
@@ -180,6 +238,18 @@ A fresh home listens on `127.0.0.1:6767`, which nothing off the box can reach. P
 on an always-on host that is always on the tailnet; prefer `0.0.0.0` on a laptop that
 roams, and set a password if its networks are not all trusted. The relay stays a third
 option and needs no listen change at all.
+
+Before adding a host in the app, settle whether a daemon is actually there:
+
+```bash
+node scripts/check-remote-host.mjs 100.80.154.65        # defaults to :6767
+node scripts/check-remote-host.mjs bozeo.ngrok.app:443
+```
+
+It prints the exact Host, Port and **Use SSL** to enter, or why the address will fail.
+Serving HTML on `/` proves nothing: the web UI is static assets, and a tunnel can serve
+them with nothing behind the WebSocket, producing a page that loads and never populates.
+Only a `/ws` upgrade proves a daemon, which is what this checks.
 
 Changing `daemon.listen` needs a daemon restart. Then check where it actually bound,
 rather than trusting the config:
