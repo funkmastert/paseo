@@ -301,7 +301,7 @@ interface CodexAppServerAgentDeps {
 export interface CodexModePreset {
   approvalPolicy: string;
   sandbox: string;
-  approvalsReviewer?: "auto_review";
+  approvalsReviewer?: "auto_review" | "user";
 }
 
 export const MODE_PRESETS: Record<string, CodexModePreset> = {
@@ -318,9 +318,15 @@ export const MODE_PRESETS: Record<string, CodexModePreset> = {
   // removed in Codex 0.160 ("no longer supported"). `workspace-write` + `on-request` is the one
   // combination proven to still raise item/commandExecution/requestApproval, which the guarded
   // approval handler answers in-process instead of surfacing it to a person (docs/codex-workers.md).
+  // `approvalsReviewer: "user"` (review finding #2, confirmed against codex-cli 0.160.0's own
+  // `app-server generate-json-schema` output: `ApprovalsReviewer` accepts "user" on both
+  // ThreadStartParams and TurnStartParams, default "user") is sent explicitly rather than relying
+  // on that default, so a host whose own `~/.codex/config.toml` sets `auto_review` globally
+  // doesn't silently route a guarded session's approvals through it.
   guarded: {
     approvalPolicy: "on-request",
     sandbox: "workspace-write",
+    approvalsReviewer: "user",
   },
   "auto-review": {
     approvalPolicy: "on-request",
@@ -5333,7 +5339,24 @@ export class CodexAppServerAgentSession implements AgentSession {
     const responseApprovalsReviewer =
       typeof response?.approvalsReviewer === "string" ? response.approvalsReviewer : undefined;
     const threadStartProviderOptions = this.guardedProviderOptions();
-    if (
+    if (this.currentMode === "guarded") {
+      // Review finding #2: a guarded session must never be promoted to auto-review -- that would
+      // turn off the network pin and the live re-check, silently losing both gates. If the
+      // app-server reports an auto-review/guardian reviewer anyway (most likely because the
+      // host's own Codex config forces auto_review globally, overriding what guarded mode asked
+      // for), approvals for this thread would be routed through that reviewer instead of the
+      // daemon's own gates -- fail closed rather than let the session proceed ungated.
+      if (isAutoReviewReviewer(responseApprovalsReviewer)) {
+        const reason =
+          "Codex app-server returned an auto-review reviewer for a guarded thread; the host's " +
+          "own Codex config may force auto-review, which would bypass the guard's gates.";
+        setCodexGuardHealthState(
+          { status: "red", reason, codexVersion: getCodexGuardHealthState().codexVersion },
+          this.logger,
+        );
+        throw new Error(reason);
+      }
+    } else if (
       shouldPromoteThreadResponseToAutoReview({
         approvalsReviewer: responseApprovalsReviewer,
         approvalPolicy: approvalPolicy ?? String(threadStartProviderOptions.approval_policy ?? ""),

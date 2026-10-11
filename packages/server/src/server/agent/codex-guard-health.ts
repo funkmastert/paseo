@@ -681,13 +681,39 @@ export async function runCodexGuardSelfTest(options: RunCodexGuardSelfTestOption
   }
   selfTestInFlight = true;
   try {
+    // Created before the realpath check (review finding #1, this round): on the very first run,
+    // selfTestRoot doesn't exist yet, and falling back to the un-resolved path on that failure --
+    // the previous behavior -- compares an un-resolved "/var/..." path against the realpath'd
+    // "/private/var/..." tmpdir candidates below and silently never matches on macOS. Creating it
+    // first makes the realpath call below succeed the same way it would on every later run.
+    try {
+      mkdirSync(options.selfTestRoot, { recursive: true });
+    } catch (error) {
+      options.logger?.warn(
+        { err: error, path: options.selfTestRoot },
+        "Codex guard self-test could not create its scratch root",
+      );
+    }
     let resolvedSelfTestRoot: string;
     try {
       resolvedSelfTestRoot = realpathSync(options.selfTestRoot);
-    } catch {
-      // Doesn't exist yet -- mkdirSync below will create it recursively, so the un-resolved
-      // (but still absolute) path is the best approximation of where it will actually live.
-      resolvedSelfTestRoot = path.resolve(options.selfTestRoot);
+    } catch (error) {
+      // Still unresolvable even after trying to create it -- never fall back to an un-resolved
+      // path here; treat it as unsafe outright rather than risk admitting a root that actually is
+      // inside the sandbox's default writable roots.
+      options.logger?.warn(
+        { err: error, path: options.selfTestRoot },
+        "Codex guard self-test could not resolve its scratch root's real path",
+      );
+      setCodexGuardHealthState(
+        {
+          status: "red",
+          reason: `self-test root could not be resolved (could not create or stat it): ${options.selfTestRoot}`,
+          codexVersion: options.codexVersion,
+        },
+        options.logger,
+      );
+      return;
     }
     if (isInsideDefaultSandboxWritableRoot(resolvedSelfTestRoot)) {
       // review finding #10: running anyway reproduces the exact bug this root is supposed to

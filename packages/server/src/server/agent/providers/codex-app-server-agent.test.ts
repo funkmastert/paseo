@@ -141,10 +141,11 @@ describe("Codex executable discovery", () => {
 });
 
 describe("Codex guarded mode preset", () => {
-  test("maps to workspace-write plus on-request", () => {
+  test("maps to workspace-write plus on-request plus an explicit user reviewer (review finding #2c)", () => {
     expect(MODE_PRESETS.guarded).toEqual({
       approvalPolicy: "on-request",
       sandbox: "workspace-write",
+      approvalsReviewer: "user",
     });
   });
 
@@ -1962,6 +1963,67 @@ describe("Codex app-server provider", () => {
     },
   );
 
+  test.each(["auto_review", "guardian_subagent"])(
+    "a guarded session fails closed, and never promotes, when thread/start returns %s (review finding #2)",
+    async (approvalsReviewer) => {
+      resetCodexGuardHealthStateForTests();
+      const session = createSession({ modeId: "guarded", thinkingOptionId: "low" });
+      session.currentThreadId = null;
+      session.activeForegroundTurnId = null;
+      const requests: Array<{ method: string; params: unknown }> = [];
+      session.client = {
+        request: vi.fn(async (method: string, params: unknown) => {
+          requests.push({ method, params });
+          if (method === "thread/start") {
+            return { thread: { id: "guarded-thread" }, approvalsReviewer };
+          }
+          if (method === "turn/start") {
+            return {};
+          }
+          throw new Error(`Unexpected request: ${method}`);
+        }),
+      };
+
+      // A guarded session must never be promoted to auto-review -- that would turn off the
+      // network pin and the live re-check -- so it fails closed instead of proceeding ungated.
+      await expect(session.startTurn("trigger thread creation")).rejects.toThrow(/auto-review/);
+
+      expect(getCodexGuardHealthState().status).toBe("red");
+      expect(getCodexGuardHealthState().reason).toContain("auto-review");
+      // thread/start's own response already failed closed; turn/start must never follow it.
+      expect(requests.some((req) => req.method === "turn/start")).toBe(false);
+    },
+  );
+
+  test("a guarded session's own thread/start request explicitly asks for approvalsReviewer: user (review finding #2)", async () => {
+    const session = createSession({ modeId: "guarded", thinkingOptionId: "low" });
+    session.currentThreadId = null;
+    session.activeForegroundTurnId = null;
+    const requests: Array<{ method: string; params: unknown }> = [];
+    session.client = {
+      request: vi.fn(async (method: string, params: unknown) => {
+        requests.push({ method, params });
+        if (method === "thread/start") {
+          return { thread: { id: "guarded-thread" } };
+        }
+        if (method === "turn/start") {
+          return {};
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      }),
+    };
+
+    await session.startTurn("trigger thread creation");
+
+    const startCall = requests.find((req) => req.method === "thread/start");
+    // Sent explicitly (review finding #2c, confirmed against codex-cli 0.160.0's own
+    // generate-json-schema output) rather than relying on the app-server's own "user" default,
+    // so a host whose config sets auto_review globally doesn't silently override it.
+    expect((startCall?.params as Record<string, unknown> | undefined)?.approvalsReviewer).toBe(
+      "user",
+    );
+  });
+
   test("turn/start forwards approvalsReviewer while in auto-review mode", async () => {
     const session = createSession({ modeId: "auto-review" }, { autoReviewEnabled: true });
     const request = vi.fn(async (method: string) => {
@@ -1983,6 +2045,31 @@ describe("Codex app-server provider", () => {
       expect.objectContaining({
         approvalPolicy: "on-request",
         approvalsReviewer: "auto_review",
+      }),
+    );
+  });
+
+  test("turn/start also carries approvalsReviewer: user for a guarded session (review finding #2c)", async () => {
+    const session = createSession({ modeId: "guarded", thinkingOptionId: "low" });
+    const request = vi.fn(async (method: string) => {
+      if (method === "thread/loaded/list") {
+        return { data: ["test-thread"] };
+      }
+      if (method === "turn/start") {
+        return {};
+      }
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({ request });
+
+    await session.startTurn("needs approval");
+
+    const turnStartCall = request.mock.calls.find(([method]) => method === "turn/start");
+    expect(turnStartCall?.[1]).toEqual(
+      expect.objectContaining({
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
       }),
     );
   });

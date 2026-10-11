@@ -12,6 +12,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
@@ -1007,6 +1008,35 @@ describe("runCodexGuardSelfTest", () => {
     const insideTmpdirRoot = mkdtempSync(
       path.join(os.tmpdir(), "codex-guard-self-test-unsafe-root-"),
     );
+    try {
+      const appServer = newFakeAppServer();
+
+      await runCodexGuardSelfTest({
+        createClient: createGuardedClient(appServer),
+        model: "gpt-6-luna",
+        codexVersion: "0.160.0",
+        timeoutMs: 5_000,
+        selfTestRoot: insideTmpdirRoot,
+      });
+
+      expect(getCodexGuardHealthState().status).toBe("red");
+      expect(getCodexGuardHealthState().reason).toContain(
+        "self-test root is inside a sandbox writable root",
+      );
+      expect(countTurnStarts(appServer)).toBe(0);
+    } finally {
+      rmSync(insideTmpdirRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses to run against a not-yet-existing root under os.tmpdir() (re-review finding #1)", async () => {
+    // Deliberately not created ahead of time -- on the very first run on a fresh machine,
+    // selfTestRoot doesn't exist yet either, and the root-safety check must still catch it.
+    const insideTmpdirRoot = path.join(
+      os.tmpdir(),
+      `codex-guard-self-test-unsafe-new-${randomUUID()}`,
+    );
+    expect(existsSync(insideTmpdirRoot)).toBe(false);
     try {
       const appServer = newFakeAppServer();
 
