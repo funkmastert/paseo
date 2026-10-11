@@ -2361,6 +2361,7 @@ export async function createPaseoDaemon(
           model: model.id,
           codexVersion,
           logger,
+          selfTestRoot: path.join(config.paseoHome, "codex-guard-self-test"),
         });
       } catch (error) {
         logger.warn({ err: error }, "Codex guard self-test scheduling failed");

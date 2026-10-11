@@ -301,7 +301,7 @@ interface CodexAppServerAgentDeps {
 export interface CodexModePreset {
   approvalPolicy: string;
   sandbox: string;
-  approvalsReviewer?: "auto_review";
+  approvalsReviewer?: "auto_review" | "user";
 }
 
 export const MODE_PRESETS: Record<string, CodexModePreset> = {
@@ -318,9 +318,15 @@ export const MODE_PRESETS: Record<string, CodexModePreset> = {
   // removed in Codex 0.160 ("no longer supported"). `workspace-write` + `on-request` is the one
   // combination proven to still raise item/commandExecution/requestApproval, which the guarded
   // approval handler answers in-process instead of surfacing it to a person (docs/codex-workers.md).
+  // `approvalsReviewer: "user"` (review finding #2, confirmed against codex-cli 0.160.0's own
+  // `app-server generate-json-schema` output: `ApprovalsReviewer` accepts "user" on both
+  // ThreadStartParams and TurnStartParams, default "user") is sent explicitly rather than relying
+  // on that default, so a host whose own `~/.codex/config.toml` sets `auto_review` globally
+  // doesn't silently route a guarded session's approvals through it.
   guarded: {
     approvalPolicy: "on-request",
     sandbox: "workspace-write",
+    approvalsReviewer: "user",
   },
   "auto-review": {
     approvalPolicy: "on-request",
@@ -3435,6 +3441,9 @@ export class CodexAppServerAgentSession implements AgentSession {
   private readonly providerOptions: CodexProviderOptions;
   /** Logged once per session, not once per call site, when guardedProviderOptions() strips something. */
   private loggedGuardedProviderOptionsOverride = false;
+  /** Logged once per session (review finding #1), when a guarded turn's sandboxPolicy would
+   * otherwise have carried the host's own networkAccess: true through to Codex. */
+  private loggedGuardedNetworkAccessOverride = false;
   private resolvedWorkspaceWrite: NonNullable<
     CodexProviderOptions["sandbox_workspace_write"]
   > | null = null;
@@ -4260,15 +4269,66 @@ export class CodexAppServerAgentSession implements AgentSession {
         ...this.resolvedWorkspaceWrite,
         ...providerOptions.sandbox_workspace_write,
       };
-      params.sandboxPolicy =
+      const policy =
         this.resolvedSandboxPolicy?.type === nativeType
           ? this.resolvedSandboxPolicy
           : toSandboxPolicy(sandboxPolicyType, workspaceWrite);
+      params.sandboxPolicy = this.pinGuardedNetworkAccess(policy, nativeType);
     }
     if (this.hasWorkflowModeOverride) {
       applyApprovalsReviewerParam(params, preset);
     }
     return { approvalPolicy, sandboxPolicyType };
+  }
+
+  /**
+   * Guarded turns always send `networkAccess: false` (review finding #1), whatever the host's
+   * own Codex config or a prior turn's resolved policy says -- the catastrophe/device gates
+   * assume a network action (a push, `adb` over `localhost:5037`) must escalate, which only holds
+   * when the sandbox itself never lets one through unescalated. Logged once per session (the same
+   * pattern as `guardedProviderOptionsOverride` above) so a host whose own config enables network
+   * access for guarded turns is still visible, without spamming `daemon.log` on every turn.
+   *
+   * Also updates `resolvedSandboxPolicy` to the pinned policy actually being sent, for guarded
+   * workspaceWrite turns: unlike `thread/start`, `turn/start`'s own response is never run through
+   * `rememberResolvedSandboxPolicy`, so without this the live re-check (which reads
+   * `resolvedSandboxPolicy` to decide whether this session's sandbox is containing) would keep
+   * seeing the pre-pin, thread-start-time snapshot -- stale the moment this pins the policy that
+   * is actually in effect for this and every later turn.
+   */
+  private pinGuardedNetworkAccess(
+    policy: Record<string, unknown>,
+    nativeType: string,
+  ): Record<string, unknown> {
+    if (this.currentMode !== "guarded" || nativeType !== "workspaceWrite") {
+      return policy;
+    }
+    if (policy.networkAccess === true && !this.loggedGuardedNetworkAccessOverride) {
+      this.loggedGuardedNetworkAccessOverride = true;
+      this.logger.warn(
+        {},
+        "Guarded Codex session pinned a turn's networkAccess to false; the host's own Codex config had it enabled",
+      );
+    }
+    const pinned = { ...policy, networkAccess: false };
+    this.resolvedSandboxPolicy = pinned;
+    return pinned;
+  }
+
+  /**
+   * Whether this session's actual, most-recently-resolved sandbox policy (review finding #1) is
+   * a containing `workspaceWrite`: network access off, and no writable roots beyond the
+   * sandbox's own defaults. Only under this configuration can the live re-check assume a
+   * non-zero exit means the sandbox itself stopped the command, rather than the command simply
+   * failing for an unrelated reason while still able to reach outside the sandbox.
+   */
+  private isGuardedSandboxContaining(): boolean {
+    const policy = this.resolvedSandboxPolicy;
+    if (!policy || policy.type !== "workspaceWrite" || policy.networkAccess !== false) {
+      return false;
+    }
+    const writableRoots = policy.writableRoots;
+    return !Array.isArray(writableRoots) || writableRoots.length === 0;
   }
 
   private logTurnStartSummary({
@@ -5279,7 +5339,24 @@ export class CodexAppServerAgentSession implements AgentSession {
     const responseApprovalsReviewer =
       typeof response?.approvalsReviewer === "string" ? response.approvalsReviewer : undefined;
     const threadStartProviderOptions = this.guardedProviderOptions();
-    if (
+    if (this.currentMode === "guarded") {
+      // Review finding #2: a guarded session must never be promoted to auto-review -- that would
+      // turn off the network pin and the live re-check, silently losing both gates. If the
+      // app-server reports an auto-review/guardian reviewer anyway (most likely because the
+      // host's own Codex config forces auto_review globally, overriding what guarded mode asked
+      // for), approvals for this thread would be routed through that reviewer instead of the
+      // daemon's own gates -- fail closed rather than let the session proceed ungated.
+      if (isAutoReviewReviewer(responseApprovalsReviewer)) {
+        const reason =
+          "Codex app-server returned an auto-review reviewer for a guarded thread; the host's " +
+          "own Codex config may force auto-review, which would bypass the guard's gates.";
+        setCodexGuardHealthState(
+          { status: "red", reason, codexVersion: getCodexGuardHealthState().codexVersion },
+          this.logger,
+        );
+        throw new Error(reason);
+      }
+    } else if (
       shouldPromoteThreadResponseToAutoReview({
         approvalsReviewer: responseApprovalsReviewer,
         approvalPolicy: approvalPolicy ?? String(threadStartProviderOptions.approval_policy ?? ""),
@@ -6378,7 +6455,12 @@ export class CodexAppServerAgentSession implements AgentSession {
     subAgentCallId: string | null = null,
   ): void {
     if (this.currentMode === "guarded" && !subAgentCallId && typeof parsed.command === "string") {
-      void this.recheckGuardedCommandCompletion(parsed.callId, parsed.command, parsed.cwd ?? null);
+      void this.recheckGuardedCommandCompletion(
+        parsed.callId,
+        parsed.command,
+        parsed.cwd ?? null,
+        parsed.exitCode ?? null,
+      );
     }
     const outputDeltas = subAgentCallId
       ? this.subAgentCallsByCallId.get(subAgentCallId)?.pendingCommandOutputDeltas
@@ -6423,6 +6505,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         itemId ?? null,
         timelineItem.detail.command,
         timelineItem.detail.cwd ?? null,
+        timelineItem.detail.exitCode ?? null,
       );
     }
   }
@@ -6460,6 +6543,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     callId: string | null,
     command: string,
     cwd: string | null,
+    exitCode: number | null,
   ): Promise<void> {
     // A completion with no callId can't be looked up in guardedApprovalSeenItemIds, so there is
     // no way to confirm an approval request was ever seen for it -- treat it as unmatched rather
@@ -6476,6 +6560,8 @@ export class CodexAppServerAgentSession implements AgentSession {
           deviceLaunchGate: this.deps.deviceLaunchGate,
           isCatastropheGateEnabled: this.deps.isCatastropheGateEnabled,
           approvalRequestSeen,
+          exitCode,
+          sandboxIsContaining: this.isGuardedSandboxContaining(),
         },
         this.logger,
       );

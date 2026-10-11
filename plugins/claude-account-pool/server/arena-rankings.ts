@@ -48,8 +48,14 @@ const HF_DATASET = "lmarena-ai/leaderboard-dataset";
 const HF_SPLIT = "latest";
 /** HF's hard cap on `/rows`' `length` parameter. */
 const HF_PAGE_SIZE = 100;
-/** Safety cap on pages scanned per dataset config, so a dataset-shape change cannot loop forever. */
-const MAX_PAGES_PER_CONFIG = 40;
+/**
+ * Safety cap on pages scanned per dataset config -- a last-resort circuit breaker against a
+ * dataset-shape change that makes `num_rows_total` lie or a page never come back short, not the
+ * normal stopping condition (which is `num_rows_total`, or a short/empty page). `text_style_control`
+ * alone is ~11,000 rows / ~110 pages today; 300 pages (30,000 rows) leaves 3x headroom for
+ * upstream growth before this cap itself becomes the next version of this bug.
+ */
+const MAX_PAGES_PER_CONFIG = 300;
 /** Gap between consecutive HF requests, so a daily refresh doesn't burst the datasets-server. */
 const REQUEST_SPACING_MS = 1_500;
 /** Backoff schedule for a 429/5xx (or other transient error), honored unless `Retry-After` says otherwise. */
@@ -262,6 +268,7 @@ async function fetchConfigCategoryRows(
 ): Promise<{ rowsByCategory: Map<string, LeaderboardRow[]>; error: unknown | undefined }> {
   const collected = new Map<string, LeaderboardRow[]>();
   let offset = 0;
+  let reachedEnd = false;
 
   for (let page = 0; page < MAX_PAGES_PER_CONFIG; page++) {
     if (page > 0) {
@@ -277,6 +284,7 @@ async function fetchConfigCategoryRows(
       return { rowsByCategory: collected, error: e };
     }
     if (rows.length === 0) {
+      reachedEnd = true;
       break;
     }
     for (const item of rows) {
@@ -292,8 +300,22 @@ async function fetchConfigCategoryRows(
     }
     offset += rows.length;
     if (offset >= num_rows_total) {
+      reachedEnd = true;
       break;
     }
+  }
+  if (!reachedEnd) {
+    // Ran out of allowed pages before the config ran out of rows -- not the normal stopping
+    // condition. Reported as an error (even though no page fetch itself threw) so the category
+    // this scan never reached is marked failed below, not recorded as an empty board: the whole
+    // bug this safety cap otherwise reintroduces at a higher row count is a board silently read
+    // as "fetched fine" with 0 rows just because the scan stopped before reaching it.
+    return {
+      rowsByCategory: collected,
+      error: new Error(
+        `${config}: hit the ${MAX_PAGES_PER_CONFIG}-page safety cap before reaching the end (stopped at offset ${offset})`,
+      ),
+    };
   }
   return { rowsByCategory: collected, error: undefined };
 }

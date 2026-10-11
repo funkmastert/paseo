@@ -928,4 +928,118 @@ describe("fetching a config shared by several categories", () => {
     expect(written?.failedBoards).toContain("text_style_control/expert");
     expect(written?.failedBoards).not.toContain("text_style_control/coding");
   });
+
+  it("a persistent 429 mid-scan marks every category not yet collected as failed, not as an empty board", async () => {
+    // "coding" (offset 0) is read fine; every page from offset 1 on (which would have served
+    // "instruction_following") 429s on every attempt, exhausting fetchHfPage's own retries.
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      const config = u.searchParams.get("config");
+      const offset = Number(u.searchParams.get("offset"));
+      if (config !== "text_style_control") {
+        const row = { model_name: "claude-sonnet-5.5-high", category: "overall", rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+        return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
+      }
+      if (offset === 0) {
+        const row = { model_name: "claude-sonnet-5.5-high", category: "coding", rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+        return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 10 }), { status: 200 });
+      }
+      return new Response("rate limited", { status: 429 });
+    }) as unknown as typeof fetch;
+
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+    expect(result.status).toBe("success");
+
+    const written = await loadArenaRankings(tempDir);
+    expect(written?.boards["text_style_control/coding"]).toHaveLength(1);
+    // "instruction_following" was never reached -- it must be failed, not present with 0 rows.
+    expect(written?.boards["text_style_control/instruction_following"]).toBeUndefined();
+    expect(written?.failedBoards).toContain("text_style_control/instruction_following");
+  });
+
+  it("fetches a wanted category that sits past the old 40-page cap", async () => {
+    // "instruction_following"'s only row sits at offset 44 -- past the old 40-page
+    // (4,000-row) cap, which never read it at all.
+    const INSTRUCTION_FOLLOWING_OFFSET = 44;
+    const TOTAL_ROWS = INSTRUCTION_FOLLOWING_OFFSET + 1;
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      const config = u.searchParams.get("config");
+      const offset = Number(u.searchParams.get("offset"));
+      if (config !== "text_style_control") {
+        const row = { model_name: "claude-sonnet-5.5-high", category: "overall", rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+        return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
+      }
+      if (offset >= TOTAL_ROWS) {
+        return new Response(JSON.stringify({ rows: [], num_rows_total: TOTAL_ROWS }), { status: 200 });
+      }
+      const category = offset === INSTRUCTION_FOLLOWING_OFFSET ? "instruction_following" : "coding";
+      const row = { model_name: "claude-sonnet-5.5-high", category, rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+      return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: TOTAL_ROWS }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+    expect(result.status).toBe("success");
+
+    const written = await loadArenaRankings(tempDir);
+    expect(written?.boards["text_style_control/instruction_following"]).toHaveLength(1);
+    expect(written?.failedBoards ?? []).not.toContain("text_style_control/instruction_following");
+  });
+
+  it("stops paging once offset reaches num_rows_total, without requesting a trailing empty page", async () => {
+    // 250 rows at 100/page is 3 requests (offsets 0, 100, 200); a 4th at offset 300 would mean
+    // the loop kept going past num_rows_total instead of stopping right at it.
+    const TOTAL_ROWS = 250;
+    const requestedOffsets: number[] = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      const config = u.searchParams.get("config");
+      const offset = Number(u.searchParams.get("offset"));
+      if (config !== "text_style_control") {
+        const row = { model_name: "claude-sonnet-5.5-high", category: "overall", rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+        return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
+      }
+      requestedOffsets.push(offset);
+      const remaining = TOTAL_ROWS - offset;
+      const pageSize = Math.min(100, remaining);
+      const rows = Array.from({ length: pageSize }, () => ({
+        row: { model_name: "claude-sonnet-5.5-high", category: "coding", rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" },
+      }));
+      return new Response(JSON.stringify({ rows, num_rows_total: TOTAL_ROWS }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+    expect(result.status).toBe("success");
+
+    expect(requestedOffsets).toEqual([0, 100, 200]);
+    const written = await loadArenaRankings(tempDir);
+    expect(written?.boards["text_style_control/coding"]).toHaveLength(TOTAL_ROWS);
+  });
+
+  it("exhausting the page safety cap without finishing marks every uncollected wanted category failed, not empty", async () => {
+    // Every page serves "coding" rows and reports a num_rows_total far beyond what
+    // MAX_PAGES_PER_CONFIG (300 pages x 100 rows) can ever reach -- the scan runs out of
+    // pages before it runs out of rows. "instruction_following" never appears on any page.
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      const config = u.searchParams.get("config");
+      if (config !== "text_style_control") {
+        const row = { model_name: "claude-sonnet-5.5-high", category: "overall", rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+        return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }), { status: 200 });
+      }
+      const row = { model_name: "claude-sonnet-5.5-high", category: "coding", rating: 1500, rating_lower: 1490, rating_upper: 1510, vote_count: 200, leaderboard_publish_date: "2026-10-09" };
+      return new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1_000_000 }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+    expect(result.status).toBe("success"); // Other configs still succeeded.
+
+    const written = await loadArenaRankings(tempDir);
+    // "coding" was actually collected within the cap -- partial credit, same as any other
+    // mid-scan failure.
+    expect(written?.boards["text_style_control/coding"]?.length).toBeGreaterThan(0);
+    // "instruction_following" was never reached -- failed, not an empty board.
+    expect(written?.boards["text_style_control/instruction_following"]).toBeUndefined();
+    expect(written?.failedBoards).toContain("text_style_control/instruction_following");
+  }, 15_000);
 });
