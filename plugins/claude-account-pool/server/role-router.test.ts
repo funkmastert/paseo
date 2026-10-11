@@ -952,6 +952,144 @@ describe("createRoleRouter", () => {
     expect(result?.config.providerOptions).toEqual({ foo: "bar" });
   });
 
+  /**
+   * A Codex child the classifier honors, recovers, or leaves to an unconfigured pool is a child
+   * running on the codex provider too -- `decision.model.provider` just doesn't say so reliably
+   * on these paths (null for `unconfigured`; an echo of the request for `honored-request`). Each
+   * of these reproduces the live incident (2026-10-11 03:17Z): a Codex child created with
+   * `modeId: full-access` kept it, because the guard step only ran on the ordinary rewrite path.
+   */
+  describe("Codex guard forced on every return path, not just the rewrite (codex-child-guard fix)", () => {
+    it("HONORED-REQUEST: forces guarded mode on an explicit codex request the classifier approves and honors", () => {
+      const health = createHealthTracker();
+      health.reportUsage("codex", [{ window: "session", usedPct: 10 }]); // selectable right now, not budget-gated
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-5.1"])),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
+          codexGuardCache: { get: () => ({ healthy: true, runningChildren: 0 }) },
+          health,
+        }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: {
+            provider: "codex",
+            model: "gpt-5.1",
+            modeId: "full-access",
+            providerOptions: { approval_policy: "never", sandbox_mode: "danger-full-access" },
+            cwd: "/tmp/work",
+          },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("codex"); // honored, untouched by the model rewrite
+      expect(result?.config.model).toBe("gpt-5.1");
+      expect(result?.config.modeId).toBe("guarded"); // was "full-access" -- the live bug
+      expect(result?.config.providerOptions).toEqual({});
+    });
+
+    it("UNCONFIGURED: forces guarded mode on an explicit codex request when the role's pool is empty", () => {
+      const router = createRoleRouter(baseOptions()); // worker role's pool is empty by default
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: {
+            provider: "codex",
+            model: "gpt-6-luna",
+            modeId: "full-access",
+            providerOptions: { approval_policy: "never", sandbox_mode: "danger-full-access" },
+            cwd: "/tmp/work",
+          },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("codex"); // unconfigured: the request's own model/provider stand
+      expect(result?.config.model).toBe("gpt-6-luna");
+      expect(result?.config.modeId).toBe("guarded"); // was "full-access"
+      expect(result?.config.providerOptions).toEqual({});
+    });
+
+    it("RECOVERED (provider-not-registered): forces guarded mode when the rewrite target vanishes and the caller's own codex request runs instead", () => {
+      const pool: ResolvedPool = { workers: [{ providerId: "worker-a", priority: 1 }], leader: { providerId: "leader" } };
+      // The registry knows about "codex" (so the caller's own pick is launchable) but not
+      // "deadfamily" -- the role's pinned rewrite target, which vanished from daemon config.
+      const providerIds = { get: () => new Set(["claude", "codex", "worker-a", "leader"]), forceRefresh: vi.fn(), stop: vi.fn() };
+      const router = createRoleRouter({
+        ...baseOptions({ poolCache: fakePoolCache(pool) }),
+        policyCache: fakePolicyCache(policyWithWorkerModels(["deadfamily/some-model"])),
+        catalogCache: fakeCatalogCache(new Map()), // "deadfamily" never resolves in the catalog either
+        providerIds,
+      });
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: {
+            provider: "codex",
+            model: "gpt-6-luna",
+            modeId: "full-access",
+            providerOptions: { approval_policy: "never", sandbox_mode: "danger-full-access" },
+            cwd: "/tmp",
+          },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("codex"); // recovered: the caller's own request stands, not the vanished pin
+      expect(result?.config.model).toBe("gpt-6-luna");
+      expect(result?.config.modeId).toBe("guarded"); // was "full-access"
+      expect(result?.config.providerOptions).toEqual({});
+    });
+
+    it("ROOT: a root create's fallback-anyway codex pick keeps the root's own mode (no callerAgentId)", () => {
+      // Leaders are never eligible for Codex (KTD-7), but an all-gated-out pool still runs its
+      // first entry anyway (`decision.model.outcome === "unavailable"`) -- this must still never
+      // force guarded mode on Tyler's own root create.
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache({
+            ...DEFAULT_POLICY,
+            roles: DEFAULT_POLICY.roles.map((role) => (role.id === "leader" ? { ...role, models: ["codex/gpt-5.1"] } : role)),
+          }),
+        }),
+      );
+
+      const result = router(
+        request({ config: { provider: "claude", model: "claude-sonnet", modeId: "full-access", cwd: "/tmp" } }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("codex");
+      expect(result?.config.modeId).toBe("full-access"); // untouched: no callerAgentId, so this is Tyler, not a child
+    });
+
+    it("a non-codex honored-request child is untouched by the Codex guard", () => {
+      const pool: ResolvedPool = { workers: [{ providerId: "claude-backup", priority: 1 }], leader: { providerId: "leader" } };
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["claude-sonnet-5", "claude-opus-5"])),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5", "claude-opus-5"] })),
+          poolCache: fakePoolCache(pool),
+        }),
+      );
+
+      const initial = request({
+        callerAgentId: "c1",
+        config: { provider: "claude-backup", model: "claude-opus-5", modeId: "full-access", cwd: "/tmp" },
+      });
+      const result = router(initial, fakeContext);
+
+      expect(result).toBeUndefined(); // byte-identical pass-through: nothing to enforce, nothing to guard
+      expect((result ?? initial.request).config.modeId).toBe("full-access");
+    });
+  });
+
   it("resolves via tier 2 declared role label and routes to that role's model", () => {
     const router = createRoleRouter(
       baseOptions({

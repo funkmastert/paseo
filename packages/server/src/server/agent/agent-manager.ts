@@ -149,6 +149,7 @@ import {
 } from "./provider-move.js";
 import { getErrorMessage } from "@getpaseo/protocol/error-utils";
 import { RunMarkerTracker } from "./restart-recovery/run-marker.js";
+import { getCodexGuardHealthState, isCodexGuardHealthy } from "./codex-guard-health.js";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
@@ -2741,6 +2742,7 @@ export class AgentManager {
         options = { ...options, env: request.env, labels: request.labels };
       }
     }
+    config = this.enforceCodexChildGuard(config, options.callerAgentId);
     await this.deleteAgentState(resolvedAgentId);
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
       config,
@@ -3652,6 +3654,17 @@ export class AgentManager {
 
   async setAgentMode(agentId: string, modeId: string): Promise<AgentProviderNotice | null> {
     const agent = this.requireSessionAgent(agentId);
+    // KTD-7 (docs/catastrophe-gate.md): a Codex CHILD must not be able to leave guarded mode by
+    // any route, including an explicit mode change after the fact -- the create-time guard
+    // (`enforceCodexChildGuard` above) would otherwise be pointless. Root sessions (no
+    // `paseo.parent-agent-id` label, i.e. Tyler's own) can switch modes freely.
+    if (agent.provider === "codex" && agent.labels[PARENT_AGENT_ID_LABEL] && modeId !== "guarded") {
+      this.logger.warn(
+        { agentId, requestedModeId: modeId },
+        "Refused a Codex child's mode change away from guarded",
+      );
+      throw new Error(`Codex children cannot leave guarded mode (requested '${modeId}').`);
+    }
     const notice = (await agent.session.setMode(modeId)) ?? null;
     await this.drainSessionEvents(agentId);
     const currentMode = (await agent.session.getCurrentMode()) ?? modeId;
@@ -7622,6 +7635,39 @@ export class AgentManager {
     if (this.providerEnabled.get(provider) === false) {
       throw new Error(`Provider '${provider}' is disabled`);
     }
+  }
+
+  /**
+   * Independent of the plugin layer (`role-router.ts`'s own guard, which can be absent, down, or
+   * buggy -- it is fail-open by contract): a Codex CHILD create is forced into guarded mode here
+   * too, and the create is refused outright when the guard itself isn't proven healthy (KTD-6,
+   * docs/catastrophe-gate.md). `unknown` and `red` both refuse -- guards-first, same as the
+   * classifier's own `isCodexRefUsable` (KTD-3). Root creates (no `callerAgentId`, i.e. Tyler from
+   * the app) and internal creates (daemon-owned, e.g. the guard self-test's own session, which
+   * never reaches this path anyway) are untouched: this guard exists for children, not for Tyler.
+   *
+   * Must run on `config` BEFORE `prepareSessionConfig`: that call bakes `modeId` into
+   * `launchConfig`/`providerLaunchConfig`, the values actually sent to `client.createSession`, so
+   * a mutation applied to `storedConfig` afterward would never reach the provider.
+   */
+  private enforceCodexChildGuard(
+    config: AgentSessionConfig,
+    callerAgentId: string | undefined,
+  ): AgentSessionConfig {
+    if (config.internal || !callerAgentId || config.provider !== "codex") {
+      return config;
+    }
+    if (!isCodexGuardHealthy()) {
+      const health = getCodexGuardHealthState();
+      this.logger.warn(
+        { callerAgentId, status: health.status, reason: health.reason },
+        "Refused a Codex child create: guard health is not green",
+      );
+      throw new Error(
+        `Codex children are unavailable: Codex guard health is ${health.status} (${health.reason}). Use a Claude model.`,
+      );
+    }
+    return config.modeId === "guarded" ? config : { ...config, modeId: "guarded" };
   }
 
   private getConfiguredProviderIds(): AgentProvider[] {
