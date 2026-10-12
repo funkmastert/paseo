@@ -1955,6 +1955,15 @@ export const ar: TranslationResources = {
   sidebarCallout: {
     dismiss: "رفض",
   },
+  accountAlerts: {
+    title_one: "مشكلة في الحساب",
+    title_other: "مشاكل في الحساب",
+    signIn: "تسجيل الدخول",
+    signInPending: "جارٍ تسجيل الدخول...",
+    signInRunOn: "تشغيل على {{host}}",
+    signInError: "تعذر بدء تسجيل الدخول",
+    moreCount: "+{{count}} أخرى",
+  },
   restartRecovery: {
     summary_one: "انقطع {{count}} وكيل أثناء دوره",
     summary_other: "انقطع {{count}} وكلاء أثناء أدوارهم",

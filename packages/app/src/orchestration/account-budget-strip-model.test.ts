@@ -127,6 +127,7 @@ describe("buildAccountBudgetRows", () => {
       {
         kind: "unavailable",
         providerId: "claude",
+        auth: null,
         identity: null,
         section: "claude",
         label: "Claude",
@@ -159,6 +160,36 @@ describe("buildAccountBudgetRows", () => {
         "CLAUDE_CONFIG_DIR=/home/u/.claude-personal claude auth login --email worker@example.com",
     });
     expect(rows.find((row) => row.providerId === "claude")?.identity).toBeNull();
+  });
+
+  it("carries the daemon's signed-out state onto the row, and suppresses the identity line", () => {
+    const providers = [
+      usage({
+        providerId: "claude-personal",
+        accountAuth: {
+          state: "signed_out",
+          since: "2026-10-12T18:00:00Z",
+          summary: "claude-personal is signed out",
+          fixCommand: "CLAUDE_CONFIG_DIR=/home/u/.claude-personal claude auth login",
+          canSignIn: true,
+        },
+        accountIdentity: {
+          kind: "wrong-login",
+          summary: "claude-personal is signed into tyler@example.com, not worker@example.com",
+          fixCommand: "claude auth login --email worker@example.com",
+        },
+      }),
+      usage({ providerId: "claude" }),
+    ];
+
+    const rows = buildAccountBudgetRows(providers, ["claude", "claude-personal"], []);
+
+    expect(rows.find((row) => row.providerId === "claude-personal")?.auth).toEqual({
+      summary: "claude-personal is signed out",
+      fixCommand: "CLAUDE_CONFIG_DIR=/home/u/.claude-personal claude auth login",
+    });
+    expect(rows.find((row) => row.providerId === "claude-personal")?.identity).toBeNull();
+    expect(rows.find((row) => row.providerId === "claude")?.auth).toBeNull();
   });
 
   it("keeps every requested account, as an unavailable row when the usage endpoint has no entry for it", () => {

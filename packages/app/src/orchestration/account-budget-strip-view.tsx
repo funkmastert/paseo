@@ -16,6 +16,7 @@ import { formatDuration } from "@/utils/time";
 import {
   resolveAccountIcon,
   selectAccountWorstWindow,
+  type AccountAuthViewModel,
   type AccountBalanceViewModel,
   type AccountBudgetRowViewModel,
   type AccountDetailViewModel,
@@ -300,9 +301,69 @@ function AccountBudgetBody({
 }
 
 /**
- * The daemon found this pool entry on the wrong login. The fix is a command to run on the host, so
- * the row offers it as a copy rather than an action.
+ * The daemon found a sign-in or identity problem on this pool entry. The fix is a command to run
+ * on the host, so the row offers it as a copy rather than an action.
  */
+function AccountProblemNotice({
+  providerId,
+  testIDPrefix,
+  summary,
+  fixCommand,
+  danger = false,
+}: {
+  providerId: string;
+  testIDPrefix: string;
+  summary: string;
+  fixCommand: string;
+  danger?: boolean;
+}) {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const handleCopy = useCallback(() => {
+    void (async () => {
+      try {
+        await Clipboard.setStringAsync(fixCommand);
+        toast.copied(t("panels.orchestration.identityCopied"));
+      } catch {
+        toast.error(t("panels.orchestration.identityCopyError"));
+      }
+    })();
+  }, [fixCommand, t, toast]);
+  return (
+    <View style={styles.identityNotice} testID={`${testIDPrefix}-${providerId}`}>
+      <Text style={[styles.identityText, danger ? styles.identityTextDanger : null]}>
+        {summary}
+      </Text>
+      <Pressable
+        onPress={handleCopy}
+        accessibilityRole="button"
+        accessibilityLabel={t("panels.orchestration.identityCopyFix")}
+        testID={`${testIDPrefix}-copy-${providerId}`}
+      >
+        <Text style={styles.identityCopy}>{fixCommand}</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function AccountAuthNotice({
+  providerId,
+  auth,
+}: {
+  providerId: string;
+  auth: AccountAuthViewModel;
+}) {
+  return (
+    <AccountProblemNotice
+      providerId={providerId}
+      testIDPrefix="orchestration-account-auth"
+      summary={auth.summary}
+      fixCommand={auth.fixCommand}
+      danger
+    />
+  );
+}
+
 function AccountIdentityNotice({
   providerId,
   identity,
@@ -310,31 +371,22 @@ function AccountIdentityNotice({
   providerId: string;
   identity: AccountIdentityViewModel;
 }) {
-  const { t } = useTranslation();
-  const toast = useToast();
-  const handleCopy = useCallback(() => {
-    void (async () => {
-      try {
-        await Clipboard.setStringAsync(identity.fixCommand);
-        toast.copied(t("panels.orchestration.identityCopied"));
-      } catch {
-        toast.error(t("panels.orchestration.identityCopyError"));
-      }
-    })();
-  }, [identity.fixCommand, t, toast]);
   return (
-    <View style={styles.identityNotice} testID={`orchestration-account-identity-${providerId}`}>
-      <Text style={styles.identityText}>{identity.summary}</Text>
-      <Pressable
-        onPress={handleCopy}
-        accessibilityRole="button"
-        accessibilityLabel={t("panels.orchestration.identityCopyFix")}
-        testID={`orchestration-account-identity-copy-${providerId}`}
-      >
-        <Text style={styles.identityCopy}>{identity.fixCommand}</Text>
-      </Pressable>
-    </View>
+    <AccountProblemNotice
+      providerId={providerId}
+      testIDPrefix="orchestration-account-identity"
+      summary={identity.summary}
+      fixCommand={identity.fixCommand}
+    />
   );
+}
+
+/** A signed-out account takes the row over a stale identity problem (account-budget-strip-model.ts). */
+function AccountRowProblem({ row }: { row: AccountBudgetRowViewModel }) {
+  if (row.auth) return <AccountAuthNotice providerId={row.providerId} auth={row.auth} />;
+  if (row.identity)
+    return <AccountIdentityNotice providerId={row.providerId} identity={row.identity} />;
+  return null;
 }
 
 function AccountBudgetRow({
@@ -395,9 +447,7 @@ function AccountBudgetRow({
         ) : null}
         {isJev ? <ThemedChevronRight size={14} uniProps={mutedIconColor} /> : null}
       </View>
-      {row.identity ? (
-        <AccountIdentityNotice providerId={row.providerId} identity={row.identity} />
-      ) : null}
+      <AccountRowProblem row={row} />
       {row.usage ? <AccountPresence providerId={row.providerId} usage={row.usage} /> : null}
       {capMinutes != null && row.kind === "available" ? (
         <Text
@@ -549,6 +599,9 @@ const styles = StyleSheet.create((theme) => ({
   identityText: {
     color: theme.colors.statusWarning,
     fontSize: theme.fontSize.sm,
+  },
+  identityTextDanger: {
+    color: theme.colors.statusDanger,
   },
   identityCopy: {
     color: theme.colors.foregroundMuted,
