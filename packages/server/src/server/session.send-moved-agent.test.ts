@@ -1,13 +1,21 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { ACCOUNT_FAILOVER_MIGRATED_TO_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { SessionOutboundMessage } from "@getpaseo/protocol/messages";
 import { createTestLogger } from "../test-utils/test-logger.js";
 import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
+import { setCodexGuardHealthState } from "./agent/codex-guard-health.js";
+
+// This file creates codex agents as a generic fixture for account-failover message delivery
+// behavior unrelated to the Codex child guard, so default guard health to green the way a real
+// daemon reaches it once the self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 import { AgentRequests } from "./agent/requests/index.js";
 import { OWNER_PERMISSIONS } from "./authorization/index.js";
 import { Session, type SessionOptions } from "./session.js";

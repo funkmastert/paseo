@@ -1,4 +1,4 @@
-import { describe, expect, it, test, vi } from "vitest";
+import { beforeEach, describe, expect, it, test, vi } from "vitest";
 import pino, { type Logger } from "pino";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -13,6 +13,14 @@ import { createTestLogger } from "../../test-utils/test-logger.js";
 import { createTestAgentClient } from "../test-utils/fake-agent-client.js";
 import { AgentManager } from "./agent-manager.js";
 import { AgentStorage } from "./agent-storage.js";
+import { setCodexGuardHealthState } from "./codex-guard-health.js";
+
+// This file creates codex agents as a generic fixture for agent-prompt behavior unrelated to
+// the Codex child guard, so default guard health to green the way a real daemon reaches it once
+// the self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 import { FinishObligationService } from "./finish-obligation-service.js";
 import {
   formatSystemNotificationPrompt,

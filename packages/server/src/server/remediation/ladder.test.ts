@@ -613,6 +613,7 @@ describe("RemediationLadder remediation agent create (week review D1b-03)", () =
       unattended: true,
       background: true,
       notifyOnFinish: false,
+      origin: "daemon",
     });
   });
 });

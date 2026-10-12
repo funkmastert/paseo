@@ -1,12 +1,20 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { expect, test } from "vitest";
+import { beforeEach, expect, test } from "vitest";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { AgentManager } from "./agent-manager.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import { AgentStorage } from "./agent-storage.js";
+import { setCodexGuardHealthState } from "./codex-guard-health.js";
+
+// This file creates codex agents as a generic fixture for agent-loading behavior unrelated to
+// the Codex child guard, so default guard health to green the way a real daemon reaches it once
+// the self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 import type {
   AgentClient,
   AgentLaunchContext,

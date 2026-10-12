@@ -1,7 +1,15 @@
-import { afterEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test } from "vitest";
 import { HubRelationshipHarness } from "./test-utils/relationship-harness.js";
+import { setCodexGuardHealthState } from "../agent/codex-guard-health.js";
 
 let relationship: HubRelationshipHarness | null = null;
+
+// This file creates codex executions as a generic fixture for Hub behavior unrelated to the
+// Codex child guard, so default guard health to green the way a real daemon reaches it once the
+// self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 
 afterEach(async () => {
   await relationship?.close();
