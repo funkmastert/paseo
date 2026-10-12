@@ -16,12 +16,16 @@ import type { WorkspaceProvisioningService } from "./session/workspace-provision
 import type { ProviderUsageService } from "../services/quota-fetcher/service.js";
 import {
   DEFAULT_REACTIVE_SIGNAL_TTL_MS,
+  failureTimeMs,
+  isAuthShapedError,
   isLimitShapedError,
   parseResetTimeHint,
   planAccountFailoverSweep,
   type LimitErrorSighting,
   type ProviderLimitSighting,
 } from "./agent/account-failover-detector.js";
+import { AccountAuthProbe, type AccountAuthProbeResult } from "./agent/account-auth-probe.js";
+import { AccountAuthTracker, type AccountAuthReading } from "./agent/account-auth-health.js";
 import {
   headroomByProvider,
   saturatedProviderIds,
@@ -110,7 +114,7 @@ export interface AccountFailoverMonitorOptions {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   workspaceProvisioning: Pick<WorkspaceProvisioningService, "runInImportWorkspace">;
-  providerUsage: Pick<ProviderUsageService, "listUsage">;
+  providerUsage: Pick<ProviderUsageService, "listUsage" | "getAuthReadings">;
   pushNotificationSender: PushNotificationSender;
   /** Where "no account can take the work" goes. The ladder owns that push. */
   remediationSink?: RemediationSink;
@@ -134,6 +138,10 @@ export interface AccountFailoverMonitorOptions {
    * the budget rows; the monitor raises the push when one first appears.
    */
   accountIdentity?: PoolAccountIdentityTracker;
+  /** Standing sign-in state per pooled Claude account (account-auth-health.ts). */
+  accountAuth?: AccountAuthTracker;
+  /** Confirms or clears a `suspect` account via the CLI itself (account-auth-probe.ts). */
+  accountAuthProbe?: AccountAuthProbe;
   sweepIntervalMs?: number;
   reactiveSignalTtlMs?: number;
   now?: () => number;
@@ -187,6 +195,8 @@ export class AccountFailoverMonitor {
   private readonly reactiveSignalTtlMs: number;
   private readonly now: () => number;
   private readonly accountIdentity: PoolAccountIdentityTracker;
+  private readonly accountAuth: AccountAuthTracker;
+  private readonly accountAuthProbe: AccountAuthProbe;
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweepInFlight = false;
   private sightings = new Map<string, LimitErrorSighting>();
@@ -214,6 +224,8 @@ export class AccountFailoverMonitor {
     this.reactiveSignalTtlMs = options.reactiveSignalTtlMs ?? DEFAULT_REACTIVE_SIGNAL_TTL_MS;
     this.now = options.now ?? Date.now;
     this.accountIdentity = options.accountIdentity ?? new PoolAccountIdentityTracker();
+    this.accountAuth = options.accountAuth ?? new AccountAuthTracker();
+    this.accountAuthProbe = options.accountAuthProbe ?? new AccountAuthProbe();
   }
 
   start(): void {
@@ -255,6 +267,11 @@ export class AccountFailoverMonitor {
     // anything. Its own failure must not stop the sweep it rides on.
     await this.observeAccountIdentity(daemonConfig.providers).catch((error) => {
       this.options.logger.warn({ err: error }, "Account identity check failed");
+    });
+    // Same reasoning as identity above: whether an account can sign in is worth knowing whether
+    // or not failover is enabled to act on it.
+    await this.observeAccountAuth(daemonConfig.providers).catch((error) => {
+      this.options.logger.warn({ err: error }, "Account auth check failed");
     });
     if (daemonConfig.accountFailover?.enabled === false) {
       return;
@@ -681,6 +698,71 @@ export class AccountFailoverMonitor {
     } catch (error) {
       this.options.logger.warn({ err: error }, "Account identity: push notification failed");
     }
+  }
+
+  /**
+   * Feeds this sweep's evidence to the AccountAuthTracker: auth-shaped turn failures, a forced
+   * usage re-read for any account the tracker already has as `suspect` or `signed_out` (so
+   * recovery is seen within one sweep instead of waiting out the usage cache), and a confirming
+   * probe for suspects. Opened/closed episodes are not acted on yet here — the push (the urgent
+   * alert) and marking an account dead to failover are separate concerns layered onto this same
+   * tracker.
+   */
+  private async observeAccountAuth(providers: Record<string, unknown> | undefined): Promise<void> {
+    const poolEntries = resolveAccountPoolEntries(providers);
+    if (poolEntries.length === 0) return;
+
+    const nowMs = this.now();
+    const dirs = new Map(
+      deriveClaudeProviderEntries(providers).map((entry) => [entry.providerId, entry.claudeHome]),
+    );
+    const accounts = poolEntries.map((entry) => ({
+      providerId: entry.providerId,
+      enabled: entry.enabled,
+      configDir: expandHome(dirs.get(entry.providerId) ?? defaultClaudeDir(entry.providerId)),
+      expectedEmail: entry.expectedEmail ?? null,
+    }));
+
+    const agents = this.listUnclaimedAgents();
+    const poolProviderIds = new Set(poolEntries.map((entry) => entry.providerId));
+    const turnFailures = agents
+      .filter((agent) => poolProviderIds.has(agent.provider) && isAuthShapedError(agent.lastError))
+      .map((agent) => ({
+        providerId: agent.provider,
+        error: agent.lastError as string,
+        atMs: failureTimeMs(agent.lastTimelineAt, nowMs),
+      }));
+
+    const suspectIds = this.accountAuth.suspectProviderIds();
+    const signedOutIds = this.accountAuth.signedOutProviderIds();
+    const forceReadIds = new Set<string>([...suspectIds, ...signedOutIds]);
+    let readings: { providerId: string; reading: AccountAuthReading; atMs: number }[] = [];
+    if (forceReadIds.size > 0) {
+      await this.options.providerUsage
+        .listUsage({ forceRefreshProviderIds: forceReadIds })
+        .catch((error) => {
+          this.options.logger.warn({ err: error }, "Account auth: forced usage read failed");
+        });
+      readings = [...this.options.providerUsage.getAuthReadings(forceReadIds)].map(
+        ([providerId, reading]) => ({ providerId, reading, atMs: nowMs }),
+      );
+    }
+
+    const probes: { providerId: string; result: AccountAuthProbeResult; atMs: number }[] = [];
+    for (const providerId of suspectIds) {
+      const account = accounts.find((candidate) => candidate.providerId === providerId);
+      if (!account?.configDir) continue;
+      const hasRunningAgent = agents.some(
+        (agent) => agent.provider === providerId && agent.lifecycle === "running",
+      );
+      const result = await this.accountAuthProbe.run(
+        { providerId, configDir: account.configDir, hasRunningAgent },
+        nowMs,
+      );
+      if (result) probes.push({ providerId, result, atMs: nowMs });
+    }
+
+    this.accountAuth.observe({ accounts, turnFailures, readings, probes });
   }
 
   /**

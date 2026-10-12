@@ -726,7 +726,7 @@ export interface PaseoDaemonConfig {
    * `getAccountFailoverMonitor().tick()`, and advance `now` to expire reactive evidence.
    */
   accountFailoverOverrides?: {
-    providerUsage?: Pick<ProviderUsageService, "listUsage">;
+    providerUsage?: Pick<ProviderUsageService, "listUsage" | "getAuthReadings">;
     sweepIntervalMs?: number;
     now?: () => number;
     remediationSink?: RemediationSink;

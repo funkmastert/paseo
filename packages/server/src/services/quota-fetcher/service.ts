@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import type { ProviderUsage } from "../../server/messages.js";
+import type { AccountAuthReading } from "../../server/agent/account-auth-health.js";
 import type { PoolAccountIdentityTracker } from "../../server/agent/pool-account-identity.js";
 import type { ClaudeDerivedProviderEntry } from "./manifest.js";
 import { createProviderUsageFetchers } from "./manifest.js";
@@ -51,6 +52,10 @@ export class ProviderUsageService {
   private cached: { fetchedAtMs: number; result: ProviderUsageListResult } | null = null;
   private inFlight: Promise<ProviderUsageListResult> | null = null;
   private readonly accountIdentity: PoolAccountIdentityTracker | undefined;
+  /** Auth reading from each fetcher's most recent real `fetchUsage()` call, for the account-auth
+   * sweep (account-auth-health.ts). Not cleared on a cache hit: a reading is only as fresh as the
+   * last real fetch, same as the row it rode in on. */
+  private lastAuthReadings = new Map<string, AccountAuthReading>();
 
   constructor(options: ProviderUsageServiceOptions) {
     this.logger = options.logger.child({ module: "provider-usage-service" });
@@ -70,8 +75,24 @@ export class ProviderUsageService {
     this.now = options.now ?? Date.now;
   }
 
-  async listUsage(options?: { forceRefresh?: boolean }): Promise<ProviderUsageListResult> {
+  async listUsage(options?: {
+    forceRefresh?: boolean;
+    /** Bypass the cache for exactly these providers; every other row may still be cache-served. */
+    forceRefreshProviderIds?: ReadonlySet<string>;
+  }): Promise<ProviderUsageListResult> {
     return this.withAccountIdentity(await this.readUsage(options));
+  }
+
+  /** Readings collected from whichever of `providerIds` were actually (re)fetched by the most
+   * recent `listUsage()` call. A provider absent here was cache-served that call, or its fetcher
+   * does not implement `describeAuthReading`. */
+  getAuthReadings(providerIds: ReadonlySet<string>): ReadonlyMap<string, AccountAuthReading> {
+    const result = new Map<string, AccountAuthReading>();
+    for (const providerId of providerIds) {
+      const reading = this.lastAuthReadings.get(providerId);
+      if (reading) result.set(providerId, reading);
+    }
+    return result;
   }
 
   /**
@@ -98,14 +119,27 @@ export class ProviderUsageService {
     };
   }
 
-  private async readUsage(options?: { forceRefresh?: boolean }): Promise<ProviderUsageListResult> {
+  private async readUsage(options?: {
+    forceRefresh?: boolean;
+    forceRefreshProviderIds?: ReadonlySet<string>;
+  }): Promise<ProviderUsageListResult> {
     const nowMs = this.now();
     if (
       !options?.forceRefresh &&
       this.cached &&
       nowMs - this.cached.fetchedAtMs < this.cacheTtlMs
     ) {
-      return this.withLiveRows(this.cached.result);
+      let result = await this.refreshSelectedRows(
+        this.cached.result,
+        (fetcher) => fetcher.live === true,
+      );
+      if (options?.forceRefreshProviderIds?.size) {
+        const forced = options.forceRefreshProviderIds;
+        result = await this.refreshSelectedRows(result, (fetcher) =>
+          forced.has(fetcher.providerId),
+        );
+      }
+      return result;
     }
 
     if (this.inFlight) {
@@ -123,18 +157,24 @@ export class ProviderUsageService {
     }
   }
 
-  /** The cached rows with every live fetcher's row read again, in the same place. */
-  private async withLiveRows(result: ProviderUsageListResult): Promise<ProviderUsageListResult> {
-    const live = this.fetchers.filter((fetcher) => fetcher.live);
-    if (live.length === 0) return result;
+  /** The given result with every fetcher matching `shouldRefresh` read again, in the same place.
+   * Backs both the always-live refresh and a caller's named forced refresh. */
+  private async refreshSelectedRows(
+    result: ProviderUsageListResult,
+    shouldRefresh: (fetcher: ProviderUsageFetcher) => boolean,
+  ): Promise<ProviderUsageListResult> {
+    const toRefresh = this.fetchers.filter(shouldRefresh);
+    if (toRefresh.length === 0) return result;
     const fresh = new Map<string, ProviderUsage | null>();
     await Promise.all(
-      live.map(async (fetcher) => {
+      toRefresh.map(async (fetcher) => {
         try {
           const row = await fetcher.fetchUsage();
           fresh.set(fetcher.providerId, row && withFetchedAt(row, Date.now()));
+          const reading = fetcher.describeAuthReading?.();
+          if (reading) this.lastAuthReadings.set(fetcher.providerId, reading);
         } catch (err) {
-          this.logger.debug({ err, providerId: fetcher.providerId }, "Live usage read failed");
+          this.logger.debug({ err, providerId: fetcher.providerId }, "Usage refresh failed");
         }
       }),
     );
@@ -153,6 +193,8 @@ export class ProviderUsageService {
     const providers = settled.flatMap((result, index): ProviderUsage[] => {
       const fetcher = this.fetchers[index];
       if (result.status === "fulfilled") {
+        const reading = fetcher.describeAuthReading?.();
+        if (reading) this.lastAuthReadings.set(fetcher.providerId, reading);
         return result.value ? [withFetchedAt(result.value, nowMs)] : [];
       }
       this.logger.debug(

@@ -1,4 +1,5 @@
 import type { Logger } from "pino";
+import type { AccountAuthReading } from "../../server/agent/account-auth-health.js";
 import type { JevStatus } from "../../server/jev/contract.js";
 import type { ProviderUsage } from "../../server/messages.js";
 import type { OpenAiApiUsageConfig } from "./providers/openai-api.js";
@@ -16,6 +17,12 @@ export interface ProviderUsageFetcher {
   readonly live?: boolean;
   /** Null means the provider reports nothing at all (for example, it is switched off in config). */
   fetchUsage(): Promise<ProviderUsage | null>;
+  /**
+   * Why (if at all) the `fetchUsage()` call just made looks like an account that cannot
+   * authenticate, for the account-auth sweep (account-auth-health.ts). Only Claude-family
+   * fetchers implement this; an absent method means "this provider has no sign-in state."
+   */
+  describeAuthReading?(): AccountAuthReading | null;
 }
 
 export interface ProviderUsageFetcherFactoryOptions {

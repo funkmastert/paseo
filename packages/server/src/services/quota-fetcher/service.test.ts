@@ -425,6 +425,96 @@ describe("ProviderUsageService", () => {
       ],
     });
   });
+
+  it("a named forced read bypasses the cache only for that provider; a healthy one stays cached", async () => {
+    let now = Date.parse("2026-06-19T00:00:00.000Z");
+    let claudeCalls = 0;
+    let codexCalls = 0;
+    const service = new ProviderUsageService({
+      logger: createLogger(),
+      now: () => now,
+      cacheTtlMs: 60_000,
+      fetchers: [
+        {
+          providerId: "claude-personal",
+          displayName: "Claude",
+          fetchUsage: async () => {
+            claudeCalls += 1;
+            return {
+              providerId: "claude-personal",
+              displayName: "Claude",
+              status: "unavailable",
+              planLabel: null,
+              windows: [],
+            };
+          },
+        },
+        {
+          providerId: "codex",
+          displayName: "Codex",
+          fetchUsage: async () => {
+            codexCalls += 1;
+            return {
+              providerId: "codex",
+              displayName: "Codex",
+              status: "available",
+              planLabel: null,
+              windows: [],
+            };
+          },
+        },
+      ],
+    });
+
+    await service.listUsage();
+    now += 10_000;
+    await service.listUsage({ forceRefreshProviderIds: new Set(["claude-personal"]) });
+
+    expect(claudeCalls).toBe(2);
+    expect(codexCalls).toBe(1);
+  });
+
+  it("collects auth readings only from providers refreshed by the most recent listUsage call", async () => {
+    let now = Date.parse("2026-06-19T00:00:00.000Z");
+    const service = new ProviderUsageService({
+      logger: createLogger(),
+      now: () => now,
+      cacheTtlMs: 60_000,
+      fetchers: [
+        {
+          providerId: "claude-personal",
+          displayName: "Claude",
+          fetchUsage: async () => ({
+            providerId: "claude-personal",
+            displayName: "Claude",
+            status: "unavailable",
+            planLabel: null,
+            windows: [],
+          }),
+          describeAuthReading: () => "credentials_missing" as const,
+        },
+        {
+          providerId: "codex",
+          displayName: "Codex",
+          fetchUsage: async () => ({
+            providerId: "codex",
+            displayName: "Codex",
+            status: "available",
+            planLabel: null,
+            windows: [],
+          }),
+        },
+      ],
+    });
+
+    await service.listUsage();
+    now += 10_000;
+    await service.listUsage({ forceRefreshProviderIds: new Set(["claude-personal"]) });
+
+    const readings = service.getAuthReadings(new Set(["claude-personal", "codex"]));
+    expect(readings.get("claude-personal")).toBe("credentials_missing");
+    expect(readings.has("codex")).toBe(false);
+  });
 });
 
 describe("real provider usage fetchers", () => {

@@ -6,6 +6,8 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { Logger } from "pino";
 import { z } from "zod";
+import type { AccountAuthReading } from "../../../server/agent/account-auth-health.js";
+import { readClaudeAccountAuth } from "../../../server/agent/providers/claude/account-auth.js";
 import type {
   ProviderUsage,
   ProviderUsageDetail,
@@ -32,6 +34,12 @@ const ClaudeCredentialsSchema = z.object({
       refreshToken: z.string().optional(),
       subscriptionType: z.string().optional(),
       rateLimitTier: z.string().optional(),
+      /**
+       * Read-only, like the rest of this file (docs/providers.md): the CLI owns refresh, this
+       * only tells a 401 apart as "the token expired" (suspect, needs a confirming probe) vs
+       * "the token was rejected before it should have been" (revoked, strong signal on its own).
+       */
+      expiresAt: z.number().optional(),
     })
     .optional(),
 });
@@ -98,6 +106,7 @@ interface ClaudeQuotaProviderOptions {
   claudeConfigDirKeychainReader?: (service: string) => Promise<unknown | null>;
   platform?: typeof process.platform;
   fetch?: ProviderApiFetch;
+  now?: () => number;
 }
 
 function buildClaudePlan(
@@ -403,6 +412,8 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
   private readonly readConfigDirKeychainCredentials: (service: string) => Promise<unknown | null>;
   private readonly platform: typeof process.platform;
   private readonly fetchApi: ProviderApiFetch;
+  private readonly now: () => number;
+  private authReading: AccountAuthReading | null = null;
 
   constructor(options: ClaudeQuotaProviderOptions) {
     this.providerId = options.providerId ?? "claude";
@@ -416,11 +427,27 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
       options.claudeConfigDirKeychainReader ?? readClaudeConfigDirKeychainCredentials;
     this.platform = options.platform ?? process.platform;
     this.fetchApi = options.fetch ?? fetch;
+    this.now = options.now ?? Date.now;
+  }
+
+  /**
+   * The auth reading from the most recent `fetchUsage()` call, for the account-auth sweep
+   * (account-auth-health.ts). Read right after `fetchUsage()` on the same instance — it is not
+   * cached independently of the usage row it was read alongside.
+   */
+  describeAuthReading(): AccountAuthReading | null {
+    return this.authReading;
   }
 
   async fetchUsage(): Promise<ProviderUsage> {
     const credentials = await this.readCredentials();
     if (!credentials) {
+      // `.claude.json` keeps naming an account after its OAuth session can no longer refresh
+      // (the gap this plan closes), so its presence — not "signed-in" — is what makes a missing
+      // credential worth a reading. A config dir nothing ever signed into reports no reading at
+      // all: there is no account there to be signed out of.
+      this.authReading =
+        readClaudeAccountAuth(this.claudeHome).state === "signed-in" ? "credentials_missing" : null;
       return unavailableUsage(this);
     }
 
@@ -429,10 +456,15 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
     const resp = await this.callClaudeApi(oauth.accessToken);
 
     if (resp === "NEEDS_AUTH") {
-      // Read-only on credentials; the Claude CLI owns refresh. See docs/providers.md.
+      // Read-only on credentials; the Claude CLI owns refresh. See docs/providers.md. An
+      // expiresAt this file cannot parse is treated as expired: that routes a 401 through the
+      // confirming probe rather than straight to signed_out on an assumption that may be wrong.
+      const expired = typeof oauth.expiresAt !== "number" || oauth.expiresAt <= this.now();
+      this.authReading = expired ? "rejected_expired" : "rejected_unexpired";
       return unavailableUsage(this);
     }
 
+    this.authReading = "ok";
     const scoped = reconcileScopedLimits(
       legacyScopedLimits(resp),
       this.scopedLimitsFromResponse(resp.limits),
