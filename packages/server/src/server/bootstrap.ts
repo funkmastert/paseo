@@ -2324,8 +2324,8 @@ export async function createPaseoDaemon(
       extraClients: config.agentClients,
     },
   });
-  // Codex guard health's self-test (docs/catastrophe-gate.md, KTD-6): no codex/ ref is usable
-  // for children until this is green. Checked now and hourly after, so a daily re-run and a
+  // Codex guard health's self-test (docs/codex-workers.md): no codex/ ref is usable for
+  // children until this is green. Checked now and hourly after, so a daily re-run and a
   // Codex binary version change are both caught without a separate timer for each. A tick that
   // has to skip the self-test itself (no binary, empty catalog) records why (review finding
   // #10) and retries on a short bounded backoff instead of waiting the full hour.
