@@ -22,9 +22,8 @@ const FIRST_CHECK_DELAY_MS = 10 * 60 * 1000;
 const RETRY_BACKOFF_CAP_MS = DAY_MS;
 /**
  * A run that outlasts the slowest check's deadline by this much was suspended mid-way (a sleeping
- * Mac dark-wakes for about two seconds) or blocked, and its timeouts measured that gap rather than
- * the checks. It is discarded and retried on the failure backoff instead of saved as the week's
- * report.
+ * Mac dark-wakes for about two seconds) or blocked, and its timeouts counted that gap as run time.
+ * It is discarded and retried on the failure backoff instead of saved as the week's report.
  */
 const INTERRUPTED_RUN_SLACK_MS = 60 * 1000;
 /** The ladder cuts evidence at 8 KB; the worst rows go first so the cut takes GREEN ones. */

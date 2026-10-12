@@ -8,6 +8,7 @@ import type { PushPayload, PushSendMeta } from "../push/index.js";
 import type { RemediationObservation } from "../remediation/contract.js";
 import type { DoctorContext } from "../session/doctor/context.js";
 import { makeContext, makeFixture } from "../session/doctor/test-support.js";
+import { tokenAuditDeadlineMs } from "../session/doctor/tokens/index.js";
 import { row, type TokenAuditReport, type TokenAuditRow } from "../session/doctor/tokens/types.js";
 import { resolveTokenAuditConfig } from "./config.js";
 import { diffReports } from "./diff.js";
@@ -288,8 +289,7 @@ describe("TokenAuditJob", () => {
   });
 
   it("discards a run that a sleep cut short, and retries it on the backoff", async () => {
-    // The Mac slept 18 minutes mid-run: on wake every slow check's deadline had passed.
-    let sleeps = true;
+    let sleeps = false;
     const timedOut = row(
       "memory",
       "memory:timeout",
@@ -304,9 +304,16 @@ describe("TokenAuditJob", () => {
       return [timedOut];
     });
     const store = new TokenAuditReportStore(path.join(dir, "token-audit"));
+    // Last week's report, with its advisory episode still open.
+    await j.runOnce();
+    const lastWeek = await store.latest();
+    observed.length = 0;
 
+    // The Mac slept 18 minutes mid-run: on wake every slow check's deadline had passed.
+    nowMs += 7 * DAY;
+    sleeps = true;
     expect(await j.checkDue()).toEqual({ kind: "interrupted", elapsedMs: 18 * 60 * 1000 });
-    expect(await store.latest()).toBeNull();
+    expect(await store.latest()).toEqual(lastWeek);
     expect(observed).toEqual([]);
     expect(pushes).toEqual([]);
     expect(await store.lastAttempt()).toMatchObject({ ok: false, consecutiveFailures: 1 });
@@ -316,9 +323,22 @@ describe("TokenAuditJob", () => {
     expect(await j.checkDue()).toBeNull();
     sleeps = false;
     nowMs += 31 * 60 * 1000;
-    expect((await j.checkDue())?.kind).toBe("escalated");
-    expect((await store.latest())?.rows).toEqual(rows);
+    expect((await j.checkDue())?.kind).toBe("recorded");
+    expect((await store.latest())?.generatedAt).not.toBe(lastWeek?.generatedAt);
     expect(await store.lastAttempt()).toMatchObject({ ok: true, consecutiveFailures: 0 });
+  });
+
+  it("saves a slow but awake run that ends within a minute of the slowest check's deadline", async () => {
+    const limitMs = tokenAuditDeadlineMs(ctx) + 60 * 1000;
+    let tookMs = limitMs;
+    const j = job(async () => {
+      nowMs += tookMs;
+      return rows;
+    });
+    expect((await j.runOnce()).kind).toBe("escalated");
+    nowMs += 7 * DAY;
+    tookMs = limitMs + 1;
+    expect(await j.runOnce()).toEqual({ kind: "interrupted", elapsedMs: limitMs + 1 });
   });
 
   it("pushes the headline at notice itself when the escalation agent is turned off", async () => {
