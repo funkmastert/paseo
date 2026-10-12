@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { buttonControlHeight, createControlGeometry } from "@/components/ui/control-geometry";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { getIsElectron } from "@/constants/platform";
 import { useIsLocalDaemon } from "@/hooks/use-is-local-daemon";
@@ -30,18 +31,11 @@ import { SIGN_IN_IDLE, SIGN_IN_TIMEOUT_MS, signInReducer, type SignInEvent } fro
 import { NO_ACCOUNT_ALERTS, reportHostAccountAlerts, useAccountAlertEntries } from "./store";
 
 const COMPACT_MAX_ENTRIES = 2;
+const LINE_HEIGHT_RATIO = 1.4;
 
 const ThemedCopy = withUnistyles(Copy);
 const mutedIconColor = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const filledIconColor = (theme: Theme) => ({ color: theme.colors.destructiveForeground });
-
-type EntryTone = "filled" | "danger" | "warning";
-
-function toneTextStyle(tone: EntryTone) {
-  if (tone === "filled") return styles.filledText;
-  if (tone === "danger") return styles.dangerText;
-  return styles.warningText;
-}
 
 /**
  * Subscribes one host's usage and provider snapshot and reports the host's alert entries to the
@@ -96,7 +90,10 @@ function AccountAlertEntryRow({
 }: {
   entry: AccountAlertEntry;
   showHost: boolean;
-  /** The banner is filled red (a signed-out entry stands): entry text follows the fill, not its own tone. */
+  /**
+   * The banner is filled red (a signed-out entry stands): entry text follows the fill, not its own
+   * tone. Always true for a signed-out entry, so only an identity entry ever renders unfilled.
+   */
   filled: boolean;
 }) {
   const { t } = useTranslation();
@@ -153,42 +150,44 @@ function AccountAlertEntryRow({
     router.push(buildSettingsHostSectionRoute(entry.serverId, "providers"));
   }, [entry.serverId]);
 
-  let summaryTone: EntryTone = "warning";
-  if (filled) summaryTone = "filled";
-  else if (entry.kind === "signed_out") summaryTone = "danger";
-
+  // Sign in, Run on, and the sign-in error only exist on a signed-out entry, so always on the fill.
   let signInControl: ReactNode = null;
-  if (signInAction) {
-    signInControl =
-      signInAction === "sign_in" ? (
-        <Button
-          variant="outline"
-          size="sm"
-          onPress={handleSignIn}
-          disabled={isSigningIn}
-          loading={isSigningIn}
-          testID={`account-alert-sign-in-${entry.providerId}`}
-        >
-          {signInLabel}
-        </Button>
-      ) : (
-        <Text
-          style={[styles.runOn, filled ? styles.filledText : styles.mutedText]}
-          numberOfLines={1}
-        >
-          {t("accountAlerts.signInRunOn", { host: entry.hostLabel })}
-        </Text>
-      );
+  if (signInAction === "sign_in") {
+    signInControl = (
+      <Button
+        variant="outline"
+        size="sm"
+        onPress={handleSignIn}
+        disabled={isSigningIn}
+        loading={isSigningIn}
+        testID={`account-alert-sign-in-${entry.providerId}`}
+      >
+        {signInLabel}
+      </Button>
+    );
+  } else if (signInAction === "run_on_host") {
+    signInControl = (
+      <Text style={[styles.runOn, styles.filledText]} numberOfLines={1}>
+        {t("accountAlerts.signInRunOn", { host: entry.hostLabel })}
+      </Text>
+    );
   }
 
   return (
     <View style={styles.entry} testID={`account-alert-entry-${entry.providerId}`}>
-      <Pressable onPress={openSettings} accessibilityRole="button">
-        <Text style={[styles.entryLabel, filled ? styles.filledText : null]} numberOfLines={1}>
-          {showHost ? `${entry.label} · ${entry.hostLabel}` : entry.label}
-        </Text>
-      </Pressable>
-      <Text style={[styles.entrySummary, toneTextStyle(summaryTone)]} numberOfLines={2}>
+      <Button
+        variant="ghost"
+        size="xs"
+        onPress={openSettings}
+        style={styles.inlineLink}
+        textStyle={[styles.linkText, filled ? styles.filledText : null]}
+      >
+        {showHost ? `${entry.label} · ${entry.hostLabel}` : entry.label}
+      </Button>
+      <Text
+        style={[styles.entrySummary, filled ? styles.filledText : styles.warningText]}
+        numberOfLines={2}
+      >
         {entry.summary}
       </Text>
       {!isCompact ? (
@@ -212,7 +211,7 @@ function AccountAlertEntryRow({
       </View>
       {signInError ? (
         <Text
-          style={[styles.error, filled ? styles.filledText : styles.dangerText]}
+          style={[styles.error, styles.filledText]}
           testID={`account-alert-error-${entry.providerId}`}
         >
           {signInError}
@@ -259,11 +258,16 @@ function AccountAlertBanner() {
           />
         ))}
         {hiddenCount > 0 ? (
-          <Pressable onPress={openMore} accessibilityRole="button" testID="account-alert-more">
-            <Text style={[styles.more, hasSignedOut ? styles.filledText : null]}>
-              {t("accountAlerts.moreCount", { count: hiddenCount })}
-            </Text>
-          </Pressable>
+          <Button
+            variant="ghost"
+            size="xs"
+            onPress={openMore}
+            style={styles.inlineLink}
+            textStyle={[styles.linkText, hasSignedOut ? styles.filledText : null]}
+            testID="account-alert-more"
+          >
+            {t("accountAlerts.moreCount", { count: hiddenCount })}
+          </Button>
         ) : null}
       </View>
     ),
@@ -302,55 +306,60 @@ export function AccountAlertFrame({ children }: { children: ReactNode }) {
   );
 }
 
-const styles = StyleSheet.create((theme) => ({
-  container: {
-    paddingHorizontal: theme.spacing[3],
-    paddingBottom: theme.spacing[2],
-  },
-  entries: {
-    gap: theme.spacing[3],
-  },
-  entry: {
-    gap: theme.spacing[1],
-  },
-  entryLabel: {
-    color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
-    fontWeight: theme.fontWeight.medium,
-  },
-  entrySummary: {
-    fontSize: theme.fontSize.sm,
-  },
-  entryCommand: {
-    fontSize: theme.fontSize.sm,
-    fontFamily: "monospace",
-  },
-  entryActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[2],
-  },
-  runOn: {
-    fontSize: theme.fontSize.sm,
-  },
-  more: {
-    color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
-    fontWeight: theme.fontWeight.medium,
-  },
-  error: {
-    fontSize: theme.fontSize.sm,
-  },
-  filledText: {
-    color: theme.colors.destructiveForeground,
-  },
-  mutedText: {
-    color: theme.colors.foregroundMuted,
-  },
-  dangerText: {
-    color: theme.colors.statusDanger,
-  },
-  warningText: {
-    color: theme.colors.statusWarning,
-  },
-}));
+const styles = StyleSheet.create((theme) => {
+  // A ghost button's label sits a padding step inside its box, and the box is taller than a line
+  // of text. Pulling the box out by both puts the label's ink where plain text would sit; the hit
+  // area grows outward instead (docs/design.md §8).
+  const ghostInkInset = createControlGeometry(theme).buttonXs.paddingHorizontal;
+  const lineHeight = Math.round(theme.fontSize.sm * LINE_HEIGHT_RATIO);
+  const lineOverhang = Math.round((lineHeight - buttonControlHeight.xs) / 2);
+
+  return {
+    container: {
+      paddingHorizontal: theme.spacing[3],
+      paddingBottom: theme.spacing[2],
+    },
+    entries: {
+      gap: theme.spacing[3],
+    },
+    entry: {
+      gap: theme.spacing[1],
+    },
+    inlineLink: {
+      alignSelf: "flex-start",
+      marginLeft: -ghostInkInset,
+      marginVertical: lineOverhang,
+    },
+    linkText: {
+      color: theme.colors.foreground,
+      fontWeight: theme.fontWeight.medium,
+    },
+    entrySummary: {
+      fontSize: theme.fontSize.sm,
+    },
+    entryCommand: {
+      fontSize: theme.fontSize.sm,
+      fontFamily: "monospace",
+    },
+    entryActions: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: theme.spacing[2],
+    },
+    runOn: {
+      fontSize: theme.fontSize.sm,
+    },
+    error: {
+      fontSize: theme.fontSize.sm,
+    },
+    filledText: {
+      color: theme.colors.destructiveForeground,
+    },
+    mutedText: {
+      color: theme.colors.foregroundMuted,
+    },
+    warningText: {
+      color: theme.colors.statusWarning,
+    },
+  };
+});
