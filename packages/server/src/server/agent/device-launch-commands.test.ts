@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { detectDeviceLaunchIntents, targetMatchesRunningDevice } from "./device-launch-commands.js";
+import {
+  detectDeviceLaunchIntents,
+  stripCommandPrefixes,
+  targetMatchesRunningDevice,
+  tokenizeCommandSegments,
+} from "./device-launch-commands.js";
 
 describe("detectDeviceLaunchIntents", () => {
   test("recognizes the ways an agent boots a simulator", () => {
@@ -131,5 +136,60 @@ describe("targetMatchesRunningDevice", () => {
   test("a device name is not a UDID, so it never claims a running device", () => {
     expect(targetMatchesRunningDevice("iPhone 17 Pro", simulator, "ios")).toBe(false);
     expect(targetMatchesRunningDevice(undefined, simulator, "ios")).toBe(false);
+  });
+});
+
+describe("tokenizeCommandSegments and unterminated substitutions", () => {
+  test("an unterminated $(...) doesn't swallow a later launch command", () => {
+    // No closing paren — a real shell refuses to run this. Consuming to EOF anyway would fold
+    // the `&&` and everything after it into one opaque token, hiding the emulator boot below it
+    // from every gate that shares this tokenizer.
+    expect(detectDeviceLaunchIntents("echo $(uname -s && emulator -avd Pixel_7")).toEqual([
+      { platform: "android", command: "emulator", target: "Pixel_7" },
+    ]);
+  });
+
+  test("an unterminated backtick doesn't swallow a later launch command", () => {
+    expect(detectDeviceLaunchIntents("echo `uname -s && emulator -avd Pixel_7")).toEqual([
+      { platform: "android", command: "emulator", target: "Pixel_7" },
+    ]);
+  });
+
+  test("a terminated $(...) still collapses to one token even with a pipe inside it", () => {
+    expect(tokenizeCommandSegments("adb -s $(echo FAKE | cat) install app.apk")).toEqual([
+      ["adb", "-s", "$(echo FAKE | cat)", "install", "app.apk"],
+    ]);
+  });
+});
+
+describe("stripCommandPrefixes and xargs", () => {
+  test("strips a bare xargs", () => {
+    expect(stripCommandPrefixes(["xargs", "adb", "-s", "FAKE", "install"])).toEqual([
+      "adb",
+      "-s",
+      "FAKE",
+      "install",
+    ]);
+  });
+
+  test("strips xargs with an attached flag (-0, -n1)", () => {
+    expect(stripCommandPrefixes(["xargs", "-0", "adb", "install"])).toEqual(["adb", "install"]);
+    expect(stripCommandPrefixes(["xargs", "-n1", "adb", "install"])).toEqual(["adb", "install"]);
+  });
+
+  test("strips xargs with a separate-value flag (-I {})", () => {
+    expect(stripCommandPrefixes(["xargs", "-I", "{}", "adb", "install"])).toEqual([
+      "adb",
+      "install",
+    ]);
+  });
+
+  test("strips an attached -I{} without consuming the command after it", () => {
+    expect(stripCommandPrefixes(["xargs", "-I{}", "adb", "-s", "{}", "install"])).toEqual([
+      "adb",
+      "-s",
+      "{}",
+      "install",
+    ]);
   });
 });

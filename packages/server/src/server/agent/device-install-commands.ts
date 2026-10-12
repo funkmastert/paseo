@@ -25,6 +25,16 @@ export interface InstallCommandIntent {
   /** The serial, UDID, CoreDevice identifier or device name the command names, if it names one. */
   target?: string;
   /**
+   * True when `target` still contains shell syntax this gate couldn't expand — `$(...)`, a
+   * backtick, or a `$VAR`/`${VAR}` with no assignment seen earlier in the same command. The
+   * command still names exactly one real device; it just isn't the literal string in `target`.
+   * The caller must not read it as "names a device nothing is connected as" (that fallback is
+   * for a device genuinely not connected — an emulator, a simulator, a typo) and must not grant
+   * the untargeted-plain-`adb` exemption either: `-s $X` already told adb which device to pick,
+   * even though this gate can't read which one.
+   */
+  targetUnresolved?: boolean;
+  /**
    * True for a shape that installs on every connected device of its platform when no target is
    * given (`./gradlew installDebug` with no `ANDROID_SERIAL`) — untargeted is the dangerous
    * case the gate has to catch, not just the one where a device is named explicitly.
@@ -38,6 +48,69 @@ export interface InstallCommandIntent {
 }
 
 const RUNNERS = new Set(["npx", "bunx", "pnpm", "yarn", "bun"]);
+
+const VARIABLE_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+const VARIABLE_REFERENCE = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/;
+/** Any `$` or backtick left in a resolved target is shell syntax this gate can't read: a
+ * `$(...)` subshell, a backtick substitution, `$1`/`$@`, a `${VAR:-default}` expansion, or a
+ * plain `$VAR` with no assignment seen earlier in this command. `{}` is `xargs -I{}`'s default
+ * replace-string — the only part of its pipeline that could plausibly land exactly on a
+ * `-s`/`--device` target, standing in for whatever its stdin actually contains. A literal
+ * serial, UDID or device name never looks like any of this. */
+const UNEXPANDED_SHELL_SYNTAX = /[$`]|^\{\}$/;
+/** Keywords that only decorate an assignment — `export S=...`, `declare -r S=...`, `local`,
+ * `readonly` — never the assignment itself. Skipped so the scan below still finds the
+ * `NAME=value` token after them. */
+const ASSIGNMENT_PREFIX_KEYWORDS = new Set(["export", "declare", "local", "readonly"]);
+
+/**
+ * `S=FAKESERIAL001; ...; adb -s $S install app.apk` — an agent's own shell resolves `$S` to the
+ * real serial before running adb; this gate's matchers only see the command's text, so without
+ * resolving it too they'd read the target as the literal, never-connected device named `$S`.
+ * Collected across every segment of the same command line, in order, so a later assignment
+ * overrides an earlier one the way a real shell would.
+ */
+function collectVariableAssignments(
+  segments: readonly (readonly string[])[],
+): ReadonlyMap<string, string> {
+  const vars = new Map<string, string>();
+  for (const segment of segments) {
+    for (const token of segment) {
+      if (ASSIGNMENT_PREFIX_KEYWORDS.has(token)) continue;
+      const match = VARIABLE_ASSIGNMENT.exec(token);
+      if (!match) break;
+      vars.set(match[1], match[2]);
+    }
+  }
+  return vars;
+}
+
+/** Resolves a bare `$VAR`/`${VAR}` target against assignments made earlier in the same command
+ * line, leaving it as-is when it can't be resolved there — a `$(...)`, a backtick, or a variable
+ * this gate never saw assigned (exported in the agent's shell profile, or set in an earlier,
+ * separate tool call). */
+function resolveVariableTarget(target: string, vars: ReadonlyMap<string, string>): string {
+  const match = VARIABLE_REFERENCE.exec(target);
+  if (!match) return target;
+  return vars.get(match[1]) ?? target;
+}
+
+/**
+ * Resolves a matched intent's target against same-command variable assignments and marks it
+ * `targetUnresolved` when shell syntax survives resolution — fail closed, not "nothing to
+ * protect": the command still names exactly one real device, this gate just can't read which.
+ */
+function resolveIntentTarget(
+  candidate: InstallCommandIntent,
+  vars: ReadonlyMap<string, string>,
+): InstallCommandIntent {
+  if (!candidate.target) return candidate;
+  const resolved = resolveVariableTarget(candidate.target, vars);
+  if (UNEXPANDED_SHELL_SYNTAX.test(resolved)) {
+    return { ...candidate, target: resolved, targetUnresolved: true };
+  }
+  return resolved === candidate.target ? candidate : { ...candidate, target: resolved };
+}
 
 function readFlagValue(tokens: readonly string[], ...flags: string[]): string | undefined {
   for (const flag of flags) {
@@ -252,12 +325,14 @@ const MATCHERS = [
  * device-launch-commands.ts is, so `cmd1 && cmd2` is gated per segment. */
 export function detectInstallCommandIntents(command: string): InstallCommandIntent[] {
   const intents: InstallCommandIntent[] = [];
-  for (const segment of tokenizeCommandSegments(command)) {
+  const segments = tokenizeCommandSegments(command);
+  const vars = collectVariableAssignments(segments);
+  for (const segment of segments) {
     if (segment.length === 0) continue;
     for (const matcher of MATCHERS) {
       const match = matcher(segment);
       if (match) {
-        intents.push(match);
+        intents.push(resolveIntentTarget(match, vars));
         break;
       }
     }

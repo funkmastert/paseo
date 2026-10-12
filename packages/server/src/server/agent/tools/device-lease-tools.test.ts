@@ -220,8 +220,11 @@ describe("device tools and the provider asymmetry", () => {
   });
 
   test("an agent whose gate has a hole is told where the hole is", async () => {
+    // Codex moved from "asks" to "refuses" once the Codex child guard started answering
+    // `item/commandExecution/requestApproval` itself (2b5470433) — but only for a daemon-launched
+    // guarded child. The description now names that gap instead of the old "Full Access" mode.
     const { configs } = registerFor("agent-1", "codex");
-    expect(configs.get("device_checkout")?.description).toContain("Full Access");
+    expect(configs.get("device_checkout")?.description).toContain("only guarded children get this");
   });
 
   test("a caller the daemon cannot resolve gets the cautious sentence, not a crash", async () => {
