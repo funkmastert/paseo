@@ -1,6 +1,14 @@
 export const PARENT_AGENT_ID_LABEL = "paseo.parent-agent-id";
 const OPEN_AGENT_TAB_LABEL_PREFIX = "paseo.open-agent-tab.";
 
+/**
+ * Stamped by the daemon the first time a Codex child is forced into guarded mode (create,
+ * resume, or reload). Protected (`PROTECTED_LABEL_KEYS`, agent-manager.ts) so `update_agent`
+ * can't clear it: `paseo.parent-agent-id` is mutable and a child can lose it (relabel, detach,
+ * archive), but this marker survives, so the mode lock has something durable to check.
+ */
+export const CODEX_GUARDED_LABEL = "paseo.codex-guarded";
+
 /** Whether a spawned agent got the JEV agent tools (docs/jev.md, "Features 4-6"). */
 export const JEV_TOOLS_LABEL = "paseo.jev-tools";
 /** "on": the tools are exposed. "control": the D8 hold-out arm, withheld on purpose. */

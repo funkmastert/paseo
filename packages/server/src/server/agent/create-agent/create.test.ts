@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, test, vi } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 import { createPaseoApi } from "@getpaseo/client";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 
@@ -9,6 +9,7 @@ import { createTestLogger } from "../../../test-utils/test-logger.js";
 import { createTestAgentClients } from "../../test-utils/fake-agent-client.js";
 import type { TestAgentClientOptions } from "../../test-utils/fake-agent-client.js";
 import { createProviderSnapshotManagerStub } from "../../test-utils/session-stubs.js";
+import { setCodexGuardHealthState } from "../codex-guard-health.js";
 import { AgentManager } from "../agent-manager.js";
 import { AgentStorage } from "../agent-storage.js";
 import { PluginHookHandlers, PluginUnresponsiveError } from "../../plugins/lifecycle/index.js";
@@ -24,6 +25,13 @@ const logger = createTestLogger();
 const hookPaseo = createPaseoApi(
   new DaemonClient({ url: "ws://127.0.0.1:1/ws", clientId: "create-test-lifecycle" }),
 );
+
+// This file uses `provider: "codex"` as a generic fixture for create-path behavior unrelated to
+// the Codex child guard (worktree/workspaceId stamping, hook forwarding, ...), so default guard
+// health to green the way a real daemon reaches it once the self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 
 function createRealAgentManager(
   storage: AgentStorage,
@@ -446,7 +454,7 @@ test("mcp create forwards callerAgentId to the agent.create hook", async () => {
     );
     requests.length = 0;
 
-    await createAgentCommand(
+    const { snapshot: child } = await createAgentCommand(
       { agentManager, agentStorage: storage, logger, providerSnapshotManager },
       {
         kind: "mcp",
@@ -460,6 +468,10 @@ test("mcp create forwards callerAgentId to the agent.create hook", async () => {
       },
     );
 
+    // The child was actually created (guarded, since it's a real Codex child), not just that the
+    // hook saw a request for one.
+    expect(child.id).toBeTruthy();
+    expect(child.config.modeId).toBe("guarded");
     expect(requests).toHaveLength(1);
     expect(requests[0]?.callerAgentId).toBe(parent.id);
   } finally {
@@ -489,7 +501,7 @@ test("session create forwards callerAgentId to the agent.create hook for CLI/ses
     );
     requests.length = 0;
 
-    await createAgentCommand(
+    const { snapshot: child } = await createAgentCommand(
       { agentManager, agentStorage: storage, logger, providerSnapshotManager },
       {
         kind: "session",
@@ -503,6 +515,10 @@ test("session create forwards callerAgentId to the agent.create hook for CLI/ses
       },
     );
 
+    // The child was actually created (guarded, since it's a real Codex child), not just that the
+    // hook saw a request for one.
+    expect(child.id).toBeTruthy();
+    expect(child.config.modeId).toBe("guarded");
     expect(requests).toHaveLength(1);
     expect(requests[0]?.callerAgentId).toBe(parent.id);
   } finally {
