@@ -29,9 +29,9 @@ import { BelowBannerInsets } from "./below-banner-insets";
 import { NO_ACCOUNT_ALERTS, reportHostAccountAlerts, useAccountAlertEntries } from "./store";
 
 const COMPACT_MAX_ENTRIES = 2;
-// Matches the daemon's own "Signing in..." cutoff (docs/account-failover.md): a login the app
-// never heard back from stops blocking retries after this, win or lose.
-const SIGN_IN_TIMEOUT_MS = 3 * 60_000;
+// Mirrors the daemon's login slot (LOGIN_TIMEOUT_MS in claude-account-sign-in.ts): until it
+// frees, a retry only gets `already_running`, so the button stays pending that long, win or lose.
+const SIGN_IN_TIMEOUT_MS = 5 * 60_000;
 
 const ThemedCopy = withUnistyles(Copy);
 const mutedIconColor = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
