@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
 import type { ProviderUsage } from "@/provider-usage/types";
-import { buildAccountAlertEntries, type AccountAlertHostUsage } from "./account-alert-model";
+import {
+  buildAccountAlertEntries,
+  signInActionFor,
+  type AccountAlertHostUsage,
+} from "./account-alert-model";
 
 function usage(overrides: Partial<ProviderUsage> = {}): ProviderUsage {
   return {
@@ -207,5 +211,28 @@ describe("buildAccountAlertEntries", () => {
     expect(entries.find((entry) => entry.providerId === "claude-backup")?.hostLabel).toBe(
       "Host Two",
     );
+  });
+});
+
+describe("signInActionFor", () => {
+  const here = { isElectron: true, hostSupportsSignIn: true, isLocalDaemon: true };
+  const signedOut = { kind: "signed_out" as const, canSignIn: true };
+
+  it("offers Sign in for a signed-out entry on the desktop's own daemon", () => {
+    expect(signInActionFor(signedOut, here)).toBe("sign_in");
+  });
+
+  it.each([
+    ["the daemon cannot start a login", { ...signedOut, canSignIn: false }, here],
+    ["the app is not Electron", signedOut, { ...here, isElectron: false }],
+    ["the host does not serve the sign-in RPC", signedOut, { ...here, hostSupportsSignIn: false }],
+    ["the entry is on a remote host", signedOut, { ...here, isLocalDaemon: false }],
+  ])("falls back to running the command on the host when %s", (_reason, entry, context) => {
+    expect(signInActionFor(entry, context)).toBe("run_on_host");
+  });
+
+  it("offers nothing for an identity entry", () => {
+    expect(signInActionFor({ kind: "identity", canSignIn: false }, here)).toBeNull();
+    expect(signInActionFor({ kind: "identity", canSignIn: true }, here)).toBeNull();
   });
 });

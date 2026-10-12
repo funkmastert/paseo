@@ -85,3 +85,28 @@ export function buildAccountAlertEntries(
     return a.label.localeCompare(b.label);
   });
 }
+
+/** Where the app can fix an entry from: what the desktop knows about itself and the entry's host. */
+export interface SignInContext {
+  isElectron: boolean;
+  /** The entry's host advertises `claudeAccountSignIn`. */
+  hostSupportsSignIn: boolean;
+  /** The entry's host is the daemon this desktop app manages. */
+  isLocalDaemon: boolean;
+}
+
+export type SignInAction = "sign_in" | "run_on_host";
+
+/**
+ * Sign in opens a browser login on the daemon's machine, so it is offered only where that machine
+ * is the one in front of the user. Every other signed-out entry says where to run the command.
+ */
+export function signInActionFor(
+  entry: Pick<AccountAlertEntry, "kind" | "canSignIn">,
+  context: SignInContext,
+): SignInAction | null {
+  if (entry.kind !== "signed_out") return null;
+  const canSignInHere =
+    entry.canSignIn && context.isElectron && context.hostSupportsSignIn && context.isLocalDaemon;
+  return canSignInHere ? "sign_in" : "run_on_host";
+}

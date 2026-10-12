@@ -4,6 +4,7 @@ import { router } from "expo-router";
 import { Copy } from "lucide-react-native";
 import { Pressable, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Alert } from "@/components/ui/alert";
@@ -13,7 +14,7 @@ import { getIsElectron } from "@/constants/platform";
 import { useToast } from "@/contexts/toast-context";
 import { useIsLocalDaemon } from "@/hooks/use-is-local-daemon";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
-import { useProviderUsage } from "@/provider-usage/use-provider-usage";
+import { providerUsageQueryKey, useProviderUsage } from "@/provider-usage/use-provider-usage";
 import type { ProviderUsage } from "@/provider-usage/types";
 import { useHostRuntimeClient, useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
@@ -22,6 +23,7 @@ import { buildSettingsHostSectionRoute } from "@/utils/host-routes";
 import { WindowChromeSafeArea } from "@/utils/desktop-window";
 import {
   buildAccountAlertEntries,
+  signInActionFor,
   type AccountAlertEntry,
   type AccountAlertHostUsage,
 } from "./account-alert-model";
@@ -166,7 +168,10 @@ function AccountAlertEntryRow({
   const signInSupported = useSessionStore(
     (state) => state.sessions[entry.serverId]?.serverInfo?.features?.claudeAccountSignIn === true,
   );
+  const queryClient = useQueryClient();
   const [pending, setPending] = useState(false);
+  // Set synchronously, so a second click before the re-render sends nothing.
+  const pendingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -176,33 +181,40 @@ function AccountAlertEntryRow({
     };
   }, []);
 
-  const canOfferSignIn =
-    entry.kind === "signed_out" &&
-    entry.canSignIn &&
-    getIsElectron() &&
-    signInSupported &&
-    isLocalDaemon;
+  const signInAction = signInActionFor(entry, {
+    isElectron: getIsElectron(),
+    hostSupportsSignIn: signInSupported,
+    isLocalDaemon,
+  });
 
   const handleSignIn = useCallback(() => {
-    if (pending || !client) return;
+    if (pendingRef.current || !client) return;
+    const settle = () => {
+      pendingRef.current = false;
+      setPending(false);
+    };
+    pendingRef.current = true;
     setPending(true);
     setError(null);
     void client
       .accountClaudeSignIn(entry.providerId)
       .then((response) => {
         if (response.outcome === "failed") {
-          setPending(false);
+          settle();
           setError(response.error ?? t("accountAlerts.signInError"));
           return;
         }
-        timeoutRef.current = setTimeout(() => setPending(false), SIGN_IN_TIMEOUT_MS);
+        timeoutRef.current = setTimeout(settle, SIGN_IN_TIMEOUT_MS);
         return;
       })
       .catch((caught: unknown) => {
-        setPending(false);
+        settle();
         setError(caught instanceof Error ? caught.message : t("accountAlerts.signInError"));
+      })
+      .finally(() => {
+        void queryClient.invalidateQueries({ queryKey: providerUsageQueryKey(entry.serverId) });
       });
-  }, [pending, client, entry.providerId, t]);
+  }, [client, entry.providerId, entry.serverId, queryClient, t]);
 
   const handleCopy = useCallback(() => {
     void (async () => {
@@ -223,9 +235,9 @@ function AccountAlertEntryRow({
   if (filled) summaryTone = "filled";
   else if (entry.kind === "signed_out") summaryTone = "danger";
 
-  let signInAction: ReactNode = null;
-  if (entry.kind === "signed_out") {
-    signInAction = canOfferSignIn ? (
+  let signInControl: ReactNode = null;
+  if (signInAction) {
+    signInControl = signInAction === "sign_in" ? (
       <Button
         variant="outline"
         size="sm"
@@ -262,7 +274,7 @@ function AccountAlertEntryRow({
         </Text>
       ) : null}
       <View style={styles.entryActions}>
-        {signInAction}
+        {signInControl}
         <Pressable
           onPress={handleCopy}
           accessibilityRole="button"
