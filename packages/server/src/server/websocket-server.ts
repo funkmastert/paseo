@@ -8,6 +8,7 @@ import { monitorEventLoopDelay } from "node:perf_hooks";
 import type { AgentManager, AgentMetricsSnapshot } from "./agent/agent-manager.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
 import { PoolAccountIdentityTracker } from "./agent/pool-account-identity.js";
+import { AccountAuthTracker } from "./agent/account-auth-health.js";
 import type { DownloadTokenStore } from "./file-download/token-store.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type pino from "pino";
@@ -617,6 +618,7 @@ export class VoiceAssistantWebSocketServer {
   private unsubscribeDaemonConfigChange: (() => void) | null = null;
   private readonly providerUsageService: ProviderUsageService;
   private readonly accountIdentity = new PoolAccountIdentityTracker();
+  private readonly accountAuth = new AccountAuthTracker();
   private readonly usageHistoryStore: UsageHistoryStore;
   private readonly contextUsageService: AgentContextUsageService;
   private unsubscribeTerminalActivity: (() => void) | null = null;
@@ -801,6 +803,7 @@ export class VoiceAssistantWebSocketServer {
       logger: this.logger,
       claudeDerivedProviders: deriveClaudeProviderEntries(this.daemonConfigStore.get().providers),
       accountIdentity: this.accountIdentity,
+      accountAuth: this.accountAuth,
       // Re-read from config.json each fetch: the key is named there, never stored.
       readOpenAiApiConfig: () => {
         try {
@@ -1021,6 +1024,11 @@ export class VoiceAssistantWebSocketServer {
   /** The standing account-identity problems the failover sweep maintains (docs/account-failover.md). */
   public getAccountIdentity(): PoolAccountIdentityTracker {
     return this.accountIdentity;
+  }
+
+  /** The standing sign-in state the failover sweep maintains (docs/account-failover.md). */
+  public getAccountAuth(): AccountAuthTracker {
+    return this.accountAuth;
   }
 
   /** The usage-history store this instance owns: the sampler in AgentTokenBurnMonitor writes it and
@@ -1762,6 +1770,8 @@ export class VoiceAssistantWebSocketServer {
         mcpGatewayAdopt: true,
         // COMPAT(deviceLeases): added in v0.8.1, remove gate after 2027-03-18.
         deviceLeases: true,
+        // COMPAT(claudeAccountSignIn): added in v0.8.x, remove gate after 2027-10-12.
+        claudeAccountSignIn: true,
         // COMPAT(usageHistory): added in v0.8.2, remove gate after 2027-09-23.
         usageHistory: true,
         // COMPAT(tokenUsage): added in v0.8.x, remove gate after 2027-10-07.

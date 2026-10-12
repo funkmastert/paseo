@@ -1,6 +1,9 @@
 import type { Logger } from "pino";
 import type { ProviderUsage } from "../../server/messages.js";
-import type { AccountAuthReading } from "../../server/agent/account-auth-health.js";
+import type {
+  AccountAuthReading,
+  AccountAuthTracker,
+} from "../../server/agent/account-auth-health.js";
 import type { PoolAccountIdentityTracker } from "../../server/agent/pool-account-identity.js";
 import type { ClaudeDerivedProviderEntry } from "./manifest.js";
 import { createProviderUsageFetchers } from "./manifest.js";
@@ -25,6 +28,8 @@ export interface ProviderUsageServiceOptions {
   readJevStatus?: ProviderUsageFetcherFactoryOptions["readJevStatus"];
   /** Standing account-identity problems, attached to each pool row at read time. */
   accountIdentity?: PoolAccountIdentityTracker;
+  /** Standing sign-in state, attached to each pool row at read time (docs/account-failover.md). */
+  accountAuth?: AccountAuthTracker;
 }
 
 export interface ProviderUsageListResult {
@@ -52,6 +57,7 @@ export class ProviderUsageService {
   private cached: { fetchedAtMs: number; result: ProviderUsageListResult } | null = null;
   private inFlight: Promise<ProviderUsageListResult> | null = null;
   private readonly accountIdentity: PoolAccountIdentityTracker | undefined;
+  private readonly accountAuth: AccountAuthTracker | undefined;
   /** Auth reading from each fetcher's most recent real `fetchUsage()` call, for the account-auth
    * sweep (account-auth-health.ts). Not cleared on a cache hit: a reading is only as fresh as the
    * last real fetch, same as the row it rode in on. */
@@ -60,6 +66,7 @@ export class ProviderUsageService {
   constructor(options: ProviderUsageServiceOptions) {
     this.logger = options.logger.child({ module: "provider-usage-service" });
     this.accountIdentity = options.accountIdentity;
+    this.accountAuth = options.accountAuth;
     this.fetchers =
       options.fetchers ??
       createProviderUsageFetchers(
@@ -80,7 +87,7 @@ export class ProviderUsageService {
     /** Bypass the cache for exactly these providers; every other row may still be cache-served. */
     forceRefreshProviderIds?: ReadonlySet<string>;
   }): Promise<ProviderUsageListResult> {
-    return this.withAccountIdentity(await this.readUsage(options));
+    return this.withAccountAuth(this.withAccountIdentity(await this.readUsage(options)));
   }
 
   /** Readings collected from whichever of `providerIds` were actually (re)fetched by the most
@@ -113,6 +120,34 @@ export class ProviderUsageService {
             kind: problem.kind,
             summary: problem.summary,
             fixCommand: problem.fixCommand,
+          },
+        };
+      }),
+    };
+  }
+
+  /**
+   * Auth state is read per call too, same reasoning as identity above. `canSignIn` is a UI hint
+   * only: every pooled entry has a config dir to run the sign-in command in, so this reports true
+   * for any signed-out row; the RPC itself is the authoritative check and answers `failed` if it
+   * cannot actually resolve a `claude` binary.
+   */
+  private withAccountAuth(result: ProviderUsageListResult): ProviderUsageListResult {
+    if (!this.accountAuth) return result;
+    const tracker = this.accountAuth;
+    return {
+      ...result,
+      providers: result.providers.map((row) => {
+        const record = tracker.stateFor(row.providerId);
+        if (!record || record.state !== "signed_out") return row;
+        return {
+          ...row,
+          accountAuth: {
+            state: "signed_out" as const,
+            since: new Date(record.since).toISOString(),
+            summary: record.summary,
+            fixCommand: record.fixCommand,
+            canSignIn: true,
           },
         };
       }),

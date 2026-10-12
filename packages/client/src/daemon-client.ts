@@ -2004,6 +2004,21 @@ export class DaemonClient {
     }
   }
 
+  /** Starts `claude auth login` for one pooled account on this daemon's own host
+   * (docs/account-failover.md). The daemon resolves the config dir and email itself. */
+  accountClaudeSignIn(
+    providerId: string,
+    requestId?: string,
+  ): Promise<CorrelatedResponsePayload<"account.claude.sign_in.response">> {
+    return this.sendNamespacedCorrelatedSessionRequest<"account.claude.sign_in.response">({
+      requestId,
+      message: {
+        type: "account.claude.sign_in.request",
+        providerId,
+      },
+    });
+  }
+
   sendHeartbeat(params: {
     deviceType: "web" | "mobile";
     focusedAgentId: string | null;

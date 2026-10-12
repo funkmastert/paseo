@@ -1123,13 +1123,13 @@ function strandingEvidence(input: {
 }
 
 /** `~/` in a config path, expanded the way the sign-in command needs it. */
-function expandHome(value: string | undefined): string | null {
+export function expandHome(value: string | undefined): string | null {
   if (!value) return null;
   return value === "~" || value.startsWith("~/") ? path.join(homedir(), value.slice(1)) : value;
 }
 
 /** The directory the built-in `claude` entry reads when its config sets none. */
-function defaultClaudeDir(providerId: string): string | undefined {
+export function defaultClaudeDir(providerId: string): string | undefined {
   if (providerId !== "claude") return undefined;
   return process.env["CLAUDE_CONFIG_DIR"] ?? path.join(homedir(), ".claude");
 }

@@ -1433,7 +1433,10 @@ function createAccountFailoverMonitor(input: {
   workspaceProvisioning: Pick<WorkspaceProvisioningService, "runInImportWorkspace">;
   wsServer: Pick<
     VoiceAssistantWebSocketServer,
-    "getProviderUsageService" | "getPushNotificationSender" | "getAccountIdentity"
+    | "getProviderUsageService"
+    | "getPushNotificationSender"
+    | "getAccountIdentity"
+    | "getAccountAuth"
   >;
   daemonConfigStore: Pick<DaemonConfigStore, "get">;
   remediationSink: RemediationSink;
@@ -1461,6 +1464,7 @@ function createAccountFailoverMonitor(input: {
       ((agentId) => input.restartRecovery.isAboutToResume(agentId)),
     paceResume: overrides?.wrapPaceResume?.(input.paceResume) ?? input.paceResume,
     accountIdentity: input.wsServer.getAccountIdentity(),
+    accountAuth: input.wsServer.getAccountAuth(),
     sweepIntervalMs: overrides?.sweepIntervalMs,
     now: overrides?.now,
   });

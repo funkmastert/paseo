@@ -177,6 +177,7 @@ import { isVoicePermissionAllowed } from "./voice-permission-policy.js";
 import { ProjectIconReader, setProjectCustomIcon } from "../utils/project-custom-icon.js";
 import { removeProjectRecord } from "./project-removal.js";
 import { VoiceSession } from "./session/voice/voice-session.js";
+import { AccountSignInSession } from "./session/account/account-sign-in-session.js";
 import { CheckoutSession } from "./session/checkout/checkout-session.js";
 import {
   createWorkspaceGitObserverService,
@@ -849,6 +850,7 @@ export class Session {
   private readonly workspaceDirectory: WorkspaceDirectory;
   private readonly voiceSession: VoiceSession;
   private readonly checkoutSession: CheckoutSession;
+  private readonly accountSignInSession: AccountSignInSession;
   private readonly scheduleSession: ScheduleSession;
   private readonly notifyPolicySession: NotifyPolicySession;
   private readonly restartRecoverySession: RestartRecoverySession;
@@ -1025,6 +1027,21 @@ export class Session {
       paseoHome: this.paseoHome,
       worktreesRoot: this.worktreesRoot,
       logger: this.sessionLogger,
+    });
+    this.accountSignInSession = new AccountSignInSession({
+      readDaemonConfig: () => ({ providers: daemonConfigStore.get().providers }),
+      host: { emit: (msg) => this.emit(msg) },
+      logger: this.sessionLogger,
+      onLoginExited: (providerId) => {
+        void providerUsageService
+          .listUsage({ forceRefreshProviderIds: new Set([providerId]) })
+          .catch((error) => {
+            this.sessionLogger.warn(
+              { err: error, providerId },
+              "Account sign-in: post-login usage recheck failed",
+            );
+          });
+      },
     });
     this.workspaceGitObserver = createWorkspaceGitObserverService({
       workspaceGitService: this.workspaceGitService,
@@ -2913,6 +2930,8 @@ export class Session {
       case "checkout.forge.set_auto_merge.request":
       case "checkout.github.set_auto_merge.request":
         return this.checkoutSession.handleCheckoutForgeSetAutoMergeRequest(msg);
+      case "account.claude.sign_in.request":
+        return this.accountSignInSession.handleAccountClaudeSignInRequest(msg);
       case "checkout.forge.get_check_details.request":
       case "checkout.github.get_check_details.request":
         return this.checkoutSession.handleCheckoutForgeGetCheckDetailsRequest(msg);
