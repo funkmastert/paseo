@@ -57,3 +57,15 @@ export function readClaudeAccountAuth(configDir: string): AgentAccountAuth {
     accountUuid: typeof uuid === "string" ? uuid : null,
   };
 }
+
+/**
+ * The email `oauthAccount` last named in this config dir's `.claude.json`, whether or not the
+ * session behind it still authenticates. A sign-in command built from this beats the TTY-only
+ * bare `claude /login` for an account whose OAuth session expired without the CLI clearing
+ * `oauthAccount` (the gap this plan closes) — the browser login page can be pre-filled with the
+ * right login instead of asking Tyler to remember which of three accounts needs it.
+ */
+export function lastKnownClaudeEmail(configDir: string): string | null {
+  const auth = readClaudeAccountAuth(configDir);
+  return auth.state === "signed-in" ? auth.accountLabel : null;
+}

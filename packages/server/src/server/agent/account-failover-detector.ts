@@ -28,6 +28,28 @@ export function isLimitShapedError(text: string | undefined | null): text is str
   return typeof text === "string" && LIMIT_TEXT_PATTERN.test(text);
 }
 
+// The CLI owns refresh and retries it lazily (docs/providers.md), so an idle account can throw
+// this mid-turn while its refresh token is fine — a lock held by another process on the same
+// config dir, not a dead account. Checked first so it can never match the patterns below.
+const REFRESH_LOCK_PATTERN = /holding the refresh lock/i;
+
+// R2's auth-shaped strings, from the pinned CLI binary plus the incident's own error text.
+// "Session expired" also matches "Your session has expired"; both are kept literal rather than
+// generalized to "session" because "session limit" (a cap, not an auth failure) must not match.
+const AUTH_TEXT_PATTERN =
+  /Failed to authenticate|OAuth session expired|OAuth token revoked|Not logged in|Session expired|Your session has expired|Please run \/login|Invalid API key/i;
+
+export function isAuthShapedError(text: string | undefined | null): text is string {
+  if (typeof text !== "string") return false;
+  if (REFRESH_LOCK_PATTERN.test(text)) return false;
+  return AUTH_TEXT_PATTERN.test(text);
+}
+
+/** Either shape of error that makes an account dead to failover: out of budget, or signed out. */
+export function isAccountDeadError(text: string | undefined | null): text is string {
+  return isLimitShapedError(text) || isAuthShapedError(text);
+}
+
 // "your session limit resets 3:10pm (America/Los_Angeles)" -> "3:10pm (America/Los_Angeles)".
 // Free text rather than a Date: it is only ever shown to a person or an agent.
 const RESET_HINT_PATTERN = /resets?\s+(?:at\s+)?([^\n.]+)/i;
@@ -74,7 +96,7 @@ const NON_CANDIDATE_LIFECYCLES: ReadonlySet<AgentLifecycleStatus> = new Set([
 // not by when this process first noticed it. Otherwise a restart would present every old,
 // abandoned failure as brand new: its account would read dead for five more hours, and the
 // agent would be migrated and told to resume work nobody wants anymore.
-function failureTimeMs(lastTimelineAt: string | null, nowMs: number): number {
+export function failureTimeMs(lastTimelineAt: string | null, nowMs: number): number {
   const parsed = lastTimelineAt === null ? Number.NaN : Date.parse(lastTimelineAt);
   return Number.isFinite(parsed) ? Math.min(parsed, nowMs) : nowMs;
 }
