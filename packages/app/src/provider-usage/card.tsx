@@ -4,6 +4,7 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { getProviderIcon } from "@/components/provider-icons";
 import { StatusBadge } from "@/components/ui/status-badge";
 import type { Theme } from "@/styles/theme";
+import { resolveAccountProblem } from "./account-problem";
 import { ProviderUsageBalanceBar } from "./balance-bar";
 import { formatAgo } from "./format";
 import type { ProviderUsage } from "./types";
@@ -29,12 +30,6 @@ function statusText(usage: ProviderUsage): string | null {
   return usage.status === "error" ? "Error" : "Unavailable";
 }
 
-function problemText(usage: ProviderUsage): { text: string; danger: boolean } | null {
-  if (usage.accountAuth) return { text: usage.accountAuth.summary, danger: true };
-  if (usage.accountIdentity) return { text: usage.accountIdentity.summary, danger: false };
-  return null;
-}
-
 function footerText(usage: ProviderUsage): string | null {
   const updated = formatAgo(usage.fetchedAt);
   const parts = [usage.sourceLabel, updated ? `Updated ${updated}` : null].filter(
@@ -51,7 +46,7 @@ export function ProviderUsageCard({
   compact?: boolean;
 }) {
   const status = statusText(usage);
-  const problem = problemText(usage);
+  const problem = resolveAccountProblem(usage);
   const footer = footerText(usage);
   const balances = usage.balances ?? [];
   const details = usage.details ?? [];
@@ -94,11 +89,14 @@ export function ProviderUsageCard({
 
       {problem ? (
         <Text
-          style={[styles.problem, problem.danger ? styles.problemDanger : styles.problemWarning]}
+          style={[
+            styles.problem,
+            problem.kind === "signed_out" ? styles.problemDanger : styles.problemWarning,
+          ]}
           numberOfLines={3}
           testID={`provider-usage-card-problem-${usage.providerId}`}
         >
-          {problem.text}
+          {problem.summary}
         </Text>
       ) : null}
 

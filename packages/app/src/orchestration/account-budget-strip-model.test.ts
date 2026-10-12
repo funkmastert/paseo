@@ -127,8 +127,7 @@ describe("buildAccountBudgetRows", () => {
       {
         kind: "unavailable",
         providerId: "claude",
-        auth: null,
-        identity: null,
+        problem: null,
         section: "claude",
         label: "Claude",
         plan: null,
@@ -144,7 +143,7 @@ describe("buildAccountBudgetRows", () => {
         providerId: "claude-personal",
         accountIdentity: {
           kind: "wrong-login",
-          summary: "claude-personal is signed into tyler@example.com, not worker@example.com",
+          summary: "claude-personal is signed into someone@example.com, not worker@example.com",
           fixCommand:
             "CLAUDE_CONFIG_DIR=/home/u/.claude-personal claude auth login --email worker@example.com",
         },
@@ -154,15 +153,17 @@ describe("buildAccountBudgetRows", () => {
 
     const rows = buildAccountBudgetRows(providers, ["claude", "claude-personal"], []);
 
-    expect(rows.find((row) => row.providerId === "claude-personal")?.identity).toEqual({
-      summary: "claude-personal is signed into tyler@example.com, not worker@example.com",
+    expect(rows.find((row) => row.providerId === "claude-personal")?.problem).toEqual({
+      kind: "identity",
+      summary: "claude-personal is signed into someone@example.com, not worker@example.com",
       fixCommand:
         "CLAUDE_CONFIG_DIR=/home/u/.claude-personal claude auth login --email worker@example.com",
+      canSignIn: false,
     });
-    expect(rows.find((row) => row.providerId === "claude")?.identity).toBeNull();
+    expect(rows.find((row) => row.providerId === "claude")?.problem).toBeNull();
   });
 
-  it("carries the daemon's signed-out state onto the row, and suppresses the identity line", () => {
+  it("carries the daemon's signed-out state onto the row in place of an identity problem", () => {
     const providers = [
       usage({
         providerId: "claude-personal",
@@ -175,7 +176,7 @@ describe("buildAccountBudgetRows", () => {
         },
         accountIdentity: {
           kind: "wrong-login",
-          summary: "claude-personal is signed into tyler@example.com, not worker@example.com",
+          summary: "claude-personal is signed into someone@example.com, not worker@example.com",
           fixCommand: "claude auth login --email worker@example.com",
         },
       }),
@@ -184,12 +185,13 @@ describe("buildAccountBudgetRows", () => {
 
     const rows = buildAccountBudgetRows(providers, ["claude", "claude-personal"], []);
 
-    expect(rows.find((row) => row.providerId === "claude-personal")?.auth).toEqual({
+    expect(rows.find((row) => row.providerId === "claude-personal")?.problem).toEqual({
+      kind: "signed_out",
       summary: "claude-personal is signed out",
       fixCommand: "CLAUDE_CONFIG_DIR=/home/u/.claude-personal claude auth login",
+      canSignIn: true,
     });
-    expect(rows.find((row) => row.providerId === "claude-personal")?.identity).toBeNull();
-    expect(rows.find((row) => row.providerId === "claude")?.auth).toBeNull();
+    expect(rows.find((row) => row.providerId === "claude")?.problem).toBeNull();
   });
 
   it("keeps every requested account, as an unavailable row when the usage endpoint has no entry for it", () => {

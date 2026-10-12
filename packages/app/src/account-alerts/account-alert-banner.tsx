@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import * as Clipboard from "expo-clipboard";
 import { router } from "expo-router";
 import { Copy } from "lucide-react-native";
 import { Pressable, Text, View } from "react-native";
@@ -11,9 +10,10 @@ import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { getIsElectron } from "@/constants/platform";
-import { useToast } from "@/contexts/toast-context";
 import { useIsLocalDaemon } from "@/hooks/use-is-local-daemon";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
+import { DEFAULT_REFETCH_INTERVAL_MS } from "@/orchestration/account-budget-strip";
+import { useCopyFixCommand } from "@/provider-usage/use-copy-fix-command";
 import { providerUsageQueryKey, useProviderUsage } from "@/provider-usage/use-provider-usage";
 import type { ProviderUsage } from "@/provider-usage/types";
 import { useHostRuntimeClient, useHosts } from "@/runtime/host-runtime";
@@ -28,8 +28,6 @@ import {
   type AccountAlertHostUsage,
 } from "./account-alert-model";
 
-// The strip's cadence (account-budget-strip.tsx): well under the daemon's 5-minute usage cache.
-const REFETCH_INTERVAL_MS = 75_000;
 const COMPACT_MAX_ENTRIES = 2;
 // Matches the daemon's own "Signing in..." cutoff (docs/account-failover.md): a login the app
 // never heard back from stops blocking retries after this, win or lose.
@@ -64,7 +62,7 @@ function HostAlertSource({
   onChange: (serverId: string, usage: AccountAlertHostUsage | null) => void;
 }) {
   const { view } = useProviderUsage(serverId, {
-    refetchInterval: REFETCH_INTERVAL_MS,
+    refetchInterval: DEFAULT_REFETCH_INTERVAL_MS,
     catchUpOnFocus: true,
   });
   const { entries } = useProvidersSnapshot(serverId);
@@ -109,24 +107,6 @@ export function AccountAlertFeed({
     });
   }, []);
 
-  // A host that disconnects entirely (removed, not just offline) stops reporting through
-  // HostAlertSource's unmount cleanup only if it was mounted; this covers the gap.
-  useEffect(() => {
-    const liveIds = new Set(hosts.map((host) => host.serverId));
-    setByHost((previous) => {
-      let changed = false;
-      const next: Record<string, AccountAlertHostUsage> = {};
-      for (const [serverId, usage] of Object.entries(previous)) {
-        if (liveIds.has(serverId)) {
-          next[serverId] = usage;
-        } else {
-          changed = true;
-        }
-      }
-      return changed ? next : previous;
-    });
-  }, [hosts]);
-
   const state = useMemo(
     () => ({
       entries: buildAccountAlertEntries(Object.values(byHost)),
@@ -161,7 +141,6 @@ function AccountAlertEntryRow({
   filled: boolean;
 }) {
   const { t } = useTranslation();
-  const toast = useToast();
   const isCompact = useIsCompactFormFactor();
   const client = useHostRuntimeClient(entry.serverId);
   const isLocalDaemon = useIsLocalDaemon(entry.serverId);
@@ -216,16 +195,7 @@ function AccountAlertEntryRow({
       });
   }, [client, entry.providerId, entry.serverId, queryClient, t]);
 
-  const handleCopy = useCallback(() => {
-    void (async () => {
-      try {
-        await Clipboard.setStringAsync(entry.fixCommand);
-        toast.copied(t("panels.orchestration.identityCopied"));
-      } catch {
-        toast.error(t("panels.orchestration.identityCopyError"));
-      }
-    })();
-  }, [entry.fixCommand, t, toast]);
+  const handleCopy = useCopyFixCommand(entry.fixCommand);
 
   const openSettings = useCallback(() => {
     router.push(buildSettingsHostSectionRoute(entry.serverId, "providers"));
@@ -237,22 +207,26 @@ function AccountAlertEntryRow({
 
   let signInControl: ReactNode = null;
   if (signInAction) {
-    signInControl = signInAction === "sign_in" ? (
-      <Button
-        variant="outline"
-        size="sm"
-        onPress={handleSignIn}
-        disabled={pending}
-        loading={pending}
-        testID={`account-alert-sign-in-${entry.providerId}`}
-      >
-        {pending ? t("accountAlerts.signInPending") : t("accountAlerts.signIn")}
-      </Button>
-    ) : (
-      <Text style={[styles.runOn, filled ? styles.filledText : styles.mutedText]} numberOfLines={1}>
-        {t("accountAlerts.signInRunOn", { host: entry.hostLabel })}
-      </Text>
-    );
+    signInControl =
+      signInAction === "sign_in" ? (
+        <Button
+          variant="outline"
+          size="sm"
+          onPress={handleSignIn}
+          disabled={pending}
+          loading={pending}
+          testID={`account-alert-sign-in-${entry.providerId}`}
+        >
+          {pending ? t("accountAlerts.signInPending") : t("accountAlerts.signIn")}
+        </Button>
+      ) : (
+        <Text
+          style={[styles.runOn, filled ? styles.filledText : styles.mutedText]}
+          numberOfLines={1}
+        >
+          {t("accountAlerts.signInRunOn", { host: entry.hostLabel })}
+        </Text>
+      );
   }
 
   return (

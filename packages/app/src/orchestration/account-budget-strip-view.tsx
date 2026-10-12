@@ -1,5 +1,4 @@
 import { Fragment, useCallback, useMemo, useState } from "react";
-import * as Clipboard from "expo-clipboard";
 import { ChevronRight } from "lucide-react-native";
 import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
@@ -8,19 +7,18 @@ import { useIsCompactFormFactor } from "@/constants/layout";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useCompactTimeAgo } from "@/hooks/use-compact-time-ago";
-import { useToast } from "@/contexts/toast-context";
+import type { AccountProblem, AccountProblemKind } from "@/provider-usage/account-problem";
 import { formatPct, formatResetLabel } from "@/provider-usage/format";
+import { useCopyFixCommand } from "@/provider-usage/use-copy-fix-command";
 import { ProviderUsageMeter, ProviderUsageWindowBar } from "@/provider-usage/window-bar";
 import type { Theme } from "@/styles/theme";
 import { formatDuration } from "@/utils/time";
 import {
   resolveAccountIcon,
   selectAccountWorstWindow,
-  type AccountAuthViewModel,
   type AccountBalanceViewModel,
   type AccountBudgetRowViewModel,
   type AccountDetailViewModel,
-  type AccountIdentityViewModel,
   type AccountPoolRole,
   type AccountUsageCount,
   type WorstBudgetWindow,
@@ -300,39 +298,35 @@ function AccountBudgetBody({
   );
 }
 
+// Each kind keeps its own test id, so a test can tell which problem a row shows.
+const PROBLEM_TEST_ID_PREFIX: Readonly<Record<AccountProblemKind, string>> = {
+  signed_out: "orchestration-account-auth",
+  identity: "orchestration-account-identity",
+};
+
 /**
  * The daemon found a sign-in or identity problem on this pool entry. The fix is a command to run
  * on the host, so the row offers it as a copy rather than an action.
  */
 function AccountProblemNotice({
   providerId,
-  testIDPrefix,
-  summary,
-  fixCommand,
-  danger = false,
+  problem,
 }: {
   providerId: string;
-  testIDPrefix: string;
-  summary: string;
-  fixCommand: string;
-  danger?: boolean;
+  problem: AccountProblem;
 }) {
   const { t } = useTranslation();
-  const toast = useToast();
-  const handleCopy = useCallback(() => {
-    void (async () => {
-      try {
-        await Clipboard.setStringAsync(fixCommand);
-        toast.copied(t("panels.orchestration.identityCopied"));
-      } catch {
-        toast.error(t("panels.orchestration.identityCopyError"));
-      }
-    })();
-  }, [fixCommand, t, toast]);
+  const handleCopy = useCopyFixCommand(problem.fixCommand);
+  const testIDPrefix = PROBLEM_TEST_ID_PREFIX[problem.kind];
   return (
     <View style={styles.identityNotice} testID={`${testIDPrefix}-${providerId}`}>
-      <Text style={[styles.identityText, danger ? styles.identityTextDanger : null]}>
-        {summary}
+      <Text
+        style={[
+          styles.identityText,
+          problem.kind === "signed_out" ? styles.identityTextDanger : null,
+        ]}
+      >
+        {problem.summary}
       </Text>
       <Pressable
         onPress={handleCopy}
@@ -340,53 +334,10 @@ function AccountProblemNotice({
         accessibilityLabel={t("panels.orchestration.identityCopyFix")}
         testID={`${testIDPrefix}-copy-${providerId}`}
       >
-        <Text style={styles.identityCopy}>{fixCommand}</Text>
+        <Text style={styles.identityCopy}>{problem.fixCommand}</Text>
       </Pressable>
     </View>
   );
-}
-
-function AccountAuthNotice({
-  providerId,
-  auth,
-}: {
-  providerId: string;
-  auth: AccountAuthViewModel;
-}) {
-  return (
-    <AccountProblemNotice
-      providerId={providerId}
-      testIDPrefix="orchestration-account-auth"
-      summary={auth.summary}
-      fixCommand={auth.fixCommand}
-      danger
-    />
-  );
-}
-
-function AccountIdentityNotice({
-  providerId,
-  identity,
-}: {
-  providerId: string;
-  identity: AccountIdentityViewModel;
-}) {
-  return (
-    <AccountProblemNotice
-      providerId={providerId}
-      testIDPrefix="orchestration-account-identity"
-      summary={identity.summary}
-      fixCommand={identity.fixCommand}
-    />
-  );
-}
-
-/** A signed-out account takes the row over a stale identity problem (account-budget-strip-model.ts). */
-function AccountRowProblem({ row }: { row: AccountBudgetRowViewModel }) {
-  if (row.auth) return <AccountAuthNotice providerId={row.providerId} auth={row.auth} />;
-  if (row.identity)
-    return <AccountIdentityNotice providerId={row.providerId} identity={row.identity} />;
-  return null;
 }
 
 function AccountBudgetRow({
@@ -447,7 +398,9 @@ function AccountBudgetRow({
         ) : null}
         {isJev ? <ThemedChevronRight size={14} uniProps={mutedIconColor} /> : null}
       </View>
-      <AccountRowProblem row={row} />
+      {row.problem ? (
+        <AccountProblemNotice providerId={row.providerId} problem={row.problem} />
+      ) : null}
       {row.usage ? <AccountPresence providerId={row.providerId} usage={row.usage} /> : null}
       {capMinutes != null && row.kind === "available" ? (
         <Text
