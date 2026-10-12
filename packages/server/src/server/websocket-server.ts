@@ -802,6 +802,8 @@ export class VoiceAssistantWebSocketServer {
     this.accountSignIn = new ClaudeAccountSignIn({
       readDaemonConfig: () => this.daemonConfigStore.get(),
       logger: this.logger,
+      markerDir: join(paseoHome, "account-sign-in"),
+      accountIdentity: this.accountIdentity,
       // The login may have fixed the account: read its usage now, so the next sweep and the
       // app's next poll both see it.
       onLoginExited: (providerId) => {

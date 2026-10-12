@@ -121,6 +121,18 @@ export function findPoolAccountIdentityProblems(
 }
 
 /**
+ * Whether in-app sign-in must refuse an entry. A declared email is always safe to sign in as.
+ * Without one the login is whatever `.claude.json` last held, and while an identity problem stands
+ * that may be another entry's login: signing it in again would make the drift stick.
+ */
+export function blocksInAppSignIn(
+  problem: PoolAccountIdentityProblem | null,
+  expectedEmail: string | null | undefined,
+): problem is PoolAccountIdentityProblem {
+  return problem !== null && !expectedEmail;
+}
+
+/**
  * Standing problems from the last sweep. A problem is an episode: it is raised once when a provider
  * first gets one, stays quiet while it stands, and is forgotten when a sweep no longer finds it, so
  * the next occurrence is raised again.
@@ -137,5 +149,11 @@ export class PoolAccountIdentityTracker {
 
   problemFor(providerId: string): PoolAccountIdentityProblem | null {
     return this.standing.get(providerId) ?? null;
+  }
+
+  /** `blocksInAppSignIn` for the standing problem, by the email its entry declared at the sweep. */
+  blocksInAppSignIn(providerId: string): boolean {
+    const problem = this.problemFor(providerId);
+    return blocksInAppSignIn(problem, problem?.expectedEmail);
   }
 }

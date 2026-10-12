@@ -15,22 +15,41 @@ export function claudeSignInArgs(email: string): string[] {
 }
 
 /**
- * The command a person runs to sign the account behind `configDir` in. Without an expected email
- * this is the bare, terminal-only `claude /login`, and that is the only fallback: a label is free
- * text, so nothing is parsed out of it. A null `configDir` leaves the command unscoped.
+ * The command a person runs to sign the account behind `configDir` in, in the shell `platform`
+ * opens by default: PowerShell on Windows, where `VAR=value cmd` does not run, and a POSIX shell
+ * elsewhere. Without an expected email this is the bare, terminal-only `claude /login`, and that
+ * is the only fallback: a label is free text, so nothing is parsed out of it. A null `configDir`
+ * leaves the command unscoped.
  */
 export function claudeSignInCommand(
   configDir: string | null,
   expectedEmail?: string | null,
+  platform: NodeJS.Platform = process.platform,
 ): string {
+  if (platform === "win32") {
+    const login = expectedEmail
+      ? ["claude", ...claudeSignInArgs(expectedEmail).map(powerShellArg)].join(" ")
+      : "claude /login";
+    return configDir ? `$env:CLAUDE_CONFIG_DIR=${powerShellString(configDir)}; ${login}` : login;
+  }
   const login = expectedEmail
     ? ["claude", ...claudeSignInArgs(expectedEmail)].map(shellWord).join(" ")
     : "claude /login";
-  return configDir ? `CLAUDE_CONFIG_DIR=${configDir} ${login}` : login;
+  return configDir ? `CLAUDE_CONFIG_DIR=${shellWord(configDir)} ${login}` : login;
 }
 
 function shellWord(value: string): string {
-  return /^[A-Za-z0-9._%+@-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+  return /^[A-Za-z0-9._%+@/~-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** A PowerShell single-quoted string: nothing inside expands, and a quote is written twice. */
+function powerShellString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** A bare word when PowerShell reads it as one; `@` is not, since it starts a splat or array. */
+function powerShellArg(value: string): string {
+  return /^[A-Za-z0-9._/-]+$/.test(value) ? value : powerShellString(value);
 }
 
 /**
