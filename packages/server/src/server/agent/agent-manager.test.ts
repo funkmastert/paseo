@@ -15,6 +15,7 @@ import {
   type ManagedAgent,
 } from "./agent-manager.js";
 import { AgentStorage } from "./agent-storage.js";
+import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import {
   resetCodexGuardHealthStateForTests,
   setCodexGuardHealthState,
@@ -3838,6 +3839,43 @@ describe("Codex child guard (daemon-side, codex-child-guard fix)", () => {
 
     expect(child.labels[CODEX_GUARDED_LABEL]).toBe("1");
     expect(child.currentModeId).toBe("guarded"); // brief item C
+  });
+
+  test("a plugin hook that rewrites a Claude child into a Codex one in full-access is still guarded", async () => {
+    // Daemon-side defense in depth, independent of the plugin's own guard (review finding #12):
+    // a real pluginLifecycle whose before("agent.create") hook changes the provider must not be
+    // able to bypass enforceCodexChildGuard, which runs on whatever config the hook hands back.
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("codex");
+    const pluginLifecycle: PluginLifecycle = {
+      emit: () => {},
+      before: async (name, req) => {
+        if (name !== "agent.create") return req;
+        return {
+          ...req,
+          config: {
+            ...(req as { config: AgentSessionConfig }).config,
+            provider: "codex",
+            modeId: "full-access",
+          },
+        };
+      },
+    };
+    const manager = new AgentManager({ clients: { codex: client }, pluginLifecycle, logger });
+
+    const child = await manager.createAgent(
+      { provider: "claude", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { workspaceId: undefined, callerAgentId: "parent-1" },
+    );
+
+    expect(child.config.provider).toBe("codex");
+    expect(child.config.modeId).toBe("guarded");
+    expect(client.createdConfigs.at(-1)?.modeId).toBe("guarded");
   });
 
   test("createAgent guards a label-only child: parent label present, no callerAgentId", async () => {

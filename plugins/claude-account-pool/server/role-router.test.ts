@@ -85,6 +85,10 @@ function baseOptions(overrides: Partial<RoleRouterOptions> = {}): RoleRouterOpti
     poolCache: fakePoolCache({ workers: [], leader: null }),
     health: createHealthTracker(),
     recentAgentTypes: createRecentAgentTypes(),
+    // Most tests here are not about the Codex guard's own health -- default to healthy (a
+    // daemon whose self-test passed) so a codex pick routes the way it always used to. Override
+    // explicitly to exercise the unavailable-outcome health fallback (review finding #9).
+    codexGuardCache: { get: () => ({ healthy: true, runningChildren: 0 }) },
     ...overrides,
   };
 }
@@ -1353,7 +1357,7 @@ describe("createRoleRouter", () => {
     }
 
     it("falls back to the next pool entry when no codexGuardCache is wired (guards-first, KTD-3)", () => {
-      const router = createRoleRouter(codexFirstOptions());
+      const router = createRoleRouter(codexFirstOptions({ codexGuardCache: undefined }));
 
       const result = router(request({ callerAgentId: "c1" }), fakeContext);
 
@@ -1381,6 +1385,36 @@ describe("createRoleRouter", () => {
 
       expect(result?.config.provider).not.toBe("codex");
       expect(result?.config.model).toBe("claude-sonnet-5");
+    });
+
+    it("REVIEW FINDING #9: a single-entry codex pool's fallback-anyway pick backs out to the caller's own provider when the guard isn't healthy", () => {
+      // Single entry, no usage reported: codex is ineligible for ordinary selection, so
+      // `selectModel` returns `outcome: "unavailable"` and names codex as its "use it anyway"
+      // pick -- exactly the shape the daemon would otherwise refuse outright (KTD-6).
+      const onRoleUnavailable = vi.fn();
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-6-luna"])),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-6-luna"] })),
+          codexGuardCache: { get: () => ({ healthy: false, runningChildren: 0 }) },
+          onRoleUnavailable,
+        }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: { provider: "claude-sonnet-5", model: "claude-sonnet-5", modeId: "default", cwd: "/tmp" },
+        }),
+        fakeContext,
+      );
+
+      // Nothing to enforce, nothing to guard: the caller's own non-codex request stands
+      // untouched -- never rewritten to a codex ref the daemon can only refuse.
+      expect(result).toBeUndefined();
+      expect(onRoleUnavailable).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "codex-guard-unhealthy" }),
+      );
     });
 
     it("falls back when the running-children count is already at the policy's cap", () => {
