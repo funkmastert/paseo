@@ -758,11 +758,13 @@ describe("DeviceLeaseManager with a provider it cannot refuse", () => {
     });
 
     const snapshot = await manager.getSnapshot();
-    // Weakest first: what the cap cannot do is the part worth reading.
+    // Weakest first: what the cap cannot do is the part worth reading. Codex moved from "asks"
+    // to "refuses" (with a gap noting the guarded-mode caveat) once the Codex child guard
+    // started answering `item/commandExecution/requestApproval` itself (2b5470433).
     expect(snapshot.enforcement).toEqual([
       expect.objectContaining({ provider: "pi", tier: "observes" }),
-      expect.objectContaining({ provider: "codex", tier: "asks" }),
       expect.objectContaining({ provider: "claude", tier: "refuses" }),
+      expect.objectContaining({ provider: "codex", tier: "refuses" }),
     ]);
   });
 

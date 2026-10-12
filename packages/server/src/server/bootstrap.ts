@@ -2439,6 +2439,7 @@ export async function createPaseoDaemon(
         ),
       };
       if (agent.title) summary.title = agent.title;
+      if (agent.parentAgentId) summary.parentAgentId = agent.parentAgentId;
       return summary;
     });
   // The cap's only lever over a provider it cannot refuse: tell the agent about a device it

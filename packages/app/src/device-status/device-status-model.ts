@@ -52,6 +52,10 @@ export interface PhysicalDeviceStatusRow {
   graceRemainingSeconds?: number;
   agentId?: string;
   agentLabel?: string;
+  /** The holder's leader, when the holder is a child — absent for a root leader. */
+  leaderAgentId?: string;
+  /** The holding agent's leader's title, resolved by the caller from its own agent list. */
+  leaderLabel?: string;
   heldForSeconds?: number;
   reserved: boolean;
 }
@@ -195,6 +199,10 @@ function toPhysicalRow(
     ...(device.agentId ? { agentId: device.agentId } : {}),
     ...(device.agentId && agentLabels[device.agentId]
       ? { agentLabel: agentLabels[device.agentId] }
+      : {}),
+    ...(device.leaderAgentId ? { leaderAgentId: device.leaderAgentId } : {}),
+    ...(device.leaderAgentId && agentLabels[device.leaderAgentId]
+      ? { leaderLabel: agentLabels[device.leaderAgentId] }
       : {}),
     ...(device.heldForSeconds !== undefined ? { heldForSeconds: device.heldForSeconds } : {}),
   };
