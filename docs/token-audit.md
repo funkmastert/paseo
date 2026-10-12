@@ -49,6 +49,8 @@ Read from the pinned Claude Code binary (`@anthropic-ai/claude-agent-sdk-darwin-
 
 The first check runs 10 minutes after the daemon starts, so a restart's burst settles first, then every 30 minutes asks whether the last report is old enough. A run that throws before the report is saved (ENOSPC during disk pressure, say) does not simply retry on the next 30-minute tick forever: the job records the attempt, successful or not (`TokenAuditReportStore.saveAttempt`), and a failed one backs off — the wait doubles with each consecutive failure, capped at a day — before the next attempt. A success resets the backoff.
 
+A run that outlasts its slowest check's deadline by more than a minute also counts as a failed attempt and saves no report: the daemon was suspended or blocked mid-run, so its timeouts measured the gap, not the checks. A Mac asleep on battery dark-wakes for about two seconds every quarter hour or so. A tick that starts the audit in one of those windows comes back with every slow item UNKNOWN, and saving that report would hold the schedule for seven days.
+
 ## When someone hears about it
 
 The job diffs each report against the previous one (`token-audit/diff.ts`). It escalates on:

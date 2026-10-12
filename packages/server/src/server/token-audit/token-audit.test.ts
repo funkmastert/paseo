@@ -159,7 +159,7 @@ describe("TokenAuditJob", () => {
     ctx = makeContext(makeFixture());
   });
 
-  function job(): TokenAuditJob {
+  function job(runAudit: () => Promise<TokenAuditRow[]> = async () => rows): TokenAuditJob {
     return new TokenAuditJob({
       paseoHome: dir,
       buildContext: () => ctx,
@@ -171,7 +171,7 @@ describe("TokenAuditJob", () => {
       serverId: "srv",
       logger: pino({ level: "silent" }),
       now: () => nowMs,
-      runAudit: async () => rows,
+      runAudit,
     });
   }
 
@@ -285,6 +285,40 @@ describe("TokenAuditJob", () => {
     await expect(j.checkDue()).rejects.toThrow("ENOSPC");
     nowMs += 30 * 60 * 1000;
     expect(await j.checkDue()).toBeNull();
+  });
+
+  it("discards a run that a sleep cut short, and retries it on the backoff", async () => {
+    // The Mac slept 18 minutes mid-run: on wake every slow check's deadline had passed.
+    let sleeps = true;
+    const timedOut = row(
+      "memory",
+      "memory:timeout",
+      "UNKNOWN",
+      "memory audit did not finish",
+      "UNKNOWN: did not finish within 180s",
+      "UNKNOWN",
+    );
+    const j = job(async () => {
+      if (!sleeps) return rows;
+      nowMs += 18 * 60 * 1000;
+      return [timedOut];
+    });
+    const store = new TokenAuditReportStore(path.join(dir, "token-audit"));
+
+    expect(await j.checkDue()).toEqual({ kind: "interrupted", elapsedMs: 18 * 60 * 1000 });
+    expect(await store.latest()).toBeNull();
+    expect(observed).toEqual([]);
+    expect(pushes).toEqual([]);
+    expect(await store.lastAttempt()).toMatchObject({ ok: false, consecutiveFailures: 1 });
+
+    // Inside the backoff nothing reruns; after it, an awake run is saved.
+    nowMs += 30 * 60 * 1000;
+    expect(await j.checkDue()).toBeNull();
+    sleeps = false;
+    nowMs += 31 * 60 * 1000;
+    expect((await j.checkDue())?.kind).toBe("escalated");
+    expect((await store.latest())?.rows).toEqual(rows);
+    expect(await store.lastAttempt()).toMatchObject({ ok: true, consecutiveFailures: 0 });
   });
 
   it("pushes the headline at notice itself when the escalation agent is turned off", async () => {

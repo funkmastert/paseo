@@ -3,7 +3,7 @@ import { MonitorModeLog } from "../monitor-mode-log.js";
 import type { PushNotificationSender } from "../push/index.js";
 import type { RemediationObservation, RemediationSink } from "../remediation/contract.js";
 import type { DoctorContext } from "../session/doctor/context.js";
-import { runTokenAudit } from "../session/doctor/tokens/index.js";
+import { runTokenAudit, tokenAuditDeadlineMs } from "../session/doctor/tokens/index.js";
 import {
   countSeverities,
   renderTokenAuditTable,
@@ -20,6 +20,13 @@ const CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const FIRST_CHECK_DELAY_MS = 10 * 60 * 1000;
 /** A failed run (e.g. ENOSPC) doubles the wait each time it recurs, capped at a day. */
 const RETRY_BACKOFF_CAP_MS = DAY_MS;
+/**
+ * A run that outlasts the slowest check's deadline by this much was suspended mid-way (a sleeping
+ * Mac dark-wakes for about two seconds) or blocked, and its timeouts measured that gap rather than
+ * the checks. It is discarded and retried on the failure backoff instead of saved as the week's
+ * report.
+ */
+const INTERRUPTED_RUN_SLACK_MS = 60 * 1000;
 /** The ladder cuts evidence at 8 KB; the worst rows go first so the cut takes GREEN ones. */
 const EVIDENCE_ROWS = 40;
 
@@ -50,7 +57,8 @@ export type TokenAuditRunOutcome =
       episodeKey: string;
       diff: ReportDiff;
       viaAgent: boolean;
-    };
+    }
+  | { kind: "interrupted"; elapsedMs: number };
 
 /**
  * The weekly token audit (docs/token-audit.md). It runs the seven deterministic checks, stores the
@@ -124,23 +132,41 @@ export class TokenAuditJob {
     const attemptAt = new Date(this.now()).toISOString();
     try {
       const outcome = await this.run();
-      await this.store.saveAttempt({ at: attemptAt, ok: true, consecutiveFailures: 0 });
+      if (outcome.kind === "interrupted") {
+        await this.saveFailedAttempt(attemptAt);
+      } else {
+        await this.store.saveAttempt({ at: attemptAt, ok: true, consecutiveFailures: 0 });
+      }
       return outcome;
     } catch (error) {
-      const previous = await this.store.lastAttempt();
-      const consecutiveFailures = (previous && !previous.ok ? previous.consecutiveFailures : 0) + 1;
-      await this.store.saveAttempt({ at: attemptAt, ok: false, consecutiveFailures });
+      await this.saveFailedAttempt(attemptAt);
       throw error;
     } finally {
       this.running = false;
     }
   }
 
+  /** `checkDue` backs off by how many runs in a row failed or were interrupted. */
+  private async saveFailedAttempt(at: string): Promise<void> {
+    const previous = await this.store.lastAttempt();
+    const consecutiveFailures = (previous && !previous.ok ? previous.consecutiveFailures : 0) + 1;
+    await this.store.saveAttempt({ at, ok: false, consecutiveFailures });
+  }
+
   private async run(): Promise<TokenAuditRunOutcome> {
     const { options } = this;
     const config = options.readConfig();
     const ctx = options.buildContext();
+    const startedAt = this.now();
     const rows = await (options.runAudit ?? runTokenAudit)(ctx);
+    const elapsedMs = this.now() - startedAt;
+    if (elapsedMs > tokenAuditDeadlineMs(ctx) + INTERRUPTED_RUN_SLACK_MS) {
+      options.logger.info(
+        { elapsedMs },
+        "Token audit run outlasted its slowest check's deadline (suspended or blocked); discarded, will retry",
+      );
+      return { kind: "interrupted", elapsedMs };
+    }
     const report: TokenAuditReport = {
       version: 1,
       generatedAt: new Date(this.now()).toISOString(),
