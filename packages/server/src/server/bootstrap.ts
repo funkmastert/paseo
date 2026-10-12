@@ -156,8 +156,11 @@ import {
   findDefaultCodexBinary,
 } from "./agent/providers/codex-app-server-agent.js";
 import { resolveBinaryVersion } from "./agent/providers/diagnostic-utils.js";
-import { runCodexGuardSelfTest } from "./agent/codex-guard-health.js";
-import { createCodexGuardBootHealthScheduler } from "./agent/codex-guard-boot-health.js";
+import { runCodexGuardSelfTest, setCodexGuardHealthState } from "./agent/codex-guard-health.js";
+import {
+  createCodexGuardBootHealthScheduler,
+  type CodexGuardBootHealthScheduler,
+} from "./agent/codex-guard-boot-health.js";
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
 import { WorkspaceReconciliationService } from "./workspace-reconciliation-service.js";
 import {
@@ -844,6 +847,14 @@ export interface PaseoDaemonDependencies {
     daemonStatusRpc?: boolean;
     relayConfig?: boolean;
   };
+  /** In-process test harnesses that construct a daemon directly (not the real CLI entry point,
+   * which never sets this) use this to skip the Codex guard's real self-test: a host that
+   * actually has a Codex binary on PATH would otherwise run it for real on every such daemon,
+   * which is slow and -- inside a sandboxed tmp `paseoHome` -- reliably comes back red. Health is
+   * set to green immediately instead, the way a real daemon reaches it once a real self-test has
+   * passed. No config key or env var exposes this; it can only be set by code constructing a
+   * `PaseoDaemon` directly. */
+  skipCodexGuardSelfTest?: boolean;
 }
 
 function createBootstrapManagedProcessRegistry(
@@ -1619,6 +1630,23 @@ function createDaemonReadCheckObserver(input: {
   };
 }
 
+/** See `PaseoDaemonDependencies.skipCodexGuardSelfTest`: an in-process test harness skips the
+ * real self-test and goes straight to green instead of letting the scheduler run it for real. */
+function startOrSkipCodexGuardBootHealth(
+  scheduler: CodexGuardBootHealthScheduler,
+  skipSelfTest: boolean | undefined,
+): void {
+  if (!skipSelfTest) {
+    void scheduler.checkNow();
+    return;
+  }
+  setCodexGuardHealthState({
+    status: "green",
+    reason: "test dependency override: Codex guard self-test skipped",
+    codexVersion: null,
+  });
+}
+
 export async function createPaseoDaemon(
   config: PaseoDaemonConfig,
   rootLogger: Logger,
@@ -2363,7 +2391,10 @@ export async function createPaseoDaemon(
     },
     logger,
   });
-  void codexGuardBootHealthScheduler.checkNow();
+  startOrSkipCodexGuardBootHealth(
+    codexGuardBootHealthScheduler,
+    dependencies.skipCodexGuardSelfTest,
+  );
 
   const providerSnapshotManager = agentProviderRuntime.snapshotManager;
   daemonConfigStore.onFieldChange("catalogRefreshTimeoutMs", (value) => {

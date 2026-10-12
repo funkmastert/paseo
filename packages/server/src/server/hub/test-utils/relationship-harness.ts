@@ -1422,6 +1422,12 @@ export class HubRelationshipHarness {
       hubRelationshipClock: this.clock,
       hubRelationshipRetryPolicy: this.clock,
       createHubDaemonId: () => "daemon-test",
+      // Fake agent clients (the default: `this.agentClients` unset) have no real Codex binary
+      // behind them, so there's nothing for a real self-test to prove -- skip it rather than let
+      // it run for real and come back red on this sandboxed tmp paseoHome (see
+      // PaseoDaemonDependencies.skipCodexGuardSelfTest). `startWithRealAgentClients` sets
+      // `agentClients` and keeps the real self-test, matching its real-provider intent.
+      skipCodexGuardSelfTest: this.agentClients === undefined,
     });
     await this.daemon.start();
     const target = this.daemon.getListenTarget();

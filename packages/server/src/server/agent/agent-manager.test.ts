@@ -4164,6 +4164,74 @@ describe("Codex child guard (daemon-side, codex-child-guard fix)", () => {
 
     expect(reloaded.config.modeId).toBe("guarded");
   });
+
+  test("importProviderSession forces guarded mode on an import carrying the parent label", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-import-guard-"));
+    let storedConfigModeId: string | undefined;
+
+    class ImportClient extends TestAgentClient {
+      async importSession(
+        input: ImportProviderSessionInput,
+        context: ImportProviderSessionContext,
+      ) {
+        storedConfigModeId = context.storedConfig.modeId;
+        return {
+          session: new TestAgentSession({ provider: "codex", cwd: workdir }),
+          config: context.storedConfig,
+          persistence: {
+            provider: "codex" as const,
+            sessionId: input.providerHandleId,
+            nativeHandle: input.providerHandleId,
+            metadata: { provider: "codex", cwd: workdir },
+          },
+          timeline: [],
+        };
+      }
+    }
+    const client = new ImportClient();
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    const imported = await manager.importProviderSession({
+      provider: "codex",
+      providerHandleId: "thread-imported-child",
+      cwd: workdir,
+      workspaceId: "ws-imported",
+      labels: { [PARENT_AGENT_ID_LABEL]: "parent-1" },
+    });
+
+    // The guard forces the config the PROVIDER receives, before import ever reaches it.
+    expect(storedConfigModeId).toBe("guarded");
+    expect(imported.config.modeId).toBe("guarded");
+    expect(imported.labels[CODEX_GUARDED_LABEL]).toBe("1"); // backfilled
+  });
+
+  test("importProviderSession refuses with CodexChildGuardError when guard health is red", async () => {
+    setCodexGuardHealthState({ status: "red", reason: "the canary ran", codexVersion: "0.160.0" });
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-import-guard-red-"));
+
+    class ImportClient extends TestAgentClient {
+      async importSession(): Promise<never> {
+        throw new Error("The guard must refuse before an import ever reaches the provider");
+      }
+    }
+    const client = new ImportClient();
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    await expect(
+      manager.importProviderSession({
+        provider: "codex",
+        providerHandleId: "thread-imported-red",
+        cwd: workdir,
+        workspaceId: "ws-imported",
+        labels: { [CODEX_GUARDED_LABEL]: "1" },
+      }),
+    ).rejects.toThrow(CodexChildGuardError);
+  });
 });
 
 test("reload releases the original writer before resuming the same session", async () => {
