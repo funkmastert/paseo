@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type { AgentAccountAuth, AgentPromptInput } from "./agent/agent-sdk-types.js";
+import type { AccountAuthReading } from "./agent/account-auth-health.js";
 import {
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
   HANDOFF_FROM_LABEL,
@@ -63,6 +64,12 @@ interface Harness {
   failResumes(provider: PoolProvider, times: number): void;
   /** What `describeAccountAuth` reports for a provider — which Claude login it runs as. */
   setAccount(provider: PoolProvider, auth: AgentAccountAuth): void;
+  /**
+   * What the usage fetcher's auth reading says for a provider on the next forced re-read
+   * (observeAccountAuth force-reads any provider the tracker already has as suspect or
+   * signed_out). `"ok"` is how a sign-in recovers without a later successful turn.
+   */
+  setAuthReading(provider: PoolProvider, reading: AccountAuthReading): void;
   advanceClock(ms: number): void;
   setClock(ms: number): void;
   sweep(): Promise<void>;
@@ -113,6 +120,7 @@ async function createHarness(): Promise<Harness> {
     "claude-backup": [],
   };
   let usage: ProviderUsage[] = [];
+  const authReadings = new Map<string, AccountAuthReading>();
   let sweepHook: (() => Promise<void>) | null = null;
   let paceHook: (() => Promise<void>) | null = null;
   const resumeFailures: Record<PoolProvider, number> = {
@@ -184,6 +192,14 @@ async function createHarness(): Promise<Harness> {
             await hook?.();
             return { fetchedAt: new Date(clockMs).toISOString(), providers: usage };
           },
+          getAuthReadings: (ids) => {
+            const result = new Map<string, AccountAuthReading>();
+            for (const id of ids) {
+              const reading = authReadings.get(id);
+              if (reading) result.set(id, reading);
+            }
+            return result;
+          },
         },
         sweepIntervalMs: 60 * MINUTE_MS,
         now: () => clockMs,
@@ -246,6 +262,9 @@ async function createHarness(): Promise<Harness> {
     claimedByRestartRecovery,
     failResumes: (provider, times) => {
       resumeFailures[provider] = times;
+    },
+    setAuthReading: (provider, reading) => {
+      authReadings.set(provider, reading);
     },
     setAccount: (provider, auth) => {
       accounts[provider] = auth;
@@ -1121,6 +1140,73 @@ describe("AccountFailoverMonitor (e2e)", () => {
     await harness.sweep();
     expect(strandedObservations(harness)).toHaveLength(count);
   });
+
+  test("pushes the signed-out account every sweep while active, and closes once on recovery", async () => {
+    const signedOutObservations = () =>
+      harness.observations.filter((o) => o.key === "account-signed-out:claude");
+
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await converse(harness, leader, "SIGNED-OUT-MARKER");
+    await failOnLimit(
+      harness,
+      leader,
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+    );
+
+    await harness.sweep();
+    expect(signedOutObservations()).toHaveLength(1);
+    expect(signedOutObservations()[0]).toMatchObject({
+      kind: "account-signed-out",
+      active: true,
+      remedy: "none",
+      level: "urgent",
+      title: "Claude account signed out: claude",
+    });
+
+    // Still signed out: reported again, same episode.
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(signedOutObservations()).toHaveLength(2);
+    expect(signedOutObservations()[1]?.active).toBe(true);
+
+    // Credentials restored: the forced re-read this sweep sees it, and the episode closes.
+    harness.setAuthReading("claude", "ok");
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(signedOutObservations()).toHaveLength(3);
+    expect(signedOutObservations()[2]).toMatchObject({ active: false });
+
+    // Closed once; a quiet account says nothing more.
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(signedOutObservations()).toHaveLength(3);
+  }, 60_000);
+
+  test("two accounts signed out at once produce two episodes with distinct keys", async () => {
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await converse(harness, leader, "L");
+    await failOnLimit(
+      harness,
+      leader,
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+    );
+    const worker = await createAgent(harness, { provider: "claude-backup", title: "Worker" });
+    await converse(harness, worker, "W");
+    await failOnLimit(
+      harness,
+      worker,
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+    );
+
+    await harness.sweep();
+
+    expect(
+      harness.observations.filter((o) => o.key === "account-signed-out:claude" && o.active),
+    ).toHaveLength(1);
+    expect(
+      harness.observations.filter((o) => o.key === "account-signed-out:claude-backup" && o.active),
+    ).toHaveLength(1);
+  }, 60_000);
 
   test("pushes once when a pool entry shares another's login, and again only after it clears", async () => {
     const shared: AgentAccountAuth = {

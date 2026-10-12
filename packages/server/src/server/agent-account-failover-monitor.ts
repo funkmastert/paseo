@@ -26,7 +26,11 @@ import {
   type ProviderLimitSighting,
 } from "./agent/account-failover-detector.js";
 import { AccountAuthProbe, type AccountAuthProbeResult } from "./agent/account-auth-probe.js";
-import { AccountAuthTracker, type AccountAuthReading } from "./agent/account-auth-health.js";
+import {
+  AccountAuthTracker,
+  type AccountAuthReading,
+  type AccountAuthRecord,
+} from "./agent/account-auth-health.js";
 import {
   headroomByProvider,
   saturatedProviderIds,
@@ -677,6 +681,7 @@ export class AccountFailoverMonitor {
         configDir: expandHome(dirs.get(entry.providerId) ?? defaultClaudeDir(entry.providerId)),
         expectedEmail: entry.expectedEmail ?? null,
         auth: await this.options.agentManager.describeProviderAccount(entry.providerId),
+        enabled: entry.enabled,
       })),
     );
     const raised = this.accountIdentity.observe(findPoolAccountIdentityProblems(readings));
@@ -706,9 +711,9 @@ export class AccountFailoverMonitor {
    * Feeds this sweep's evidence to the AccountAuthTracker: auth-shaped turn failures, a forced
    * usage re-read for any account the tracker already has as `suspect` or `signed_out` (so
    * recovery is seen within one sweep instead of waiting out the usage cache), and a confirming
-   * probe for suspects. Opened/closed episodes are not acted on yet here — the push (the urgent
-   * alert) and marking an account dead to failover are separate concerns layered onto this same
-   * tracker.
+   * probe for suspects. Then raises the ladder's urgent push for every standing `signed_out`
+   * record (reported every sweep while active, same as `observeStranding`) and closes it once,
+   * on the sweep the tracker reports the episode cleared.
    */
   private async observeAccountAuth(providers: Record<string, unknown> | undefined): Promise<void> {
     const poolEntries = resolveAccountPoolEntries(providers);
@@ -764,7 +769,37 @@ export class AccountFailoverMonitor {
       if (result) probes.push({ providerId, result, atMs: nowMs });
     }
 
-    this.accountAuth.observe({ accounts, turnFailures, readings, probes });
+    const { closed } = this.accountAuth.observe({ accounts, turnFailures, readings, probes });
+
+    for (const providerId of this.accountAuth.signedOutProviderIds()) {
+      const record = this.accountAuth.stateFor(providerId);
+      if (record) await this.notifyAccountSignedOut(record, true);
+    }
+    for (const record of closed) {
+      await this.notifyAccountSignedOut(record, false);
+    }
+  }
+
+  /**
+   * One urgent push per sign-out episode, naming the account, its login and the sign-in command
+   * (R7). Reported every sweep while `active`, like `observeStranding`; the ladder is idempotent
+   * per key, so only the first call of an episode actually pushes. `active: false` closes it,
+   * called exactly once by the tracker's own `closed` episode.
+   */
+  private async notifyAccountSignedOut(record: AccountAuthRecord, active: boolean): Promise<void> {
+    const sink = this.options.remediationSink ?? NULL_REMEDIATION_SINK;
+    await sink.observe({
+      key: `account-signed-out:${record.providerId}`,
+      kind: "account-signed-out",
+      active,
+      remedy: "none",
+      level: "urgent",
+      title: `Claude account signed out: ${record.providerId}`,
+      summary: active
+        ? `${record.providerId} can't authenticate (${record.summary}). Sign in as ` +
+          `${record.email ?? "its account"}: ${record.fixCommand}`
+        : `${record.providerId} is signed in again.`,
+    });
   }
 
   /**

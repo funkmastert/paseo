@@ -36,6 +36,12 @@ export interface PoolAccountReading {
   configDir: string | null;
   expectedEmail: string | null;
   auth: AgentAccountAuth | null;
+  /**
+   * `false` hides this entry from every identity problem: disabling an account is how Tyler
+   * silences one he has abandoned, and it gets no banner, push or probe either (U3's scope
+   * decision). Absent means enabled.
+   */
+  enabled?: boolean;
 }
 
 function sameEmail(a: string, b: string): boolean {
@@ -96,8 +102,9 @@ function wrongLoginProblem(reading: PoolAccountReading): PoolAccountIdentityProb
 export function findPoolAccountIdentityProblems(
   readings: readonly PoolAccountReading[],
 ): PoolAccountIdentityProblem[] {
+  const enabledReadings = readings.filter((reading) => reading.enabled !== false);
   const groups = new Map<string, PoolAccountReading[]>();
-  for (const reading of readings) {
+  for (const reading of enabledReadings) {
     const key = accountKeyOf(reading.auth);
     if (key === null) continue;
     const group = groups.get(key);
@@ -109,7 +116,7 @@ export function findPoolAccountIdentityProblems(
     .filter((members) => members.length > 1)
     .flatMap(sharedLoginProblems);
   const flagged = new Set(shared.map((problem) => problem.providerId));
-  const wrong = readings
+  const wrong = enabledReadings
     .filter((reading) => !flagged.has(reading.providerId))
     .map(wrongLoginProblem)
     .filter((problem): problem is PoolAccountIdentityProblem => problem !== null);

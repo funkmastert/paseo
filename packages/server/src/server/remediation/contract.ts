@@ -21,6 +21,9 @@ export type RemediationConditionKind =
   | "stalled-agent"
   | "work-at-risk"
   | "account-pool-exhausted"
+  /** A pooled Claude account can't authenticate (account-auth-health.ts). One push per episode,
+   * closed when it recovers. See docs/account-failover.md. */
+  | "account-signed-out"
   | "token-audit"
   /**
    * The stall judgment's loop watch (docs/jev.md, Feature 10), reported for a running agent that

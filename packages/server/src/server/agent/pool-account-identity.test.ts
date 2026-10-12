@@ -99,6 +99,27 @@ describe("findPoolAccountIdentityProblems", () => {
     ]);
   });
 
+  it("says nothing for a disabled entry with a wrong login", () => {
+    const problems = findPoolAccountIdentityProblems([
+      reading("claude-personal", signedIn("leader@example.com", "uuid-1"), {
+        expectedEmail: "worker@example.com",
+        enabled: false,
+      }),
+    ]);
+    expect(problems).toEqual([]);
+  });
+
+  it("says nothing for a disabled entry sharing a login with an enabled one", () => {
+    const problems = findPoolAccountIdentityProblems([
+      reading("claude", signedIn("leader@example.com", "uuid-1"), { role: "leader" }),
+      reading("claude-personal", signedIn("leader@example.com", "uuid-1"), {
+        expectedEmail: "worker@example.com",
+        enabled: false,
+      }),
+    ]);
+    expect(problems).toEqual([]);
+  });
+
   it("says nothing for signed-out, unknown, or unlabelled accounts", () => {
     expect(
       findPoolAccountIdentityProblems([
