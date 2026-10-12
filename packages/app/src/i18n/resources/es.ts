@@ -2001,6 +2001,15 @@ export const es: TranslationResources = {
   sidebarCallout: {
     dismiss: "Despedir",
   },
+  accountAlerts: {
+    title_one: "Problema de cuenta",
+    title_other: "Problemas de cuenta",
+    signIn: "Iniciar sesión",
+    signInPending: "Iniciando sesión...",
+    signInRunOn: "Ejecutar en {{host}}",
+    signInError: "No se pudo iniciar el inicio de sesión",
+    moreCount: "+{{count}} más",
+  },
   restartRecovery: {
     summary_one: "{{count}} agente se interrumpió a mitad de turno",
     summary_other: "{{count}} agentes se interrumpieron a mitad de turno",

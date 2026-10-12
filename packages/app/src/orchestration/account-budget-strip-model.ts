@@ -51,8 +51,16 @@ export interface AccountIdentityViewModel {
   fixCommand: string;
 }
 
+/** A pool entry the daemon can no longer authenticate as. The daemon's words and sign-in command. */
+export interface AccountAuthViewModel {
+  summary: string;
+  fixCommand: string;
+}
+
 interface AccountBudgetRowBase {
   providerId: string;
+  /** Null unless the daemon's sweep finds the account signed out; takes the row over `identity`. */
+  auth: AccountAuthViewModel | null;
   /** Null for a healthy account; set while the daemon's identity check still flags it. */
   identity: AccountIdentityViewModel | null;
   section: AccountSection;
@@ -350,7 +358,15 @@ function unavailableReason(
   return error ? { error } : {};
 }
 
+function authOf(usage: ProviderUsage | undefined): AccountAuthViewModel | null {
+  const auth = usage?.accountAuth;
+  return auth ? { summary: auth.summary, fixCommand: auth.fixCommand } : null;
+}
+
+// A signed-out account takes the row; showing a stale identity problem beside it would mix a
+// red, actionable alert with an amber one that caps stays with failover (docs/account-failover.md).
 function identityOf(usage: ProviderUsage | undefined): AccountIdentityViewModel | null {
+  if (usage?.accountAuth) return null;
   const identity = usage?.accountIdentity;
   return identity ? { summary: identity.summary, fixCommand: identity.fixCommand } : null;
 }
@@ -374,6 +390,7 @@ function buildAccountRow(
     : (entries?.find((candidate) => candidate.provider === providerId)?.label ?? providerId);
   const base = {
     providerId: resolvedId,
+    auth: authOf(usage),
     identity: identityOf(usage),
     section,
     label: section === "other" ? withVendor(resolvedId, label) : label,

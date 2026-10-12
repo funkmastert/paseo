@@ -29,6 +29,12 @@ function statusText(usage: ProviderUsage): string | null {
   return usage.status === "error" ? "Error" : "Unavailable";
 }
 
+function problemText(usage: ProviderUsage): { text: string; danger: boolean } | null {
+  if (usage.accountAuth) return { text: usage.accountAuth.summary, danger: true };
+  if (usage.accountIdentity) return { text: usage.accountIdentity.summary, danger: false };
+  return null;
+}
+
 function footerText(usage: ProviderUsage): string | null {
   const updated = formatAgo(usage.fetchedAt);
   const parts = [usage.sourceLabel, updated ? `Updated ${updated}` : null].filter(
@@ -45,6 +51,7 @@ export function ProviderUsageCard({
   compact?: boolean;
 }) {
   const status = statusText(usage);
+  const problem = problemText(usage);
   const footer = footerText(usage);
   const balances = usage.balances ?? [];
   const details = usage.details ?? [];
@@ -82,6 +89,16 @@ export function ProviderUsageCard({
       {usage.error ? (
         <Text style={styles.error} numberOfLines={3}>
           {usage.error}
+        </Text>
+      ) : null}
+
+      {problem ? (
+        <Text
+          style={[styles.problem, problem.danger ? styles.problemDanger : styles.problemWarning]}
+          numberOfLines={3}
+          testID={`provider-usage-card-problem-${usage.providerId}`}
+        >
+          {problem.text}
         </Text>
       ) : null}
 
@@ -190,6 +207,16 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.palette.red[300],
     fontSize: theme.fontSize.sm,
     lineHeight: theme.fontSize.sm * 1.4,
+  },
+  problem: {
+    fontSize: theme.fontSize.sm,
+    lineHeight: theme.fontSize.sm * 1.4,
+  },
+  problemDanger: {
+    color: theme.colors.statusDanger,
+  },
+  problemWarning: {
+    color: theme.colors.statusWarning,
   },
   footer: {
     color: theme.colors.foregroundMuted,
