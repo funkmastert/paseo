@@ -442,9 +442,8 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
   async fetchUsage(): Promise<ProviderUsage> {
     const credentials = await this.readCredentials();
     if (!credentials) {
-      // `.claude.json` keeps naming an account after its OAuth session can no longer refresh
-      // (the gap this plan closes), so its presence — not "signed-in" — is what makes a missing
-      // credential worth a reading. A config dir nothing ever signed into reports no reading at
+      // `.claude.json` keeps naming an account after its OAuth session can no longer refresh, so
+      // its presence — not "signed-in" — is what makes a missing credential worth a reading. A config dir nothing ever signed into reports no reading at
       // all: there is no account there to be signed out of.
       this.authReading =
         readClaudeAccountAuth(this.claudeHome).state === "signed-in" ? "credentials_missing" : null;

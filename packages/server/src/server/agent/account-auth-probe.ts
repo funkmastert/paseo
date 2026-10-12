@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execCommand } from "../../utils/spawn.js";
 import { isAuthShapedError } from "./account-failover-detector.js";
-import type { AccountAuthProbeResult } from "./account-auth-health.js";
+import type { AccountAuthProbeEvidence, AccountAuthProbeResult } from "./account-auth-health.js";
 import { resolveClaudeBinary } from "./providers/claude/agent.js";
 
 export interface ProbeProcessResult {
@@ -92,13 +92,6 @@ export interface AccountAuthProbeRequest {
   hasRunningAgent: boolean;
 }
 
-export interface FinishedAccountAuthProbe {
-  providerId: string;
-  result: AccountAuthProbeResult;
-  /** When the probe started: the moment the CLI was asked to refresh. */
-  atMs: number;
-}
-
 /**
  * Runs at most once per account per `minIntervalMs` (default 15 minutes), skipping entirely
  * while that account has a running agent.
@@ -112,7 +105,7 @@ export class AccountAuthProbe {
   private scratchDir: string | null = null;
   private lastRunMs = new Map<string, number>();
   private running = new Set<string>();
-  private finished: FinishedAccountAuthProbe[] = [];
+  private finished: AccountAuthProbeEvidence[] = [];
 
   constructor(options: AccountAuthProbeOptions = {}) {
     this.runProcess = options.runProcess ?? execProbeProcess;
@@ -140,7 +133,7 @@ export class AccountAuthProbe {
   }
 
   /** Results of the probes that finished since the last call. */
-  takeFinished(): FinishedAccountAuthProbe[] {
+  takeFinished(): AccountAuthProbeEvidence[] {
     const finished = this.finished;
     this.finished = [];
     return finished;

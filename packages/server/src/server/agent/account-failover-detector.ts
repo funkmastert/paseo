@@ -33,7 +33,8 @@ export function isLimitShapedError(text: string | undefined | null): text is str
 // config dir, not a dead account. Checked first so it can never match the patterns below.
 const REFRESH_LOCK_PATTERN = /holding the refresh lock/i;
 
-// R2's auth-shaped strings, from the pinned CLI binary plus the incident's own error text.
+// The CLI's sign-in failure strings, read from its binary, plus the text an expired OAuth
+// session that cannot refresh fails a turn with.
 // "Session expired" also matches "Your session has expired"; both are kept literal rather than
 // generalized to "session" because "session limit" (a cap, not an auth failure) must not match.
 const AUTH_TEXT_PATTERN =
@@ -130,7 +131,7 @@ export interface PlanAccountFailoverSweepInput {
   /** The previous plan's `providerSightings`, plus whatever a move recorded since. */
   previousProviderSightings: ReadonlyMap<string, ProviderLimitSighting>;
   /**
-   * This sweep's `AccountAuthTracker.signedOutProviderIds()`. Unlike the reactive sightings above,
+   * This sweep's `AccountAuthTracker.providerIdsIn("signed_out")`. Unlike the reactive sightings above,
    * sign-in evidence carries no TTL of its own (account-auth-health.ts) — it stays dead here for
    * as long as the tracker says so, with no decay in this function.
    */

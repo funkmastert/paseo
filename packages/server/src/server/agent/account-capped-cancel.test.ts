@@ -157,6 +157,7 @@ describe("an account-capped cancel hands a stalled turn to account failover", ()
       usage: null,
       previousSightings: new Map(),
       previousProviderSightings: new Map(),
+      signedOutProviderIds: new Set(),
       nowMs: Date.now(),
       reactiveSignalTtlMs: DEFAULT_REACTIVE_SIGNAL_TTL_MS,
       migrateSubagents: true,

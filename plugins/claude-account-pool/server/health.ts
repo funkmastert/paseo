@@ -360,9 +360,8 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
       // Below the drain threshold: a healthy usage reading clears any cap/drain for this window --
       // except a durable signed-out cap, which only reportAccountAuth may clear. An ordinary usage
       // window reading says nothing about whether the account can authenticate.
-      if (state.signedOutDurable) {
-        // no-op: stays capped until reportAccountAuth(providerId, false).
-      } else if (state.status === "capped" || state.status === "probation") {
+      if (state.signedOutDurable) continue;
+      if (state.status === "capped" || state.status === "probation") {
         toHealthy(providerId, reading.window, state);
       } else {
         state.status = "healthy";

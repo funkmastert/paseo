@@ -67,17 +67,6 @@ describe("AccountAuthTracker", () => {
     expect(tracker.stateFor("claude-personal")?.state).toBe("signed_out");
   });
 
-  it("does not mark when a later successful turn postdates an older failure", () => {
-    const tracker = new AccountAuthTracker();
-    const result = tracker.observe({
-      accounts: [account()],
-      turnFailures: [{ providerId: "claude-personal", error: "Not logged in", atMs: T0 }],
-      turnSuccesses: [{ providerId: "claude-personal", atMs: T0 + MIN }],
-    });
-    expect(result.opened).toEqual([]);
-    expect(tracker.stateFor("claude-personal")?.state).toBe("ok");
-  });
-
   it("closes the episode on a successful usage read, then opens a new one on a second sign-out", () => {
     const tracker = new AccountAuthTracker();
     tracker.observe({

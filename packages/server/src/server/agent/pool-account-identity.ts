@@ -38,8 +38,8 @@ export interface PoolAccountReading {
   auth: AgentAccountAuth | null;
   /**
    * `false` hides this entry from every identity problem: disabling an account is how Tyler
-   * silences one he has abandoned, and it gets no banner, push or probe either (U3's scope
-   * decision). Absent means enabled.
+   * silences one he has abandoned, and it gets no banner, push or probe either. Absent means
+   * enabled.
    */
   enabled?: boolean;
 }

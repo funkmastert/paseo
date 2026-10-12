@@ -69,9 +69,9 @@ const REFUSAL_LIMIT_PATTERN = /hit your limit|rate limit|quota|credits|spend lim
  * Also carries the daemon's own `isAuthShapedError` strings
  * (account-failover-detector.ts) — "Failed to authenticate", "OAuth session
  * expired", "OAuth token revoked", "Session expired", "Your session has
- * expired" — from the 2026-10-12 incident where an expired-and-unrefreshable
- * OAuth session produced exactly that text. classify.test.ts's drift test
- * checks every one of the daemon's strings against this pattern.
+ * expired" — the text an expired OAuth session that cannot refresh fails a
+ * turn with. classify.test.ts's drift test checks every one of the daemon's
+ * strings against this pattern.
  */
 const AUTH_FAILURE_PATTERN =
   /not logged in|please run\s*\/login|invalid api key|invalid auth token|oauth login failed|cloud authentication failed|failed to authenticate|oauth session expired|oauth token revoked|session expired|your session has expired/i;

@@ -7136,7 +7136,7 @@ export const ProviderUsageAccountIdentitySchema = z.object({
 // COMPAT(accountAuth): added in v0.8.x. A sibling field next to accountIdentity rather than a new
 // `status` value -- ProviderUsageStatusSchema is a closed enum an old client would fail to parse
 // on an unrecognized value. `state` is the literal string "signed_out" when present; its absence
-// means nothing is known to be wrong (a `suspect` account shows nothing, per the plan's R8).
+// means nothing is known to be wrong; a `suspect` account shows nothing.
 export const ProviderUsageAccountAuthSchema = z.object({
   state: z.literal("signed_out"),
   since: z.string(),

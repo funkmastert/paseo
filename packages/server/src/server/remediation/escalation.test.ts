@@ -63,7 +63,9 @@ describe("findEscalationAccountBlocker", () => {
   const health =
     (dead: Set<string>) =>
     async (provider: string): Promise<ProviderHealth> =>
-      dead.has(provider) ? { askable: false, reason: `${provider} is capped` } : { askable: true };
+      dead.has(provider)
+        ? { askable: false, reason: `${provider} is capped`, cancelReason: "account-capped" }
+        : { askable: true };
 
   it("is clear while any enabled pooled account is usable", async () => {
     await expect(

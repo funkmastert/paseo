@@ -44,8 +44,6 @@ export interface AccountAuthProblemRecord extends AccountAuthRecordBase {
 
 export type AccountAuthRecord = AccountAuthOkRecord | AccountAuthProblemRecord;
 
-export type AccountAuthEpisode = AccountAuthProblemRecord;
-
 export interface AccountAuthAccountInput {
   providerId: string;
   enabled: boolean;
@@ -61,36 +59,31 @@ export interface AccountAuthTurnFailureInput {
   atMs: number;
 }
 
-export interface AccountAuthTurnSuccessInput {
-  providerId: string;
-  atMs: number;
-}
-
 export interface AccountAuthReadingInput {
   providerId: string;
   reading: AccountAuthReading;
   atMs: number;
 }
 
-export interface AccountAuthProbeInput {
+export interface AccountAuthProbeEvidence {
   providerId: string;
   result: AccountAuthProbeResult;
+  /** When the probe started: the moment the CLI was asked to refresh. */
   atMs: number;
 }
 
 export interface AccountAuthObserveInput {
   accounts: readonly AccountAuthAccountInput[];
   turnFailures?: readonly AccountAuthTurnFailureInput[];
-  turnSuccesses?: readonly AccountAuthTurnSuccessInput[];
   readings?: readonly AccountAuthReadingInput[];
-  probes?: readonly AccountAuthProbeInput[];
+  probes?: readonly AccountAuthProbeEvidence[];
 }
 
 export interface AccountAuthObserveResult {
   /** Providers that newly became signed_out this observation. */
-  opened: AccountAuthEpisode[];
+  opened: AccountAuthProblemRecord[];
   /** Providers that were signed_out and are not any more. */
-  closed: AccountAuthEpisode[];
+  closed: AccountAuthProblemRecord[];
 }
 
 function latestByProvider<T extends { providerId: string; atMs: number }>(
@@ -143,51 +136,31 @@ function pickCandidate(
   return best;
 }
 
-function readingSummary(reading: AccountAuthReading): string {
-  switch (reading) {
-    case "credentials_missing":
-      return "No credentials found for this account";
-    case "rejected_unexpired":
-      return "The usage API rejected a token that has not expired";
-    case "rejected_expired":
-      return "The usage API rejected an expired token";
-    case "ok":
-      return "A usage read succeeded";
-  }
-}
-
-function stateFromReading(reading: AccountAuthReading): AccountAuthState {
-  if (reading === "rejected_expired") return "suspect";
-  if (reading === "ok") return "ok";
-  return "signed_out";
-}
+// A 401 on an expired token is only suspect: the CLI refreshes lazily, so the refresh token may
+// still be fine.
+const FROM_READING: Record<AccountAuthReading, { state: AccountAuthState; summary: string }> = {
+  credentials_missing: { state: "signed_out", summary: "No credentials found for this account" },
+  rejected_unexpired: {
+    state: "signed_out",
+    summary: "The usage API rejected a token that has not expired",
+  },
+  rejected_expired: { state: "suspect", summary: "The usage API rejected an expired token" },
+  ok: { state: "ok", summary: "A usage read succeeded" },
+};
 
 function candidateFromTurnFailure(
   turnFailure: AccountAuthTurnFailureInput | null,
-  turnSuccess: AccountAuthTurnSuccessInput | null,
 ): Candidate | null {
   if (!turnFailure) return null;
-  if (turnSuccess && turnSuccess.atMs >= turnFailure.atMs) return null;
   return { state: "signed_out", atMs: turnFailure.atMs, summary: turnFailure.error };
-}
-
-function candidateFromTurnSuccess(
-  turnSuccess: AccountAuthTurnSuccessInput | null,
-): Candidate | null {
-  if (!turnSuccess) return null;
-  return { state: "ok", atMs: turnSuccess.atMs, summary: "A turn on the account succeeded" };
 }
 
 function candidateFromReading(reading: AccountAuthReadingInput | null): Candidate | null {
   if (!reading) return null;
-  return {
-    state: stateFromReading(reading.reading),
-    atMs: reading.atMs,
-    summary: readingSummary(reading.reading),
-  };
+  return { ...FROM_READING[reading.reading], atMs: reading.atMs };
 }
 
-function candidateFromProbe(probe: AccountAuthProbeInput | null): Candidate | null {
+function candidateFromProbe(probe: AccountAuthProbeEvidence | null): Candidate | null {
   if (!probe || probe.result === "inconclusive") return null;
   const success = probe.result === "success";
   return {
@@ -203,9 +176,8 @@ interface NextRecordEvidence {
   account: AccountAuthAccountInput;
   prev: AccountAuthRecord | null;
   turnFailure: AccountAuthTurnFailureInput | null;
-  turnSuccess: AccountAuthTurnSuccessInput | null;
   reading: AccountAuthReadingInput | null;
-  probe: AccountAuthProbeInput | null;
+  probe: AccountAuthProbeEvidence | null;
 }
 
 const OK_SINCE_START: Candidate = { state: "ok", atMs: 0, summary: "ok" };
@@ -234,8 +206,7 @@ function nextRecordFor(evidence: NextRecordEvidence): AccountAuthRecord {
   const prevSince = prev?.since ?? 0;
 
   const picked = pickCandidate(prevState, prevSince, [
-    candidateFromTurnFailure(evidence.turnFailure, evidence.turnSuccess),
-    candidateFromTurnSuccess(evidence.turnSuccess),
+    candidateFromTurnFailure(evidence.turnFailure),
     candidateFromReading(evidence.reading),
     candidateFromProbe(evidence.probe),
   ]);
@@ -255,8 +226,8 @@ export class AccountAuthTracker {
   private records = new Map<string, AccountAuthRecord>();
 
   observe(input: AccountAuthObserveInput): AccountAuthObserveResult {
-    const opened: AccountAuthEpisode[] = [];
-    const closed: AccountAuthEpisode[] = [];
+    const opened: AccountAuthProblemRecord[] = [];
+    const closed: AccountAuthProblemRecord[] = [];
     const enabledIds = new Set(
       input.accounts.filter((account) => account.enabled).map((account) => account.providerId),
     );
@@ -265,7 +236,6 @@ export class AccountAuthTracker {
     }
 
     const turnFailures = latestByProvider(input.turnFailures);
-    const turnSuccesses = latestByProvider(input.turnSuccesses);
     const readings = latestByProvider(input.readings);
     const probes = latestByProvider(input.probes);
 
@@ -278,7 +248,6 @@ export class AccountAuthTracker {
         account,
         prev,
         turnFailure: turnFailures.get(account.providerId) ?? null,
-        turnSuccess: turnSuccesses.get(account.providerId) ?? null,
         reading: readings.get(account.providerId) ?? null,
         probe: probes.get(account.providerId) ?? null,
       });
@@ -299,15 +268,12 @@ export class AccountAuthTracker {
     return this.records.get(providerId) ?? null;
   }
 
-  signedOutProviderIds(): Set<string> {
-    return new Set(
-      [...this.records.values()].filter((r) => r.state === "signed_out").map((r) => r.providerId),
-    );
-  }
-
-  suspectProviderIds(): Set<string> {
-    return new Set(
-      [...this.records.values()].filter((r) => r.state === "suspect").map((r) => r.providerId),
-    );
+  /** The providers standing in `state`. */
+  providerIdsIn(state: AccountAuthState): Set<string> {
+    const ids = new Set<string>();
+    for (const record of this.records.values()) {
+      if (record.state === state) ids.add(record.providerId);
+    }
+    return ids;
   }
 }

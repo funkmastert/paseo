@@ -315,7 +315,7 @@ export class AccountFailoverMonitor {
       usage: usage?.providers ?? null,
       previousSightings: this.sightings,
       previousProviderSightings: this.providerSightings,
-      signedOutProviderIds: this.accountAuth.signedOutProviderIds(),
+      signedOutProviderIds: this.accountAuth.providerIdsIn("signed_out"),
       nowMs,
       reactiveSignalTtlMs: this.reactiveSignalTtlMs,
       migrateSubagents: config.migrateSubagents,
@@ -718,8 +718,8 @@ export class AccountFailoverMonitor {
    */
   private dueAuthRereads(nowMs: number): Set<string> {
     const standing = new Set([
-      ...this.accountAuth.suspectProviderIds(),
-      ...this.accountAuth.signedOutProviderIds(),
+      ...this.accountAuth.providerIdsIn("suspect"),
+      ...this.accountAuth.providerIdsIn("signed_out"),
     ]);
     for (const providerId of this.authRereadAtMs.keys()) {
       if (!standing.has(providerId)) this.authRereadAtMs.delete(providerId);
@@ -770,7 +770,7 @@ export class AccountFailoverMonitor {
     });
 
     // A suspect account is not dead to failover, so nothing this sweep waits for the answer.
-    for (const providerId of this.accountAuth.suspectProviderIds()) {
+    for (const providerId of this.accountAuth.providerIdsIn("suspect")) {
       const configDir = accounts.find((account) => account.providerId === providerId)?.configDir;
       if (!configDir) continue;
       const hasRunningAgent = agents.some(
@@ -790,7 +790,7 @@ export class AccountFailoverMonitor {
   private async reportSignedOutAccounts(): Promise<void> {
     const sink = this.options.remediationSink ?? NULL_REMEDIATION_SINK;
     const standing = new Set<string>();
-    for (const providerId of this.accountAuth.signedOutProviderIds()) {
+    for (const providerId of this.accountAuth.providerIdsIn("signed_out")) {
       const record = this.accountAuth.stateFor(providerId);
       if (record?.state !== "signed_out") continue;
       standing.add(providerId);

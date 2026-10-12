@@ -7,6 +7,7 @@ export type PermissionRequirement = DaemonPermission | readonly DaemonPermission
 
 const INBOUND_PERMISSION = {
   abort_request: "workspace.write",
+  "account.claude.sign_in.request": "daemon.manage",
   "agent.config.apply.request": ["workspace.write", "hub.execute"],
   "agent.detach.request": "workspace.write",
   "agent.fork_context.request": "workspace.read",
@@ -46,7 +47,6 @@ const INBOUND_PERMISSION = {
   "checkout.commits.list.request": "workspace.read",
   "checkout.discard_changes.request": "workspace.write",
   "checkout.forge.get_check_details.request": "workspace.read",
-  "account.claude.sign_in.request": "daemon.manage",
   "checkout.forge.set_auto_merge.request": "workspace.write",
   "checkout.github.get_check_details.request": "workspace.read",
   "checkout.github.set_auto_merge.request": "workspace.write",
@@ -231,6 +231,7 @@ const INBOUND_PERMISSION = {
 } as const satisfies Record<InboundOperation, PermissionRequirement>;
 
 const OUTBOUND_PERMISSION = {
+  "account.claude.sign_in.response": "daemon.manage",
   activity_log: "workspace.read",
   "agent.config.apply.response": ["workspace.write", "hub.execute"],
   "agent.detach.response": "workspace.write",
@@ -281,7 +282,6 @@ const OUTBOUND_PERMISSION = {
   "checkout.commits.list.response": "workspace.read",
   "checkout.discard_changes.response": "workspace.write",
   "checkout.forge.get_check_details.response": "workspace.read",
-  "account.claude.sign_in.response": "daemon.manage",
   "checkout.forge.set_auto_merge.response": "workspace.write",
   "checkout.github.get_check_details.response": "workspace.read",
   "checkout.github.set_auto_merge.response": "workspace.write",

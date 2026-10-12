@@ -42,6 +42,7 @@ import type { StallJudgmentSummary, StallMeasurementLine } from "./agent/stall-j
 import { pacedResume, unpacedResume, type PaceResume } from "./agent/resume-pacer.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
 import { isAccountDeadError } from "./agent/account-failover-detector.js";
+import type { AccountDeadCancelReason } from "./agent/turn-cancel.js";
 import { formatSystemNotificationPrompt, sendPromptToAgent } from "./agent/agent-prompt.js";
 import { formatDuration } from "./agent/done-janitor-detector.js";
 import { attributeProcessTrees, type AgentProcessTree } from "./agent/process-attribution.js";
@@ -103,12 +104,11 @@ export interface StallSweepDependencies {
   snapshotter: WorktreeSnapshotter;
   /** Sends `prompt` as it is (already in its envelope), replacing the stuck run. */
   nudgeAgent(input: { agentId: string; prompt: string }): Promise<StallNudgeResult>;
-  /**
-   * Cancels the stuck turn so it leaves a limit- or auth-shaped `lastError` for account failover.
-   * `signedOut` picks the cancel reason: a sign-in failure on the account gets `account-signed-out`
-   * so the daemon leaves an auth-shaped error behind instead of a usage-limit one.
-   */
-  handOffToFailover(agentId: string, signedOut: boolean): Promise<StallHandoffResult>;
+  /** Cancels the stuck turn so it leaves a limit- or auth-shaped `lastError` for account failover. */
+  handOffToFailover(
+    agentId: string,
+    cancelReason: AccountDeadCancelReason,
+  ): Promise<StallHandoffResult>;
   /**
    * The newest `limit` timeline rows, oldest first; null when the agent is not loaded. The stall
    * judgment and the background-wait rule read it. Absent: neither runs.
@@ -1192,8 +1192,8 @@ export class AgentStallSweep {
   ): Promise<void> {
     const { agent } = candidate;
     const { logger } = this.options;
-    const capped = !candidate.health.askable;
-    const signedOut = candidate.health.askable === false && candidate.health.signedOut === true;
+    const { health } = candidate;
+    const capped = !health.askable;
 
     const snapshot = config.snapshot
       ? await this.deps.snapshotter.snapshot({
@@ -1204,8 +1204,8 @@ export class AgentStallSweep {
     episode.snapshot = snapshot;
     episode.attempts.push(describeSnapshot(snapshot, this.now()));
 
-    if (capped) {
-      const result = await this.deps.handOffToFailover(agent.id, signedOut);
+    if (!health.askable) {
+      const result = await this.deps.handOffToFailover(agent.id, health.cancelReason);
       const at = new Date(this.now()).toISOString();
       if (result.kind === "failed") {
         episode.exhausted = true;
@@ -1224,7 +1224,7 @@ export class AgentStallSweep {
           outcome: result.kind === "handed-off" ? "acted" : "nothing-to-do",
           detail:
             result.kind === "handed-off"
-              ? `canceled the stuck turn with a usage-limit error so account failover moves it off ${agent.provider}`
+              ? `canceled the stuck turn (${health.cancelReason}) so account failover moves it off ${agent.provider}`
               : "the turn ended on its own before the cancel",
           at,
         });
@@ -1232,7 +1232,7 @@ export class AgentStallSweep {
       }
       logger.info(
         { agentId: agent.id, provider: agent.provider, result: result.kind },
-        "Stalled-agent sweep: handed a stalled agent on a capped account to account failover",
+        "Stalled-agent sweep: handed a stalled agent on a dead account to account failover",
       );
       return;
     }
@@ -1731,27 +1731,25 @@ async function nudgeNow(
   }
 }
 
-/**
- * The production handoff: an `account-capped` or `account-signed-out` cancel, checked for the
- * error failover reads.
- */
+/** The production handoff: a cancel with the dead account's reason, checked for the error
+ * failover reads. */
 export async function handOffStalledAgentToFailover(
   agentManager: Pick<AgentManager, "cancelAgentRun" | "getAgent">,
   agentId: string,
-  signedOut: boolean,
+  cancelReason: AccountDeadCancelReason,
 ): Promise<StallHandoffResult> {
   try {
-    const result = await agentManager.cancelAgentRun(
-      agentId,
-      signedOut ? "account-signed-out" : "account-capped",
-    );
+    const result = await agentManager.cancelAgentRun(agentId, cancelReason);
     if (result.status === "not_running") return { kind: "not-running" };
     if (result.status === "refused") {
       return { kind: "failed", error: "the provider session did not acknowledge the cancel" };
     }
     const lastError = agentManager.getAgent(agentId)?.lastError;
     if (!isAccountDeadError(lastError)) {
-      return { kind: "failed", error: "the cancel settled but left no usage-limit error" };
+      return {
+        kind: "failed",
+        error: "the cancel settled but left no limit- or auth-shaped error for failover to read",
+      };
     }
     return { kind: "handed-off", lastError };
   } catch (error) {

@@ -15,6 +15,7 @@ import { ensureAgentLoaded } from "./agent/agent-loading.js";
 import { formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
 import { isAuthShapedError, isLimitShapedError } from "./agent/account-failover-detector.js";
 import { isRunMarkerOpen } from "./agent/restart-recovery/run-marker.js";
+import type { AccountDeadCancelReason } from "./agent/turn-cancel.js";
 import {
   buildDoneQuestion,
   formatDuration,
@@ -184,9 +185,8 @@ export type ProviderHealth =
   | {
       askable: false;
       reason: string;
-      /** Set when the reason is a sign-in failure rather than a usage cap; the stalled-agent sweep
-       * reads it to decide which cancel reason hands a stuck turn to account failover. */
-      signedOut?: boolean;
+      /** How the stalled-agent sweep cancels a turn stuck here, so failover reads the right error. */
+      cancelReason: AccountDeadCancelReason;
     };
 
 /**
@@ -2382,30 +2382,43 @@ export async function readProviderHealth(input: {
   lastErrorsByProvider: ReadonlyMap<string, readonly (string | undefined)[]>;
 }): Promise<ProviderHealth> {
   if (!(await input.isAvailable(input.provider))) {
-    return { askable: false, reason: `provider ${input.provider} is unavailable` };
+    return {
+      askable: false,
+      reason: `provider ${input.provider} is unavailable`,
+      cancelReason: "account-capped",
+    };
   }
   const usage = (await input.listUsage())?.find((entry) => entry.providerId === input.provider);
   if (usage?.status === "error") {
     return {
       askable: false,
       reason: `account ${input.provider} reports a usage error${usage.error ? ` (${usage.error})` : ""}; it may be logged out`,
+      cancelReason: "account-capped",
     };
   }
   if (
     usage?.windows.some((window) => typeof window.usedPct === "number" && window.usedPct >= 100)
   ) {
-    return { askable: false, reason: `account ${input.provider} is at its usage cap` };
+    return {
+      askable: false,
+      reason: `account ${input.provider} is at its usage cap`,
+      cancelReason: "account-capped",
+    };
   }
   const providerErrors = input.lastErrorsByProvider.get(input.provider) ?? [];
   if (providerErrors.some(isAuthShapedError)) {
     return {
       askable: false,
       reason: `an agent on account ${input.provider} failed to authenticate`,
-      signedOut: true,
+      cancelReason: "account-signed-out",
     };
   }
   if (providerErrors.some(isLimitShapedError)) {
-    return { askable: false, reason: `an agent on account ${input.provider} hit a usage limit` };
+    return {
+      askable: false,
+      reason: `an agent on account ${input.provider} hit a usage limit`,
+      cancelReason: "account-capped",
+    };
   }
   return { askable: true };
 }

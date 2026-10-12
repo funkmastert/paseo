@@ -140,8 +140,8 @@ import {
   isUnresponsiveCancelReason,
   UNRESPONSIVE_CANCEL_ERROR,
   UNRESPONSIVE_CANCEL_REASON,
-  formatAccountCappedCancelError,
-  formatAccountSignedOutCancelError,
+  ACCOUNT_DEAD_CANCEL_ERRORS,
+  type AccountDeadCancelReason,
 } from "./turn-cancel.js";
 import {
   AgentProviderMoveError,
@@ -5039,14 +5039,11 @@ export class AgentManager {
    */
   private async recordAccountDeadCancel(
     agentId: string,
-    cancelReason: "account-capped" | "account-signed-out",
+    cancelReason: AccountDeadCancelReason,
   ): Promise<void> {
     const agent = this.requireSessionAgent(agentId);
     if (agent.lifecycle === "running") return;
-    agent.lastError =
-      cancelReason === "account-signed-out"
-        ? formatAccountSignedOutCancelError(agent.provider)
-        : formatAccountCappedCancelError(agent.provider);
+    agent.lastError = ACCOUNT_DEAD_CANCEL_ERRORS[cancelReason](agent.provider);
     await this.appendSystemErrorTimelineMessage(agent, agent.provider, agent.lastError);
     this.touchUpdatedAt(agent);
     this.emitState(agent);

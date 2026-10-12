@@ -561,7 +561,11 @@ describe("AgentDoneJanitor", () => {
   test("an agent on a capped account is reported and left", async () => {
     const h = harness({
       config: ON,
-      health: { askable: false, reason: "account claude is at its usage cap" },
+      health: {
+        askable: false,
+        reason: "account claude is at its usage cap",
+        cancelReason: "account-capped",
+      },
     });
 
     const report = await h.janitor.tick();
@@ -1690,7 +1694,11 @@ describe("readProviderHealth", () => {
         },
       ],
     });
-    expect(result).toEqual({ askable: false, reason: "account claude-b is at its usage cap" });
+    expect(result).toEqual({
+      askable: false,
+      reason: "account claude-b is at its usage cap",
+      cancelReason: "account-capped",
+    });
   });
 
   test("a spend-limit error on any agent of the account is not", async () => {
@@ -1701,19 +1709,23 @@ describe("readProviderHealth", () => {
     expect(result.askable).toBe(false);
   });
 
-  test("a sign-in failure on any agent of the account is not, and is flagged signed out", async () => {
+  test("a sign-in failure on any agent of the account is not, and a stuck turn there cancels as signed out", async () => {
     const result = await readProviderHealth({
       ...base,
       lastErrorsByProvider: new Map([
         ["claude-b", ["Failed to authenticate: OAuth session expired and could not be refreshed"]],
       ]),
     });
-    expect(result).toMatchObject({ askable: false, signedOut: true });
+    expect(result).toMatchObject({ askable: false, cancelReason: "account-signed-out" });
   });
 
   test("an unavailable provider is not", async () => {
     const result = await readProviderHealth({ ...base, isAvailable: async () => false });
-    expect(result).toEqual({ askable: false, reason: "provider claude-b is unavailable" });
+    expect(result).toEqual({
+      askable: false,
+      reason: "provider claude-b is unavailable",
+      cancelReason: "account-capped",
+    });
   });
 });
 

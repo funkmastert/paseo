@@ -640,9 +640,8 @@ describe("AccountFailoverMonitor (e2e)", () => {
   }, 60_000);
 
   test("migrates a worker stuck on a signed-out account to a healthy one", async () => {
-    // Same shape as the capped-leader test above, but the evidence is a sign-in failure
-    // (AUTH_TEXT_PATTERN), not a usage cap — U3 extends deadProviderIds with the tracker's
-    // signed-out providers, so the rescue leg reads it the same way.
+    // Same shape as the capped-leader test above, but the evidence is a sign-in failure, not a
+    // usage cap: a signed-out account is dead the same way, so the rescue leg reads it alike.
     const leader = await createAgent(harness, { provider: "claude", title: "Build failover" });
     await converse(harness, leader, "CONTEXT-MARKER-AUTH");
     await failOnLimit(

@@ -25,17 +25,17 @@ const CLI_CAP_MESSAGES: ReadonlyArray<{ message: string; window: string }> = [
 ];
 
 /**
- * The daemon's own detector, read out of its source. The plugin compiles on its own and cannot
- * import daemon code, so it carries a copy of the pattern; this is what keeps the copy honest.
+ * One of the daemon's own detector patterns, read out of its source. The plugin compiles on its own
+ * and cannot import daemon code, so it carries copies of the patterns; this keeps the copies honest.
  */
-function daemonLimitPattern(): RegExp {
+function daemonPattern(constName: "LIMIT_TEXT_PATTERN" | "AUTH_TEXT_PATTERN"): RegExp {
   const source = readFileSync(
     new URL("../../../packages/server/src/server/agent/account-failover-detector.ts", import.meta.url),
     "utf8",
   );
-  const match = /const LIMIT_TEXT_PATTERN =\s*\/(.+)\/([a-z]*);/.exec(source);
+  const match = new RegExp(`const ${constName} =\\s*\\/(.+)\\/([a-z]*);`).exec(source);
   if (!match) {
-    throw new Error("LIMIT_TEXT_PATTERN not found in account-failover-detector.ts; update this test");
+    throw new Error(`${constName} not found in account-failover-detector.ts; update this test`);
   }
   return new RegExp(match[1], match[2]);
 }
@@ -103,8 +103,8 @@ describe("classify — the CLI's per-window cap messages", () => {
   });
 
   it("uses the same limit pattern as the daemon's failover detector", () => {
-    expect(LIMIT_PATTERN.source).toBe(daemonLimitPattern().source);
-    expect(LIMIT_PATTERN.flags).toBe(daemonLimitPattern().flags);
+    expect(LIMIT_PATTERN.source).toBe(daemonPattern("LIMIT_TEXT_PATTERN").source);
+    expect(LIMIT_PATTERN.flags).toBe(daemonPattern("LIMIT_TEXT_PATTERN").flags);
   });
 });
 
@@ -160,9 +160,8 @@ describe("classify", () => {
     expect(classify("You've hit your limit").isAuthFailure).toBeFalsy();
   });
 
-  // The 2026-10-12 incident: an expired-and-unrefreshable OAuth session produced this exact text,
-  // and this plugin's AUTH_FAILURE_PATTERN missed it, which let the account-pool keep retrying it.
-  it("flags the daemon's R2 auth strings as auth failures too", () => {
+  // An expired OAuth session that cannot refresh fails a turn with exactly this text.
+  it("flags an expired or revoked sign-in as an auth failure", () => {
     expect(
       classify("Failed to authenticate: OAuth session expired and could not be refreshed")
         .isAuthFailure,
@@ -181,24 +180,16 @@ describe("classify", () => {
   });
 
   /**
-   * `AUTH_FAILURE_PATTERN` must recognize every string the daemon's `isAuthShapedError`
-   * (account-failover-detector.ts's `AUTH_TEXT_PATTERN`) does, or a sign-in failure the daemon
-   * sees would keep looking healthy to the pool. Unlike LIMIT_PATTERN above, the two patterns are
-   * not required to be identical sources -- this plugin's pattern also recognizes strings
-   * (`invalid auth token`, `oauth login failed`, `cloud authentication failed`) the daemon's
-   * doesn't need -- so this checks containment, not equality.
+   * `AUTH_FAILURE_PATTERN` must recognize every string the daemon's `isAuthShapedError` does, or a
+   * sign-in failure the daemon sees would keep looking healthy to the pool. It may recognize more
+   * (`invalid auth token`, `oauth login failed`, `cloud authentication failed`), so this checks
+   * containment, not equality.
    */
   it("recognizes every string in the daemon's AUTH_TEXT_PATTERN", () => {
-    const source = readFileSync(
-      new URL("../../../packages/server/src/server/agent/account-failover-detector.ts", import.meta.url),
-      "utf8",
-    );
-    const match = /const AUTH_TEXT_PATTERN =\s*\/(.+)\/([a-z]*);/.exec(source);
-    if (!match) {
-      throw new Error("AUTH_TEXT_PATTERN not found in account-failover-detector.ts; update this test");
-    }
-    const alternatives = match[1].split("|").map((alt) => alt.replace(/\\\//g, "/"));
-    expect(alternatives.length).toBeGreaterThan(0);
+    const alternatives = daemonPattern("AUTH_TEXT_PATTERN")
+      .source.split("|")
+      .map((alt) => alt.replace(/\\\//g, "/"));
+    expect(alternatives.length).toBeGreaterThan(1);
     for (const alternative of alternatives) {
       expect(classify(alternative).isAuthFailure, alternative).toBe(true);
     }
