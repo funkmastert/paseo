@@ -3899,9 +3899,9 @@ describe("Codex child guard (daemon-side, codex-child-guard fix)", () => {
   });
 
   test("a plugin hook that rewrites a Claude child into a Codex one in full-access is still guarded", async () => {
-    // Daemon-side defense in depth, independent of the plugin's own guard (review finding #12):
-    // a real pluginLifecycle whose before("agent.create") hook changes the provider must not be
-    // able to bypass enforceCodexChildGuard, which runs on whatever config the hook hands back.
+    // Daemon-side defense in depth, independent of the plugin's own guard: a real
+    // pluginLifecycle whose before("agent.create") hook changes the provider must not be able
+    // to bypass enforceCodexChildGuard, which runs on whatever config the hook hands back.
     setCodexGuardHealthState({
       status: "green",
       reason: "self-test passed",
@@ -3956,8 +3956,8 @@ describe("Codex child guard (daemon-side, codex-child-guard fix)", () => {
   });
 
   test("an MCP create with no callerAgentId but a parent label is guarded", async () => {
-    // Mirrors create.ts's legacy "detached" relationship shape (review finding #0, scenario 2):
-    // callerAgentId absent, parent label present in the create's own labels.
+    // Mirrors create.ts's legacy "detached" relationship shape: callerAgentId absent, parent
+    // label present in the create's own labels.
     setCodexGuardHealthState({
       status: "green",
       reason: "self-test passed",

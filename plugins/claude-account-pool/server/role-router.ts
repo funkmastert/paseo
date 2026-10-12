@@ -330,8 +330,8 @@ type ProviderOptionsValue = AgentCreateConfig["providerOptions"];
 const CODEX_GUARDED_OVERRIDE_KEYS = ["approval_policy", "sandbox_mode", "sandbox_workspace_write"] as const;
 
 /**
- * Defense in depth for a routed Codex child (review finding #1): these three fields must never
- * reach the provider on a guarded create at all, even though the provider itself
+ * Defense in depth for a routed Codex child: these three fields must never reach the provider on
+ * a guarded create at all, even though the provider itself
  * (codex-app-server-agent.ts's `guardedProviderOptions()`) is also responsible for refusing them
  * for a guarded session. Two independent layers enforcing the same invariant -- a caller-supplied
  * approval_policy/sandbox_mode/sandbox_workspace_write must never be able to turn a guarded
@@ -357,8 +357,8 @@ function stripCodexGuardedOverrides(providerOptions: ProviderOptionsValue | unde
  * fields lie for two of its outcomes: `unconfigured` reports `provider: null` though the
  * request's own provider stands, and a pinned cross-family rewrite target that isn't registered
  * (recovery path) falls back to the request's own provider too. Both the guard and tool
- * enforcement need to key on this, not `decision.model.provider` alone (review finding #5): a
- * bare, unprefixed pool entry inside a same-family selection leaves `crossesRequestedFamily`
+ * enforcement need to key on this, not `decision.model.provider` alone: a bare, unprefixed pool
+ * entry inside a same-family selection leaves `crossesRequestedFamily`
  * false and `provider` null, and a `codex` request left unguarded there is exactly the bypass
  * this function closes.
  */
@@ -1111,7 +1111,7 @@ function routeRoleForCreateUnguarded(
       enforcementProvider = request.config.provider ?? null;
     }
   }
-  // Computed from `guardedRequest`, not `request` (review finding #8): a guarded child's base
+  // Computed from `guardedRequest`, not `request`: a guarded child's base
   // already has the caller's own approval_policy/sandbox_mode/sandbox_workspace_write stripped,
   // so enforcement's own trusted providerOptions (e.g. a read-only profile's `sandbox_mode`)
   // never has to fight a leaked override for the same key, and a no-op enforcement decision

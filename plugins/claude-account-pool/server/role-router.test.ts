@@ -87,7 +87,7 @@ function baseOptions(overrides: Partial<RoleRouterOptions> = {}): RoleRouterOpti
     recentAgentTypes: createRecentAgentTypes(),
     // Most tests here are not about the Codex guard's own health -- default to healthy (a
     // daemon whose self-test passed) so a codex pick routes the way it always used to. Override
-    // explicitly to exercise the unavailable-outcome health fallback (review finding #9).
+    // explicitly to exercise the unavailable-outcome health fallback.
     codexGuardCache: { get: () => ({ healthy: true, runningChildren: 0 }) },
     ...overrides,
   };
@@ -929,7 +929,7 @@ describe("createRoleRouter", () => {
     expect(result?.config.cwd).toBe("/tmp/work");
   });
 
-  it("strips a caller's approval_policy/sandbox_mode/sandbox_workspace_write for a codex-routed create (review finding #1)", () => {
+  it("strips a caller's approval_policy/sandbox_mode/sandbox_workspace_write for a codex-routed create", () => {
     const router = createRoleRouter(
       baseOptions({
         policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-5.1"])),
@@ -1392,10 +1392,10 @@ describe("createRoleRouter", () => {
       expect(result?.config.model).toBe("claude-sonnet-5");
     });
 
-    it("REVIEW FINDING #9: a single-entry codex pool's fallback-anyway pick backs out to the caller's own provider when the guard isn't healthy", () => {
+    it("a single-entry codex pool's fallback-anyway pick backs out to the caller's own provider when the guard isn't healthy", () => {
       // Single entry, no usage reported: codex is ineligible for ordinary selection, so
       // `selectModel` returns `outcome: "unavailable"` and names codex as its "use it anyway"
-      // pick -- exactly the shape the daemon would otherwise refuse outright (KTD-6).
+      // pick -- exactly the shape the daemon would otherwise refuse outright.
       const onRoleUnavailable = vi.fn();
       const router = createRoleRouter(
         baseOptions({
