@@ -45,10 +45,15 @@ function entryFor(usage: ProviderUsage, host: AccountAlertHostUsage): AccountAle
 
 const KIND_ORDER: Readonly<Record<AccountProblemKind, number>> = { signed_out: 0, identity: 1 };
 
+/** The banner's order: signed-out first, then identity, then by account label. */
+export function compareAccountAlertEntries(a: AccountAlertEntry, b: AccountAlertEntry): number {
+  if (a.kind !== b.kind) return KIND_ORDER[a.kind] - KIND_ORDER[b.kind];
+  return a.label.localeCompare(b.label);
+}
+
 /**
- * Every enabled account across every connected host with a sign-in or identity problem:
- * signed-out first, then identity, then by account label. A disabled provider, or a row
- * carrying neither field, produces nothing.
+ * Every enabled account across the given hosts with a sign-in or identity problem, in the
+ * banner's order. A disabled provider, or a row carrying neither field, produces nothing.
  */
 export function buildAccountAlertEntries(
   hosts: readonly AccountAlertHostUsage[],
@@ -60,10 +65,7 @@ export function buildAccountAlertEntries(
       if (entry) entries.push(entry);
     }
   }
-  return entries.sort((a, b) => {
-    if (a.kind !== b.kind) return KIND_ORDER[a.kind] - KIND_ORDER[b.kind];
-    return a.label.localeCompare(b.label);
-  });
+  return entries.sort(compareAccountAlertEntries);
 }
 
 /** Where the app can fix an entry from: what the desktop knows about itself and the entry's host. */

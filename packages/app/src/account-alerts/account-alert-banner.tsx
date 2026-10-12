@@ -15,7 +15,6 @@ import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { DEFAULT_REFETCH_INTERVAL_MS } from "@/orchestration/account-budget-strip";
 import { useCopyFixCommand } from "@/provider-usage/use-copy-fix-command";
 import { providerUsageQueryKey, useProviderUsage } from "@/provider-usage/use-provider-usage";
-import type { ProviderUsage } from "@/provider-usage/types";
 import { useHostRuntimeClient, useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
@@ -25,8 +24,9 @@ import {
   buildAccountAlertEntries,
   signInActionFor,
   type AccountAlertEntry,
-  type AccountAlertHostUsage,
 } from "./account-alert-model";
+import { BelowBannerInsets } from "./below-banner-insets";
+import { NO_ACCOUNT_ALERTS, reportHostAccountAlerts, useAccountAlertEntries } from "./store";
 
 const COMPACT_MAX_ENTRIES = 2;
 // Matches the daemon's own "Signing in..." cutoff (docs/account-failover.md): a login the app
@@ -45,87 +45,43 @@ function toneTextStyle(tone: EntryTone) {
   return styles.warningText;
 }
 
-const EMPTY_PROVIDERS: readonly ProviderUsage[] = [];
-
 /**
- * Subscribes one host's usage and provider snapshot and reports the combined row up. A plain
- * hook can't fan out over a host list whose length changes between renders, so the banner mounts
- * one of these per connected host instead and lifts the result through `onChange`.
+ * Subscribes one host's usage and provider snapshot and reports the host's alert entries to the
+ * store. A plain hook can't fan out over a host list whose length changes between renders, so the
+ * feed mounts one of these per connected host instead.
  */
-function HostAlertSource({
-  serverId,
-  hostLabel,
-  onChange,
-}: {
-  serverId: string;
-  hostLabel: string;
-  onChange: (serverId: string, usage: AccountAlertHostUsage | null) => void;
-}) {
+function HostAlertSource({ serverId, hostLabel }: { serverId: string; hostLabel: string }) {
   const { view } = useProviderUsage(serverId, {
     refetchInterval: DEFAULT_REFETCH_INTERVAL_MS,
     catchUpOnFocus: true,
   });
-  const { entries } = useProvidersSnapshot(serverId);
-  const providers = useMemo(
-    () => (view.kind === "ready" ? view.payload.providers : EMPTY_PROVIDERS),
-    [view],
-  );
+  const { entries: snapshot } = useProvidersSnapshot(serverId);
+  const alertEntries = useMemo(() => {
+    if (view.kind !== "ready") return NO_ACCOUNT_ALERTS;
+    const providers = view.payload.providers;
+    return buildAccountAlertEntries([{ serverId, hostLabel, providers, entries: snapshot }]);
+  }, [serverId, hostLabel, view, snapshot]);
 
   useEffect(() => {
-    onChange(serverId, providers.length > 0 ? { serverId, hostLabel, providers, entries } : null);
-  }, [serverId, hostLabel, providers, entries, onChange]);
+    reportHostAccountAlerts(serverId, alertEntries);
+  }, [serverId, alertEntries]);
 
+  // Unmount only: a cleanup on the report effect would clear and re-add the host every poll.
   useEffect(() => {
-    return () => onChange(serverId, null);
-  }, [serverId, onChange]);
+    return () => reportHostAccountAlerts(serverId, NO_ACCOUNT_ALERTS);
+  }, [serverId]);
 
   return null;
 }
 
-/**
- * Every enabled account's sign-in or identity problem, merged across every connected host. Mount
- * once, high in the tree; `children` renders with the live state so a caller (the banner itself,
- * or a layout that needs to know whether the banner is showing) never fetches this twice.
- */
-export function AccountAlertFeed({
-  children,
-}: {
-  children: (state: { entries: AccountAlertEntry[]; multiHost: boolean }) => ReactNode;
-}) {
+/** One source per connected host; a removed host's source unmounts and clears its entries. */
+function AccountAlertFeed() {
   const hosts = useHosts();
-  const [byHost, setByHost] = useState<Record<string, AccountAlertHostUsage>>({});
-
-  const handleChange = useCallback((serverId: string, usage: AccountAlertHostUsage | null) => {
-    setByHost((previous) => {
-      if (usage === null) {
-        if (!(serverId in previous)) return previous;
-        const next = { ...previous };
-        delete next[serverId];
-        return next;
-      }
-      return { ...previous, [serverId]: usage };
-    });
-  }, []);
-
-  const state = useMemo(
-    () => ({
-      entries: buildAccountAlertEntries(Object.values(byHost)),
-      multiHost: hosts.length > 1,
-    }),
-    [byHost, hosts.length],
-  );
-
   return (
     <>
       {hosts.map((host) => (
-        <HostAlertSource
-          key={host.serverId}
-          serverId={host.serverId}
-          hostLabel={host.label}
-          onChange={handleChange}
-        />
+        <HostAlertSource key={host.serverId} serverId={host.serverId} hostLabel={host.label} />
       ))}
-      {children(state)}
     </>
   );
 }
@@ -274,19 +230,18 @@ function AccountAlertEntryRow({
  * Not dismissible while a problem stands (docs/design.md §11): filled red the moment any entry
  * is signed out, amber when every entry is only an identity problem. Renders nothing otherwise.
  */
-export function AccountAlertBanner({
-  entries,
-  multiHost,
-}: {
-  entries: AccountAlertEntry[];
-  multiHost: boolean;
-}) {
+function AccountAlertBanner() {
   const { t } = useTranslation();
   const insets = useSafeAreaInsets();
   const isCompact = useIsCompactFormFactor();
+  const entries = useAccountAlertEntries();
+  const multiHost = useHosts().length > 1;
 
   const hasSignedOut = entries.some((entry) => entry.kind === "signed_out");
-  const visibleEntries = isCompact ? entries.slice(0, COMPACT_MAX_ENTRIES) : entries;
+  const visibleEntries = useMemo(
+    () => (isCompact ? entries.slice(0, COMPACT_MAX_ENTRIES) : entries),
+    [isCompact, entries],
+  );
   const hiddenCount = entries.length - visibleEntries.length;
   const overflowServerId = entries[visibleEntries.length]?.serverId;
 
@@ -333,6 +288,21 @@ export function AccountAlertBanner({
         />
       </View>
     </View>
+  );
+}
+
+/**
+ * Every enabled account's sign-in or identity problem, across every connected host, as a banner
+ * above the app shell. Mount once, around the shell: the frame holds no state, so a usage poll
+ * re-renders the banner and never the shell.
+ */
+export function AccountAlertFrame({ children }: { children: ReactNode }) {
+  return (
+    <>
+      <AccountAlertFeed />
+      <AccountAlertBanner />
+      <BelowBannerInsets>{children}</BelowBannerInsets>
+    </>
   );
 }
 

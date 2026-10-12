@@ -19,11 +19,7 @@ import {
 import { AppState, useWindowDimensions, View } from "react-native";
 import { GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
-import {
-  SafeAreaInsetsContext,
-  SafeAreaProvider,
-  useSafeAreaInsets,
-} from "react-native-safe-area-context";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { AppearanceProvider } from "@/appearance/provider";
 import { CommandCenter } from "@/command-center/command-center";
@@ -141,8 +137,7 @@ import { resolveNotificationTapAction } from "@/utils/notification-routing";
 import { openExternalUrl } from "@/utils/open-external-url";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { AgentMoveNoticeToast } from "@/components/agent-move-notice-toast";
-import { AccountAlertBanner, AccountAlertFeed } from "@/account-alerts/account-alert-banner";
-import type { AccountAlertEntry } from "@/account-alerts/account-alert-model";
+import { AccountAlertFrame } from "@/account-alerts/account-alert-banner";
 import { PluginCatalogSync } from "@/plugins";
 import {
   ensureOsNotificationPermission,
@@ -878,36 +873,6 @@ function OpenProjectListener() {
   return null;
 }
 
-function AppWithSidebarContent({
-  children,
-  chromeEnabled,
-  bannerEntries,
-  bannerMultiHost,
-}: {
-  children: ReactNode;
-  chromeEnabled: boolean;
-  bannerEntries: AccountAlertEntry[];
-  bannerMultiHost: boolean;
-}) {
-  const insets = useSafeAreaInsets();
-  const bannerVisible = bannerEntries.length > 0;
-  // The banner renders above everything and reserves the top safe-area inset and window-chrome
-  // clearance itself (account-alert-banner.tsx); the screen below it is no longer physically
-  // against the notch/traffic-lights, so it must not reserve that space a second time.
-  const contentInsets = useMemo(
-    () => (bannerVisible ? { ...insets, top: 0 } : insets),
-    [bannerVisible, insets],
-  );
-  return (
-    <>
-      <AccountAlertBanner entries={bannerEntries} multiHost={bannerMultiHost} />
-      <SafeAreaInsetsContext.Provider value={contentInsets}>
-        <AppContainer chromeEnabled={chromeEnabled}>{children}</AppContainer>
-      </SafeAreaInsetsContext.Provider>
-    </>
-  );
-}
-
 function AppWithSidebar({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const hosts = useHosts();
@@ -928,17 +893,9 @@ function AppWithSidebar({ children }: { children: ReactNode }) {
       routeHasKnownHost);
 
   return (
-    <AccountAlertFeed>
-      {({ entries, multiHost }) => (
-        <AppWithSidebarContent
-          chromeEnabled={shouldShowAppChrome}
-          bannerEntries={entries}
-          bannerMultiHost={multiHost}
-        >
-          {children}
-        </AppWithSidebarContent>
-      )}
-    </AccountAlertFeed>
+    <AccountAlertFrame>
+      <AppContainer chromeEnabled={shouldShowAppChrome}>{children}</AppContainer>
+    </AccountAlertFrame>
   );
 }
 

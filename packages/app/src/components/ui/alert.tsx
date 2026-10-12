@@ -40,20 +40,16 @@ export function Alert({
   const accentColor = resolveAccentColor(variant, theme);
   const borderColor = variant === "success" ? theme.colors.border : accentColor;
 
-  let quietContainerStyle: { borderColor: string } | null = null;
-  if (!filled && borderColor) quietContainerStyle = { borderColor };
-  const containerStyle = useMemo(
-    () => [styles.container, filled ? styles.containerFilled : quietContainerStyle],
-    [filled, quietContainerStyle],
-  );
+  const containerStyle = useMemo(() => {
+    if (filled) return [styles.container, styles.containerFilled];
+    return [styles.container, borderColor ? { borderColor } : null];
+  }, [filled, borderColor]);
 
   const textStyle = filled ? styles.filledText : null;
-  let quietTitleStyle: { color: string } | null = null;
-  if (!filled && accentColor) quietTitleStyle = { color: accentColor };
-  const titleStyle = useMemo(
-    () => [styles.title, filled ? styles.filledText : quietTitleStyle],
-    [filled, quietTitleStyle],
-  );
+  const titleStyle = useMemo(() => {
+    if (filled) return [styles.title, styles.filledText];
+    return [styles.title, accentColor ? { color: accentColor } : null];
+  }, [filled, accentColor]);
 
   const resolvedIcon = useMemo(() => {
     if (icon !== undefined) return icon;
