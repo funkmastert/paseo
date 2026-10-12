@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, type ReactNode } from "react";
 import { router } from "expo-router";
 import { Copy } from "lucide-react-native";
 import { Pressable, Text, View } from "react-native";
@@ -26,12 +26,10 @@ import {
   type AccountAlertEntry,
 } from "./account-alert-model";
 import { BelowBannerInsets } from "./below-banner-insets";
+import { SIGN_IN_IDLE, SIGN_IN_TIMEOUT_MS, signInReducer, type SignInEvent } from "./sign-in-state";
 import { NO_ACCOUNT_ALERTS, reportHostAccountAlerts, useAccountAlertEntries } from "./store";
 
 const COMPACT_MAX_ENTRIES = 2;
-// Mirrors the daemon's login slot (LOGIN_TIMEOUT_MS in claude-account-sign-in.ts): until it
-// frees, a retry only gets `already_running`, so the button stays pending that long, win or lose.
-const SIGN_IN_TIMEOUT_MS = 5 * 60_000;
 
 const ThemedCopy = withUnistyles(Copy);
 const mutedIconColor = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
@@ -56,11 +54,16 @@ function HostAlertSource({ serverId, hostLabel }: { serverId: string; hostLabel:
     catchUpOnFocus: true,
   });
   const { entries: snapshot } = useProvidersSnapshot(serverId);
+  const hostSupportsSignIn = useSessionStore(
+    (state) => state.sessions[serverId]?.serverInfo?.features?.claudeAccountSignIn === true,
+  );
   const alertEntries = useMemo(() => {
     if (view.kind !== "ready") return NO_ACCOUNT_ALERTS;
     const providers = view.payload.providers;
-    return buildAccountAlertEntries([{ serverId, hostLabel, providers, entries: snapshot }]);
-  }, [serverId, hostLabel, view, snapshot]);
+    return buildAccountAlertEntries([
+      { serverId, hostLabel, hostSupportsSignIn, providers, entries: snapshot },
+    ]);
+  }, [serverId, hostLabel, hostSupportsSignIn, view, snapshot]);
 
   useEffect(() => {
     reportHostAccountAlerts(serverId, alertEntries);
@@ -100,14 +103,10 @@ function AccountAlertEntryRow({
   const isCompact = useIsCompactFormFactor();
   const client = useHostRuntimeClient(entry.serverId);
   const isLocalDaemon = useIsLocalDaemon(entry.serverId);
-  const signInSupported = useSessionStore(
-    (state) => state.sessions[entry.serverId]?.serverInfo?.features?.claudeAccountSignIn === true,
-  );
   const queryClient = useQueryClient();
-  const [pending, setPending] = useState(false);
+  const [signIn, dispatchSignIn] = useReducer(signInReducer, SIGN_IN_IDLE);
   // Set synchronously, so a second click before the re-render sends nothing.
   const pendingRef = useRef(false);
-  const [error, setError] = useState<string | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -116,40 +115,37 @@ function AccountAlertEntryRow({
     };
   }, []);
 
-  const signInAction = signInActionFor(entry, {
-    isElectron: getIsElectron(),
-    hostSupportsSignIn: signInSupported,
-    isLocalDaemon,
-  });
+  const signInAction = signInActionFor(entry, { isElectron: getIsElectron(), isLocalDaemon });
 
   const handleSignIn = useCallback(() => {
     if (pendingRef.current || !client) return;
-    const settle = () => {
+    function settle(event: SignInEvent) {
       pendingRef.current = false;
-      setPending(false);
-    };
+      dispatchSignIn(event);
+    }
     pendingRef.current = true;
-    setPending(true);
-    setError(null);
+    dispatchSignIn({ type: "start" });
     void client
       .accountClaudeSignIn(entry.providerId)
       .then((response) => {
         if (response.outcome === "failed") {
-          settle();
-          setError(response.error ?? t("accountAlerts.signInError"));
+          settle({ type: "failed", error: response.error });
           return;
         }
-        timeoutRef.current = setTimeout(settle, SIGN_IN_TIMEOUT_MS);
+        dispatchSignIn({ type: "started" });
+        timeoutRef.current = setTimeout(() => settle({ type: "timed_out" }), SIGN_IN_TIMEOUT_MS);
         return;
       })
-      .catch((caught: unknown) => {
-        settle();
-        setError(caught instanceof Error ? caught.message : t("accountAlerts.signInError"));
-      })
+      .catch((caught: unknown) => settle({ type: "threw", error: caught }))
       .finally(() => {
         void queryClient.invalidateQueries({ queryKey: providerUsageQueryKey(entry.serverId) });
       });
-  }, [client, entry.providerId, entry.serverId, queryClient, t]);
+  }, [client, entry.providerId, entry.serverId, queryClient]);
+
+  const isSigningIn = signIn.status === "pending";
+  const signInLabel = isSigningIn ? t("accountAlerts.signInPending") : t("accountAlerts.signIn");
+  let signInError: string | null = null;
+  if (signIn.status === "failed") signInError = signIn.message ?? t("accountAlerts.signInError");
 
   const handleCopy = useCopyFixCommand(entry.fixCommand);
 
@@ -169,11 +165,11 @@ function AccountAlertEntryRow({
           variant="outline"
           size="sm"
           onPress={handleSignIn}
-          disabled={pending}
-          loading={pending}
+          disabled={isSigningIn}
+          loading={isSigningIn}
           testID={`account-alert-sign-in-${entry.providerId}`}
         >
-          {pending ? t("accountAlerts.signInPending") : t("accountAlerts.signIn")}
+          {signInLabel}
         </Button>
       ) : (
         <Text
@@ -214,12 +210,12 @@ function AccountAlertEntryRow({
           <ThemedCopy size={14} uniProps={filled ? filledIconColor : mutedIconColor} />
         </Pressable>
       </View>
-      {error ? (
+      {signInError ? (
         <Text
           style={[styles.error, filled ? styles.filledText : styles.dangerText]}
           testID={`account-alert-error-${entry.providerId}`}
         >
-          {error}
+          {signInError}
         </Text>
       ) : null}
     </View>

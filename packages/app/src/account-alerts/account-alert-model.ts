@@ -13,12 +13,16 @@ export interface AccountAlertEntry extends AccountProblem {
   serverId: string;
   hostLabel: string;
   label: string;
+  /** The entry's host advertises `claudeAccountSignIn`. */
+  hostSupportsSignIn: boolean;
 }
 
 /** One connected host's usage rows and provider snapshot, as the banner's feed collects them. */
 export interface AccountAlertHostUsage {
   serverId: string;
   hostLabel: string;
+  /** The host advertises `claudeAccountSignIn`. */
+  hostSupportsSignIn: boolean;
   providers: readonly ProviderUsage[];
   entries?: readonly ProviderSnapshotEntry[];
 }
@@ -40,6 +44,7 @@ function entryFor(usage: ProviderUsage, host: AccountAlertHostUsage): AccountAle
     serverId: host.serverId,
     hostLabel: host.hostLabel,
     label: resolveAccountLabel(host.entries, usage),
+    hostSupportsSignIn: host.hostSupportsSignIn,
   };
 }
 
@@ -71,8 +76,6 @@ export function buildAccountAlertEntries(
 /** Where the app can fix an entry from: what the desktop knows about itself and the entry's host. */
 export interface SignInContext {
   isElectron: boolean;
-  /** The entry's host advertises `claudeAccountSignIn`. */
-  hostSupportsSignIn: boolean;
   /** The entry's host is the daemon this desktop app manages. */
   isLocalDaemon: boolean;
 }
@@ -84,11 +87,11 @@ export type SignInAction = "sign_in" | "run_on_host";
  * is the one in front of the user. Every other signed-out entry says where to run the command.
  */
 export function signInActionFor(
-  entry: Pick<AccountAlertEntry, "kind" | "canSignIn">,
+  entry: Pick<AccountAlertEntry, "kind" | "canSignIn" | "hostSupportsSignIn">,
   context: SignInContext,
 ): SignInAction | null {
   if (entry.kind !== "signed_out") return null;
   const canSignInHere =
-    entry.canSignIn && context.isElectron && context.hostSupportsSignIn && context.isLocalDaemon;
+    entry.canSignIn && entry.hostSupportsSignIn && context.isElectron && context.isLocalDaemon;
   return canSignInHere ? "sign_in" : "run_on_host";
 }

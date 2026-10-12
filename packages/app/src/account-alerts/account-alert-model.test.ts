@@ -22,6 +22,7 @@ function host(overrides: Partial<AccountAlertHostUsage> = {}): AccountAlertHostU
   return {
     serverId: "server-1",
     hostLabel: "Host One",
+    hostSupportsSignIn: true,
     providers: [],
     ...overrides,
   };
@@ -212,11 +213,31 @@ describe("buildAccountAlertEntries", () => {
       "Host Two",
     );
   });
+
+  it("carries whether each entry's host serves the sign-in RPC", () => {
+    const signedOut = usage({
+      accountAuth: {
+        state: "signed_out",
+        since: "2026-10-12T18:00:00Z",
+        summary: "Signed out",
+        fixCommand: "claude auth login",
+        canSignIn: true,
+      },
+    });
+    const entries = buildAccountAlertEntries([
+      host({ serverId: "server-new", hostSupportsSignIn: true, providers: [signedOut] }),
+      host({ serverId: "server-old", hostSupportsSignIn: false, providers: [signedOut] }),
+    ]);
+    expect(entries.map((entry) => [entry.serverId, entry.hostSupportsSignIn])).toEqual([
+      ["server-new", true],
+      ["server-old", false],
+    ]);
+  });
 });
 
 describe("signInActionFor", () => {
-  const here = { isElectron: true, hostSupportsSignIn: true, isLocalDaemon: true };
-  const signedOut = { kind: "signed_out" as const, canSignIn: true };
+  const here = { isElectron: true, isLocalDaemon: true };
+  const signedOut = { kind: "signed_out" as const, canSignIn: true, hostSupportsSignIn: true };
 
   it("offers Sign in for a signed-out entry on the desktop's own daemon", () => {
     expect(signInActionFor(signedOut, here)).toBe("sign_in");
@@ -225,14 +246,15 @@ describe("signInActionFor", () => {
   it.each([
     ["the daemon cannot start a login", { ...signedOut, canSignIn: false }, here],
     ["the app is not Electron", signedOut, { ...here, isElectron: false }],
-    ["the host does not serve the sign-in RPC", signedOut, { ...here, hostSupportsSignIn: false }],
+    ["the host does not serve the sign-in RPC", { ...signedOut, hostSupportsSignIn: false }, here],
     ["the entry is on a remote host", signedOut, { ...here, isLocalDaemon: false }],
   ])("falls back to running the command on the host when %s", (_reason, entry, context) => {
     expect(signInActionFor(entry, context)).toBe("run_on_host");
   });
 
   it("offers nothing for an identity entry", () => {
-    expect(signInActionFor({ kind: "identity", canSignIn: false }, here)).toBeNull();
-    expect(signInActionFor({ kind: "identity", canSignIn: true }, here)).toBeNull();
+    const identity = { kind: "identity" as const, hostSupportsSignIn: true };
+    expect(signInActionFor({ ...identity, canSignIn: false }, here)).toBeNull();
+    expect(signInActionFor({ ...identity, canSignIn: true }, here)).toBeNull();
   });
 });

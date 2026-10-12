@@ -12,6 +12,7 @@ function entry(overrides: Partial<AccountAlertEntry> = {}): AccountAlertEntry {
     summary: "claude-backup is signed out",
     fixCommand: "claude auth login",
     canSignIn: true,
+    hostSupportsSignIn: true,
     ...overrides,
   };
 }
