@@ -23,24 +23,35 @@ export type AccountAuthReading =
 
 export type AccountAuthProbeResult = "success" | "auth_failure" | "inconclusive";
 
-export interface AccountAuthRecord {
+interface AccountAuthRecordBase {
   providerId: string;
-  state: AccountAuthState;
   /** When the evidence behind the current state was dated, not when this process noticed it. */
   since: number;
   summary: string;
-  fixCommand: string;
-  email: string | null;
 }
 
-export type AccountAuthEpisode = AccountAuthRecord;
+export interface AccountAuthOkRecord extends AccountAuthRecordBase {
+  state: "ok";
+}
+
+/** An account that may not authenticate, with who to sign in as and how. */
+export interface AccountAuthProblemRecord extends AccountAuthRecordBase {
+  state: "suspect" | "signed_out";
+  /** The declared email, else the last login in the config dir's `.claude.json`. */
+  email: string | null;
+  fixCommand: string;
+}
+
+export type AccountAuthRecord = AccountAuthOkRecord | AccountAuthProblemRecord;
+
+export type AccountAuthEpisode = AccountAuthProblemRecord;
 
 export interface AccountAuthAccountInput {
   providerId: string;
   enabled: boolean;
   /** The directory the sign-in command targets. Null leaves the command unscoped. */
   configDir: string | null;
-  expectedEmail: string | null;
+  expectedEmail?: string | null;
 }
 
 export interface AccountAuthTurnFailureInput {
@@ -80,11 +91,6 @@ export interface AccountAuthObserveResult {
   opened: AccountAuthEpisode[];
   /** Providers that were signed_out and are not any more. */
   closed: AccountAuthEpisode[];
-}
-
-function fixCommandFor(configDir: string | null, email: string | null): string {
-  if (configDir) return claudeSignInCommand(configDir, email);
-  return email ? `claude auth login --email ${email}` : "claude /login";
 }
 
 function latestByProvider<T extends { providerId: string; atMs: number }>(
@@ -202,6 +208,26 @@ interface NextRecordEvidence {
   probe: AccountAuthProbeInput | null;
 }
 
+const OK_SINCE_START: Candidate = { state: "ok", atMs: 0, summary: "ok" };
+
+/** The record for one account in `candidate`'s state; a problem names who to sign in as. */
+function recordFor(account: AccountAuthAccountInput, candidate: Candidate): AccountAuthRecord {
+  const base = {
+    providerId: account.providerId,
+    since: candidate.atMs,
+    summary: candidate.summary,
+  };
+  if (candidate.state === "ok") return { ...base, state: "ok" };
+  const email =
+    account.expectedEmail ?? (account.configDir ? lastKnownClaudeEmail(account.configDir) : null);
+  return {
+    ...base,
+    state: candidate.state,
+    email,
+    fixCommand: claudeSignInCommand(account.configDir, email),
+  };
+}
+
 function nextRecordFor(evidence: NextRecordEvidence): AccountAuthRecord {
   const { account, prev } = evidence;
   const prevState = prev?.state ?? "ok";
@@ -213,31 +239,12 @@ function nextRecordFor(evidence: NextRecordEvidence): AccountAuthRecord {
     candidateFromReading(evidence.reading),
     candidateFromProbe(evidence.probe),
   ]);
-
-  const email = account.expectedEmail ?? lastKnownClaudeEmail(account.configDir ?? "") ?? null;
-  const fixCommand = fixCommandFor(account.configDir, email);
-
-  if (picked) {
-    return {
-      providerId: account.providerId,
-      state: picked.state,
-      since: picked.atMs,
-      summary: picked.summary,
-      fixCommand,
-      email,
-    };
-  }
-  if (prev) {
-    return { ...prev, fixCommand, email };
-  }
-  return {
-    providerId: account.providerId,
-    state: "ok",
-    since: 0,
-    summary: "ok",
-    fixCommand,
-    email,
-  };
+  // A standing record is rebuilt too, so a login fixed in `.claude.json` updates its command.
+  return recordFor(
+    account,
+    picked ??
+      (prev ? { state: prev.state, atMs: prev.since, summary: prev.summary } : OK_SINCE_START),
+  );
 }
 
 /**
@@ -280,7 +287,7 @@ export class AccountAuthTracker {
       if (prevState !== "signed_out" && next.state === "signed_out") {
         opened.push({ ...next });
       }
-      if (prevState === "signed_out" && next.state !== "signed_out" && prev) {
+      if (prev?.state === "signed_out" && next.state !== "signed_out") {
         closed.push({ ...prev });
       }
     }

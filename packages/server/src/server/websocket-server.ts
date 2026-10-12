@@ -9,6 +9,7 @@ import type { AgentManager, AgentMetricsSnapshot } from "./agent/agent-manager.j
 import type { AgentStorage } from "./agent/agent-storage.js";
 import { PoolAccountIdentityTracker } from "./agent/pool-account-identity.js";
 import { AccountAuthTracker } from "./agent/account-auth-health.js";
+import { ClaudeAccountSignIn } from "./session/account/claude-account-sign-in.js";
 import type { DownloadTokenStore } from "./file-download/token-store.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type pino from "pino";
@@ -619,6 +620,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly providerUsageService: ProviderUsageService;
   private readonly accountIdentity = new PoolAccountIdentityTracker();
   private readonly accountAuth = new AccountAuthTracker();
+  private readonly accountSignIn: ClaudeAccountSignIn;
   private readonly usageHistoryStore: UsageHistoryStore;
   private readonly contextUsageService: AgentContextUsageService;
   private unsubscribeTerminalActivity: (() => void) | null = null;
@@ -797,6 +799,22 @@ export class VoiceAssistantWebSocketServer {
       });
     });
 
+    this.accountSignIn = new ClaudeAccountSignIn({
+      readDaemonConfig: () => this.daemonConfigStore.get(),
+      logger: this.logger,
+      // The login may have fixed the account: read its usage now, so the next sweep and the
+      // app's next poll both see it.
+      onLoginExited: (providerId) => {
+        void this.providerUsageService
+          .listUsage({ forceRefreshProviderIds: new Set([providerId]) })
+          .catch((error) => {
+            this.logger.warn(
+              { err: error, providerId },
+              "Account sign-in: post-login usage recheck failed",
+            );
+          });
+      },
+    });
     // Claude-derived entries are captured once at construction; a config change that adds
     // or edits one only takes effect after a daemon restart.
     this.providerUsageService = new ProviderUsageService({
@@ -804,6 +822,7 @@ export class VoiceAssistantWebSocketServer {
       claudeDerivedProviders: deriveClaudeProviderEntries(this.daemonConfigStore.get().providers),
       accountIdentity: this.accountIdentity,
       accountAuth: this.accountAuth,
+      isClaudeBinaryAvailable: () => this.accountSignIn.isBinaryAvailable(),
       // Re-read from config.json each fetch: the key is named there, never stored.
       readOpenAiApiConfig: () => {
         try {
@@ -1548,6 +1567,7 @@ export class VoiceAssistantWebSocketServer {
       terminalManager: this.terminalManager,
       providerSnapshotManager: this.providerSnapshotManager,
       providerUsageService: this.providerUsageService,
+      accountSignIn: this.accountSignIn,
       usageHistory: this.usageHistoryStore,
       tokenUsage: this.tokenUsage,
       contextUsage: this.contextUsageService,

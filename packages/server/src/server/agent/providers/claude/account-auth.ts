@@ -6,16 +6,27 @@ import type { AgentAccountAuth } from "../../agent-sdk-types.js";
 const GLOBAL_CONFIG_FILENAME = ".claude.json";
 
 /**
- * The command a person runs to sign the account behind `configDir` in. With an expected email the
- * OAuth page is pre-filled with it (`login_hint`), so a browser that is signed into a different
- * account does not win by default. Without one this is the bare command, and that is the only
- * fallback: a label is free text, so nothing is parsed out of it.
+ * The `claude` arguments that sign `email` in. The OAuth page is pre-filled with it
+ * (`login_hint`), so a browser that is signed into a different account does not win by default.
+ * The daemon spawns exactly these for an in-app sign-in, and `claudeSignInCommand` prints them.
  */
-export function claudeSignInCommand(configDir: string, expectedEmail?: string | null): string {
+export function claudeSignInArgs(email: string): string[] {
+  return ["auth", "login", "--email", email];
+}
+
+/**
+ * The command a person runs to sign the account behind `configDir` in. Without an expected email
+ * this is the bare, terminal-only `claude /login`, and that is the only fallback: a label is free
+ * text, so nothing is parsed out of it. A null `configDir` leaves the command unscoped.
+ */
+export function claudeSignInCommand(
+  configDir: string | null,
+  expectedEmail?: string | null,
+): string {
   const login = expectedEmail
-    ? `claude auth login --email ${shellWord(expectedEmail)}`
+    ? ["claude", ...claudeSignInArgs(expectedEmail)].map(shellWord).join(" ")
     : "claude /login";
-  return `CLAUDE_CONFIG_DIR=${configDir} ${login}`;
+  return configDir ? `CLAUDE_CONFIG_DIR=${configDir} ${login}` : login;
 }
 
 function shellWord(value: string): string {
@@ -60,10 +71,9 @@ export function readClaudeAccountAuth(configDir: string): AgentAccountAuth {
 
 /**
  * The email `oauthAccount` last named in this config dir's `.claude.json`, whether or not the
- * session behind it still authenticates. A sign-in command built from this beats the TTY-only
- * bare `claude /login` for an account whose OAuth session expired without the CLI clearing
- * `oauthAccount` (the gap this plan closes) — the browser login page can be pre-filled with the
- * right login instead of asking Tyler to remember which of three accounts needs it.
+ * session behind it still authenticates. An OAuth session that expired leaves `oauthAccount` in
+ * place, so a sign-in command built from this can pre-fill the right login instead of falling
+ * back to the terminal-only `claude /login`.
  */
 export function lastKnownClaudeEmail(configDir: string): string | null {
   const auth = readClaudeAccountAuth(configDir);

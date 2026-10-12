@@ -7142,8 +7142,9 @@ export const ProviderUsageAccountAuthSchema = z.object({
   since: z.string(),
   summary: z.string(),
   fixCommand: z.string(),
-  /** Whether the desktop Sign in button can offer this entry (an email or bare login resolved,
-   * and the daemon has a `claude` binary to run it with). */
+  /** Whether the daemon can start this account's sign-in itself: an email to pre-fill the login
+   * page is known and a `claude` binary resolves. Without an email only `fixCommand`, run in a
+   * terminal, can sign it in. */
   canSignIn: z.boolean(),
 });
 

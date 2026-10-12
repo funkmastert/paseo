@@ -15,6 +15,32 @@ import { KimiQuotaProvider } from "./providers/kimi.js";
 import { MiniMaxQuotaProvider } from "./providers/minimax.js";
 import { ZaiQuotaProvider } from "./providers/zai.js";
 import { ProviderUsageService } from "./service.js";
+import {
+  AccountAuthTracker,
+  type AccountAuthReading,
+} from "../../server/agent/account-auth-health.js";
+
+function unavailableRow(providerId: string): ProviderUsage {
+  return {
+    providerId,
+    displayName: providerId,
+    status: "unavailable",
+    planLabel: null,
+    windows: [],
+  };
+}
+
+function unavailableFetcher(
+  providerId: string,
+  describeAuthReading?: () => AccountAuthReading,
+): ProviderUsageFetcher {
+  return {
+    providerId,
+    displayName: providerId,
+    fetchUsage: async () => unavailableRow(providerId),
+    ...(describeAuthReading ? { describeAuthReading } : {}),
+  };
+}
 
 function writeClaudeCredentials(
   dir: string,
@@ -474,8 +500,32 @@ describe("ProviderUsageService", () => {
     expect(codexCalls).toBe(1);
   });
 
-  it("collects auth readings only from providers refreshed by the most recent listUsage call", async () => {
+  it("keeps each fetcher's newest auth reading, dated when it was read, from ordinary refills", async () => {
+    const t0 = Date.parse("2026-06-19T00:00:00.000Z");
+    let now = t0;
+    const service = new ProviderUsageService({
+      logger: createLogger(),
+      now: () => now,
+      cacheTtlMs: 60_000,
+      fetchers: [
+        unavailableFetcher("claude-personal", () => "credentials_missing"),
+        unavailableFetcher("codex"),
+      ],
+    });
+
+    await service.listUsage();
+    now += 10_000;
+    // Served from the cache: the reading keeps the time it was actually taken.
+    await service.listUsage();
+
+    const readings = service.getAuthReadings();
+    expect(readings.get("claude-personal")).toEqual({ reading: "credentials_missing", atMs: t0 });
+    expect(readings.has("codex")).toBe(false);
+  });
+
+  it("writes a forced row back into the cache, so a later plain read sees it", async () => {
     let now = Date.parse("2026-06-19T00:00:00.000Z");
+    let reads = 0;
     const service = new ProviderUsageService({
       logger: createLogger(),
       now: () => now,
@@ -484,25 +534,16 @@ describe("ProviderUsageService", () => {
         {
           providerId: "claude-personal",
           displayName: "Claude",
-          fetchUsage: async () => ({
-            providerId: "claude-personal",
-            displayName: "Claude",
-            status: "unavailable",
-            planLabel: null,
-            windows: [],
-          }),
-          describeAuthReading: () => "credentials_missing" as const,
-        },
-        {
-          providerId: "codex",
-          displayName: "Codex",
-          fetchUsage: async () => ({
-            providerId: "codex",
-            displayName: "Codex",
-            status: "available",
-            planLabel: null,
-            windows: [],
-          }),
+          fetchUsage: async () => {
+            reads += 1;
+            return {
+              providerId: "claude-personal",
+              displayName: "Claude",
+              status: reads === 1 ? "unavailable" : "available",
+              planLabel: null,
+              windows: [],
+            };
+          },
         },
       ],
     });
@@ -510,10 +551,71 @@ describe("ProviderUsageService", () => {
     await service.listUsage();
     now += 10_000;
     await service.listUsage({ forceRefreshProviderIds: new Set(["claude-personal"]) });
+    now += 10_000;
+    const later = await service.listUsage();
 
-    const readings = service.getAuthReadings(new Set(["claude-personal", "codex"]));
-    expect(readings.get("claude-personal")).toBe("credentials_missing");
-    expect(readings.has("codex")).toBe(false);
+    expect(reads).toBe(2);
+    expect(later.providers[0]?.status).toBe("available");
+  });
+
+  it("reads a fetcher that is both live and forced once per call", async () => {
+    let now = Date.parse("2026-06-19T00:00:00.000Z");
+    let reads = 0;
+    const live: ProviderUsageFetcher = {
+      ...unavailableFetcher("claude-personal"),
+      live: true,
+      fetchUsage: async () => {
+        reads += 1;
+        return unavailableRow("claude-personal");
+      },
+    };
+    const service = new ProviderUsageService({
+      logger: createLogger(),
+      now: () => now,
+      cacheTtlMs: 60_000,
+      fetchers: [live],
+    });
+
+    await service.listUsage();
+    now += 10_000;
+    await service.listUsage({ forceRefreshProviderIds: new Set(["claude-personal"]) });
+
+    expect(reads).toBe(2);
+  });
+
+  it("offers in-app sign-in only for a signed-out row with a known email and a claude binary", async () => {
+    const tracker = new AccountAuthTracker();
+    tracker.observe({
+      accounts: [
+        {
+          providerId: "with-email",
+          enabled: true,
+          configDir: null,
+          expectedEmail: "a@example.com",
+        },
+        { providerId: "no-email", enabled: true, configDir: null, expectedEmail: null },
+      ],
+      turnFailures: [
+        { providerId: "with-email", error: "Not logged in", atMs: 1 },
+        { providerId: "no-email", error: "Not logged in", atMs: 1 },
+      ],
+    });
+    const fetchers = [unavailableFetcher("with-email"), unavailableFetcher("no-email")];
+    const canSignIn = async (binaryAvailable: boolean) => {
+      const service = new ProviderUsageService({
+        logger: createLogger(),
+        fetchers,
+        accountAuth: tracker,
+        isClaudeBinaryAvailable: async () => binaryAvailable,
+      });
+      const { providers } = await service.listUsage();
+      return Object.fromEntries(
+        providers.map((row) => [row.providerId, row.accountAuth?.canSignIn]),
+      );
+    };
+
+    expect(await canSignIn(true)).toEqual({ "with-email": true, "no-email": false });
+    expect(await canSignIn(false)).toEqual({ "with-email": false, "no-email": false });
   });
 });
 

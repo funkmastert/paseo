@@ -84,6 +84,13 @@ describe("claudeSignInCommand", () => {
     );
   });
 
+  test("leaves the config dir out when none resolves", () => {
+    expect(claudeSignInCommand(null, "worker@example.com")).toBe(
+      "claude auth login --email worker@example.com",
+    );
+    expect(claudeSignInCommand(null, null)).toBe("claude /login");
+  });
+
   test("quotes an email that is not a plain shell word", () => {
     expect(claudeSignInCommand("/c", "o'brien@example.com")).toBe(
       "CLAUDE_CONFIG_DIR=/c claude auth login --email 'o'\\''brien@example.com'",

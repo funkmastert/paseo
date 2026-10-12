@@ -49,10 +49,7 @@ function sameEmail(a: string, b: string): boolean {
 }
 
 function fixFor(reading: PoolAccountReading): string {
-  if (reading.configDir) return claudeSignInCommand(reading.configDir, reading.expectedEmail);
-  return reading.expectedEmail
-    ? `claude auth login --email ${reading.expectedEmail}`
-    : "claude /login";
+  return claudeSignInCommand(reading.configDir, reading.expectedEmail);
 }
 
 /** The members of one login that are not the keeper, each as a problem. */

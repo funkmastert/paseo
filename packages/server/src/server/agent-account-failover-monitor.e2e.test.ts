@@ -65,11 +65,12 @@ interface Harness {
   /** What `describeAccountAuth` reports for a provider — which Claude login it runs as. */
   setAccount(provider: PoolProvider, auth: AgentAccountAuth): void;
   /**
-   * What the usage fetcher's auth reading says for a provider on the next forced re-read
-   * (observeAccountAuth force-reads any provider the tracker already has as suspect or
-   * signed_out). `"ok"` is how a sign-in recovers without a later successful turn.
+   * What the usage fetcher's newest auth reading says for a provider, read now. `"ok"` is how a
+   * sign-in recovers without a later successful turn.
    */
   setAuthReading(provider: PoolProvider, reading: AccountAuthReading): void;
+  /** The providers each usage read so far forced past the cache, oldest first. */
+  forcedUsageReads: string[][];
   advanceClock(ms: number): void;
   setClock(ms: number): void;
   sweep(): Promise<void>;
@@ -120,7 +121,8 @@ async function createHarness(): Promise<Harness> {
     "claude-backup": [],
   };
   let usage: ProviderUsage[] = [];
-  const authReadings = new Map<string, AccountAuthReading>();
+  const forcedUsageReads: string[][] = [];
+  const authReadings = new Map<string, { reading: AccountAuthReading; atMs: number }>();
   let sweepHook: (() => Promise<void>) | null = null;
   let paceHook: (() => Promise<void>) | null = null;
   const resumeFailures: Record<PoolProvider, number> = {
@@ -186,20 +188,14 @@ async function createHarness(): Promise<Harness> {
       },
       accountFailoverOverrides: {
         providerUsage: {
-          listUsage: async () => {
+          listUsage: async (options) => {
+            forcedUsageReads.push([...(options?.forceRefreshProviderIds ?? [])]);
             const hook = sweepHook;
             sweepHook = null;
             await hook?.();
             return { fetchedAt: new Date(clockMs).toISOString(), providers: usage };
           },
-          getAuthReadings: (ids) => {
-            const result = new Map<string, AccountAuthReading>();
-            for (const id of ids) {
-              const reading = authReadings.get(id);
-              if (reading) result.set(id, reading);
-            }
-            return result;
-          },
+          getAuthReadings: () => new Map(authReadings),
         },
         sweepIntervalMs: 60 * MINUTE_MS,
         now: () => clockMs,
@@ -263,8 +259,9 @@ async function createHarness(): Promise<Harness> {
     failResumes: (provider, times) => {
       resumeFailures[provider] = times;
     },
+    forcedUsageReads,
     setAuthReading: (provider, reading) => {
-      authReadings.set(provider, reading);
+      authReadings.set(provider, { reading, atMs: clockMs });
     },
     setAccount: (provider, auth) => {
       accounts[provider] = auth;
@@ -1141,7 +1138,7 @@ describe("AccountFailoverMonitor (e2e)", () => {
     expect(strandedObservations(harness)).toHaveLength(count);
   });
 
-  test("pushes the signed-out account every sweep while active, and closes once on recovery", async () => {
+  test("reports a standing signed-out account once, and closes it once on recovery", async () => {
     const signedOutObservations = () =>
       harness.observations.filter((o) => o.key === "account-signed-out:claude");
 
@@ -1163,23 +1160,49 @@ describe("AccountFailoverMonitor (e2e)", () => {
       title: "Claude account signed out: claude",
     });
 
-    // Still signed out: reported again, same episode.
+    // Still signed out, nothing new to say: the ladder is not written again.
     harness.advanceClock(MINUTE_MS);
     await harness.sweep();
-    expect(signedOutObservations()).toHaveLength(2);
-    expect(signedOutObservations()[1]?.active).toBe(true);
+    expect(signedOutObservations()).toHaveLength(1);
 
-    // Credentials restored: the forced re-read this sweep sees it, and the episode closes.
+    // Credentials restored: the next reading sees it, and the episode closes.
     harness.setAuthReading("claude", "ok");
     harness.advanceClock(MINUTE_MS);
     await harness.sweep();
-    expect(signedOutObservations()).toHaveLength(3);
-    expect(signedOutObservations()[2]).toMatchObject({ active: false });
+    expect(signedOutObservations()).toHaveLength(2);
+    expect(signedOutObservations()[1]).toMatchObject({ active: false });
 
     // Closed once; a quiet account says nothing more.
     harness.advanceClock(MINUTE_MS);
     await harness.sweep();
-    expect(signedOutObservations()).toHaveLength(3);
+    expect(signedOutObservations()).toHaveLength(2);
+  }, 60_000);
+
+  test("re-reads a signed-out account's usage past the cache at most once per five minutes", async () => {
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await converse(harness, leader, "THROTTLE-MARKER");
+    await failOnLimit(
+      harness,
+      leader,
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+    );
+    const forcedReadsOfClaude = () =>
+      harness.forcedUsageReads.filter((ids) => ids.includes("claude")).length;
+
+    await harness.sweep();
+    expect(forcedReadsOfClaude()).toBe(0);
+
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(forcedReadsOfClaude()).toBe(1);
+
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(forcedReadsOfClaude()).toBe(1);
+
+    harness.advanceClock(5 * MINUTE_MS);
+    await harness.sweep();
+    expect(forcedReadsOfClaude()).toBe(2);
   }, 60_000);
 
   test("two accounts signed out at once produce two episodes with distinct keys", async () => {
@@ -1206,6 +1229,31 @@ describe("AccountFailoverMonitor (e2e)", () => {
     expect(
       harness.observations.filter((o) => o.key === "account-signed-out:claude-backup" && o.active),
     ).toHaveLength(1);
+  }, 60_000);
+
+  test("an idle enabled account with no credentials is signed out within one sweep; a disabled one is not", async () => {
+    await harness.client.patchDaemonConfig({
+      providers: {
+        "claude-backup": {
+          extends: "claude",
+          label: "Claude Backup",
+          enabled: false,
+          params: { accountPool: { role: "worker", priority: 2 } },
+        },
+      },
+    });
+    // No agent ever ran on either account: the usage fetcher's own read is the only evidence.
+    harness.setAuthReading("claude-personal", "credentials_missing");
+    harness.setAuthReading("claude-backup", "credentials_missing");
+
+    await harness.sweep();
+
+    expect(
+      harness.observations.filter((o) => o.key === "account-signed-out:claude-personal"),
+    ).toEqual([expect.objectContaining({ active: true, level: "urgent" })]);
+    expect(
+      harness.observations.filter((o) => o.key === "account-signed-out:claude-backup"),
+    ).toEqual([]);
   }, 60_000);
 
   test("pushes once when a pool entry shares another's login, and again only after it clears", async () => {

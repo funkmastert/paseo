@@ -30,6 +30,14 @@ export interface ProviderUsageServiceOptions {
   accountIdentity?: PoolAccountIdentityTracker;
   /** Standing sign-in state, attached to each pool row at read time (docs/account-failover.md). */
   accountAuth?: AccountAuthTracker;
+  /** Whether a `claude` binary resolves on this host, for a signed-out row's `canSignIn`. */
+  isClaudeBinaryAvailable?: () => Promise<boolean>;
+}
+
+/** A fetcher's auth reading and the instant it was taken. */
+export interface AccountAuthReadingAt {
+  reading: AccountAuthReading;
+  atMs: number;
 }
 
 export interface ProviderUsageListResult {
@@ -58,15 +66,15 @@ export class ProviderUsageService {
   private inFlight: Promise<ProviderUsageListResult> | null = null;
   private readonly accountIdentity: PoolAccountIdentityTracker | undefined;
   private readonly accountAuth: AccountAuthTracker | undefined;
-  /** Auth reading from each fetcher's most recent real `fetchUsage()` call, for the account-auth
-   * sweep (account-auth-health.ts). Not cleared on a cache hit: a reading is only as fresh as the
-   * last real fetch, same as the row it rode in on. */
-  private lastAuthReadings = new Map<string, AccountAuthReading>();
+  private readonly isClaudeBinaryAvailable: () => Promise<boolean>;
+  /** Each fetcher's newest auth reading, from whichever real `fetchUsage()` call produced it. */
+  private lastAuthReadings = new Map<string, AccountAuthReadingAt>();
 
   constructor(options: ProviderUsageServiceOptions) {
     this.logger = options.logger.child({ module: "provider-usage-service" });
     this.accountIdentity = options.accountIdentity;
     this.accountAuth = options.accountAuth;
+    this.isClaudeBinaryAvailable = options.isClaudeBinaryAvailable ?? (async () => false);
     this.fetchers =
       options.fetchers ??
       createProviderUsageFetchers(
@@ -90,16 +98,17 @@ export class ProviderUsageService {
     return this.withAccountAuth(this.withAccountIdentity(await this.readUsage(options)));
   }
 
-  /** Readings collected from whichever of `providerIds` were actually (re)fetched by the most
-   * recent `listUsage()` call. A provider absent here was cache-served that call, or its fetcher
-   * does not implement `describeAuthReading`. */
-  getAuthReadings(providerIds: ReadonlySet<string>): ReadonlyMap<string, AccountAuthReading> {
-    const result = new Map<string, AccountAuthReading>();
-    for (const providerId of providerIds) {
-      const reading = this.lastAuthReadings.get(providerId);
-      if (reading) result.set(providerId, reading);
-    }
-    return result;
+  /**
+   * The newest auth reading of every fetcher that reports one, dated when it was read rather than
+   * when it is asked for: a reading served from the cache is as old as the row it rode in on.
+   */
+  getAuthReadings(): ReadonlyMap<string, AccountAuthReadingAt> {
+    return new Map(this.lastAuthReadings);
+  }
+
+  private recordAuthReading(fetcher: ProviderUsageFetcher, atMs: number): void {
+    const reading = fetcher.describeAuthReading?.();
+    if (reading) this.lastAuthReadings.set(fetcher.providerId, { reading, atMs });
   }
 
   /**
@@ -127,19 +136,26 @@ export class ProviderUsageService {
   }
 
   /**
-   * Auth state is read per call too, same reasoning as identity above. `canSignIn` is a UI hint
-   * only: every pooled entry has a config dir to run the sign-in command in, so this reports true
-   * for any signed-out row; the RPC itself is the authoritative check and answers `failed` if it
-   * cannot actually resolve a `claude` binary.
+   * Auth state is read per call too, same reasoning as identity above. In-app sign-in needs an
+   * email to pre-fill (the bare `claude /login` only works in a terminal) and a `claude` binary to
+   * run, so `canSignIn` says whether both resolve; the RPC checks both again.
    */
-  private withAccountAuth(result: ProviderUsageListResult): ProviderUsageListResult {
-    if (!this.accountAuth) return result;
+  private async withAccountAuth(result: ProviderUsageListResult): Promise<ProviderUsageListResult> {
     const tracker = this.accountAuth;
+    if (!tracker) return result;
+    const signedOut = new Map(
+      result.providers.flatMap((row) => {
+        const record = tracker.stateFor(row.providerId);
+        return record?.state === "signed_out" ? [[row.providerId, record] as const] : [];
+      }),
+    );
+    if (signedOut.size === 0) return result;
+    const binaryAvailable = await this.isClaudeBinaryAvailable();
     return {
       ...result,
       providers: result.providers.map((row) => {
-        const record = tracker.stateFor(row.providerId);
-        if (!record || record.state !== "signed_out") return row;
+        const record = signedOut.get(row.providerId);
+        if (!record) return row;
         return {
           ...row,
           accountAuth: {
@@ -147,7 +163,7 @@ export class ProviderUsageService {
             since: new Date(record.since).toISOString(),
             summary: record.summary,
             fixCommand: record.fixCommand,
-            canSignIn: true,
+            canSignIn: record.email !== null && binaryAvailable,
           },
         };
       }),
@@ -159,21 +175,16 @@ export class ProviderUsageService {
     forceRefreshProviderIds?: ReadonlySet<string>;
   }): Promise<ProviderUsageListResult> {
     const nowMs = this.now();
-    if (
-      !options?.forceRefresh &&
-      this.cached &&
-      nowMs - this.cached.fetchedAtMs < this.cacheTtlMs
-    ) {
-      let result = await this.refreshSelectedRows(
-        this.cached.result,
-        (fetcher) => fetcher.live === true,
+    const cached = this.cached;
+    if (!options?.forceRefresh && cached && nowMs - cached.fetchedAtMs < this.cacheTtlMs) {
+      const forced = options?.forceRefreshProviderIds;
+      const result = await this.refreshSelectedRows(
+        cached.result,
+        (fetcher) => fetcher.live === true || forced?.has(fetcher.providerId) === true,
       );
-      if (options?.forceRefreshProviderIds?.size) {
-        const forced = options.forceRefreshProviderIds;
-        result = await this.refreshSelectedRows(result, (fetcher) =>
-          forced.has(fetcher.providerId),
-        );
-      }
+      // Keep what was just read, so the next caller is served it rather than the older row. The
+      // cache keeps its age: a forced read refreshes named rows, not the whole list.
+      if (this.cached === cached) this.cached = { fetchedAtMs: cached.fetchedAtMs, result };
       return result;
     }
 
@@ -193,7 +204,7 @@ export class ProviderUsageService {
   }
 
   /** The given result with every fetcher matching `shouldRefresh` read again, in the same place.
-   * Backs both the always-live refresh and a caller's named forced refresh. */
+   * Backs both the always-live refresh and a caller's named forced refresh, in one pass. */
   private async refreshSelectedRows(
     result: ProviderUsageListResult,
     shouldRefresh: (fetcher: ProviderUsageFetcher) => boolean,
@@ -205,9 +216,9 @@ export class ProviderUsageService {
       toRefresh.map(async (fetcher) => {
         try {
           const row = await fetcher.fetchUsage();
-          fresh.set(fetcher.providerId, row && withFetchedAt(row, Date.now()));
-          const reading = fetcher.describeAuthReading?.();
-          if (reading) this.lastAuthReadings.set(fetcher.providerId, reading);
+          const readAtMs = this.now();
+          fresh.set(fetcher.providerId, row && withFetchedAt(row, readAtMs));
+          this.recordAuthReading(fetcher, readAtMs);
         } catch (err) {
           this.logger.debug({ err, providerId: fetcher.providerId }, "Usage refresh failed");
         }
@@ -228,8 +239,7 @@ export class ProviderUsageService {
     const providers = settled.flatMap((result, index): ProviderUsage[] => {
       const fetcher = this.fetchers[index];
       if (result.status === "fulfilled") {
-        const reading = fetcher.describeAuthReading?.();
-        if (reading) this.lastAuthReadings.set(fetcher.providerId, reading);
+        this.recordAuthReading(fetcher, nowMs);
         return result.value ? [withFetchedAt(result.value, nowMs)] : [];
       }
       this.logger.debug(

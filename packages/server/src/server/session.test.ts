@@ -330,6 +330,7 @@ interface SessionForTestOptions {
   pluginRuntime?: SessionOptions["pluginRuntime"];
   orchestrationSkills?: SessionOptions["orchestrationSkills"];
   workspaceLabelService?: WorkspaceLabelService;
+  accountSignIn?: SessionOptions["accountSignIn"];
 }
 
 function createSessionForTest(options: SessionForTestOptions = {}): Session {
@@ -436,9 +437,41 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
     daemonVersion: options.daemonVersion,
     daemonRuntimeConfig: options.daemonRuntimeConfig,
     permissions: options.permissions ?? OWNER_PERMISSIONS,
+    accountSignIn: options.accountSignIn,
   };
   return new Session(sessionOptions);
 }
+
+test("every connection starts a Claude sign-in through the daemon's one sign-in service", async () => {
+  // One login per account per daemon: a second client, or the same client after a reconnect,
+  // must see the login the first one started.
+  const start = vi
+    .fn()
+    .mockResolvedValueOnce({ outcome: "started", error: null })
+    .mockResolvedValueOnce({ outcome: "already_running", error: null });
+  const accountSignIn = { start } as unknown as SessionOptions["accountSignIn"];
+  const first: unknown[] = [];
+  const second: unknown[] = [];
+  const request = (requestId: string) => ({
+    type: "account.claude.sign_in.request" as const,
+    providerId: "claude-personal",
+    requestId,
+  });
+
+  await createSessionForTest({ messages: first, accountSignIn }).handleMessage(request("a"));
+  await createSessionForTest({ messages: second, accountSignIn }).handleMessage(request("b"));
+
+  expect(start).toHaveBeenCalledTimes(2);
+  expect(second).toContainEqual({
+    type: "account.claude.sign_in.response",
+    payload: {
+      providerId: "claude-personal",
+      outcome: "already_running",
+      error: null,
+      requestId: "b",
+    },
+  });
+});
 
 test("routes host-scoped agent skills requests through the daemon owner", async () => {
   const messages: SessionOutboundMessage[] = [];

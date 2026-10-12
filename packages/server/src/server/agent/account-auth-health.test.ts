@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { isAccountDeadError, isAuthShapedError } from "./account-failover-detector.js";
 import { AccountAuthTracker } from "./account-auth-health.js";
@@ -11,7 +14,7 @@ function account(
   return {
     providerId: "claude-personal",
     enabled: true,
-    configDir: "/home/tyler/.claude-personal",
+    configDir: "/accounts/personal",
     expectedEmail: null,
     ...overrides,
   };
@@ -129,26 +132,68 @@ describe("AccountAuthTracker", () => {
   });
 
   it("builds fixCommand from the declared email, else the .claude.json email, else a bare login", () => {
+    const configDir = mkdtempSync(join(tmpdir(), "account-auth-health-"));
+    try {
+      writeFileSync(
+        join(configDir, ".claude.json"),
+        JSON.stringify({ oauthAccount: { emailAddress: "last@example.com" } }),
+      );
+      const tracker = new AccountAuthTracker();
+      tracker.observe({
+        accounts: [
+          account({ providerId: "declared", configDir, expectedEmail: "someone@example.com" }),
+          account({ providerId: "last-known", configDir }),
+          account({ providerId: "unknown", configDir: "/tmp/does-not-exist-account-auth-health" }),
+        ],
+        turnFailures: ["declared", "last-known", "unknown"].map((providerId) => ({
+          providerId,
+          error: "Not logged in",
+          atMs: T0,
+        })),
+      });
+      expect(tracker.stateFor("declared")).toMatchObject({
+        email: "someone@example.com",
+        fixCommand: `CLAUDE_CONFIG_DIR=${configDir} claude auth login --email someone@example.com`,
+      });
+      expect(tracker.stateFor("last-known")).toMatchObject({ email: "last@example.com" });
+      expect(tracker.stateFor("unknown")).toMatchObject({
+        email: null,
+        fixCommand: "CLAUDE_CONFIG_DIR=/tmp/does-not-exist-account-auth-health claude /login",
+      });
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("quotes the email in the sign-in command, and leaves CLAUDE_CONFIG_DIR out when no dir resolves", () => {
     const tracker = new AccountAuthTracker();
     tracker.observe({
-      accounts: [account({ expectedEmail: "tyler@example.com" })],
+      accounts: [account({ configDir: null, expectedEmail: "first last@example.com" })],
       turnFailures: [{ providerId: "claude-personal", error: "Not logged in", atMs: T0 }],
     });
-    expect(tracker.stateFor("claude-personal")?.fixCommand).toContain("tyler@example.com");
-
-    const trackerNoExpected = new AccountAuthTracker();
-    trackerNoExpected.observe({
-      accounts: [
-        {
-          providerId: "claude-backup",
-          enabled: true,
-          configDir: "/tmp/does-not-exist-account-auth-health-test",
-          expectedEmail: null,
-        },
-      ],
-      turnFailures: [{ providerId: "claude-backup", error: "Not logged in", atMs: T0 }],
+    expect(tracker.stateFor("claude-personal")).toMatchObject({
+      fixCommand: "claude auth login --email 'first last@example.com'",
     });
-    // No .claude.json at that path, so no last-known email either: falls all the way back.
-    expect(trackerNoExpected.stateFor("claude-backup")?.fixCommand).toContain("claude /login");
+  });
+
+  it("reads no login for an account that is fine", () => {
+    const configDir = mkdtempSync(join(tmpdir(), "account-auth-health-"));
+    try {
+      writeFileSync(
+        join(configDir, ".claude.json"),
+        JSON.stringify({ oauthAccount: { emailAddress: "someone@example.com" } }),
+      );
+      const tracker = new AccountAuthTracker();
+      tracker.observe({
+        accounts: [account({ configDir })],
+        readings: [{ providerId: "claude-personal", reading: "ok", atMs: T0 }],
+      });
+      const record = tracker.stateFor("claude-personal");
+      expect(record?.state).toBe("ok");
+      expect(record).not.toHaveProperty("email");
+      expect(record).not.toHaveProperty("fixCommand");
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
   });
 });

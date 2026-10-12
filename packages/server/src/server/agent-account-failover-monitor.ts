@@ -6,8 +6,6 @@ import {
   buildAccountFailoverReturnNotificationPayload,
   buildAccountIdentityNotificationPayload,
 } from "@getpaseo/protocol/account-failover-notification";
-import { homedir } from "node:os";
-import path from "node:path";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type { AccountFailoverAgentSummary, AgentManager } from "./agent/agent-manager.js";
 import type { AgentAccountAuth } from "./agent/agent-sdk-types.js";
@@ -25,11 +23,11 @@ import {
   type LimitErrorSighting,
   type ProviderLimitSighting,
 } from "./agent/account-failover-detector.js";
-import { AccountAuthProbe, type AccountAuthProbeResult } from "./agent/account-auth-probe.js";
+import { AccountAuthProbe } from "./agent/account-auth-probe.js";
 import {
   AccountAuthTracker,
-  type AccountAuthReading,
-  type AccountAuthRecord,
+  type AccountAuthReadingInput,
+  type AccountAuthTurnFailureInput,
 } from "./agent/account-auth-health.js";
 import {
   headroomByProvider,
@@ -37,8 +35,9 @@ import {
   windowLimitsModel,
 } from "./agent/account-pool-headroom.js";
 import {
-  resolveAccountPoolEntries,
+  resolvePoolAccounts,
   type AccountPoolProviderEntry,
+  type PoolAccount,
 } from "./agent/account-pool-providers.js";
 import {
   findPoolAccountIdentityProblems,
@@ -46,7 +45,6 @@ import {
   type PoolAccountIdentityProblem,
   type PoolAccountReading,
 } from "./agent/pool-account-identity.js";
-import { deriveClaudeProviderEntries } from "../services/quota-fetcher/manifest.js";
 import {
   migrateStuckAgent,
   rehomeIdleAgent,
@@ -63,9 +61,15 @@ import {
 import { formatSystemNotificationPrompt, sendPromptToAgent } from "./agent/agent-prompt.js";
 import { pacedResume, unpacedResume, type PaceResume } from "./agent/resume-pacer.js";
 import type { PushNotificationSender } from "./push/index.js";
-import { NULL_REMEDIATION_SINK, type RemediationSink } from "./remediation/contract.js";
+import {
+  NULL_REMEDIATION_SINK,
+  type RemediationObservation,
+  type RemediationSink,
+} from "./remediation/contract.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
+/** How often a suspect or signed-out account's usage is re-read past the cache: its lifetime. */
+const AUTH_REREAD_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_MIGRATION_CONCURRENCY = 3;
 /**
  * Resume sends allowed per migration, the first one included — so two retries, one per sweep.
@@ -202,6 +206,10 @@ export class AccountFailoverMonitor {
   private readonly accountIdentity: PoolAccountIdentityTracker;
   private readonly accountAuth: AccountAuthTracker;
   private readonly accountAuthProbe: AccountAuthProbe;
+  /** When each suspect or signed-out account's usage was last read past the cache. */
+  private authRereadAtMs = new Map<string, number>();
+  /** What the ladder was last told about each signed-out account. */
+  private signedOutReported = new Map<string, string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweepInFlight = false;
   private sightings = new Map<string, LimitErrorSighting>();
@@ -268,21 +276,27 @@ export class AccountFailoverMonitor {
 
   private async sweep(): Promise<void> {
     const daemonConfig = this.options.readDaemonConfig();
+    const poolEntries = resolvePoolAccounts(daemonConfig.providers);
     // Before the enabled check: an identity problem is worth a push whether or not failover moves
     // anything. Its own failure must not stop the sweep it rides on.
-    await this.observeAccountIdentity(daemonConfig.providers).catch((error) => {
+    await this.observeAccountIdentity(poolEntries).catch((error) => {
       this.options.logger.warn({ err: error }, "Account identity check failed");
     });
+    const nowMs = this.now();
+    const agents = poolEntries.length > 0 ? this.listUnclaimedAgents() : [];
+    const usage =
+      poolEntries.length > 0
+        ? await this.readUsage({ forceRefreshProviderIds: this.dueAuthRereads(nowMs) })
+        : null;
     // Same reasoning as identity above: whether an account can sign in is worth knowing whether
     // or not failover is enabled to act on it.
-    await this.observeAccountAuth(daemonConfig.providers).catch((error) => {
+    await this.observeAccountAuth(poolEntries, agents, nowMs).catch((error) => {
       this.options.logger.warn({ err: error }, "Account auth check failed");
     });
     if (daemonConfig.accountFailover?.enabled === false) {
       return;
     }
     const config = resolveConfig(daemonConfig.accountFailover);
-    const poolEntries = resolveAccountPoolEntries(daemonConfig.providers);
     if (poolEntries.length === 0) {
       this.sightings.clear();
       this.providerSightings.clear();
@@ -294,9 +308,6 @@ export class AccountFailoverMonitor {
       return;
     }
 
-    const nowMs = this.now();
-    const agents = this.listUnclaimedAgents();
-    const usage = await this.readUsage();
     const accounts = await this.readPoolAccounts(poolEntries);
     const plan = planAccountFailoverSweep({
       poolProviderIds: new Set(poolEntries.map((entry) => entry.providerId)),
@@ -644,8 +655,8 @@ export class AccountFailoverMonitor {
     });
   }
 
-  private async readUsage(options?: {
-    forceRefresh: boolean;
+  private async readUsage(options: {
+    forceRefreshProviderIds: ReadonlySet<string>;
   }): Promise<{ providers: ProviderUsage[]; fetchedAtMs: number | null } | null> {
     try {
       const result = await this.options.providerUsage.listUsage(options);
@@ -667,21 +678,15 @@ export class AccountFailoverMonitor {
    * Reads each pool entry's login and raises one push per problem that is new this sweep. Problems
    * are re-derived every sweep, so an entry that is fixed clears on its own and re-arms.
    */
-  private async observeAccountIdentity(
-    providers: Record<string, unknown> | undefined,
-  ): Promise<void> {
-    const entries = resolveAccountPoolEntries(providers);
-    const dirs = new Map(
-      deriveClaudeProviderEntries(providers).map((entry) => [entry.providerId, entry.claudeHome]),
-    );
+  private async observeAccountIdentity(accounts: readonly PoolAccount[]): Promise<void> {
     const readings: PoolAccountReading[] = await Promise.all(
-      entries.map(async (entry) => ({
-        providerId: entry.providerId,
-        role: entry.role,
-        configDir: expandHome(dirs.get(entry.providerId) ?? defaultClaudeDir(entry.providerId)),
-        expectedEmail: entry.expectedEmail ?? null,
-        auth: await this.options.agentManager.describeProviderAccount(entry.providerId),
-        enabled: entry.enabled,
+      accounts.map(async (account) => ({
+        providerId: account.providerId,
+        role: account.role,
+        configDir: account.configDir,
+        expectedEmail: account.expectedEmail ?? null,
+        auth: await this.options.agentManager.describeProviderAccount(account.providerId),
+        enabled: account.enabled,
       })),
     );
     const raised = this.accountIdentity.observe(findPoolAccountIdentityProblems(readings));
@@ -708,98 +713,101 @@ export class AccountFailoverMonitor {
   }
 
   /**
-   * Feeds this sweep's evidence to the AccountAuthTracker: auth-shaped turn failures, a forced
-   * usage re-read for any account the tracker already has as `suspect` or `signed_out` (so
-   * recovery is seen within one sweep instead of waiting out the usage cache), and a confirming
-   * probe for suspects. Then raises the ladder's urgent push for every standing `signed_out`
-   * record (reported every sweep while active, same as `observeStranding`) and closes it once,
-   * on the sweep the tracker reports the episode cleared.
+   * Suspect and signed-out accounts due a usage read past the cache, about once per cache
+   * lifetime each. A sign-in started from the app forces its own read when the login exits.
    */
-  private async observeAccountAuth(providers: Record<string, unknown> | undefined): Promise<void> {
-    const poolEntries = resolveAccountPoolEntries(providers);
-    if (poolEntries.length === 0) return;
-
-    const nowMs = this.now();
-    const dirs = new Map(
-      deriveClaudeProviderEntries(providers).map((entry) => [entry.providerId, entry.claudeHome]),
-    );
-    const accounts = poolEntries.map((entry) => ({
-      providerId: entry.providerId,
-      enabled: entry.enabled,
-      configDir: expandHome(dirs.get(entry.providerId) ?? defaultClaudeDir(entry.providerId)),
-      expectedEmail: entry.expectedEmail ?? null,
-    }));
-
-    const agents = this.listUnclaimedAgents();
-    const poolProviderIds = new Set(poolEntries.map((entry) => entry.providerId));
-    const turnFailures = agents
-      .filter((agent) => poolProviderIds.has(agent.provider) && isAuthShapedError(agent.lastError))
-      .map((agent) => ({
-        providerId: agent.provider,
-        error: agent.lastError as string,
-        atMs: failureTimeMs(agent.lastTimelineAt, nowMs),
-      }));
-
-    const suspectIds = this.accountAuth.suspectProviderIds();
-    const signedOutIds = this.accountAuth.signedOutProviderIds();
-    const forceReadIds = new Set<string>([...suspectIds, ...signedOutIds]);
-    let readings: { providerId: string; reading: AccountAuthReading; atMs: number }[] = [];
-    if (forceReadIds.size > 0) {
-      await this.options.providerUsage
-        .listUsage({ forceRefreshProviderIds: forceReadIds })
-        .catch((error) => {
-          this.options.logger.warn({ err: error }, "Account auth: forced usage read failed");
-        });
-      readings = [...this.options.providerUsage.getAuthReadings(forceReadIds)].map(
-        ([providerId, reading]) => ({ providerId, reading, atMs: nowMs }),
-      );
+  private dueAuthRereads(nowMs: number): Set<string> {
+    const standing = new Set([
+      ...this.accountAuth.suspectProviderIds(),
+      ...this.accountAuth.signedOutProviderIds(),
+    ]);
+    for (const providerId of this.authRereadAtMs.keys()) {
+      if (!standing.has(providerId)) this.authRereadAtMs.delete(providerId);
     }
-
-    const probes: { providerId: string; result: AccountAuthProbeResult; atMs: number }[] = [];
-    for (const providerId of suspectIds) {
-      const account = accounts.find((candidate) => candidate.providerId === providerId);
-      if (!account?.configDir) continue;
-      const hasRunningAgent = agents.some(
-        (agent) => agent.provider === providerId && agent.lifecycle === "running",
-      );
-      const result = await this.accountAuthProbe.run(
-        { providerId, configDir: account.configDir, hasRunningAgent },
-        nowMs,
-      );
-      if (result) probes.push({ providerId, result, atMs: nowMs });
+    const due = new Set<string>();
+    for (const providerId of standing) {
+      const last = this.authRereadAtMs.get(providerId);
+      if (last !== undefined && nowMs - last < AUTH_REREAD_INTERVAL_MS) continue;
+      this.authRereadAtMs.set(providerId, nowMs);
+      due.add(providerId);
     }
-
-    const { closed } = this.accountAuth.observe({ accounts, turnFailures, readings, probes });
-
-    for (const providerId of this.accountAuth.signedOutProviderIds()) {
-      const record = this.accountAuth.stateFor(providerId);
-      if (record) await this.notifyAccountSignedOut(record, true);
-    }
-    for (const record of closed) {
-      await this.notifyAccountSignedOut(record, false);
-    }
+    return due;
   }
 
   /**
-   * One urgent push per sign-out episode, naming the account, its login and the sign-in command
-   * (R7). Reported every sweep while `active`, like `observeStranding`; the ladder is idempotent
-   * per key, so only the first call of an episode actually pushes. `active: false` closes it,
-   * called exactly once by the tracker's own `closed` episode.
+   * Feeds this sweep's evidence to the AccountAuthTracker: auth-shaped turn failures, the usage
+   * fetcher's newest auth reading for every pool account (so an idle account nobody runs on is
+   * still caught), and the probes that finished since the last sweep. Then starts a probe for each
+   * suspect in the background and tells the ladder what changed.
    */
-  private async notifyAccountSignedOut(record: AccountAuthRecord, active: boolean): Promise<void> {
-    const sink = this.options.remediationSink ?? NULL_REMEDIATION_SINK;
-    await sink.observe({
-      key: `account-signed-out:${record.providerId}`,
-      kind: "account-signed-out",
-      active,
-      remedy: "none",
-      level: "urgent",
-      title: `Claude account signed out: ${record.providerId}`,
-      summary: active
-        ? `${record.providerId} can't authenticate (${record.summary}). Sign in as ` +
-          `${record.email ?? "its account"}: ${record.fixCommand}`
-        : `${record.providerId} is signed in again.`,
+  private async observeAccountAuth(
+    accounts: readonly PoolAccount[],
+    agents: readonly AccountFailoverAgentSummary[],
+    nowMs: number,
+  ): Promise<void> {
+    const poolProviderIds = new Set(accounts.map((account) => account.providerId));
+    const turnFailures: AccountAuthTurnFailureInput[] = agents.flatMap((agent) =>
+      poolProviderIds.has(agent.provider) && isAuthShapedError(agent.lastError)
+        ? [
+            {
+              providerId: agent.provider,
+              error: agent.lastError,
+              atMs: failureTimeMs(agent.lastTimelineAt, nowMs),
+            },
+          ]
+        : [],
+    );
+    const readings: AccountAuthReadingInput[] = [
+      ...this.options.providerUsage.getAuthReadings(),
+    ].flatMap(([providerId, { reading, atMs }]) =>
+      poolProviderIds.has(providerId) ? [{ providerId, reading, atMs }] : [],
+    );
+    this.accountAuth.observe({
+      accounts,
+      turnFailures,
+      readings,
+      probes: this.accountAuthProbe.takeFinished(),
     });
+
+    // A suspect account is not dead to failover, so nothing this sweep waits for the answer.
+    for (const providerId of this.accountAuth.suspectProviderIds()) {
+      const configDir = accounts.find((account) => account.providerId === providerId)?.configDir;
+      if (!configDir) continue;
+      const hasRunningAgent = agents.some(
+        (agent) => agent.provider === providerId && agent.lifecycle === "running",
+      );
+      this.accountAuthProbe.start({ providerId, configDir, hasRunningAgent }, nowMs);
+    }
+
+    await this.reportSignedOutAccounts();
+  }
+
+  /**
+   * One urgent push per sign-out episode, naming the account, its login and the sign-in command.
+   * The ladder hears about an episode when it opens and again only if what it would say changes,
+   * and once more when the account stops being signed out (signed in, disabled, or removed).
+   */
+  private async reportSignedOutAccounts(): Promise<void> {
+    const sink = this.options.remediationSink ?? NULL_REMEDIATION_SINK;
+    const standing = new Set<string>();
+    for (const providerId of this.accountAuth.signedOutProviderIds()) {
+      const record = this.accountAuth.stateFor(providerId);
+      if (record?.state !== "signed_out") continue;
+      standing.add(providerId);
+      const summary =
+        `${providerId} can't authenticate (${record.summary}). Sign in as ` +
+        `${record.email ?? "its account"}: ${record.fixCommand}`;
+      if (this.signedOutReported.get(providerId) === summary) continue;
+      await sink.observe(signedOutObservation(providerId, true, summary));
+      this.signedOutReported.set(providerId, summary);
+    }
+    for (const providerId of this.signedOutReported.keys()) {
+      if (standing.has(providerId)) continue;
+      await sink.observe(
+        signedOutObservation(providerId, false, `${providerId} is no longer signed out.`),
+      );
+      this.signedOutReported.delete(providerId);
+    }
   }
 
   /**
@@ -1161,14 +1169,18 @@ function strandingEvidence(input: {
   ].join("\n");
 }
 
-/** `~/` in a config path, expanded the way the sign-in command needs it. */
-export function expandHome(value: string | undefined): string | null {
-  if (!value) return null;
-  return value === "~" || value.startsWith("~/") ? path.join(homedir(), value.slice(1)) : value;
-}
-
-/** The directory the built-in `claude` entry reads when its config sets none. */
-export function defaultClaudeDir(providerId: string): string | undefined {
-  if (providerId !== "claude") return undefined;
-  return process.env["CLAUDE_CONFIG_DIR"] ?? path.join(homedir(), ".claude");
+function signedOutObservation(
+  providerId: string,
+  active: boolean,
+  summary: string,
+): RemediationObservation {
+  return {
+    key: `account-signed-out:${providerId}`,
+    kind: "account-signed-out",
+    active,
+    remedy: "none",
+    level: "urgent",
+    title: `Claude account signed out: ${providerId}`,
+    summary,
+  };
 }

@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import path from "node:path";
 import { z } from "zod";
 import { NEUTRAL_HEADROOM } from "./account-pool-headroom.js";
 import type { AgentAccountAuth } from "./agent-sdk-types.js";
@@ -87,6 +89,34 @@ export function resolveAccountPoolEntries(
     entries.push({ providerId: "claude", role: "leader", priority: 0, enabled: claudeEnabled });
   }
   return entries;
+}
+
+export interface PoolAccount extends AccountPoolProviderEntry {
+  /** The `CLAUDE_CONFIG_DIR` this entry runs with, `~` expanded. Null when none resolves. */
+  configDir: string | null;
+}
+
+/** `resolveAccountPoolEntries`, each with the config dir its account lives in. */
+export function resolvePoolAccounts(providers: Record<string, unknown> | undefined): PoolAccount[] {
+  return resolveAccountPoolEntries(providers).map((entry) => {
+    const parsed = ProviderOverrideSchema.safeParse(providers?.[entry.providerId]);
+    const configured = parsed.success ? parsed.data.env?.["CLAUDE_CONFIG_DIR"] : undefined;
+    return Object.assign(entry, {
+      configDir: expandHome(configured ?? defaultClaudeDir(entry.providerId)),
+    });
+  });
+}
+
+/** `~/` in a config path, expanded the way the sign-in command needs it. */
+function expandHome(value: string | undefined): string | null {
+  if (!value) return null;
+  return value === "~" || value.startsWith("~/") ? path.join(homedir(), value.slice(1)) : value;
+}
+
+/** The directory the built-in `claude` entry reads when its config sets none. */
+function defaultClaudeDir(providerId: string): string | undefined {
+  if (providerId !== "claude") return undefined;
+  return process.env["CLAUDE_CONFIG_DIR"] ?? path.join(homedir(), ".claude");
 }
 
 export interface PickFailoverTargetOptions {

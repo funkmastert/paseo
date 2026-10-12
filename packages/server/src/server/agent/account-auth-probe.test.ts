@@ -1,17 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
-import { AccountAuthProbe } from "./account-auth-probe.js";
+import {
+  AccountAuthProbe,
+  type ProbeProcessResult,
+  type RunProbeProcess,
+} from "./account-auth-probe.js";
 
 const T0 = Date.parse("2026-10-12T18:00:00Z");
 const FIFTEEN_MIN = 15 * 60_000;
 
-function makeProbe(
-  run: (
-    command: string,
-    args: string[],
-    options: { env: NodeJS.ProcessEnv; cwd: string; timeoutMs: number },
-  ) => Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }>,
-) {
-  return new AccountAuthProbe({ runProcess: run });
+function makeProbe(run: RunProbeProcess) {
+  return new AccountAuthProbe({
+    runProcess: run,
+    resolveBinary: async () => "claude",
+    scratchDir: () => "/tmp/probe-scratch",
+  });
 }
 
 describe("AccountAuthProbe", () => {
@@ -117,19 +119,81 @@ describe("AccountAuthProbe", () => {
     expect(run).toHaveBeenCalledTimes(2);
   });
 
-  it("runs the keepalive's single-Haiku-turn command with the entry's CLAUDE_CONFIG_DIR", async () => {
+  it("runs one Haiku turn with the resolved binary, overlaying only the entry's CLAUDE_CONFIG_DIR", async () => {
     const run = vi
       .fn()
       .mockResolvedValue({ stdout: "ok", stderr: "", exitCode: 0, timedOut: false });
-    const probe = makeProbe(run);
+    const probe = new AccountAuthProbe({
+      runProcess: run,
+      resolveBinary: async () => "/opt/claude/bin/claude",
+      scratchDir: () => "/tmp/probe-scratch",
+    });
     await probe.run(
       { providerId: "claude-personal", configDir: "/tmp/x", hasRunningAgent: false },
       T0,
     );
     expect(run).toHaveBeenCalledWith(
-      "claude",
-      ["-p", "reply ok", "--model", "haiku", "--max-turns", "1"],
-      expect.objectContaining({ env: expect.objectContaining({ CLAUDE_CONFIG_DIR: "/tmp/x" }) }),
+      "/opt/claude/bin/claude",
+      ["-p", "reply ok", "--model", "haiku", "--max-turns", "1", "--no-session-persistence"],
+      { envOverlay: { CLAUDE_CONFIG_DIR: "/tmp/x" }, cwd: "/tmp/probe-scratch", timeoutMs: 60_000 },
     );
+  });
+
+  it("is inconclusive, and spawns nothing, when no claude binary resolves", async () => {
+    const run = vi.fn();
+    const probe = new AccountAuthProbe({
+      runProcess: run,
+      resolveBinary: async () => {
+        throw new Error("Claude binary not found");
+      },
+    });
+    const result = await probe.run(
+      { providerId: "claude-personal", configDir: "/tmp/x", hasRunningAgent: false },
+      T0,
+    );
+    expect(result).toBe("inconclusive");
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("reuses one scratch directory across runs", async () => {
+    const scratchDir = vi.fn(() => "/tmp/probe-scratch");
+    const probe = new AccountAuthProbe({
+      runProcess: async () => ({ stdout: "ok", stderr: "", exitCode: 0, timedOut: false }),
+      resolveBinary: async () => "claude",
+      scratchDir,
+    });
+    for (const providerId of ["claude-personal", "claude-backup"]) {
+      await probe.run({ providerId, configDir: "/tmp/x", hasRunningAgent: false }, T0);
+    }
+    expect(scratchDir).toHaveBeenCalledTimes(1);
+  });
+
+  it("start() returns before the CLI finishes, and the result is collected afterwards", async () => {
+    let finish: (result: ProbeProcessResult) => void = () => {};
+    const probe = new AccountAuthProbe({
+      runProcess: () =>
+        new Promise<ProbeProcessResult>((resolve) => {
+          finish = resolve;
+        }),
+      resolveBinary: async () => "claude",
+      scratchDir: () => "/tmp/probe-scratch",
+    });
+
+    expect(
+      probe.start(
+        { providerId: "claude-personal", configDir: "/tmp/x", hasRunningAgent: false },
+        T0,
+      ),
+    ).toBe(true);
+    expect(probe.takeFinished()).toEqual([]);
+
+    await vi.waitFor(() => expect(probe.takeFinished()).toEqual([]));
+    finish({ stdout: "", stderr: "Not logged in", exitCode: 1, timedOut: false });
+    await vi.waitFor(() =>
+      expect(probe.takeFinished()).toEqual([
+        { providerId: "claude-personal", result: "auth_failure", atMs: T0 },
+      ]),
+    );
+    expect(probe.takeFinished()).toEqual([]);
   });
 });
