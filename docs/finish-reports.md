@@ -97,7 +97,7 @@ but it is decided explicitly by `gateDelivery` before every send:
 | running                   | `steer`       | joins the active turn                       |
 | idle, closed, not loaded  | `wake`        | starts a turn, loading the agent first      |
 | initializing              | `wait`        | next sweep, within the rung's time budget   |
-| `error` on an account cap | `wait`        | account failover is about to move it        |
+| `error` on a dead account | `wait`        | account failover is about to move it (capped or signed out) |
 | other `error`             | `wake`        | a new turn is how an errored agent recovers |
 | archived or gone          | `unreachable` | owner: released; orchestrator: next rung    |
 

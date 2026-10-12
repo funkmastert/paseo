@@ -157,7 +157,7 @@ The janitor cancels its own turn and no other. A message someone steers into the
 
 Asking costs a turn, and resuming a closed agent re-reads its whole context at cache-cold prices. So the janitor asks only agents that passed every check, one per sweep by default, most reclaimable disk first, and each at most once per quiet period: the answer is itself activity. Each consecutive "not done" doubles the wait before the next question, up to 8×. The backoff lives in memory; a restart resets it, never the quiet period.
 
-An agent that cannot be asked is left and reported as `cannot-ask`: no provider session to resume, a provider that reports itself unavailable, a usage window at 100%, a usage source in error (how a logged-out account shows), or any agent on the account with a limit-shaped error. Asking one would fail its turn and flag it, noise the janitor would have made itself.
+An agent that cannot be asked is left and reported as `cannot-ask`: no provider session to resume, a provider that reports itself unavailable, a usage window at 100%, a usage source in error (how a logged-out account shows), or any agent on the account with a limit- or auth-shaped error (the latter also flagged `signedOut` for the stalled-agent sweep's benefit — see [account-failover.md](account-failover.md#when-an-account-is-dead)). Asking one would fail its turn and flag it, noise the janitor would have made itself.
 
 ## Reclaiming the worktree
 

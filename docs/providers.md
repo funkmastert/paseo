@@ -210,6 +210,8 @@ Cursor usage reads the desktop `state.vscdb` token first, then `cursor-agent`'s 
 
 A fetcher reads the provider's credential file and never writes it. On a 401 or 403 it returns `unavailable` and leaves refresh to the provider's own CLI: redeeming a refresh token in the fetcher invalidates the CLI's copy (refresh tokens are single-use), and rewriting the file through the fetcher's Zod schema drops any field the schema does not model, corrupting the file for the CLI.
 
+The Claude fetcher also reads `claudeAiOauth.expiresAt`, read-only, to tell a revoked credential from a merely stale one: the CLI refreshes lazily, so an idle account can answer 401 on an access token that has expired while its refresh token is still good, and that is not proof of anything. A 401 on a token that has _not_ expired yet is the strong signal — nothing should have rejected it — and feeds the daemon's account-auth classification directly ([account-failover.md](account-failover.md#when-an-account-is-dead)).
+
 ### OpenAI API spend (`openai-api`)
 
 The one fetcher that is not a coding agent: month-to-date spend of an OpenAI platform org, such as the one behind image generation, shown as an account on the [orchestrator's budget strip](orchestration-panel.md#budget-strip). It reads `GET /v1/organization/costs` (daily buckets from the first of the month, UTC, following `next_page`). Off unless configured, and a disabled fetcher returns `null`, which the service drops, so the row does not exist at all.
