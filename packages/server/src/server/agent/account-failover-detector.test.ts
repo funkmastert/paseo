@@ -73,6 +73,7 @@ function plan(overrides: Partial<PlanAccountFailoverSweepInput>) {
     usage: [],
     previousSightings: new Map(),
     previousProviderSightings: new Map(),
+    signedOutProviderIds: new Set(),
     nowMs: 1_000_000,
     reactiveSignalTtlMs: TTL_MS,
     migrateSubagents: true,
@@ -192,6 +193,42 @@ describe("planAccountFailoverSweep", () => {
 
     expect([...result.deadProviderIds]).toEqual(["claude-backup"]);
     expect(ids(result.candidates)).toEqual(["stalled"]);
+  });
+
+  it("adds the tracker's signed-out providers to deadProviderIds, with no TTL of its own", () => {
+    const result = plan({ signedOutProviderIds: new Set(["claude-personal"]) });
+    expect([...result.deadProviderIds]).toEqual(["claude-personal"]);
+
+    // Unlike reactiveSignalTtlMs-bound evidence, this input has no expiry inside the function —
+    // it is dead for as long as the caller's set says so, however old `nowMs` runs.
+    const stillDead = plan({ signedOutProviderIds: new Set(["claude-personal"]), nowMs: 0 });
+    expect([...stillDead.deadProviderIds]).toEqual(["claude-personal"]);
+  });
+
+  it("ignores a signed-out id outside the pool", () => {
+    const result = plan({ signedOutProviderIds: new Set(["codex"]) });
+    expect(result.deadProviderIds.size).toBe(0);
+  });
+
+  it("a root cut off on a signed-out account is a candidate, like a capped one", () => {
+    const stuck = agent({
+      id: "stuck",
+      provider: "claude-backup",
+      lastError: "Failed to authenticate: OAuth session expired and could not be refreshed",
+    });
+    const idleOnSameAccount = agent({
+      id: "idle-sibling",
+      provider: "claude-backup",
+      lifecycle: "idle",
+    });
+
+    const result = plan({
+      agents: [stuck, idleOnSameAccount],
+      signedOutProviderIds: new Set(["claude-backup"]),
+    });
+
+    expect([...result.deadProviderIds]).toEqual(["claude-backup"]);
+    expect(ids(result.candidates)).toEqual(["stuck"]);
   });
 
   it("takes an agent in error on a dead account even when the error is not limit-shaped", () => {

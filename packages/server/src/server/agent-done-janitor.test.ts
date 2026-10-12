@@ -1701,6 +1701,16 @@ describe("readProviderHealth", () => {
     expect(result.askable).toBe(false);
   });
 
+  test("a sign-in failure on any agent of the account is not, and is flagged signed out", async () => {
+    const result = await readProviderHealth({
+      ...base,
+      lastErrorsByProvider: new Map([
+        ["claude-b", ["Failed to authenticate: OAuth session expired and could not be refreshed"]],
+      ]),
+    });
+    expect(result).toMatchObject({ askable: false, signedOut: true });
+  });
+
   test("an unavailable provider is not", async () => {
     const result = await readProviderHealth({ ...base, isAvailable: async () => false });
     expect(result).toEqual({ askable: false, reason: "provider claude-b is unavailable" });

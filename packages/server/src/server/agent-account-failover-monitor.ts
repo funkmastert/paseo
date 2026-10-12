@@ -17,6 +17,7 @@ import type { ProviderUsageService } from "../services/quota-fetcher/service.js"
 import {
   DEFAULT_REACTIVE_SIGNAL_TTL_MS,
   failureTimeMs,
+  isAccountDeadError,
   isAuthShapedError,
   isLimitShapedError,
   parseResetTimeHint,
@@ -299,6 +300,7 @@ export class AccountFailoverMonitor {
       usage: usage?.providers ?? null,
       previousSightings: this.sightings,
       previousProviderSightings: this.providerSightings,
+      signedOutProviderIds: this.accountAuth.signedOutProviderIds(),
       nowMs,
       reactiveSignalTtlMs: this.reactiveSignalTtlMs,
       migrateSubagents: config.migrateSubagents,
@@ -810,9 +812,9 @@ export class AccountFailoverMonitor {
         this.unresumed.delete(entry.agentId);
         continue;
       }
-      if (isLimitShapedError(summary.lastError)) {
-        // The target account is capped too. That is the detector's job, not this queue's, and
-        // both acting on one agent would race.
+      if (isAccountDeadError(summary.lastError)) {
+        // The target account is capped or signed out too. That is the detector's job, not this
+        // queue's, and both acting on one agent would race.
         this.unresumed.delete(entry.agentId);
         logger.info(
           { agentId: entry.agentId },
@@ -920,8 +922,10 @@ export class AccountFailoverMonitor {
         // The agent took its failure with it when it left, so nothing on the old account still
         // reports the cap. Keep the evidence on the provider, dated by the original failure, or
         // the next sweep would read it as healthy and send the next stuck agent back onto it.
-        // Only a limit-shaped failure is evidence: an agent moved for some other error left an
-        // account that was dead on usage alone, and that evidence refreshes itself.
+        // Only a limit-shaped failure is evidence here: an agent moved for some other error left
+        // an account that was dead on usage alone, and that evidence refreshes itself. A signed-out
+        // departure doesn't need this bridge either — the tracker's own evidence has no TTL to
+        // outlive, so it is still there on the next sweep without borrowing this sightings map.
         if (isLimitShapedError(agent.lastError)) {
           this.providerSightings.set(outcome.oldProviderId, {
             error: agent.lastError,

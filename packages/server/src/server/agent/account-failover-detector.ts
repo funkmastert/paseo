@@ -129,6 +129,12 @@ export interface PlanAccountFailoverSweepInput {
   previousSightings: ReadonlyMap<string, LimitErrorSighting>;
   /** The previous plan's `providerSightings`, plus whatever a move recorded since. */
   previousProviderSightings: ReadonlyMap<string, ProviderLimitSighting>;
+  /**
+   * This sweep's `AccountAuthTracker.signedOutProviderIds()`. Unlike the reactive sightings above,
+   * sign-in evidence carries no TTL of its own (account-auth-health.ts) — it stays dead here for
+   * as long as the tracker says so, with no decay in this function.
+   */
+  signedOutProviderIds: ReadonlySet<string>;
   nowMs: number;
   reactiveSignalTtlMs: number;
   migrateSubagents: boolean;
@@ -200,6 +206,9 @@ export function isStuckTurn(
 ): boolean {
   return (
     !agent.internal &&
+    // Limit-shaped only on purpose: a stuck agent in `error` is already caught by the lifecycle
+    // check, and sign-in evidence is the tracker's job (account-auth-health.ts), not this reactive
+    // sighting's 5-hour TTL.
     (agent.lifecycle === "error" || isLimitShapedError(agent.lastError)) &&
     !NON_CANDIDATE_LIFECYCLES.has(agent.lifecycle)
   );
@@ -238,6 +247,8 @@ export function planAccountFailoverSweep(
   for (const agent of input.agents) {
     if (agent.internal || !input.poolProviderIds.has(agent.provider)) continue;
     if (agent.lifecycle === "running") continue;
+    // Limit-shaped only: sign-in evidence lives in signedOutProviderIds above, dated and expired
+    // by the tracker rather than this sighting's reactiveSignalTtlMs.
     if (!isLimitShapedError(agent.lastError)) continue;
 
     const previous = input.previousSightings.get(agent.id);
@@ -265,6 +276,12 @@ export function planAccountFailoverSweep(
   const usageCaps = readUsageCaps(input.usage, input.poolProviderIds);
   for (const providerId of usageCaps.accountWide) deadProviderIds.add(providerId);
   const cappedModelWindows = usageCaps.modelWindows;
+
+  // Signed-out is dead for everyone on the account, like a whole-account usage cap, but the
+  // tracker owns when it clears — no TTL applies here.
+  for (const providerId of input.signedOutProviderIds) {
+    if (input.poolProviderIds.has(providerId)) deadProviderIds.add(providerId);
+  }
 
   // An agent in error on a dead account is a candidate whatever its error says: its turn ended
   // while its account was out, and it is resumed where it can run. Only a limit-shaped error

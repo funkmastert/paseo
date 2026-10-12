@@ -65,9 +65,16 @@ const REFUSAL_LIMIT_PATTERN = /hit your limit|rate limit|quota|credits|spend lim
  * internally (admin-API tool errors), never in the CLI's user-facing
  * turn-failure text, and matching them bare would risk false-positiving on
  * unrelated numbers in an error message.
+ *
+ * Also carries the daemon's own `isAuthShapedError` strings
+ * (account-failover-detector.ts) — "Failed to authenticate", "OAuth session
+ * expired", "OAuth token revoked", "Session expired", "Your session has
+ * expired" — from the 2026-10-12 incident where an expired-and-unrefreshable
+ * OAuth session produced exactly that text. classify.test.ts's drift test
+ * checks every one of the daemon's strings against this pattern.
  */
 const AUTH_FAILURE_PATTERN =
-  /not logged in|please run\s*\/login|invalid api key|invalid auth token|oauth login failed|cloud authentication failed/i;
+  /not logged in|please run\s*\/login|invalid api key|invalid auth token|oauth login failed|cloud authentication failed|failed to authenticate|oauth session expired|oauth token revoked|session expired|your session has expired/i;
 
 const ISO_TIMESTAMP_PATTERN =
   /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\b/;

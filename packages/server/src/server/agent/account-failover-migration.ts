@@ -13,7 +13,7 @@ import {
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
   getMigratedToFromLabels,
   HANDOFF_FROM_LABEL,
-  isLimitShapedError,
+  isAccountDeadError,
   isStuckTurn,
   parseResetTimeHint,
 } from "./account-failover-detector.js";
@@ -825,7 +825,7 @@ export async function settleBackAgent(input: SettleBackAgentInput): Promise<Sett
       oldProviderId: agent.provider,
       targetProviderId,
       staleError:
-        revived && isLimitShapedError(revived.lastError)
+        revived && isAccountDeadError(revived.lastError)
           ? { error: revived.lastError, timelineSeq: revived.timelineSeq }
           : null,
     };
@@ -946,7 +946,7 @@ export async function migrateStuckAgent(
       predecessorId: agent.id,
     });
     const handle = agentManager.getAccountFailoverSummary(successorId);
-    if (handle && isLimitShapedError(handle.lastError)) {
+    if (handle && isAccountDeadError(handle.lastError)) {
       staleError = { error: handle.lastError, timelineSeq: handle.timelineSeq };
     }
   }

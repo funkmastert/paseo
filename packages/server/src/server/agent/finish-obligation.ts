@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { OwedFinishReport } from "@getpaseo/protocol/agent-types";
 import type { AgentLifecycleStatus } from "@getpaseo/protocol/agent-lifecycle";
-import { isLimitShapedError } from "./account-failover-detector.js";
+import { isAccountDeadError } from "./account-failover-detector.js";
 
 /**
  * The finish report a delegated agent owes the agent that asked for it, stored on the child's
@@ -182,9 +182,9 @@ export interface AgentPresence {
  *
  * - `steer`: running; the report joins the active turn.
  * - `wake`: idle, closed, or not loaded; the report starts a turn (loading the agent if needed).
- * - `wait`: initializing, or failed on an account cap that account failover is about to move —
- *   a turn started now would fail or race the move. Retried next sweep, bounded by the rung's
- *   deadline.
+ * - `wait`: initializing, or failed on an account cap or sign-in failure that account failover is
+ *   about to move — a turn started now would fail or race the move. Retried next sweep, bounded
+ *   by the rung's deadline.
  * - `unreachable`: archived or gone. Nothing sent to it would ever be read.
  */
 export type DeliveryGate = "steer" | "wake" | "wait" | "unreachable";
@@ -197,7 +197,7 @@ export function gateDelivery(target: AgentPresence): DeliveryGate {
     case "initializing":
       return "wait";
     case "error":
-      return isLimitShapedError(target.lastError) ? "wait" : "wake";
+      return isAccountDeadError(target.lastError) ? "wait" : "wake";
     default:
       return "wake";
   }

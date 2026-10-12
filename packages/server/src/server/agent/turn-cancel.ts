@@ -30,3 +30,13 @@ export function isUnresponsiveCancelReason(reason: string): boolean {
 export function formatAccountCappedCancelError(provider: string): string {
   return `Account ${provider} is at its usage limit or unusable, and this turn stalled in running with no activity; the daemon canceled it so account failover can move the agent.`;
 }
+
+/**
+ * What `lastError` carries after the stalled-agent sweep cancels a turn stuck on an account that
+ * is signed out. The text has to stay auth-shaped for `isAuthShapedError` (it uses the daemon's
+ * own "Failed to authenticate" string) so account failover reads it as a sign-in failure, not a
+ * usage cap.
+ */
+export function formatAccountSignedOutCancelError(provider: string): string {
+  return `Account ${provider} is signed out (Failed to authenticate), and this turn stalled in running with no activity; the daemon canceled it so account failover can move the agent.`;
+}

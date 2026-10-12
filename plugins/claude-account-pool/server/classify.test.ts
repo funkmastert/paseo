@@ -160,6 +160,50 @@ describe("classify", () => {
     expect(classify("You've hit your limit").isAuthFailure).toBeFalsy();
   });
 
+  // The 2026-10-12 incident: an expired-and-unrefreshable OAuth session produced this exact text,
+  // and this plugin's AUTH_FAILURE_PATTERN missed it, which let the account-pool keep retrying it.
+  it("flags the daemon's R2 auth strings as auth failures too", () => {
+    expect(
+      classify("Failed to authenticate: OAuth session expired and could not be refreshed")
+        .isAuthFailure,
+    ).toBe(true);
+    expect(classify("OAuth session expired").isAuthFailure).toBe(true);
+    expect(classify("OAuth token revoked").isAuthFailure).toBe(true);
+    expect(classify("Session expired").isAuthFailure).toBe(true);
+    expect(classify("Your session has expired").isAuthFailure).toBe(true);
+  });
+
+  it("does not flag the transient refresh-lock message as an auth failure", () => {
+    const result = classify(
+      "OAuth access token could not be refreshed: another Claude Code process is holding the refresh lock",
+    );
+    expect(result.isAuthFailure).toBeFalsy();
+  });
+
+  /**
+   * `AUTH_FAILURE_PATTERN` must recognize every string the daemon's `isAuthShapedError`
+   * (account-failover-detector.ts's `AUTH_TEXT_PATTERN`) does, or a sign-in failure the daemon
+   * sees would keep looking healthy to the pool. Unlike LIMIT_PATTERN above, the two patterns are
+   * not required to be identical sources -- this plugin's pattern also recognizes strings
+   * (`invalid auth token`, `oauth login failed`, `cloud authentication failed`) the daemon's
+   * doesn't need -- so this checks containment, not equality.
+   */
+  it("recognizes every string in the daemon's AUTH_TEXT_PATTERN", () => {
+    const source = readFileSync(
+      new URL("../../../packages/server/src/server/agent/account-failover-detector.ts", import.meta.url),
+      "utf8",
+    );
+    const match = /const AUTH_TEXT_PATTERN =\s*\/(.+)\/([a-z]*);/.exec(source);
+    if (!match) {
+      throw new Error("AUTH_TEXT_PATTERN not found in account-failover-detector.ts; update this test");
+    }
+    const alternatives = match[1].split("|").map((alt) => alt.replace(/\\\//g, "/"));
+    expect(alternatives.length).toBeGreaterThan(0);
+    for (const alternative of alternatives) {
+      expect(classify(alternative).isAuthFailure, alternative).toBe(true);
+    }
+  });
+
   it("parses an ISO resetsAt timestamp from the message", () => {
     const result = classify("You've hit your limit, resets at 2026-09-10T15:00:00Z");
     expect(result.isLimit).toBe(true);

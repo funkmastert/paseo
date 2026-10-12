@@ -13,7 +13,7 @@ import type {
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import { ensureAgentLoaded } from "./agent/agent-loading.js";
 import { formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
-import { isLimitShapedError } from "./agent/account-failover-detector.js";
+import { isAuthShapedError, isLimitShapedError } from "./agent/account-failover-detector.js";
 import { isRunMarkerOpen } from "./agent/restart-recovery/run-marker.js";
 import {
   buildDoneQuestion,
@@ -179,7 +179,15 @@ export type AskAgentResult =
   | { kind: "busy" }
   | { kind: "failed"; error: string };
 
-export type ProviderHealth = { askable: true } | { askable: false; reason: string };
+export type ProviderHealth =
+  | { askable: true }
+  | {
+      askable: false;
+      reason: string;
+      /** Set when the reason is a sign-in failure rather than a usage cap; the stalled-agent sweep
+       * reads it to decide which cancel reason hands a stuck turn to account failover. */
+      signedOut?: boolean;
+    };
 
 /**
  * Everything the janitor touches, as seams. Production wiring is `createDoneJanitor` in
@@ -2363,8 +2371,9 @@ function fromLive(
 /**
  * An account is askable unless something says it is not: a provider that reports itself
  * unavailable, a usage window at or past its cap, a usage source in error (how a logged-out
- * account shows), or any agent on it whose last error reads like a spent budget. Asking an agent
- * on a dead account would fail its turn and flag it — noise the janitor would have made itself.
+ * account shows), or any agent on it whose last error reads like a spent budget or a sign-in
+ * failure. Asking an agent on a dead account would fail its turn and flag it — noise the janitor
+ * would have made itself.
  */
 export async function readProviderHealth(input: {
   provider: string;
@@ -2387,7 +2396,15 @@ export async function readProviderHealth(input: {
   ) {
     return { askable: false, reason: `account ${input.provider} is at its usage cap` };
   }
-  if ((input.lastErrorsByProvider.get(input.provider) ?? []).some(isLimitShapedError)) {
+  const providerErrors = input.lastErrorsByProvider.get(input.provider) ?? [];
+  if (providerErrors.some(isAuthShapedError)) {
+    return {
+      askable: false,
+      reason: `an agent on account ${input.provider} failed to authenticate`,
+      signedOut: true,
+    };
+  }
+  if (providerErrors.some(isLimitShapedError)) {
     return { askable: false, reason: `an agent on account ${input.provider} hit a usage limit` };
   }
   return { askable: true };

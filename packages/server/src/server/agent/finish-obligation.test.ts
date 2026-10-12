@@ -20,6 +20,7 @@ const T0 = Date.parse("2026-09-23T12:00:00.000Z");
 const MINUTE = 60_000;
 const LADDER = DEFAULT_FINISH_REPORT_LADDER;
 const LIMIT_ERROR = "You've hit your weekly limit · resets 7am (America/Los_Angeles)";
+const AUTH_ERROR = "Failed to authenticate: OAuth session expired and could not be refreshed";
 
 function presence(overrides: Partial<AgentPresence> = {}): AgentPresence {
   return { exists: true, archived: false, lifecycle: "idle", ...overrides };
@@ -91,6 +92,7 @@ describe("the delivery gate", () => {
     expect(gateDelivery(presence({ lifecycle: "initializing" }))).toBe("wait");
     // Capped: a turn started now fails, and failover is about to move it.
     expect(gateDelivery(presence({ lifecycle: "error", lastError: LIMIT_ERROR }))).toBe("wait");
+    expect(gateDelivery(presence({ lifecycle: "error", lastError: AUTH_ERROR }))).toBe("wait");
     expect(gateDelivery(presence({ lifecycle: "error", lastError: "boom" }))).toBe("wake");
     expect(gateDelivery(presence({ archived: true }))).toBe("unreachable");
     expect(gateDelivery(presence({ exists: false }))).toBe("unreachable");

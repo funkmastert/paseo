@@ -623,6 +623,59 @@ describe("AccountFailoverMonitor (e2e)", () => {
     expect(providerOf(harness, leader)).toBe("claude-personal");
   }, 60_000);
 
+  test("migrates a worker stuck on a signed-out account to a healthy one", async () => {
+    // Same shape as the capped-leader test above, but the evidence is a sign-in failure
+    // (AUTH_TEXT_PATTERN), not a usage cap — U3 extends deadProviderIds with the tracker's
+    // signed-out providers, so the rescue leg reads it the same way.
+    const leader = await createAgent(harness, { provider: "claude", title: "Build failover" });
+    await converse(harness, leader, "CONTEXT-MARKER-AUTH");
+    await failOnLimit(
+      harness,
+      leader,
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+    );
+
+    await harness.sweep();
+
+    const moved = managed(harness, leader);
+    expect(moved.provider).toBe("claude-personal");
+    expect(moved.lastError).toBeUndefined();
+    expect(failoverPushes(harness)).toEqual([
+      expect.objectContaining({
+        title: "Agent moved to a new account",
+        data: expect.objectContaining({ agentId: leader, reason: "account_failover" }),
+      }),
+    ]);
+  }, 60_000);
+
+  test("moves an idle root off a signed-out account onto the leader account", async () => {
+    // A different agent on the same account provides the sign-in evidence; the idle root itself
+    // never failed a turn, so this exercises deadProviderIds alone, not isAccountDeadFor on the
+    // root's own lastError.
+    const sentinel = await createAgent(harness, {
+      provider: "claude-backup",
+      title: "Sentinel",
+    });
+    await converse(harness, sentinel, "SENTINEL-MARKER");
+    await failOnLimit(
+      harness,
+      sentinel,
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+    );
+
+    const root = await createAgent(harness, {
+      provider: "claude-backup",
+      title: "Check mobile support needs",
+    });
+    await converse(harness, root, "ROOT-MARKER");
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude");
+    expect(assistantText(harness, root)).toContain("ROOT-MARKER");
+    expect(managed(harness, root).lifecycle).toBe("idle");
+  }, 60_000);
+
   test("paces the resumes of a mass move through the shared resume budget", async () => {
     // One resume a minute, burst one: of three capped leaders only the first restarts now.
     await harness.client.patchDaemonConfig({ admission: { bulkResumesPerMinute: 1 } });

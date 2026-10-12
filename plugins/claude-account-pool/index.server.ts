@@ -272,6 +272,7 @@ export default function contribute(server: PluginServerContext) {
             usedPct: window.usedPct ?? null,
             resetsAt: window.resetsAt ?? null,
           })),
+          accountAuth: provider.accountAuth ? { state: provider.accountAuth.state } : null,
         })),
       };
     };
