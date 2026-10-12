@@ -206,10 +206,12 @@ export function isStuckTurn(
 ): boolean {
   return (
     !agent.internal &&
-    // Limit-shaped only on purpose: a stuck agent in `error` is already caught by the lifecycle
-    // check, and sign-in evidence is the tracker's job (account-auth-health.ts), not this reactive
-    // sighting's 5-hour TTL.
-    (agent.lifecycle === "error" || isLimitShapedError(agent.lastError)) &&
+    // isAccountDeadError, not isLimitShapedError: the stalled-agent sweep's cancel lands an agent
+    // idle (not error) with a limit- or auth-shaped lastError depending on which reason it used
+    // (account-capped / account-signed-out, turn-cancel.ts). Both are a cut-off turn the rescue
+    // leg must take, or an idle+signed-out agent would match neither this nor the idle leg's
+    // exclusion (account-failover-rehome.ts) and be stuck in neither list.
+    (agent.lifecycle === "error" || isAccountDeadError(agent.lastError)) &&
     !NON_CANDIDATE_LIFECYCLES.has(agent.lifecycle)
   );
 }

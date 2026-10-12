@@ -195,6 +195,26 @@ describe("planAccountFailoverSweep", () => {
     expect(ids(result.candidates)).toEqual(["stalled"]);
   });
 
+  it("takes an agent the stalled-agent sweep cancelled with the signed-out reason too", () => {
+    // Same shape as the capped case above, but the cancel used account-signed-out
+    // (turn-cancel.ts's formatAccountSignedOutCancelError) because the account couldn't sign in.
+    // isStuckTurn has to recognize this auth-shaped lastError or the agent matches neither the
+    // rescue leg nor the idle leg (which excludes it via isAccountDeadError) and is stuck in
+    // neither list.
+    const stalled = agent({
+      id: "stalled",
+      provider: "claude-backup",
+      lifecycle: "idle",
+      lastError:
+        "Account claude-backup is signed out (Failed to authenticate), and this turn stalled " +
+        "in running with no activity; the daemon canceled it so account failover can move the agent.",
+    });
+
+    const result = plan({ agents: [stalled], signedOutProviderIds: new Set(["claude-backup"]) });
+
+    expect(ids(result.candidates)).toEqual(["stalled"]);
+  });
+
   it("adds the tracker's signed-out providers to deadProviderIds, with no TTL of its own", () => {
     const result = plan({ signedOutProviderIds: new Set(["claude-personal"]) });
     expect([...result.deadProviderIds]).toEqual(["claude-personal"]);
