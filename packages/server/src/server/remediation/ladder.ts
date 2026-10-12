@@ -85,6 +85,9 @@ export function remediationCreateAgentInput(
     unattended: request.unattended,
     background: true,
     notifyOnFinish: false,
+    // A daemon job, not an agent acting through the MCP endpoint: a Codex child guard create
+    // reads this the same as a Hub execution, not as human-made.
+    origin: "daemon",
   };
 }
 

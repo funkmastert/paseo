@@ -22,7 +22,7 @@ import { ScheduleStore } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
 import { evaluateScheduleCondition } from "./conditions.js";
 import type { ScheduleCondition } from "@getpaseo/protocol/schedule/condition";
-import { followMigratedTo, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import { followMigratedTo, type AgentCreateOrigin } from "@getpaseo/protocol/agent-labels";
 import type {
   CreateScheduleInput,
   ScheduleExecutionResult,
@@ -60,19 +60,25 @@ function trimOptionalName(value: string | null | undefined): string | null {
 }
 
 /**
- * Marks a schedule run's own create agent-made when the schedule itself was created by an agent
- * (review finding #1), so the Codex child guard treats it as a child, not root -- a schedule
- * run's own create has no `callerAgentId` of its own, and the creating agent is almost never
- * still live by the time a schedule fires, so passing it as `callerAgentId` (which
- * `resolveMcpCreateAgent` requires to exist) isn't an option here. A schedule's stored `modeId`
- * can't defeat this: the daemon forces guarded mode regardless of what the config asks for.
+ * A schedule run's own labels. Deliberately carries no `paseo.parent-agent-id`: stamping one
+ * (so the creating agent's id read as the run's parent) made every agent-made schedule run, on
+ * any provider, a child of its creator for every purpose that label drives -- archive cascades,
+ * attention severity, the AskUserQuestion check, failover -- not just the Codex guard. A schedule
+ * run is a root for all of those; only the Codex guard cares whether it was agent-made, and it
+ * reads `schedule.createdByOrigin` directly (`executeSchedule`'s `origin` on the create), not a
+ * borrowed parent label.
  */
 function buildScheduleRunLabels(schedule: StoredSchedule, runId: string): Record<string, string> {
   return {
     "paseo.schedule-id": schedule.id,
     "paseo.schedule-run": runId,
-    ...(schedule.createdByAgentId ? { [PARENT_AGENT_ID_LABEL]: schedule.createdByAgentId } : {}),
   };
+}
+
+/** Fail closed: a schedule written before `createdByOrigin` existed has no way to recover who
+ * created it, so it is treated as agent-made for Codex guard purposes. */
+function resolveScheduleCreateOrigin(schedule: StoredSchedule): AgentCreateOrigin {
+  return schedule.createdByOrigin ?? "agent";
 }
 
 function buildScheduleFireBody(schedule: StoredSchedule, runId: string): string {
@@ -403,6 +409,8 @@ export class ScheduleService {
       maxRuns: normalizeMaxRuns(input.maxRuns),
       ...conditionField(normalizeCondition(input.condition, fields.target)),
       createdByAgentId: input.createdByAgentId ?? null,
+      // Fail closed: a create path that forgets to set this is agent-made, not human.
+      createdByOrigin: input.createdByOrigin ?? "agent",
       runs: [],
     };
   }
@@ -442,6 +450,12 @@ export class ScheduleService {
           expiresAt: input.expiresAt ?? null,
           maxRuns: normalizeMaxRuns(input.maxRuns),
           ...conditionField(normalizeCondition(input.condition, inputTarget)),
+          // createOrReplace is reachable only through the MCP endpoint (create_schedule,
+          // create_heartbeat), which is agent-only -- the update branch must stamp agent-made the
+          // same way the create branch does, never leaving a retargeted schedule's attribution
+          // where a human client's create left it.
+          createdByAgentId: input.createdByAgentId ?? current.createdByAgentId ?? null,
+          createdByOrigin: "agent",
           updatedAt: now.toISOString(),
         };
       },
@@ -535,6 +549,17 @@ export class ScheduleService {
           ...updated,
           target: patchedTarget,
         };
+        // An agent (or daemon) retargeting a schedule's new-agent config marks it agent-made, so
+        // a later run can't dodge the Codex guard by pointing a human schedule at codex. A human
+        // edit (or one that omits `editorOrigin` entirely) leaves the existing attribution
+        // untouched -- this never moves a schedule back toward "human".
+        if (input.editorOrigin !== undefined && input.editorOrigin !== "human") {
+          updated = {
+            ...updated,
+            createdByAgentId: input.editorAgentId ?? updated.createdByAgentId ?? null,
+            createdByOrigin: input.editorOrigin,
+          };
+        }
       }
 
       if (input.maxRuns !== undefined) {
@@ -1060,6 +1085,9 @@ export class ScheduleService {
         promptFailure: "return-error",
         background: true,
         notifyOnFinish: false,
+        // The run is a root (no parent label), but still guarded when the schedule itself is
+        // agent-made: the schedule's own origin, not the run's own (nonexistent) caller, decides.
+        origin: resolveScheduleCreateOrigin(schedule),
       });
       const agent = created.snapshot;
       agentId = agent.id;

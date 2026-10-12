@@ -195,6 +195,8 @@ export class DaemonExecutions implements HubExecutionAgents {
         thinking: input.thinkingOptionId,
         features: input.featureValues,
         env: input.env,
+        // A Hub execution is a daemon job, not an agent acting through the MCP endpoint.
+        origin: "daemon",
         ...(input.mcpServers || input.providerOptions || input.toolPolicy
           ? {
               config: {

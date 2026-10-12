@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { z } from "zod";
 
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
@@ -25,6 +25,7 @@ import type { AgentSnapshotPayload, SessionOutboundMessage } from "@getpaseo/pro
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import { createTerminalManager } from "../terminal/terminal-manager.js";
 import { AgentManager, type AgentManagerEvent, type ManagedAgent } from "./agent/agent-manager.js";
+import { setCodexGuardHealthState } from "./agent/codex-guard-health.js";
 import { startAgentRun } from "./agent/agent-prompt.js";
 import { ChildAdmissionController } from "./agent/child-admission.js";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
@@ -95,6 +96,13 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 async function flushWorkspaceUpdateBackgroundWork(): Promise<void> {
   await waitForImmediate();
 }
+
+// This file creates label-only children (paseo.parent-agent-id, no callerAgentId) for workspace
+// behavior unrelated to the Codex child guard, so default guard health to green the way a real
+// daemon reaches it once the self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 
 afterEach(async () => {
   while (terminalManagers.length > 0) {

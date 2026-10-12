@@ -103,6 +103,9 @@ export const ScheduleUpdateRequestSchema = z.object({
   maxRuns: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().nullable().optional(),
   condition: ScheduleConditionSchema.nullable().optional(),
+  /** Set by a CLI run under `PASEO_AGENT_ID`, mirroring `schedule/create`'s own `callerAgentId`.
+   * Absent for the app/desktop client, which has no agent identity of its own. */
+  callerAgentId: z.string().optional(),
 });
 
 export const ScheduleCreateResponseSchema = z.object({

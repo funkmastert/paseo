@@ -1,8 +1,10 @@
 /**
- * Schedules the Codex guard self-test (bootstrap.ts) and records WHY a tick skipped running it
- * (review finding #10): the daemon's own hourly tick silently returned on a missing binary or an
- * empty catalog, leaving health stuck at its starting "No self-test has run yet." with nothing in
- * `daemon.log` saying which of the two happened, and the next attempt up to an hour away.
+ * Schedules the Codex guard self-test (bootstrap.ts) and records WHY a tick skipped running it:
+ * the daemon's own hourly tick could otherwise silently return on a missing binary, an empty
+ * catalog, or a self-test that resolves without proving anything, leaving health stuck at its
+ * starting "No self-test has run yet." with nothing in `daemon.log` saying which happened, and
+ * the next attempt up to an hour away. A skip never overwrites an already-proven green or red
+ * verdict -- it only records a reason and reschedules when health is still unknown.
  */
 import {
   getCodexGuardHealthState,
@@ -27,11 +29,10 @@ export const CODEX_GUARD_SELF_TEST_NORMAL_INTERVAL_MS = 60 * 60 * 1000;
  * to skip rather than actually run (or complete) the self-test. Climbs through the bounded
  * backoff, then settles into the normal hourly cadence once it runs out of steps. */
 export function nextCodexGuardSelfTestCheckDelayMs(consecutiveSkips: number): number {
-  if (consecutiveSkips <= 0) {
+  if (consecutiveSkips <= 0 || consecutiveSkips > CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS.length) {
     return CODEX_GUARD_SELF_TEST_NORMAL_INTERVAL_MS;
   }
-  const index = Math.min(consecutiveSkips - 1, CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS.length - 1);
-  return CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS[index];
+  return CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS[consecutiveSkips - 1];
 }
 
 export interface CodexGuardBootHealthDeps {
@@ -79,7 +80,13 @@ export function createCodexGuardBootHealthScheduler(
 
   function recordSkip(reason: string): void {
     consecutiveSkips += 1;
-    setCodexGuardHealthState({ status: "unknown", reason, codexVersion: null }, deps.logger);
+    // A proven green or red verdict stays: only an already-unknown health state (the common
+    // case -- a tick skipping before the first self-test ever completes) gets this skip's reason
+    // written onto it. Overwriting a proven verdict with "unknown" would un-prove it on nothing
+    // more than a transient missing binary or empty catalog.
+    if (getCodexGuardHealthState().status === "unknown") {
+      setCodexGuardHealthState({ status: "unknown", reason, codexVersion: null }, deps.logger);
+    }
     scheduleNext(nextCodexGuardSelfTestCheckDelayMs(consecutiveSkips));
   }
 
@@ -107,6 +114,15 @@ export function createCodexGuardBootHealthScheduler(
         return;
       }
       await deps.runSelfTest({ model: model.id, codexVersion });
+      // A self-test that hit an infrastructure error (a timeout, a failed createSession) resolves
+      // normally but leaves health exactly where it started: unknown. That is not proof of
+      // anything -- treat it as a skip, on the short backoff, rather than recordRanOrNotDue's
+      // hourly wait for a guard that was never actually exercised.
+      const resultingHealth = getCodexGuardHealthState();
+      if (resultingHealth.status === "unknown") {
+        recordSkip(resultingHealth.reason);
+        return;
+      }
       recordRanOrNotDue();
     } catch (error) {
       // An unexpected error (a thrown probe, a network failure) is not proof of anything about

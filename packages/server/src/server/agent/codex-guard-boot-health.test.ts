@@ -33,13 +33,11 @@ describe("nextCodexGuardSelfTestCheckDelayMs", () => {
     expect(nextCodexGuardSelfTestCheckDelayMs(4)).toBe(CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS[3]);
   });
 
-  it("stays on the backoff's last step for further consecutive skips, never exceeding it", () => {
-    expect(nextCodexGuardSelfTestCheckDelayMs(5)).toBe(
-      CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS.at(-1),
-    );
-    expect(nextCodexGuardSelfTestCheckDelayMs(100)).toBe(
-      CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS.at(-1),
-    );
+  it("settles into the hourly cadence once the backoff runs out of steps", () => {
+    expect(
+      nextCodexGuardSelfTestCheckDelayMs(CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS.length + 1),
+    ).toBe(CODEX_GUARD_SELF_TEST_NORMAL_INTERVAL_MS);
+    expect(nextCodexGuardSelfTestCheckDelayMs(100)).toBe(CODEX_GUARD_SELF_TEST_NORMAL_INTERVAL_MS);
   });
 });
 
@@ -98,9 +96,14 @@ describe("createCodexGuardBootHealthScheduler", () => {
       expect(findDefaultCodexBinary).toHaveBeenCalledTimes(index + 2);
     }
 
-    // The backoff is exhausted: the next tick (still skipping) waits on the backoff's last step
-    // again, not the hourly cadence -- it only returns to hourly once a tick actually runs/completes.
+    // The backoff is exhausted (the loop above already produced one call per backoff step, plus
+    // the initial checkNow -- CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS.length + 1 calls so far): the
+    // still-skipping scheduler now waits the hourly cadence, not the backoff's last step again.
     await vi.advanceTimersByTimeAsync(CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS.at(-1)!);
+    expect(findDefaultCodexBinary).toHaveBeenCalledTimes(
+      CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS.length + 1,
+    );
+    await vi.advanceTimersByTimeAsync(CODEX_GUARD_SELF_TEST_NORMAL_INTERVAL_MS);
     expect(findDefaultCodexBinary).toHaveBeenCalledTimes(
       CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS.length + 2,
     );
@@ -108,10 +111,72 @@ describe("createCodexGuardBootHealthScheduler", () => {
     scheduler.stop();
   });
 
+  it("never overwrites an already-proven green verdict with a skip's unknown", async () => {
+    const { setCodexGuardHealthState } = await import("./codex-guard-health.js");
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const findDefaultCodexBinary = vi.fn(async () => null);
+    const scheduler = createCodexGuardBootHealthScheduler(fakeDeps({ findDefaultCodexBinary }));
+
+    await scheduler.checkNow();
+
+    expect(getCodexGuardHealthState()).toMatchObject({ status: "green" });
+
+    await vi.advanceTimersByTimeAsync(CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS[0]);
+    expect(findDefaultCodexBinary).toHaveBeenCalledTimes(2); // still retries on the short backoff
+
+    scheduler.stop();
+  });
+
+  it("never overwrites an already-proven red verdict with a skip's unknown", async () => {
+    const { setCodexGuardHealthState } = await import("./codex-guard-health.js");
+    setCodexGuardHealthState({
+      status: "red",
+      reason: "self-test failed",
+      codexVersion: "0.160.0",
+    });
+    const scheduler = createCodexGuardBootHealthScheduler(
+      fakeDeps({ fetchCodexCatalogModels: async () => [] }),
+    );
+
+    await scheduler.checkNow();
+
+    expect(getCodexGuardHealthState()).toMatchObject({ status: "red" });
+
+    scheduler.stop();
+  });
+
+  it("treats a self-test that resolves without proving anything as a skip, on the short backoff", async () => {
+    // runSelfTest resolves normally (no infra throw) but never calls setCodexGuardHealthState --
+    // the real shape of a self-test that hit a timeout or a failed createSession.
+    const runSelfTest = vi.fn(async () => {});
+    const scheduler = createCodexGuardBootHealthScheduler(fakeDeps({ runSelfTest }));
+
+    await scheduler.checkNow();
+
+    expect(runSelfTest).toHaveBeenCalledTimes(1);
+    expect(getCodexGuardHealthState().status).toBe("unknown");
+
+    await vi.advanceTimersByTimeAsync(CODEX_GUARD_SELF_TEST_RETRY_BACKOFF_MS[0]);
+    expect(runSelfTest).toHaveBeenCalledTimes(2); // retried within a minute, not an hour
+
+    scheduler.stop();
+  });
+
   it("resets the backoff and returns to the hourly cadence once a tick actually runs", async () => {
     let binaryFound = false;
     const findDefaultCodexBinary = vi.fn(async () => (binaryFound ? "/usr/local/bin/codex" : null));
-    const runSelfTest = vi.fn(async () => {});
+    const runSelfTest = vi.fn(async () => {
+      const { setCodexGuardHealthState } = await import("./codex-guard-health.js");
+      setCodexGuardHealthState({
+        status: "green",
+        reason: "self-test passed",
+        codexVersion: "0.160.0",
+      });
+    });
     const scheduler = createCodexGuardBootHealthScheduler(
       fakeDeps({ findDefaultCodexBinary, runSelfTest }),
     );

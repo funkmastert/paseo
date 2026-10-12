@@ -34,6 +34,7 @@ import {
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import { CodexChildGuardError } from "./codex-guard-error.js";
+import { AgentProviderMoveError } from "./provider-move.js";
 import {
   createPromptQueue,
   formatSystemNotificationPrompt,
@@ -3111,7 +3112,7 @@ test("normalizeConfig injects the provider default model while leaving mode omit
       cwd: workdir,
     },
     undefined,
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   expect(snapshot.config.model).toBe("gpt-5.4");
@@ -3151,6 +3152,7 @@ test("normalizeConfig does not ask the provider to synthesize an omitted mode", 
   const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
     workspaceId: undefined,
     env: { CLAUDE_CODE_USE_BEDROCK: "1" },
+    origin: "human",
   });
 
   expect(snapshot.config.modeId).toBeUndefined();
@@ -3212,7 +3214,7 @@ test("normalizeConfig strips legacy 'default' model id", async () => {
       model: "default",
     },
     undefined,
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   expect(snapshot.config.model).toBe("gpt-5.4");
@@ -3640,7 +3642,7 @@ test("setAgentMode persists the selected mode across session reload", async () =
       modeId: "auto",
     },
     undefined,
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   await manager.setAgentMode(snapshot.id, "full-access");
@@ -3686,6 +3688,61 @@ describe("Codex child guard (daemon-side, codex-child-guard fix)", () => {
     expect(client.createdConfigs.at(-1)?.modeId).toBe("guarded"); // the mode that reached the provider
   });
 
+  test("createAgent guards a Codex create with no origin at all (fail closed on a forgotten path)", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    // No callerAgentId, no labels, no origin: a create path that forgot to assign one.
+    const agent = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { workspaceId: undefined },
+    );
+
+    expect(agent.config.modeId).toBe("guarded");
+  });
+
+  test("createAgent guards a daemon-origin Codex create (Hub, remediation)", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    const agent = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { workspaceId: undefined, origin: "daemon" },
+    );
+
+    expect(agent.config.modeId).toBe("guarded");
+  });
+
+  test("createAgent leaves a human-origin Codex create in its own mode", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    const agent = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { workspaceId: undefined, origin: "human" },
+    );
+
+    expect(agent.config.modeId).toBe("full-access");
+  });
+
   test("createAgent refuses a Codex child create when guard health is not green (unknown)", async () => {
     // Override the file-level green default: this test wants the real starting "unknown" state.
     resetCodexGuardHealthStateForTests();
@@ -3727,7 +3784,7 @@ describe("Codex child guard (daemon-side, codex-child-guard fix)", () => {
     const root = await manager.createAgent(
       { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
       undefined,
-      { workspaceId: undefined }, // no callerAgentId: Tyler's own session
+      { workspaceId: undefined, origin: "human" }, // Tyler's own session
     );
 
     expect(root.config.modeId).toBe("full-access");
@@ -3755,7 +3812,7 @@ describe("Codex child guard (daemon-side, codex-child-guard fix)", () => {
     const root = await manager.createAgent(
       { provider: "codex", cwd: process.cwd(), modeId: "guarded" },
       undefined,
-      { workspaceId: undefined },
+      { workspaceId: undefined, origin: "human" },
     );
 
     await manager.setAgentMode(root.id, "full-access");
@@ -4029,10 +4086,11 @@ describe("Codex child guard (daemon-side, codex-child-guard fix)", () => {
       callerAgentId: "parent-1",
     });
 
-    // The codex-guard refusal is checked before anything about the move's session state (no
-    // persistence handle needed to prove this one).
+    // Typed `AgentProviderMoveError` (its own `codex_guard_protected` code), matching the
+    // generic `incompatible_provider` refusal every other cross-family move already throws, and
+    // what move callers classify on -- not `CodexChildGuardError`.
     await expect(manager.moveAgentToProvider(child.id, "claude")).rejects.toThrow(
-      CodexChildGuardError,
+      AgentProviderMoveError,
     );
   });
 
@@ -4545,7 +4603,7 @@ test("createAgent passes daemon launch env through the provider launch context",
       cwd: workdir,
     },
     undefined,
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   expect(client.lastConfig).toEqual({
@@ -5606,7 +5664,7 @@ test("uses each provider's current policy for new sessions and snapshots it by a
   const codexAgent = await manager.createAgent(
     { provider: "codex", cwd: workdir },
     "00000000-0000-4000-8000-000000000107",
-    { workspaceId: undefined, labels: { "paseo.jev-tools": "on" } },
+    { workspaceId: undefined, labels: { "paseo.jev-tools": "on" }, origin: "human" },
   );
   const claudeAgent = await manager.createAgent(
     { provider: "claude", cwd: workdir },
@@ -5641,7 +5699,7 @@ test("uses each provider's current policy for new sessions and snapshots it by a
   const nextCodexAgent = await manager.createAgent(
     { provider: "codex", cwd: workdir },
     "00000000-0000-4000-8000-000000000111",
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   expect(manager.getPaseoToolPolicy(codexAgent.id)).toEqual({
@@ -7535,7 +7593,7 @@ test("persists live mode, model, and thinking changes without an external snapsh
       thinkingOptionId: "low",
     },
     undefined,
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   await manager.setAgentMode(snapshot.id, "build");
@@ -7700,7 +7758,7 @@ test("setLabels merges and persists labels", async () => {
       title: "Label test",
     },
     undefined,
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   await manager.setLabels(snapshot.id, { surface: "mobile" });

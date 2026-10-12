@@ -646,7 +646,10 @@ test("a hook mutating labels persists the mutated labels on the created agent", 
       },
       {
         kind: "mcp",
-        provider: "codex",
+        // claude, not codex: the MCP endpoint is unconditionally agent-made, so a codex create
+        // here would get stamped with the Codex guard's own marker -- noise unrelated to what
+        // this test (label merging through a plugin hook) actually checks.
+        provider: "claude",
         cwd: workdir,
         workspaceId: "ws-create-test",
         title: "child",
@@ -689,7 +692,8 @@ test("a hook returning a fresh object without labels leaves the original labels 
       },
       {
         kind: "mcp",
-        provider: "codex",
+        // claude, not codex: see the note on the previous test.
+        provider: "claude",
         cwd: workdir,
         workspaceId: "ws-create-test",
         title: "child",
@@ -904,6 +908,7 @@ test("a create goes ahead unmodified when a plugin does not answer its agent.cre
     const agent = await agentManager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
       workspaceId: undefined,
       labels: { "paseo.agent-type": "worker" },
+      origin: "human",
     });
 
     expect(agent.provider).toBe("codex");

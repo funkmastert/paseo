@@ -82,6 +82,10 @@ export class ScheduleSession {
         runOnCreate: request.runOnCreate,
         condition: request.condition,
         createdByAgentId: request.callerAgentId ?? null,
+        // A client session (app/desktop/CLI) with no callerAgentId came straight from a human;
+        // one carrying a callerAgentId is an agent acting through it (a CLI run under
+        // PASEO_AGENT_ID), same rule `createAgent`'s own session-kind create uses.
+        createdByOrigin: request.callerAgentId ? "agent" : "human",
       });
       this.host.emit({
         type: "schedule/create/response",
@@ -235,6 +239,10 @@ export class ScheduleSession {
         ...(request.maxRuns !== undefined ? { maxRuns: request.maxRuns } : {}),
         ...(request.expiresAt !== undefined ? { expiresAt: request.expiresAt } : {}),
         ...(request.condition !== undefined ? { condition: request.condition } : {}),
+        // Same human/agent rule as `schedule/create`: a callerAgentId on the request means an
+        // agent (a CLI run under PASEO_AGENT_ID) is making this edit.
+        editorOrigin: request.callerAgentId ? "agent" : "human",
+        editorAgentId: request.callerAgentId ?? null,
       });
       this.host.emit({
         type: "schedule/update/response",

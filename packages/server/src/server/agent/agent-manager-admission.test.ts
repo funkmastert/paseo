@@ -7,7 +7,15 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
+import { setCodexGuardHealthState } from "./codex-guard-health.js";
 import { AgentManager } from "./agent-manager.js";
+
+// This file creates label-only children (paseo.parent-agent-id, no callerAgentId) for admission
+// behavior unrelated to the Codex child guard, so default guard health to green the way a real
+// daemon reaches it once the self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 import { startAgentRun } from "./agent-prompt.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { AgentStorage } from "./agent-storage.js";

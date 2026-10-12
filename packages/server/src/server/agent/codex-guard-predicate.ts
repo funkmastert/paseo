@@ -3,16 +3,20 @@
  * reload, and the mode lock (`setAgentMode`) all call this instead of each inventing its own
  * notion of "child." It replaces "child = callerAgentId", which the create guard checked while
  * the mode lock checked `paseo.parent-agent-id` instead — two different, driftable definitions of
- * the same thing (review findings #0, #3).
+ * the same thing.
  *
- * True when the session family is `codex` and the agent is not human-made. "Human-made" mirrors
- * `isHumanAttributableCreate` (workspace-auto-pin.ts): no `callerAgentId` and no inherited
- * `paseo.parent-agent-id` label. A durable `paseo.codex-guarded` marker (stamped the first time
- * this predicate forces guarded mode) also counts on its own, so a child that later loses its
- * parent label — relabel, detach, archive — still can't leave guarded (review finding #0): the
- * marker is protected (`PROTECTED_LABEL_KEYS`), the label is not.
+ * True when the session family is `codex` and the agent is not human-made. A CREATE decides
+ * "human-made" from its daemon-assigned `origin`: `origin !== "human"` guards, same as an absent
+ * `origin` on a create that forgot to set one -- fail closed. Resume and reload have no origin of
+ * their own (they reconstruct a stored record, not a fresh create) and omit the field entirely,
+ * falling back to `isHumanAttributableCreate` (workspace-auto-pin.ts): no `callerAgentId` and no
+ * inherited `paseo.parent-agent-id` label. A durable `paseo.codex-guarded` marker (stamped the
+ * first time this predicate forces guarded mode) also counts on its own, so a child that later
+ * loses its parent label — relabel, detach, archive — still can't leave guarded: the marker is
+ * protected (`PROTECTED_LABEL_KEYS`), the label is not.
  */
-import { CODEX_GUARDED_LABEL, getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
+import { CODEX_GUARDED_LABEL, type AgentCreateOrigin } from "@getpaseo/protocol/agent-labels";
+import { isHumanAttributableCreate } from "../workspace-auto-pin.js";
 import type { AgentProvider } from "./agent-sdk-types.js";
 
 export function hasCodexGuardMarker(labels: Record<string, string> | null | undefined): boolean {
@@ -25,9 +29,13 @@ export interface RequiresCodexGuardInput {
   callerAgentId?: string | null;
   labels?: Record<string, string> | null;
   /** The session family of the FINAL provider (`resolveProviderSessionFamily`), not the literal
-   * provider id — a provider declared `extends: "codex"` must guard exactly like `codex` itself
-   * (review finding #2). */
+   * provider id — a provider declared `extends: "codex"` must guard exactly like `codex` itself. */
   providerFamily: AgentProvider;
+  /** The CREATE's daemon-assigned origin. Only ever present when a fresh create is being decided
+   * -- resume/reload never pass it, since a persisted record has no origin of its own to
+   * re-decide. When present and not `"human"`, this alone forces the guard, regardless of
+   * `callerAgentId`/labels -- a Hub execution or remediation agent carries neither. */
+  origin?: AgentCreateOrigin;
 }
 
 export function requiresCodexGuard(input: RequiresCodexGuardInput): boolean {
@@ -37,5 +45,11 @@ export function requiresCodexGuard(input: RequiresCodexGuardInput): boolean {
   if (hasCodexGuardMarker(input.labels)) {
     return true;
   }
-  return Boolean(input.callerAgentId) || getParentAgentIdFromLabels(input.labels) !== null;
+  if (input.origin !== undefined && input.origin !== "human") {
+    return true;
+  }
+  return !isHumanAttributableCreate({
+    callerAgentId: input.callerAgentId,
+    labels: input.labels ?? undefined,
+  });
 }

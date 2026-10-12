@@ -2,6 +2,18 @@ export const PARENT_AGENT_ID_LABEL = "paseo.parent-agent-id";
 const OPEN_AGENT_TAB_LABEL_PREFIX = "paseo.open-agent-tab.";
 
 /**
+ * Who asked the daemon to create this agent, assigned explicitly by the entry point instead of
+ * inferred from `callerAgentId`/labels after the fact (those drift per create path -- the Codex
+ * child guard's round 3 fix). "human": an app/desktop/CLI client session with no `callerAgentId`.
+ * "agent": a client session with `callerAgentId`, or the Paseo MCP endpoint (only agents use it).
+ * "daemon": a Hub execution, a remediation agent, or any other daemon-owned create. A create that
+ * never sets this is treated as agent-made -- new or forgotten paths are guarded by default, and
+ * only the explicit human path opts out.
+ */
+export const AGENT_CREATE_ORIGINS = ["human", "agent", "daemon"] as const;
+export type AgentCreateOrigin = (typeof AGENT_CREATE_ORIGINS)[number];
+
+/**
  * Stamped by the daemon the first time a Codex child is forced into guarded mode (create,
  * resume, or reload). Protected (`PROTECTED_LABEL_KEYS`, agent-manager.ts) so `update_agent`
  * can't clear it: `paseo.parent-agent-id` is mutable and a child can lose it (relabel, detach,

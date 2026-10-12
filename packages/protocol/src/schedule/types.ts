@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { AgentProviderSchema } from "../provider-manifest.js";
+import { AGENT_CREATE_ORIGINS, type AgentCreateOrigin } from "../agent-labels.js";
 import { ScheduleConditionSchema, type ScheduleCondition } from "./condition.js";
+
+export const ScheduleCreatedByOriginSchema = z.enum(AGENT_CREATE_ORIGINS);
 
 export const ScheduleStatusSchema = z.enum(["active", "paused", "completed"]);
 export type ScheduleStatus = z.infer<typeof ScheduleStatusSchema>;
@@ -73,13 +76,23 @@ export const StoredScheduleSchema = z.object({
   condition: ScheduleConditionSchema.optional(),
   runs: z.array(ScheduleRunSchema),
   /**
-   * The agent that created this schedule, or null for a human client session (the app, desktop,
-   * or a CLI run with no agent identity). Carried onto every `new-agent` run's `callerAgentId`
-   * (`ScheduleService.executeSchedule`) so the Codex child guard sees an agent-made schedule run
-   * as a child, not root -- the create itself has no caller of its own otherwise (review finding
-   * #1). Optional for backward compatibility with records written before this field existed.
+   * The agent that created (or last agent-edited) this schedule, or null for a human client
+   * session (the app, desktop, or a CLI run with no agent identity). Informational only --
+   * `createdByOrigin` is what the Codex child guard reads to decide whether a `new-agent` run is
+   * agent-made. Optional for backward compatibility with records written before this field
+   * existed.
    */
   createdByAgentId: z.string().nullable().optional(),
+  /**
+   * Who created (or last agent-edited) this schedule, mirroring `createAgent`'s origin model.
+   * Every `new-agent` run passes this straight through as the run's own create origin
+   * (`ScheduleService.executeSchedule`), instead of stamping the run with a `paseo.parent-agent-id`
+   * label -- a schedule run is a root for every other purpose (archiving, attention, failover).
+   * Optional for backward compatibility: a schedule written before this field existed has none,
+   * and is treated as agent-made for Codex purposes -- fail closed, since there is no way to
+   * recover who actually created it.
+   */
+  createdByOrigin: ScheduleCreatedByOriginSchema.optional(),
 });
 export type StoredSchedule = z.infer<typeof StoredScheduleSchema>;
 
@@ -99,6 +112,13 @@ export interface CreateScheduleInput {
   condition?: ScheduleCondition | null;
   /** The creating agent, or null/undefined for a human client session. See `StoredSchedule`. */
   createdByAgentId?: string | null;
+  /**
+   * Who created this schedule. Every entry point sets this explicitly: the `schedule/create` RPC
+   * (app/desktop/CLI) decides "human" vs "agent" from whether `callerAgentId` is present, same as
+   * `createAgent`'s own session-kind rule; the MCP endpoint (`create_schedule`/`create_heartbeat`)
+   * is agent-only and always "agent". Defaults to "agent" when omitted -- fail closed.
+   */
+  createdByOrigin?: AgentCreateOrigin;
 }
 
 export interface UpdateScheduleNewAgentConfig {
@@ -121,6 +141,18 @@ export interface UpdateScheduleInput {
   expiresAt?: string | null;
   /** Null clears the condition. */
   condition?: ScheduleCondition | null;
+  /**
+   * Who is making this edit, mirroring `createAgent`'s origin model. Only consulted when
+   * `newAgentConfig` is also present: an agent or daemon edit marks the schedule agent-made
+   * (`createdByAgentId`/`createdByOrigin`) so a later run can't dodge the Codex guard by
+   * retargeting a human schedule to a codex-family provider. Never used to move a schedule back
+   * toward "human" -- a human edit (or an edit that omits this) leaves the schedule's existing
+   * attribution untouched.
+   */
+  editorOrigin?: AgentCreateOrigin;
+  /** The editing agent's id, when `editorOrigin` is `"agent"`. Stored as the schedule's
+   * `createdByAgentId` going forward. */
+  editorAgentId?: string | null;
 }
 
 export interface ScheduleExecutionResult {

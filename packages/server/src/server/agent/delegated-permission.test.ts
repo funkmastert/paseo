@@ -2,12 +2,13 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import pino from "pino";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 
 import { AgentManager } from "./agent-manager.js";
 import { AgentStorage } from "./agent-storage.js";
+import { setCodexGuardHealthState } from "./codex-guard-health.js";
 import type {
   AgentClient,
   AgentPermissionRequest,
@@ -17,6 +18,13 @@ import type {
 } from "./agent-sdk-types.js";
 
 const logger = pino({ level: "silent" });
+
+// This file creates label-only children (paseo.parent-agent-id, no callerAgentId) for permission
+// delegation behavior unrelated to the Codex child guard, so default guard health to green the
+// way a real daemon reaches it once the self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 
 const CAPABILITIES = {
   supportsStreaming: true,

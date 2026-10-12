@@ -11,6 +11,7 @@ import type {
   CreatePaseoWorktreeWorkflowResult,
 } from "../../worktree-session.js";
 import type { AgentAttachment, FirstAgentContext, GitSetupOptions } from "../../messages.js";
+import type { AgentCreateOrigin } from "@getpaseo/protocol/agent-labels";
 import type { AgentManager, CreateAgentOptions, ManagedAgent } from "../agent-manager.js";
 import type { AgentPromptInput, AgentRunOptions, AgentSessionConfig } from "../agent-sdk-types.js";
 import type { AgentStorage } from "../agent-storage.js";
@@ -100,6 +101,12 @@ export interface CreateAgentFromMcpInput {
   detached?: boolean;
   owner?: AgentOwner;
   env?: Record<string, string>;
+  /**
+   * Who asked for this create. Defaults to "agent" -- every MCP-endpoint create is agent-made by
+   * definition, since only agents use it. A daemon-owned caller (Hub, the remediation ladder)
+   * sets "daemon" explicitly; nothing on this path sets "human".
+   */
+  origin?: AgentCreateOrigin;
   onCreated?: (created: {
     agentId: string;
     createdWorktree: CreatePaseoWorktreeWorkflowResult | null;
@@ -288,6 +295,10 @@ async function resolveSessionCreateAgent(
       env: input.env,
       callerAgentId: input.callerAgentId,
       initialTitle: input.provisionalTitle,
+      // A client session (app/desktop/CLI) with no callerAgentId came straight from a human;
+      // one carrying a callerAgentId is an agent acting through it (a CLI run under
+      // PASEO_AGENT_ID). This is the only place "session"-kind creates decide origin.
+      origin: input.callerAgentId ? "agent" : "human",
       // A legacy git/worktreeName worktree creates a fresh workspace, so the
       // agent belongs to that workspace, not the source one. createdWorkspaceId
       // is the freshly created worktree's workspace.
@@ -365,6 +376,9 @@ async function resolveMcpCreateAgent(
       owner: input.owner,
       env: input.env,
       callerAgentId: input.callerAgentId,
+      // The Paseo MCP endpoint is agent-only, so this is agent-made by default. A daemon-owned
+      // caller (Hub, the remediation ladder) sets `origin: "daemon"` on the input explicitly.
+      origin: input.origin ?? "agent",
     },
     prompt: trimmedPrompt ? trimmedPrompt : undefined,
     setupContinuation,

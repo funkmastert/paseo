@@ -2327,8 +2327,9 @@ export async function createPaseoDaemon(
   // Codex guard health's self-test (docs/codex-workers.md): no codex/ ref is usable for
   // children until this is green. Checked now and hourly after, so a daily re-run and a
   // Codex binary version change are both caught without a separate timer for each. A tick that
-  // has to skip the self-test itself (no binary, empty catalog) records why (review finding
-  // #10) and retries on a short bounded backoff instead of waiting the full hour.
+  // has to skip the self-test itself (no binary, empty catalog, or a self-test that resolves
+  // without proving anything) records why and retries on a short bounded backoff instead of
+  // waiting the full hour.
   const codexGuardBootHealthScheduler = createCodexGuardBootHealthScheduler({
     findDefaultCodexBinary,
     resolveBinaryVersion,
@@ -3991,6 +3992,7 @@ export async function createPaseoDaemon(
       // After listening, so a bootstrap that fails (port in use) never leaves an adb child.
       await physicalDeviceDetection.start();
     } catch (error) {
+      codexGuardBootHealthScheduler.stop();
       unsubscribePluginProviders();
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
       await serviceProxy.stopStandalone().catch(() => undefined);
@@ -4022,6 +4024,7 @@ export async function createPaseoDaemon(
     awayReplyJob?.stop();
     workSnapshotSweep?.stop();
     worktreeDiskMonitor?.stop();
+    codexGuardBootHealthScheduler.stop();
   };
 
   const stop = async () => {

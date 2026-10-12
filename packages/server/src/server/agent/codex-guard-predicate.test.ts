@@ -49,6 +49,28 @@ describe("requiresCodexGuard", () => {
       }),
     ).toBe(false);
   });
+
+  it("is true for an agent-origin create on codex, even with no caller and no parent label", () => {
+    expect(requiresCodexGuard({ providerFamily: "codex", origin: "agent" })).toBe(true);
+  });
+
+  it("is true for a daemon-origin create on codex (Hub, remediation)", () => {
+    expect(requiresCodexGuard({ providerFamily: "codex", origin: "daemon" })).toBe(true);
+  });
+
+  it("is false for a human-origin create on codex, even if origin is the only signal", () => {
+    expect(requiresCodexGuard({ providerFamily: "codex", origin: "human" })).toBe(false);
+  });
+
+  it("origin never overrides the marker when origin is human but the marker is present", () => {
+    expect(
+      requiresCodexGuard({
+        labels: { "paseo.codex-guarded": "1" },
+        providerFamily: "codex",
+        origin: "human",
+      }),
+    ).toBe(true);
+  });
 });
 
 describe("hasCodexGuardMarker", () => {
