@@ -833,6 +833,10 @@ export interface CreateScheduleOptions {
   expiresAt?: string;
   runOnCreate?: boolean;
   condition?: ScheduleCondition;
+  /** Set by a CLI run under `PASEO_AGENT_ID`. Marks the schedule's own creates as agent-made for
+   * the Codex child guard, which forces guarded mode on every run of an agent-created schedule
+   * whose target lands on a codex-family provider. */
+  callerAgentId?: string;
   requestId?: string;
 }
 export interface InspectScheduleOptions {
@@ -6119,6 +6123,7 @@ export class DaemonClient {
         ...(options.expiresAt ? { expiresAt: options.expiresAt } : {}),
         ...(typeof options.runOnCreate === "boolean" ? { runOnCreate: options.runOnCreate } : {}),
         ...(options.condition ? { condition: options.condition } : {}),
+        ...(options.callerAgentId ? { callerAgentId: options.callerAgentId } : {}),
       },
       responseType: "schedule/create/response",
     });

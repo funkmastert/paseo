@@ -2833,6 +2833,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         ...(name?.trim() ? { name: name.trim() } : {}),
         ...(maxRuns === undefined ? {} : { maxRuns }),
         ...(expiresAt === undefined ? {} : { expiresAt }),
+        createdByAgentId: callerAgentId ?? null,
       });
 
       return {
@@ -2891,6 +2892,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         ...(maxRuns === undefined ? {} : { maxRuns }),
         ...(expiresAt === undefined ? {} : { expiresAt }),
         ...(when === undefined ? {} : { condition: conditionFromNames(when) }),
+        createdByAgentId: callerAgentId,
       });
 
       return {

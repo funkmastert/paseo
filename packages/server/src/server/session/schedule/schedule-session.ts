@@ -81,6 +81,7 @@ export class ScheduleSession {
         expiresAt: request.expiresAt,
         runOnCreate: request.runOnCreate,
         condition: request.condition,
+        createdByAgentId: request.callerAgentId ?? null,
       });
       this.host.emit({
         type: "schedule/create/response",

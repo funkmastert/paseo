@@ -36,6 +36,9 @@ export const ScheduleCreateRequestSchema = z.object({
   expiresAt: z.string().optional(),
   runOnCreate: z.boolean().optional(),
   condition: ScheduleConditionSchema.optional(),
+  /** Set by a CLI run under `PASEO_AGENT_ID`, mirroring `create_agent_request.callerAgentId`.
+   * Absent for the app/desktop client, which has no agent identity of its own. */
+  callerAgentId: z.string().optional(),
 });
 
 export const ScheduleListRequestSchema = z.object({

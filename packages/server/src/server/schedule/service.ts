@@ -22,7 +22,7 @@ import { ScheduleStore } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
 import { evaluateScheduleCondition } from "./conditions.js";
 import type { ScheduleCondition } from "@getpaseo/protocol/schedule/condition";
-import { followMigratedTo } from "@getpaseo/protocol/agent-labels";
+import { followMigratedTo, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type {
   CreateScheduleInput,
   ScheduleExecutionResult,
@@ -57,6 +57,22 @@ function trimOptionalName(value: string | null | undefined): string | null {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Marks a schedule run's own create agent-made when the schedule itself was created by an agent
+ * (review finding #1), so the Codex child guard treats it as a child, not root -- a schedule
+ * run's own create has no `callerAgentId` of its own, and the creating agent is almost never
+ * still live by the time a schedule fires, so passing it as `callerAgentId` (which
+ * `resolveMcpCreateAgent` requires to exist) isn't an option here. A schedule's stored `modeId`
+ * can't defeat this: the daemon forces guarded mode regardless of what the config asks for.
+ */
+function buildScheduleRunLabels(schedule: StoredSchedule, runId: string): Record<string, string> {
+  return {
+    "paseo.schedule-id": schedule.id,
+    "paseo.schedule-run": runId,
+    ...(schedule.createdByAgentId ? { [PARENT_AGENT_ID_LABEL]: schedule.createdByAgentId } : {}),
+  };
 }
 
 function buildScheduleFireBody(schedule: StoredSchedule, runId: string): string {
@@ -386,6 +402,7 @@ export class ScheduleService {
       expiresAt: input.expiresAt ?? null,
       maxRuns: normalizeMaxRuns(input.maxRuns),
       ...conditionField(normalizeCondition(input.condition, fields.target)),
+      createdByAgentId: input.createdByAgentId ?? null,
       runs: [],
     };
   }
@@ -1035,10 +1052,7 @@ export class ScheduleService {
         cwd: workspace.cwd,
         workspaceId: workspace.workspaceId,
         title: resolveScheduleAgentTitle(config, schedule.prompt),
-        labels: {
-          "paseo.schedule-id": schedule.id,
-          "paseo.schedule-run": runId,
-        },
+        labels: buildScheduleRunLabels(schedule, runId),
         mode: config.modeId,
         thinking: config.thinkingOptionId,
         features: config.featureValues,

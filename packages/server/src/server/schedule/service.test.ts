@@ -21,6 +21,10 @@ import type {
   AgentStreamEvent,
 } from "../agent/agent-sdk-types.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
+import {
+  resetCodexGuardHealthStateForTests,
+  setCodexGuardHealthState,
+} from "../agent/codex-guard-health.js";
 import { validateProviderOptions } from "../agent/provider-options.js";
 import { ClaudeProviderOptionsSchema } from "../agent/providers/claude/options.js";
 import { createTestLogger } from "../../test-utils/test-logger.js";
@@ -311,6 +315,7 @@ describe("ScheduleService", () => {
     // ENOTEMPTY races when AgentManager flushes a snapshot mid-cleanup.
     await agentStorage.flush();
     await rm(tempDir, { recursive: true, force: true });
+    resetCodexGuardHealthStateForTests();
   });
 
   test("ticks due schedules and records run history on disk", async () => {
@@ -1857,6 +1862,131 @@ describe("ScheduleService", () => {
         },
       },
     });
+  });
+
+  test("an agent-created codex schedule run is guarded, even with a stored full-access mode", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const createdConfigs: AgentSessionConfig[] = [];
+    const clients = createTestAgentClients();
+    const codexClient = clients.codex;
+    if (!codexClient) {
+      throw new Error("Expected Codex test client");
+    }
+    clients.codex = {
+      provider: codexClient.provider,
+      capabilities: codexClient.capabilities,
+      createSession: async (...args) => {
+        createdConfigs.push(args[0]);
+        return codexClient.createSession(...args);
+      },
+      resumeSession: (...args) => codexClient.resumeSession(...args),
+      fetchCatalog: (...args) => codexClient.fetchCatalog(...args),
+      isAvailable: () => codexClient.isAvailable(),
+    } satisfies AgentClient;
+    const manager = new AgentManager({
+      logger: createTestLogger(),
+      clients,
+      registry: agentStorage,
+    });
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: manager,
+      agentStorage,
+      providerSnapshotManager: {
+        async resolveCreateConfig(input) {
+          return {
+            modeId: input.requestedMode ?? "full-access",
+            featureValues: input.featureValues,
+          };
+        },
+      },
+      now: () => now,
+    });
+
+    await service.create({
+      prompt: "do the thing",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: {
+        type: "new-agent",
+        config: { provider: "codex", model: "gpt-5.4", cwd: tempDir, modeId: "full-access" },
+      },
+      maxRuns: 1,
+      // The schedule itself was created by an agent (an MCP create_schedule caller), not Tyler.
+      createdByAgentId: "worker-agent-1",
+    });
+
+    now = new Date("2026-01-01T00:01:00.000Z");
+    await service.tick();
+
+    expect(createdConfigs).toHaveLength(1);
+    expect(createdConfigs[0]?.modeId).toBe("guarded");
+  });
+
+  test("a human-created codex schedule run keeps its own mode", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const createdConfigs: AgentSessionConfig[] = [];
+    const clients = createTestAgentClients();
+    const codexClient = clients.codex;
+    if (!codexClient) {
+      throw new Error("Expected Codex test client");
+    }
+    clients.codex = {
+      provider: codexClient.provider,
+      capabilities: codexClient.capabilities,
+      createSession: async (...args) => {
+        createdConfigs.push(args[0]);
+        return codexClient.createSession(...args);
+      },
+      resumeSession: (...args) => codexClient.resumeSession(...args),
+      fetchCatalog: (...args) => codexClient.fetchCatalog(...args),
+      isAvailable: () => codexClient.isAvailable(),
+    } satisfies AgentClient;
+    const manager = new AgentManager({
+      logger: createTestLogger(),
+      clients,
+      registry: agentStorage,
+    });
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: manager,
+      agentStorage,
+      providerSnapshotManager: {
+        async resolveCreateConfig(input) {
+          return {
+            modeId: input.requestedMode ?? "full-access",
+            featureValues: input.featureValues,
+          };
+        },
+      },
+      now: () => now,
+    });
+
+    await service.create({
+      prompt: "do the thing",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: {
+        type: "new-agent",
+        config: { provider: "codex", model: "gpt-5.4", cwd: tempDir, modeId: "full-access" },
+      },
+      maxRuns: 1,
+      // No createdByAgentId: Tyler created this schedule from the app.
+    });
+
+    now = new Date("2026-01-01T00:01:00.000Z");
+    await service.tick();
+
+    expect(createdConfigs).toHaveLength(1);
+    expect(createdConfigs[0]?.modeId).toBe("full-access");
   });
 
   test("advances stale nextRunAt on daemon restart", async () => {

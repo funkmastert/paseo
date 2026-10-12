@@ -72,6 +72,14 @@ export const StoredScheduleSchema = z.object({
   maxRuns: z.number().int().positive().nullable(),
   condition: ScheduleConditionSchema.optional(),
   runs: z.array(ScheduleRunSchema),
+  /**
+   * The agent that created this schedule, or null for a human client session (the app, desktop,
+   * or a CLI run with no agent identity). Carried onto every `new-agent` run's `callerAgentId`
+   * (`ScheduleService.executeSchedule`) so the Codex child guard sees an agent-made schedule run
+   * as a child, not root -- the create itself has no caller of its own otherwise (review finding
+   * #1). Optional for backward compatibility with records written before this field existed.
+   */
+  createdByAgentId: z.string().nullable().optional(),
 });
 export type StoredSchedule = z.infer<typeof StoredScheduleSchema>;
 
@@ -89,6 +97,8 @@ export interface CreateScheduleInput {
   expiresAt?: string | null;
   runOnCreate?: boolean | null;
   condition?: ScheduleCondition | null;
+  /** The creating agent, or null/undefined for a human client session. See `StoredSchedule`. */
+  createdByAgentId?: string | null;
 }
 
 export interface UpdateScheduleNewAgentConfig {
