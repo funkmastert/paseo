@@ -449,8 +449,14 @@ export interface ResourceMonitorAgentSummary {
 export interface CodexGuardChildCandidateSummary {
   id: string;
   provider: AgentProvider;
+  /** The session family of `provider` (`resolveProviderSessionFamily`), not the literal id -- a
+   * provider declared `extends: "codex"` counts against the cap exactly like `codex` itself. */
+  providerFamily: AgentProvider;
   /** The `paseo.parent-agent-id` label: set on a child agent, null on a root (Tyler's own session). */
   parentAgentId: string | null;
+  /** Whether the durable `paseo.codex-guarded` marker is set -- survives a relabel or detach
+   * that clears `parentAgentId`, so a marker-only child still counts against the cap. */
+  hasGuardMarker: boolean;
   lifecycle: AgentLifecycleStatus;
   /** A foreground turn, an active turn, a pending replacement, or a queued/admitted run. */
   busy: boolean;
@@ -2033,7 +2039,9 @@ export class AgentManager {
     return Array.from(this.agents.values()).map((agent) => ({
       id: agent.id,
       provider: agent.provider,
+      providerFamily: this.resolveProviderSessionFamily(agent.provider),
       parentAgentId: getParentAgentIdFromLabels(agent.labels),
+      hasGuardMarker: hasCodexGuardMarker(agent.labels),
       lifecycle: agent.lifecycle,
       busy: this.isAgentBusy(agent),
       createdAt: agent.createdAt.toISOString(),

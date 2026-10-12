@@ -31,7 +31,12 @@ function fakePoolCache(pool: ResolvedPool = POOL): PoolCache {
 }
 
 function fakeProviderIds(ids: string[] = ALL_IDS): ProviderIdCache {
-  return { get: () => new Set(ids), forceRefresh: vi.fn(), stop: vi.fn() };
+  return {
+    get: () => new Set(ids),
+    forceRefresh: vi.fn(),
+    stop: vi.fn(),
+    resolveFamily: (providerId: string) => providerId,
+  };
 }
 
 function request(callerAgentId: string, model: string | undefined = SONNET): { request: CreateAgentRequest } {
