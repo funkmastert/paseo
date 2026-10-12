@@ -156,11 +156,8 @@ import {
   findDefaultCodexBinary,
 } from "./agent/providers/codex-app-server-agent.js";
 import { resolveBinaryVersion } from "./agent/providers/diagnostic-utils.js";
-import {
-  getCodexGuardHealthState,
-  runCodexGuardSelfTest,
-  shouldRunCodexGuardSelfTest,
-} from "./agent/codex-guard-health.js";
+import { runCodexGuardSelfTest } from "./agent/codex-guard-health.js";
+import { createCodexGuardBootHealthScheduler } from "./agent/codex-guard-boot-health.js";
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
 import { WorkspaceReconciliationService } from "./workspace-reconciliation-service.js";
 import {
@@ -2329,47 +2326,43 @@ export async function createPaseoDaemon(
   });
   // Codex guard health's self-test (docs/catastrophe-gate.md, KTD-6): no codex/ ref is usable
   // for children until this is green. Checked now and hourly after, so a daily re-run and a
-  // Codex binary version change are both caught without a separate timer for each.
-  const checkCodexGuardSelfTest = () => {
-    void (async () => {
-      try {
-        const binaryPath = await findDefaultCodexBinary();
-        if (!binaryPath) return;
-        const codexVersion = await resolveBinaryVersion(binaryPath);
-        if (!shouldRunCodexGuardSelfTest(getCodexGuardHealthState(), Date.now(), codexVersion)) {
-          return;
-        }
-        const codexRuntimeSettings = config.agentProviderSettings?.codex;
-        const probeClient = new CodexAppServerAgentClient(logger, codexRuntimeSettings);
-        // Review finding #9: an unresponsive Codex binary left this probe hanging with no
-        // deadline, unlike the self-test's own 60s turn race below -- matching the provider
-        // catalog registry's own refresh timeout keeps a stuck probe from blocking the hourly
-        // self-test schedule indefinitely.
-        const { models } = await runProviderRefreshWithDeadline({
-          label: "Codex guard self-test catalog",
-          timeoutMs: 120_000,
-          operation: (context) =>
-            probeClient.fetchCatalog({ scope: "global", force: false }, context),
-        });
-        const model = models.find((candidate) => candidate.id.includes("luna")) ?? models[0];
-        if (!model) return;
-        await runCodexGuardSelfTest({
-          createClient: (guardDeviceLaunchGate) =>
-            new CodexAppServerAgentClient(logger, codexRuntimeSettings, {
-              deviceLaunchGate: guardDeviceLaunchGate,
-            }),
-          model: model.id,
-          codexVersion,
-          logger,
-          selfTestRoot: path.join(config.paseoHome, "codex-guard-self-test"),
-        });
-      } catch (error) {
-        logger.warn({ err: error }, "Codex guard self-test scheduling failed");
-      }
-    })();
-  };
-  checkCodexGuardSelfTest();
-  setInterval(checkCodexGuardSelfTest, 60 * 60 * 1000).unref();
+  // Codex binary version change are both caught without a separate timer for each. A tick that
+  // has to skip the self-test itself (no binary, empty catalog) records why (review finding
+  // #10) and retries on a short bounded backoff instead of waiting the full hour.
+  const codexGuardBootHealthScheduler = createCodexGuardBootHealthScheduler({
+    findDefaultCodexBinary,
+    resolveBinaryVersion,
+    fetchCodexCatalogModels: async () => {
+      const codexRuntimeSettings = config.agentProviderSettings?.codex;
+      const probeClient = new CodexAppServerAgentClient(logger, codexRuntimeSettings);
+      // Review finding #9: an unresponsive Codex binary left this probe hanging with no
+      // deadline, unlike the self-test's own 60s turn race below -- matching the provider
+      // catalog registry's own refresh timeout keeps a stuck probe from blocking the self-test
+      // schedule indefinitely.
+      const { models } = await runProviderRefreshWithDeadline({
+        label: "Codex guard self-test catalog",
+        timeoutMs: 120_000,
+        operation: (context) =>
+          probeClient.fetchCatalog({ scope: "global", force: false }, context),
+      });
+      return models;
+    },
+    runSelfTest: ({ model, codexVersion }) => {
+      const codexRuntimeSettings = config.agentProviderSettings?.codex;
+      return runCodexGuardSelfTest({
+        createClient: (guardDeviceLaunchGate) =>
+          new CodexAppServerAgentClient(logger, codexRuntimeSettings, {
+            deviceLaunchGate: guardDeviceLaunchGate,
+          }),
+        model,
+        codexVersion,
+        logger,
+        selfTestRoot: path.join(config.paseoHome, "codex-guard-self-test"),
+      });
+    },
+    logger,
+  });
+  void codexGuardBootHealthScheduler.checkNow();
 
   const providerSnapshotManager = agentProviderRuntime.snapshotManager;
   daemonConfigStore.onFieldChange("catalogRefreshTimeoutMs", (value) => {
