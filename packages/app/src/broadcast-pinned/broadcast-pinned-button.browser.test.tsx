@@ -33,13 +33,14 @@ interface Mounted {
 
 const mounted: Mounted[] = [];
 
-function mount(node: ReactNode): HTMLDivElement {
+function mount(node: ReactNode): Mounted {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => root.render(node));
-  mounted.push({ root, container });
-  return container;
+  const entry = { root, container };
+  mounted.push(entry);
+  return entry;
 }
 
 afterEach(() => {
@@ -184,5 +185,36 @@ describe("BroadcastPinnedButton", () => {
     const textarea = byTestId("broadcast-pinned-prompt-input") as HTMLTextAreaElement;
     expect(textarea).not.toBeNull();
     expect(textarea.value).toBe("status please");
+  });
+
+  it("stays open with an empty state when targets drop to zero while open", () => {
+    const onSend = vi.fn();
+    const { root } = mount(
+      <ToastProvider>
+        <BroadcastPinnedButton targets={[target({ id: "a1" })]} onSend={onSend} />
+      </ToastProvider>,
+    );
+
+    click(byTestId("sidebar-pinned-broadcast") as Element);
+    typeInto(byTestId("broadcast-pinned-prompt-input") as HTMLTextAreaElement, "status please");
+
+    act(() => {
+      root.render(
+        <ToastProvider>
+          <BroadcastPinnedButton targets={[]} onSend={onSend} />
+        </ToastProvider>,
+      );
+    });
+
+    const textarea = byTestId("broadcast-pinned-prompt-input") as HTMLTextAreaElement;
+    expect(textarea).not.toBeNull();
+    expect(textarea.value).toBe("status please");
+
+    expect(byTestId("broadcast-pinned-no-targets")).not.toBeNull();
+
+    const sendButton = byTestId("broadcast-pinned-send");
+    expect(sendButton?.getAttribute("data-menu-disabled")).toBe("true");
+
+    expect(onSend).not.toHaveBeenCalled();
   });
 });
