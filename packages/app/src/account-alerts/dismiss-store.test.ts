@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { StateStorage } from "zustand/middleware";
-import { createAccountAlertDismissStore, pruneAccountAlertDismissalsIn } from "./dismiss-store";
+import {
+  createAccountAlertDismissStore,
+  pruneAccountAlertDismissalsForUnknownHostsIn,
+  pruneAccountAlertDismissalsIn,
+} from "./dismiss-store";
 
 function createMemoryStorage(initial?: Record<string, string>): StateStorage & {
   values: Map<string, string>;
@@ -99,6 +103,51 @@ describe("account alert dismiss store", () => {
       expect(store.getState().dismissedFingerprints).toEqual([
         "server-2:claude:signed_out:2026-10-12T18:00:00Z",
       ]);
+    });
+  });
+
+  describe("pruneAccountAlertDismissalsForUnknownHostsIn", () => {
+    it("drops every dismissed fingerprint for a host no longer in the live list", () => {
+      const store = createAccountAlertDismissStore(createMemoryStorage());
+      store
+        .getState()
+        .dismiss([
+          "server-1:claude:signed_out:2026-10-12T18:00:00Z",
+          "server-2:claude:signed_out:2026-10-12T18:00:00Z",
+        ]);
+
+      pruneAccountAlertDismissalsForUnknownHostsIn(store, ["server-1"]);
+
+      expect(store.getState().dismissedFingerprints).toEqual([
+        "server-1:claude:signed_out:2026-10-12T18:00:00Z",
+      ]);
+    });
+
+    it("keeps every dismissal when every host is still live", () => {
+      const store = createAccountAlertDismissStore(createMemoryStorage());
+      store
+        .getState()
+        .dismiss([
+          "server-1:claude:signed_out:2026-10-12T18:00:00Z",
+          "server-2:claude:signed_out:2026-10-12T18:00:00Z",
+        ]);
+      const before = store.getState();
+
+      pruneAccountAlertDismissalsForUnknownHostsIn(store, ["server-1", "server-2"]);
+
+      expect(store.getState()).toBe(before);
+    });
+
+    it("drops every dismissal when given an empty live list", () => {
+      // The function itself has no loading gate — it is the caller's job (AccountAlertFeed,
+      // gated on useHostRegistryLoaded) to never call this with an empty list before the host
+      // registry has actually finished loading from disk.
+      const store = createAccountAlertDismissStore(createMemoryStorage());
+      store.getState().dismiss(["server-1:claude:signed_out:2026-10-12T18:00:00Z"]);
+
+      pruneAccountAlertDismissalsForUnknownHostsIn(store, []);
+
+      expect(store.getState().dismissedFingerprints).toEqual([]);
     });
   });
 });

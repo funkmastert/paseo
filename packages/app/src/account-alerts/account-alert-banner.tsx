@@ -24,7 +24,7 @@ import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { DEFAULT_REFETCH_INTERVAL_MS } from "@/orchestration/account-budget-strip";
 import { useCopyFixCommand } from "@/provider-usage/use-copy-fix-command";
 import { providerUsageQueryKey, useProviderUsage } from "@/provider-usage/use-provider-usage";
-import { useHostRuntimeClient, useHosts } from "@/runtime/host-runtime";
+import { useHostRegistryLoaded, useHostRuntimeClient, useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import { ICON_SIZE, type Theme } from "@/styles/theme";
 import { buildSettingsHostSectionRoute } from "@/utils/host-routes";
@@ -36,7 +36,11 @@ import {
   type AccountAlertEntry,
 } from "./account-alert-model";
 import { BelowBannerInsets } from "./below-banner-insets";
-import { pruneAccountAlertDismissals, useAccountAlertDismissStore } from "./dismiss-store";
+import {
+  pruneAccountAlertDismissals,
+  pruneAccountAlertDismissalsForUnknownHosts,
+  useAccountAlertDismissStore,
+} from "./dismiss-store";
 import { SIGN_IN_IDLE, SIGN_IN_TIMEOUT_MS, signInReducer, type SignInEvent } from "./sign-in-state";
 import { NO_ACCOUNT_ALERTS, reportHostAccountAlerts, useAccountAlertEntries } from "./store";
 
@@ -91,8 +95,7 @@ function HostAlertSource({ serverId, hostLabel }: { serverId: string; hostLabel:
     reportHostAccountAlerts(serverId, alertEntries);
   }, [serverId, alertEntries]);
 
-  // Ready-gated: a still-loading or disconnected view must never read as "nothing live" and wipe
-  // a dismissal that would otherwise still apply once this host reports back in.
+  // Ready-gated — see pruneAccountAlertDismissalsIn's doc comment for why.
   useEffect(() => {
     if (view.kind !== "ready") return;
     pruneAccountAlertDismissals(serverId, alertEntries.map(accountAlertFingerprint));
@@ -109,6 +112,17 @@ function HostAlertSource({ serverId, hostLabel }: { serverId: string; hostLabel:
 /** One source per connected host; a removed host's source unmounts and clears its entries. */
 function AccountAlertFeed() {
   const hosts = useHosts();
+  const registryLoaded = useHostRegistryLoaded();
+
+  // Loaded-gated for the same reason as the per-host prune: an empty host list before the
+  // registry finishes loading from disk must never read as "every host is gone" and wipe every
+  // dismissal. Once loaded, a host missing from this list entirely (archived, removed) has no
+  // HostAlertSource left to prune it, so this is the only place that ever drops its dismissals.
+  useEffect(() => {
+    if (!registryLoaded) return;
+    pruneAccountAlertDismissalsForUnknownHosts(hosts.map((host) => host.serverId));
+  }, [registryLoaded, hosts]);
+
   return (
     <>
       {hosts.map((host) => (
