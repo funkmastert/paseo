@@ -76,6 +76,14 @@ const REFUSAL_LIMIT_PATTERN = /hit your limit|rate limit|quota|credits|spend lim
 const AUTH_FAILURE_PATTERN =
   /not logged in|please run\s*\/login|invalid api key|invalid auth token|oauth login failed|cloud authentication failed|failed to authenticate|oauth session expired|oauth token revoked|session expired|your session has expired/i;
 
+/**
+ * A copy of the daemon's `REFRESH_LOCK_PATTERN` (account-failover-detector.ts), checked before
+ * AUTH_FAILURE_PATTERN the same way. Another process on the same config dir holds the refresh
+ * lock; the account is fine. The CLI can wrap it ("Failed to authenticate: … holding the refresh
+ * lock"), which AUTH_FAILURE_PATTERN alone would read as a sign-in failure.
+ */
+export const REFRESH_LOCK_PATTERN = /holding the refresh lock/i;
+
 const ISO_TIMESTAMP_PATTERN =
   /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\b/;
 const CLOCK_TIME_PATTERN = /resets?\s*(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
@@ -179,7 +187,7 @@ export function classify(message: string, now: Date = new Date()): ClassifyResul
   // Checked first and returned early: an auth failure carries no reset time
   // and no per-window attribution — it takes down the whole account, not one
   // window — so window/resetsAt detection (tuned for cap text) doesn't apply.
-  if (AUTH_FAILURE_PATTERN.test(message)) {
+  if (!REFRESH_LOCK_PATTERN.test(message) && AUTH_FAILURE_PATTERN.test(message)) {
     return { isLimit: true, isAuthFailure: true };
   }
 

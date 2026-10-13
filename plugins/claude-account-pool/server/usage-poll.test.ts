@@ -53,6 +53,23 @@ describe("createUsagePoller", () => {
     poller.stop();
   });
 
+  it("passes the row's sign-in command through to the tracker", async () => {
+    const tracker = createHealthTracker({ now: () => new Date("2026-09-10T10:00:00Z") });
+    const fixCommand = "CLAUDE_CONFIG_DIR=/accounts/a claude auth login --email someone@example.com";
+    const poller = createUsagePoller(tracker, {
+      fetchUsage: vi.fn().mockResolvedValue({
+        providers: [{ providerId: PROVIDER, windows: [], accountAuth: { state: "signed_out", fixCommand } }],
+      }),
+      setIntervalFn: vi.fn() as unknown as typeof setInterval,
+      clearIntervalFn: vi.fn() as unknown as typeof clearInterval,
+    });
+
+    await poller.pollOnce();
+
+    expect(tracker.describeWindow(PROVIDER, "account")?.signedOut).toEqual({ fixCommand });
+    poller.stop();
+  });
+
   it("drops an unparseable reset time rather than handing the tracker an Invalid Date", async () => {
     const tracker = createHealthTracker();
     const poller = createUsagePoller(tracker, {

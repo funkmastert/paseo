@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { classify, LIMIT_PATTERN } from "./classify";
+import { classify, LIMIT_PATTERN, REFRESH_LOCK_PATTERN } from "./classify";
 import { WINDOW_ACCOUNT, WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, weeklyModelWindow } from "./windows";
 
 /**
@@ -28,7 +28,9 @@ const CLI_CAP_MESSAGES: ReadonlyArray<{ message: string; window: string }> = [
  * One of the daemon's own detector patterns, read out of its source. The plugin compiles on its own
  * and cannot import daemon code, so it carries copies of the patterns; this keeps the copies honest.
  */
-function daemonPattern(constName: "LIMIT_TEXT_PATTERN" | "AUTH_TEXT_PATTERN"): RegExp {
+function daemonPattern(
+  constName: "LIMIT_TEXT_PATTERN" | "AUTH_TEXT_PATTERN" | "REFRESH_LOCK_PATTERN",
+): RegExp {
   const source = readFileSync(
     new URL("../../../packages/server/src/server/agent/account-failover-detector.ts", import.meta.url),
     "utf8",
@@ -193,6 +195,23 @@ describe("classify", () => {
     for (const alternative of alternatives) {
       expect(classify(alternative).isAuthFailure, alternative).toBe(true);
     }
+  });
+
+  /**
+   * The daemon checks REFRESH_LOCK_PATTERN before AUTH_TEXT_PATTERN, so a lock message the CLI
+   * wraps in "Failed to authenticate: …" is not a sign-in failure there. It must not be one here
+   * either, or the pool would park a healthy account the daemon keeps using.
+   */
+  it("rejects a wrapped refresh-lock message in both copies", () => {
+    const wrapped =
+      "Failed to authenticate: OAuth access token could not be refreshed: another Claude Code process is holding the refresh lock";
+    const daemonSaysAuth =
+      !daemonPattern("REFRESH_LOCK_PATTERN").test(wrapped) && daemonPattern("AUTH_TEXT_PATTERN").test(wrapped);
+
+    expect(daemonSaysAuth).toBe(false);
+    expect(classify(wrapped)).toEqual({ isLimit: false });
+    expect(REFRESH_LOCK_PATTERN.source).toBe(daemonPattern("REFRESH_LOCK_PATTERN").source);
+    expect(REFRESH_LOCK_PATTERN.flags).toBe(daemonPattern("REFRESH_LOCK_PATTERN").flags);
   });
 
   it("parses an ISO resetsAt timestamp from the message", () => {

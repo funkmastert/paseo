@@ -13,6 +13,7 @@ import {
 import { createIntervalPoller } from "./interval-poller";
 import { createLogThrottle } from "./log-throttle";
 import type { PoolCache } from "./pool";
+import { WINDOW_ACCOUNT } from "./windows";
 
 /** Stands in for `callerAgentId` in episodes about a create with no calling agent. */
 const ROOT_AGENT_CALLER = "(root agent)";
@@ -246,14 +247,40 @@ function earliestReset(health: LadderHealth, providerIds: readonly string[], mod
   return earliest;
 }
 
-/** The refusal text an agent sees. Names the accounts and the wait, so the caller can decide. */
+/**
+ * The refusal text an agent sees. Names the accounts and the wait, so the caller can decide. A
+ * signed-out account is named on its own with the command that signs it in: it has no reset to
+ * wait for, and calling it out of budget sends the user to the wrong fix.
+ */
 function describeExhaustedPool(health: LadderHealth, providerIds: readonly string[], modelId: string): string {
-  const reset = earliestReset(health, providerIds, modelId);
+  const signedOut = providerIds.flatMap((providerId) => {
+    const state = health.describeWindow(providerId, WINDOW_ACCOUNT)?.signedOut;
+    return state ? [{ providerId, fixCommand: state.fixCommand }] : [];
+  });
+  const outOfBudget = providerIds.filter((id) => !signedOut.some((account) => account.providerId === id));
+  const reset = earliestReset(health, outOfBudget, modelId);
   const when = reset ? `The earliest window reset is ${reset.toISOString()}.` : "No account reported a reset time.";
+  if (signedOut.length === 0) {
+    return (
+      `Account pool: every Claude account is out of budget (${providerIds.join(", ")}), so this agent was not created. ` +
+      `${when} Do not retry this spawn on another provider — they share the same exhausted pool. ` +
+      `Stop delegating and tell the user, who can sign another account in or raise a limit.`
+    );
+  }
+  const signIn = signedOut
+    .map(({ providerId, fixCommand }) =>
+      fixCommand ? `${providerId} is signed out; sign in with ${fixCommand}.` : `${providerId} is signed out.`,
+    )
+    .join(" ");
+  const budget =
+    outOfBudget.length === 0
+      ? ""
+      : ` ${outOfBudget.join(", ")} ${outOfBudget.length === 1 ? "is" : "are"} out of budget. ${when}`;
   return (
-    `Account pool: every Claude account is out of budget (${providerIds.join(", ")}), so this agent was not created. ` +
-    `${when} Do not retry this spawn on another provider — they share the same exhausted pool. ` +
-    `Stop delegating and tell the user, who can sign another account in or raise a limit.`
+    `Account pool: no Claude account can take this agent, so it was not created. ${signIn}${budget} ` +
+    `Do not retry this spawn on another provider — they share the same pool. ` +
+    `Stop delegating and tell the user, who can sign ${signedOut.length === 1 ? "that account" : "those accounts"} in` +
+    `${outOfBudget.length === 0 ? "." : " or raise a limit."}`
   );
 }
 

@@ -210,6 +210,37 @@ describe("an exhausted pool", () => {
     );
   });
 
+  const signInWith = (id: string) => `CLAUDE_CONFIG_DIR=/accounts/${id} claude auth login --email ${id}@example.com`;
+
+  it("names signed-out accounts and how to sign them in, not a budget, when every account is signed out", () => {
+    const { health, router } = build();
+    for (const id of ALL_IDS) health.reportAccountAuth(id, true, signInWith(id));
+
+    let message = "";
+    try {
+      router(request("leader-1"), fakeContext);
+    } catch (error) {
+      expect(error).toBeInstanceOf(PoolExhaustedError);
+      message = (error as Error).message;
+    }
+
+    for (const id of ALL_IDS) {
+      expect(message).toContain(`${id} is signed out; sign in with ${signInWith(id)}`);
+    }
+    expect(message).not.toContain("out of budget");
+  });
+
+  it("names signed-out and out-of-budget accounts apart when the pool is a mix", () => {
+    const { health, router } = build();
+    health.reportAccountAuth("worker-a", true, signInWith("worker-a"));
+    health.reportUsage("backup", usage({ [WINDOW_SEVEN_DAY]: 100 }, new Date("2026-09-26T09:00:00Z")));
+    health.reportUsage("claude-leader", usage({ [WINDOW_SEVEN_DAY]: 100 }, new Date("2026-09-26T09:00:00Z")));
+
+    expect(() => router(request("leader-1"), fakeContext)).toThrow(
+      /worker-a is signed out; sign in with CLAUDE_CONFIG_DIR=\/accounts\/worker-a.*backup, claude-leader are out of budget.*2026-09-26T09:00:00\.000Z/s,
+    );
+  });
+
   it("never blocks a human-created agent — those carry no callerAgentId", () => {
     const { health, router } = build();
     exhaust(health);
