@@ -4,11 +4,13 @@ import type { StreamItem } from "@/types/stream";
 import {
   createSeenThenLeftTracker,
   createStickyLastPromptPublisher,
+  NO_STICKY_PROMPT,
   selectLastPrompt,
   type StickyLastPromptSource,
 } from "./model";
 
 export interface UseStickyLastPromptInput {
+  agentId: string;
   items: readonly StreamItem[];
 }
 
@@ -40,6 +42,14 @@ export function useStickyLastPrompt(input: UseStickyLastPromptInput): UseStickyL
     const barVisible = tracker.update(lastPrompt.id, isCurrentlyVisible);
     publisher.publish({ prompt: lastPrompt, barVisible });
   });
+
+  // Reset before the items-driven recompute below runs, so a pane that switches agents without
+  // remounting never paints the previous agent's prompt first (mirrors use-chat-outline.ts's
+  // `activePrompt.publish(null)` reset keyed on agentId).
+  useEffect(() => {
+    lastVisibleRowIdsRef.current = new Set();
+    publisher.publish(NO_STICKY_PROMPT);
+  }, [publisher, input.agentId]);
 
   useEffect(() => {
     recomputeAndPublish();

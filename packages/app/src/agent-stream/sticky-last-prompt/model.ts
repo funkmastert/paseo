@@ -84,7 +84,7 @@ export interface StickyLastPromptPublisher extends StickyLastPromptSource {
   publish: (state: StickyLastPromptState) => void;
 }
 
-const NO_STICKY_PROMPT: StickyLastPromptState = { prompt: null, barVisible: false };
+export const NO_STICKY_PROMPT: StickyLastPromptState = { prompt: null, barVisible: false };
 
 function stickyLastPromptStatesEqual(
   left: StickyLastPromptState,

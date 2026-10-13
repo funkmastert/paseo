@@ -4,11 +4,13 @@ import type { StreamItem } from "@/types/stream";
 import {
   createStickyLastPromptPublisher,
   isLastPromptAboveViewport,
+  NO_STICKY_PROMPT,
   selectLastPrompt,
   type StickyLastPromptSource,
 } from "./model";
 
 export interface UseStickyLastPromptInput {
+  agentId: string;
   items: readonly StreamItem[];
 }
 
@@ -45,6 +47,14 @@ export function useStickyLastPrompt(input: UseStickyLastPromptInput): UseStickyL
       : false;
     publisher.publish({ prompt: lastPrompt, barVisible });
   });
+
+  // Reset before the items-driven recompute below runs, so a pane that switches agents without
+  // remounting never paints the previous agent's prompt first (mirrors use-chat-outline.ts's
+  // `activePrompt.publish(null)` reset keyed on agentId).
+  useEffect(() => {
+    readingPositionRowIdRef.current = null;
+    publisher.publish(NO_STICKY_PROMPT);
+  }, [publisher, input.agentId]);
 
   // A new turn (or the first prompt arriving) changes which row is "the last prompt," so this
   // must recompute even if the reading position itself hasn't changed.
