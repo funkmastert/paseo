@@ -19,7 +19,7 @@ function simulatorRow(pid: number, udid: string, etime = "02:14:00"): ProcessSam
     rssKb: 13_360,
     cpuPercent: 0.4,
     etime,
-    command: `launchd_sim /Users/tylerthackray/Library/Developer/CoreSimulator/Devices/${udid}/data/var/run/launchd_bootstrap.plist`,
+    command: `launchd_sim /Users/someone/Library/Developer/CoreSimulator/Devices/${udid}/data/var/run/launchd_bootstrap.plist`,
   };
 }
 
@@ -31,7 +31,7 @@ function emulatorRow(pid: number, ppid: number, avd: string): ProcessSampleRow {
     rssKb: 2_000_000,
     cpuPercent: 3,
     etime: "10:00",
-    command: `/Users/tylerthackray/Library/Android/sdk/emulator/emulator -avd ${avd}`,
+    command: `/Users/someone/Library/Android/sdk/emulator/emulator -avd ${avd}`,
   };
 }
 
