@@ -397,6 +397,10 @@ export class NotifyPolicy {
     for (const record of this.options.ledger.listPendingRetries()) {
       if (Date.parse(record.nextRetryAt!) > nowMs) continue;
       if (nowMs - Date.parse(record.at) >= RETRY_MAX_AGE_MS) {
+        this.logger.warn(
+          { id: record.id, level: record.level, retryCount: record.retryCount ?? 0 },
+          "Push retries exhausted; giving up",
+        );
         this.options.ledger.markFailed(
           record.id,
           record.error ?? "push retries exhausted",
@@ -406,9 +410,7 @@ export class NotifyPolicy {
       }
       due.push(record);
     }
-    await Promise.all(
-      due.map((record) => this.dispatch(record, { quiet: record.outcome === "notify" })),
-    );
+    await Promise.all(due.map((record) => this.dispatch(record, redeliveryFor(record))));
   }
 
   private async recoverUnsent(): Promise<void> {
@@ -421,7 +423,7 @@ export class NotifyPolicy {
         );
         continue;
       }
-      await this.dispatch(record, { quiet: record.outcome === "notify" });
+      await this.dispatch(record, redeliveryFor(record));
     }
   }
 
@@ -486,6 +488,18 @@ export class NotifyPolicy {
 
 function decisionFlags(decision: DeliveryDecision): Pick<PushDelivery, "timeSensitive"> {
   return decision.timeSensitive ? { timeSensitive: true } : {};
+}
+
+/**
+ * Replays the delivery flags a stored record was originally sent with, for a retry or a
+ * restart-recovered send that never goes through `decideDelivery` again. `timeSensitive` matches
+ * `decideDelivery`: only an interrupt at the urgent level asks iOS to break through Focus.
+ */
+function redeliveryFor(record: LedgerRecord): PushDelivery {
+  return {
+    quiet: record.outcome === "notify",
+    ...(record.outcome === "interrupt" && record.level === "urgent" ? { timeSensitive: true } : {}),
+  };
 }
 
 function toTicket(result: PushDeliveryResult): LedgerTicket {

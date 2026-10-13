@@ -1157,6 +1157,28 @@ describe("RemediationLadder closes episodes a restart left unconfirmed", () => {
     expect(state.episodes[0]!.closedAt).toBeUndefined();
   });
 
+  it("escalates normally, not as an expiry, when a reconciled agent times out after the restart grace", async () => {
+    const first = buildLadder();
+    await first.observe(observation({ graceMs: 0 }));
+    expect(fleet.created).toHaveLength(1);
+    first.stop();
+    fleet.views.set("agent-1", { status: "unloaded" });
+
+    const second = buildLadder();
+    await second.start();
+    expect(alerts()).toHaveLength(0);
+    // Past both the 45-minute agent timeout and the 30-minute restart grace, in the same tick.
+    nowMs += 45 * MINUTE;
+    await second.tick();
+
+    expect(alerts()).toHaveLength(1);
+    expect(records()).not.toContain("remediation_resolved");
+    const state = await loadLadderState(statePath, pino({ level: "silent" }));
+    expect(state.episodes).toHaveLength(1);
+    expect(state.episodes[0]!.closedAt).toBeUndefined();
+    expect(state.episodes[0]!.escalatedAt).toBeDefined();
+  });
+
   it("never expires an episode opened by this same process, however long it waits", async () => {
     const ladder = buildLadder();
     await ladder.tick();
@@ -1166,7 +1188,7 @@ describe("RemediationLadder closes episodes a restart left unconfirmed", () => {
     expect((await loadLadderState(statePath, pino({ level: "silent" }))).episodes).toHaveLength(1);
   });
 
-  it("sends no push and starts no agent when expiring an episode", async () => {
+  it("sends no push and starts no agent when expiring an episode, but records the close", async () => {
     const first = buildLadder();
     await first.observe(observation({ graceMs: 999 * MINUTE }));
     first.stop();
@@ -1177,8 +1199,9 @@ describe("RemediationLadder closes episodes a restart left unconfirmed", () => {
     nowMs += 30 * MINUTE;
     await second.tick();
     expect((await loadLadderState(statePath, pino({ level: "silent" }))).episodes).toHaveLength(0);
-    expect(pushes).toHaveLength(0);
+    expect(alerts()).toHaveLength(0);
     expect(fleet.created).toHaveLength(0);
+    expect(records()).toEqual(["remediation_resolved"]);
   });
 
   it("lets a fresh occurrence after expiry reach rung 3 again", async () => {

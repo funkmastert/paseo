@@ -716,6 +716,11 @@ export class RemediationLadder implements RemediationSink {
         ...triageJoin(episode),
       });
       episode.agent = undefined;
+      // The agent's own outcome is fresh information about this key, same as an observation (R2):
+      // without this, an episode reconciled from before the restart whose agent ends exactly as
+      // the grace elapses would be force-closed as "expired" in this same tick, right on top of
+      // the fixed-grace window or the escalation `evaluate` just gave it a few lines up.
+      this.restartSnapshot?.unconfirmedKeys.delete(episode.key);
 
       if (outcome.kind === "fixed") {
         await this.deps.archiveAgent(agentId).catch((error: unknown) => {
@@ -732,7 +737,7 @@ export class RemediationLadder implements RemediationSink {
       }
       if (episode.closedAt) state.episodes = state.episodes.filter((e) => e !== episode);
     }
-    if (this.expireUnconfirmedEpisodes(state, nowMs)) changed = true;
+    if (await this.expireUnconfirmedEpisodes(state, nowMs)) changed = true;
     // A hold that lapsed while its monitor went quiet: evaluate would otherwise wait for an
     // observation that may never come, and the fix the hold delayed would never start.
     for (const episode of state.episodes) {
@@ -747,9 +752,11 @@ export class RemediationLadder implements RemediationSink {
    * R1/R5/R6: an episode open when this process first loaded state, and that no observation for
    * its key has reached by the end of the restart grace, closes here. It is not closed while its
    * agent is still running (follows `handleObservation`'s own-agent filter) or while it is one of
-   * `REPORTED_ONCE_KINDS`. Sends no push and starts no agent.
+   * `REPORTED_ONCE_KINDS`. Sends no push and starts no agent; `record()` only ever logs (level
+   * "record" never reaches a phone), so the close still gets the same triage-log line every other
+   * close path gets.
    */
-  private expireUnconfirmedEpisodes(state: LadderState, nowMs: number): boolean {
+  private async expireUnconfirmedEpisodes(state: LadderState, nowMs: number): Promise<boolean> {
     const snapshot = this.restartSnapshot;
     if (!snapshot || snapshot.unconfirmedKeys.size === 0) return false;
     if (nowMs < snapshot.startedAtMs + RESTART_GRACE_MS) return false;
@@ -767,6 +774,11 @@ export class RemediationLadder implements RemediationSink {
       if (episode.agent) continue;
       episode.closedAt = new Date(nowMs).toISOString();
       this.recordClosed(episode, nowMs, { expiredAfterRestart: true });
+      await this.record(
+        episode,
+        "resolved",
+        "Expired after a restart: no monitor confirmed it within 30 minutes.",
+      );
       state.episodes = state.episodes.filter((e) => e !== episode);
       this.logger.info(
         { key: episode.key, kind: episode.observation.kind, openedAt: episode.openedAt },

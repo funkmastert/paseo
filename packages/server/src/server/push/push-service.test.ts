@@ -71,6 +71,23 @@ describe("PushService", () => {
     expect(revoked).toEqual(["b"]);
   });
 
+  test("a revoke that fails to persist does not turn the whole batch into a transport failure", async () => {
+    stubFetch(() => ({
+      data: [
+        { status: "ok", id: "t1" },
+        { status: "error", message: "gone", details: { error: "DeviceNotRegistered" } },
+      ],
+    }));
+    const service = new PushService(createLogger(), () => {
+      throw new Error("disk full");
+    });
+    const results = await service.sendPush(["a", "b"], { title: "T", body: "B" });
+    expect(results).toEqual([
+      { token: "a", ticketId: "t1", error: null, transportFailure: false },
+      { token: "b", ticketId: null, error: "DeviceNotRegistered", transportFailure: false },
+    ]);
+  });
+
   test("an unreachable push API fails every device instead of throwing, as a transport failure", async () => {
     vi.stubGlobal(
       "fetch",

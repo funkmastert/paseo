@@ -225,9 +225,17 @@ export class PushService {
     return verdicts;
   }
 
+  /**
+   * Best-effort: `revokeToken` can throw on a disk write failure, and a throw here would bubble
+   * up through `handleTickets`, which runs inside `sendBatch`'s own try/catch -- misreporting
+   * every other token in the batch, including ones Expo already accepted, as a transport failure.
+   */
   private revokeIfDead(token: string, error: string | undefined): void {
-    if (error && REVOKING_ERRORS.has(error)) {
+    if (!error || !REVOKING_ERRORS.has(error)) return;
+    try {
       this.revokeToken(token);
+    } catch (err) {
+      this.logger.warn({ err, token }, "Failed to revoke a dead push token");
     }
   }
 }

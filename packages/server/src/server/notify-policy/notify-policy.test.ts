@@ -522,6 +522,12 @@ describe("NotifyPolicy", () => {
       expect(transport.sent).toHaveLength(3);
       expect(ledger.get(id)?.state).toBe("sent");
       expect(ledger.get(id)?.id).toBe(id);
+      // An urgent retry must keep breaking through Focus, same as the original send.
+      expect(deliveriesOf(transport.sent)).toEqual([
+        { quiet: false, timeSensitive: true },
+        { quiet: false, timeSensitive: true },
+        { quiet: false, timeSensitive: true },
+      ]);
     });
 
     test("a notice that fails is not retried", async () => {
