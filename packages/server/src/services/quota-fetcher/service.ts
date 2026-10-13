@@ -138,7 +138,8 @@ export class ProviderUsageService {
   /**
    * Auth state is read per call too, same reasoning as identity above. In-app sign-in needs an
    * email to pre-fill (the bare `claude /login` only works in a terminal) and a `claude` binary to
-   * run, so `canSignIn` says whether both resolve; the RPC checks both again.
+   * run, and must not re-sign a last-known login while an identity problem stands on the entry
+   * (`blocksInAppSignIn`), so `canSignIn` says whether all three hold; the RPC checks them again.
    */
   private async withAccountAuth(result: ProviderUsageListResult): Promise<ProviderUsageListResult> {
     const tracker = this.accountAuth;
@@ -163,7 +164,10 @@ export class ProviderUsageService {
             since: new Date(record.since).toISOString(),
             summary: record.summary,
             fixCommand: record.fixCommand,
-            canSignIn: record.email !== null && binaryAvailable,
+            canSignIn:
+              record.email !== null &&
+              binaryAvailable &&
+              !this.accountIdentity?.blocksInAppSignIn(row.providerId),
           },
         };
       }),

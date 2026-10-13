@@ -19,6 +19,7 @@ import {
   AccountAuthTracker,
   type AccountAuthReading,
 } from "../../server/agent/account-auth-health.js";
+import { PoolAccountIdentityTracker } from "../../server/agent/pool-account-identity.js";
 
 function unavailableRow(providerId: string): ProviderUsage {
   return {
@@ -638,6 +639,60 @@ describe("ProviderUsageService", () => {
 
     expect(await canSignIn(true)).toEqual({ "with-email": true, "no-email": false });
     expect(await canSignIn(false)).toEqual({ "with-email": false, "no-email": false });
+  });
+
+  it("refuses in-app sign-in when the login is a last-known one and an identity problem stands", async () => {
+    // A config dir with no declared email signs in as whatever login `.claude.json` last held.
+    const driftedDir = mkdtempSync(join(tmpdir(), "usage-drifted-"));
+    writeFileSync(
+      join(driftedDir, ".claude.json"),
+      JSON.stringify({ oauthAccount: { emailAddress: "b@example.com" } }),
+    );
+    try {
+      const tracker = new AccountAuthTracker();
+      tracker.observe({
+        accounts: [
+          {
+            providerId: "declared",
+            enabled: true,
+            configDir: null,
+            expectedEmail: "a@example.com",
+          },
+          { providerId: "drifted", enabled: true, configDir: driftedDir, expectedEmail: null },
+        ],
+        turnFailures: [
+          { providerId: "declared", error: "Not logged in", atMs: 1 },
+          { providerId: "drifted", error: "Not logged in", atMs: 1 },
+        ],
+      });
+      const identity = new PoolAccountIdentityTracker();
+      identity.observe(
+        ["declared", "drifted"].map((providerId) => ({
+          providerId,
+          kind: "shared-login" as const,
+          signedInEmail: "b@example.com",
+          expectedEmail: providerId === "declared" ? "a@example.com" : null,
+          sharesWith: [providerId === "declared" ? "drifted" : "declared"],
+          summary: "Shared login",
+          fixCommand: "claude auth login",
+        })),
+      );
+      const service = new ProviderUsageService({
+        logger: createLogger(),
+        fetchers: [unavailableFetcher("declared"), unavailableFetcher("drifted")],
+        accountAuth: tracker,
+        accountIdentity: identity,
+        isClaudeBinaryAvailable: async () => true,
+      });
+
+      const { providers } = await service.listUsage();
+
+      expect(
+        Object.fromEntries(providers.map((row) => [row.providerId, row.accountAuth?.canSignIn])),
+      ).toEqual({ declared: true, drifted: false });
+    } finally {
+      rmSync(driftedDir, { recursive: true, force: true });
+    }
   });
 });
 
