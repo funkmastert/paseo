@@ -144,7 +144,17 @@ export class PushLedger {
     ]);
   }
 
-  markSent(id: string, tickets: LedgerTicket[], error: string | null, settledAt: string): void {
+  /**
+   * `retry` is the retry schedule (R8) decided from the tickets, so the arm happens in the same
+   * write as the send result instead of a second commit right after.
+   */
+  markSent(
+    id: string,
+    tickets: LedgerTicket[],
+    error: string | null,
+    settledAt: string,
+    retry: { nextRetryAt: string; retryCount: number } | null = null,
+  ): void {
     this.update(id, (record) => {
       const state = stateFromTickets(tickets);
       return {
@@ -153,9 +163,8 @@ export class PushLedger {
         state,
         error: error ?? firstTicketError(tickets),
         settledAt: state === "sent" ? null : settledAt,
-        // Delivered, pending or without a device: nothing left to retry. A failure past this
-        // point is re-armed by `scheduleRetry`, called right after this on the fresh record.
-        nextRetryAt: null,
+        nextRetryAt: retry?.nextRetryAt ?? null,
+        retryCount: retry?.retryCount ?? record.retryCount,
       };
     });
   }
