@@ -619,7 +619,7 @@ export class VoiceAssistantWebSocketServer {
   private unsubscribeDaemonConfigChange: (() => void) | null = null;
   private readonly providerUsageService: ProviderUsageService;
   private readonly accountIdentity = new PoolAccountIdentityTracker();
-  private readonly accountAuth = new AccountAuthTracker();
+  private readonly accountAuth: AccountAuthTracker;
   private readonly accountSignIn: ClaudeAccountSignIn;
   private readonly usageHistoryStore: UsageHistoryStore;
   private readonly contextUsageService: AgentContextUsageService;
@@ -691,6 +691,7 @@ export class VoiceAssistantWebSocketServer {
     jev?: JevService | null,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
+    this.accountAuth = new AccountAuthTracker({ logger: this.logger });
     this.workspaceSetupRuntime = workspaceSetupRuntime;
     this.advertiseDaemonStatusRpc = wsConfig.daemonStatusRpc !== false;
     this.autoPinExpiry = wsConfig.autoPinExpiry;

@@ -223,7 +223,7 @@ export class AccountFailoverMonitor {
     this.now = options.now ?? Date.now;
     this.accountIdentity = options.accountIdentity ?? new PoolAccountIdentityTracker();
     this.accountAuth = new AccountAuthSweep({
-      tracker: options.accountAuth ?? new AccountAuthTracker(),
+      tracker: options.accountAuth ?? new AccountAuthTracker({ logger: options.logger }),
       probe: options.accountAuthProbe ?? new AccountAuthProbe({ logger: options.logger }),
       providerUsage: options.providerUsage,
       remediationSink: options.remediationSink ?? NULL_REMEDIATION_SINK,
