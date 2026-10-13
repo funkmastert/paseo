@@ -179,6 +179,28 @@ describe("createRoleRouter", () => {
     expect(result?.config.provider).toBe("codex"); // crossed families: claude -> codex
   });
 
+  it("rewrites config.provider too when a codex request falls back to a BARE claude pool entry (codex-pool-provider-family)", () => {
+    // The caller asked for codex/gpt-6-luna; it isn't approved for this role, so policy overrides
+    // it with the role's own pool entry -- a bare claude ref. The bug: the model got rewritten to
+    // the bare ref's model id but the provider was left at the request's own "codex", because a
+    // bare ref's `null` provider read as "same family as whatever was requested" instead of
+    // resolving to the pool's actual (claude) family.
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerModels(["claude-opus-4"])),
+        catalogCache: fakeCatalogCache(catalog({ claude: ["claude-opus-4"] })),
+      }),
+    );
+
+    const result = router(
+      request({ callerAgentId: "c1", config: { provider: "codex", model: "gpt-6-luna", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe("claude-opus-4");
+    expect(result?.config.provider).toBe("claude"); // never codex + a claude model
+  });
+
   it("leaves config.provider untouched when the selection stays in the claude family", () => {
     const pool: ResolvedPool = { workers: [{ providerId: "worker-a", priority: 1 }], leader: { providerId: "leader" } };
     const router = createRoleRouter(
@@ -3050,7 +3072,33 @@ describe("JEV's labels", () => {
       expect(hintOf(router({ ...unlabelled(), jevTools: tools(0.9) }, fakeContext))).toBeUndefined();
     });
 
-    it("gives a non-Claude create neither an arm nor the hint, and the request passes through untouched", () => {
+    it("gives a create that actually RUNS on codex neither an arm nor the hint", () => {
+      // Unlike the test below, codex/gpt-5.1 here IS approved for the role — the create really
+      // does end up running codex, so JEV tools (Claude-only) correctly stay off it.
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-5.1"])),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
+        }),
+      );
+      const base = unlabelled();
+      const codexCreate = {
+        ...base,
+        request: { ...base.request, config: { ...base.request.config, provider: "codex", model: "gpt-5.1" } },
+        jevTools: tools(0.1),
+      };
+
+      const result = router(codexCreate, fakeContext);
+
+      expect(result?.config.provider).toBe("codex");
+      expect(result?.labels?.[JEV_TOOLS_LABEL]).toBeUndefined();
+      expect(hintOf(result)).toBeUndefined();
+    });
+
+    it("a create that only REQUESTS codex but is overridden onto a claude model gets JEV tools for the model that actually runs (codex-pool-provider-family)", () => {
+      // codex/gpt-5 isn't approved for jevOptions()'s worker pool, so policy overrides it with the
+      // pool's own bare claude-sonnet-5 entry — this create really does run Claude. JEV tools must
+      // key off that, not off the family the caller merely asked for.
       const base = unlabelled();
       const codexCreate = {
         ...base,
@@ -3060,9 +3108,10 @@ describe("JEV's labels", () => {
 
       const result = createRoleRouter(jevOptions())(codexCreate, fakeContext);
 
-      expect(result?.labels?.[JEV_TOOLS_LABEL]).toBeUndefined();
-      expect(hintOf(result)).toBeUndefined();
-      expect(result?.config.providerOptions).toBeUndefined();
+      expect(result?.config.provider).toBe("claude");
+      expect(result?.config.model).toBe("claude-sonnet-5");
+      expect(result?.labels?.[JEV_TOOLS_LABEL]).toBe("on");
+      expect(hintOf(result)).toContain("ask_jev");
     });
 
     it("adds no hint when the arm was never evaluated (the daemon serves no JEV tools)", () => {
