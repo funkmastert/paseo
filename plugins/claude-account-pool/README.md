@@ -209,12 +209,14 @@ prints the fix.
 
 ### 4. Apply the config
 
-Run `paseo reload` after editing `config.json`. `agents.providers`,
-`pluginsEnabled` and `agentModelPolicy` all apply without a restart. The
-reload's output lists `agentModelPolicy`, and after step 5 `plugins.*`, under
-"These changes require a daemon restart". Ignore those two: that list compares
-the file with the one the daemon started from, and both are already live.
-`mcpGateway` does need `paseo daemon restart`.
+Run `paseo reload` after editing `config.json`. The daemon does not watch the
+file, and the plugin reads the daemon's in-memory copy, so a hand edit does
+nothing until you reload. `agents.providers`, `pluginsEnabled` and
+`agentModelPolicy` all apply without a restart. The reload's output lists
+`agentModelPolicy` paths (`agentModelPolicy.roles`, say), and after step 5
+`plugins.*`, under "These changes require a daemon restart". Ignore those
+two: that list compares the file with the one the daemon started from, and
+both are already live. `mcpGateway` does need `paseo daemon restart`.
 
 ### 5. Install the plugin
 
@@ -306,9 +308,15 @@ agent spends one short turn; `paseo archive <id>` clears them away.
   `pool: FAIL-OPEN`.** The pool config is malformed: two `leader` entries, two
   workers with one `priority`, or a `priority` that is not a positive integer.
   The log line names which.
-- **A policy edit has no effect.** A malformed `agentModelPolicy` is ignored in
-  favour of the last good one, and nothing is logged. The Agent Model Policy
-  settings screen marks it malformed and refuses to save until it parses.
+- **A policy edit has no effect.** Either the daemon never loaded it or it is
+  malformed. A hand edit to `config.json` needs `paseo reload`; a daemon
+  restart is not needed, whatever the reload's warning says
+  ([step 4](#4-apply-the-config)). If the reload itself errors, nothing was
+  applied. A malformed `agentModelPolicy` is ignored in favour of the last
+  good one, and nothing is logged. The Agent Model Policy settings screen
+  marks it malformed and refuses to save until it parses. Either way, the
+  next spawn's `classifier-decision` line in the daemon log names the pool
+  that chose its model and says why.
 
 ## Where a spawn lands
 
@@ -519,7 +527,7 @@ Everything that needs the answer calls that one function:
 
 | Consumer | What it does with the decision |
 | --- | --- |
-| `before("agent.create")` (`server/role-router.ts`) | Writes it onto the request: `config.model`, `config.provider` on a cross-family selection, `config.thinkingOptionId`, the tool profile into `config.providerOptions`, the labels recording what happened — including `paseo.thinking-overridden-by-policy` when the level that runs isn't the one asked for, and `paseo.mcp-scope` for a scoped child (see [MCP servers](#mcp-servers)). |
+| `before("agent.create")` (`server/role-router.ts`) | Writes it onto the request: `config.model`, `config.provider` on a cross-family selection, `config.thinkingOptionId`, the tool profile into `config.providerOptions`, the labels recording what happened — including `paseo.thinking-overridden-by-policy` when the level that runs isn't the one asked for, `paseo.mode-translated-by-policy` when a cross-family selection also translates a requested `config.modeId` onto the target provider's own mode scale, ranked rather than string-matched (so a mode id that collides across catalogues, like `auto`, is never passed through unchanged; never widening permissions; never for a Codex child, whose mode the guard decides instead), and `paseo.mcp-scope` for a scoped child (see [MCP servers](#mcp-servers)). |
 | `role-model-policy.explain` (`server/role-policy-rpc-handlers.ts`) | Projects it onto the wire for the settings preview. |
 | `agent_model_policy` (MCP tool, below) | Renders it as text for an agent asking before it spawns. |
 
@@ -917,13 +925,14 @@ plugin does:
 
 The same poll (`jev.status`, every 60 s) decides the JEV agent tools, once
 the daemon serves them (`agentTools.served`, which the tools track sets):
-an eligible create (the feature on, a Claude-family provider, `Read` not
-denied, the company-code check passed) is labelled `paseo.jev-tools` `on` or
-`control`, by a draw against `agentTools.assignShare`. The drawn arm replaces
-any value the caller sent, and an ineligible create loses one, so no caller
-picks its own arm. A non-Claude create (Codex, OpenCode, …) is never drawn
-into either arm: the tools reach an agent only over its own MCP session, and
-the `on` arm's discovery hint rides on `providerOptions.appendSystemPrompt`, a
+an eligible create (the feature on, a Claude-family model after routing,
+`Read` not denied, the company-code check passed) is labelled
+`paseo.jev-tools` `on` or `control`, by a draw against
+`agentTools.assignShare`. The drawn arm replaces any value the caller sent,
+and an ineligible create loses one, so no caller picks its own arm. A create
+that runs on another family (Codex, OpenCode, …) is never drawn into either
+arm: the tools reach an agent only over its own MCP session, and the `on`
+arm's discovery hint rides on `providerOptions.appendSystemPrompt`, a
 Claude-only key other providers' strict option schemas reject. Until the
 daemon serves the tools, nothing is labelled.
 
@@ -1013,7 +1022,8 @@ The role router's precedence:
    exactly what was asked for.
 2. **Policy wins otherwise**, whether the model was never approved for this
    role or was approved but isn't selectable right now. The role's own
-   ordered selection runs as usual and the request is rewritten to it — but
+   ordered selection runs as usual and the request is rewritten to it, its
+   `config.provider` too when that model is in another family — but
    the override is never silent: it's logged with a reason-specific message,
    the created agent gets a `paseo.model-overridden-by-policy` label
    carrying the ref that was asked for, and the `role-model-policy.explain`

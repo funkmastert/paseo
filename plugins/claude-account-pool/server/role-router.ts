@@ -6,6 +6,7 @@ import {
   JEV_CALL_LABEL,
   JEV_SPAWN_LABEL,
   JEV_TOOLS_LABEL,
+  MODE_TRANSLATED_LABEL,
   MODEL_OVERRIDDEN_LABEL,
   TASK_CLASS_SOURCE_LABEL,
   THINKING_OVERRIDDEN_LABEL,
@@ -328,6 +329,64 @@ type AgentCreateConfig = PluginBeforeRequests["agent.create"]["config"];
 type ProviderOptionsValue = AgentCreateConfig["providerOptions"];
 
 const CODEX_GUARDED_OVERRIDE_KEYS = ["approval_policy", "sandbox_mode", "sandbox_workspace_write"] as const;
+
+/**
+ * Each family's offered modes, least to most permissive. Mirrors the provider's own list --
+ * duplicated here because this plugin doesn't depend on `packages/server`:
+ *  - claude: `packages/server/src/server/agent/providers/claude/agent.ts`'s `DEFAULT_MODES`.
+ *  - codex: `packages/server/src/server/agent/providers/codex-app-server-agent.ts`'s `CODEX_MODES`.
+ * Keyed by resolved provider FAMILY (`ProviderIdCache.resolveFamily`), not a literal provider id.
+ */
+const MODE_CATALOGUE_BY_FAMILY: Readonly<Record<string, readonly string[]>> = {
+  claude: ["plan", "default", "acceptEdits", "auto", "bypassPermissions"],
+  codex: ["auto", "auto-review", "full-access"],
+};
+
+/**
+ * Translates a `config.modeId` across a cross-family rewrite (`crossesRequestedFamily`): the
+ * target provider's mode ids are disjoint from the source's (Claude's `plan`/`bypassPermissions`
+ * mean nothing to Codex, and vice versa), so passing the id through produces "Invalid mode 'X'
+ * for Y provider" and the whole create is refused.
+ *
+ * Returns `undefined` when nothing needs to change -- no mode requested, the families match, or
+ * the target catalogue is unknown. Once the families differ, this never short-circuits just
+ * because the requested id happens to also be a member of the target's catalogue: mode ids are
+ * family-scoped, not global, and the two known catalogues collide on the literal string "auto"
+ * (Codex's most restrictive mode vs. Claude's near-maximal one) -- treating that string match as
+ * "nothing to translate" would silently escalate a Codex `auto` request into a Claude session.
+ * Every crossing create with a requested mode is ranked and translated instead.
+ *
+ * Mode lists have no shared finer-grained equivalence across providers, so this uses two tiers
+ * only: the source's own MOST permissive mode maps to the target's most permissive mode
+ * (`full-access` <-> `bypassPermissions`); anything else -- including a source family's mid-tier
+ * modes, which have no safe target equivalent -- maps to the target's MOST restrictive mode, per
+ * "never widen permissions."
+ *
+ * Caller is responsible for never calling this for a Codex CHILD create: the daemon's own Codex
+ * guard (`withCodexGuard`) already forces `modeId: "guarded"` on those, and this function has no
+ * way to reason about that preset (it isn't one of Codex's offered modes).
+ */
+function translateCrossFamilyMode(
+  requestedModeId: string | undefined,
+  sourceFamily: string,
+  targetFamily: string,
+): string | undefined {
+  if (requestedModeId === undefined || sourceFamily === targetFamily) {
+    return undefined;
+  }
+  const targetModes = MODE_CATALOGUE_BY_FAMILY[targetFamily];
+  if (!targetModes || targetModes.length === 0) {
+    return undefined;
+  }
+  const sourceModes = MODE_CATALOGUE_BY_FAMILY[sourceFamily];
+  if (!sourceModes) {
+    // Unknown source catalogue: no way to rank the requested mode's permissiveness. Fall back to
+    // the target's most restrictive mode rather than risk widening into something unintended.
+    return targetModes[0];
+  }
+  const isMostPermissive = sourceModes[sourceModes.length - 1] === requestedModeId;
+  return isMostPermissive ? targetModes[targetModes.length - 1] : targetModes[0];
+}
 
 /**
  * Defense in depth for a routed Codex child: these three fields must never reach the provider on
@@ -1274,8 +1333,24 @@ function routeRoleForCreateUnguarded(
     reserveCodexGuardSlot(options);
   }
   const nextConfig: AgentCreateConfig = { ...guardedRequest.config, model: decision.model.model };
+  // The mode translated across this rewrite, if any -- recorded onto the request's labels below
+  // (MODE_TRANSLATED_LABEL) once `extraLabels` exists, mirroring MODEL_OVERRIDDEN_LABEL.
+  let translatedModeId: string | undefined;
   if (decision.model.crossesRequestedFamily && decision.model.provider !== null) {
     nextConfig.provider = decision.model.provider as AgentCreateConfig["provider"];
+    // Never for a Codex child: `guardedRequest` already forced `modeId: "guarded"` above, which
+    // isn't one of either family's offered modes and must not be re-translated or duplicated here
+    // (the guard, not this function, owns that decision).
+    if (!isCodexChild && nextConfig.modeId !== undefined) {
+      const sourceFamily = options.providerIds?.resolveFamily?.(request.config.provider) ?? request.config.provider;
+      const targetFamily =
+        options.providerIds?.resolveFamily?.(nextConfig.provider as string) ?? (nextConfig.provider as string);
+      const translated = translateCrossFamilyMode(nextConfig.modeId, sourceFamily, targetFamily);
+      if (translated !== undefined) {
+        translatedModeId = nextConfig.modeId;
+        nextConfig.modeId = translated;
+      }
+    }
   }
   if (enforcement.providerOptions) {
     nextConfig.providerOptions = enforcement.providerOptions;
@@ -1306,6 +1381,10 @@ function routeRoleForCreateUnguarded(
   if (decision.model.unadvertised) {
     noteUnadvertised(decision.model.unadvertised.source, decision.model.unadvertised.ref);
     extraLabels[UNADVERTISED_MODEL_LABEL] = decision.model.unadvertised.ref;
+  }
+
+  if (translatedModeId !== undefined) {
+    extraLabels[MODE_TRANSLATED_LABEL] = translatedModeId;
   }
 
   const override = decision.model.override;
