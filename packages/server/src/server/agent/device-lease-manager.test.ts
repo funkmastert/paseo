@@ -77,6 +77,8 @@ function createManager(
     slowIdentityLookup?: boolean;
     /** Replaces the fake shutdown command, e.g. with one that never settles (a wedged simctl). */
     shutdownExec?: () => Promise<void>;
+    /** How many physical Android devices (phones) the physical gate currently sees connected. */
+    countPhysicalAndroidDevices?: number;
   } = {},
 ) {
   const state = {
@@ -117,6 +119,7 @@ function createManager(
       },
     },
     isPhysicalDeviceTarget: (target: string) => options.physicalTargets?.includes(target) ?? false,
+    countPhysicalAndroidDevices: () => options.countPhysicalAndroidDevices ?? 0,
     shutdownRunner: { exec: shutdownExec },
     logger,
     now: () => state.nowMs,
@@ -1411,6 +1414,281 @@ describe("DeviceLeaseManager simulator teardown config", () => {
       { monitor: "simulator-teardown", enabled: true, dryRun: true },
       { monitor: "simulator-teardown", enabled: false, dryRun: false },
     ]);
+  });
+});
+
+describe("gateInstall", () => {
+  test("does nothing while the cap is off", async () => {
+    const { manager } = createManager({
+      config: { enabled: false },
+      rows: [emulatorRow(501, 999, "emulator-5554")],
+    });
+    expect(
+      await manager.gateInstall({
+        agentId: "agent-1",
+        command: "adb -s emulator-5554 install app.apk",
+      }),
+    ).toEqual({ decision: "allow" });
+  });
+
+  test("another agent's leased emulator refuses an install, naming the holder", async () => {
+    const { manager } = createManager({ rows: [emulatorRow(501, 999, "emulator-5556")] });
+    await manager.checkout({ agentId: "agent-2", platform: "android", device: "emulator-5556" });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "adb -s emulator-5556 install app.apk",
+    });
+
+    expect(decision.decision).toBe("deny");
+    const message = decision.decision === "deny" ? decision.message : "";
+    expect(message).toContain("emulator-5556");
+    expect(message).toContain("agent-2");
+  });
+
+  test("an emulator another agent's process tree owns, never checked out, refuses an install", async () => {
+    const { manager } = createManager({
+      rows: [agentRootRow(500, "agent-2"), emulatorRow(501, 500, "emulator-5557")],
+    });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "adb -s emulator-5557 install app.apk",
+    });
+
+    expect(decision.decision).toBe("deny");
+    const message = decision.decision === "deny" ? decision.message : "";
+    expect(message).toContain("emulator-5557");
+    expect(message).toContain("agent-2");
+    expect(message).toContain("never checked out");
+  });
+
+  test("the holder's own emulator allows the install", async () => {
+    const { manager } = createManager({ rows: [emulatorRow(501, 999, "emulator-5558")] });
+    await manager.checkout({ agentId: "agent-1", platform: "android", device: "emulator-5558" });
+
+    expect(
+      await manager.gateInstall({
+        agentId: "agent-1",
+        command: "adb -s emulator-5558 install app.apk",
+      }),
+    ).toEqual({ decision: "allow" });
+  });
+
+  test("an unresolved variable target with two emulators running refuses, telling the agent to name it literally", async () => {
+    const { manager } = createManager({
+      rows: [emulatorRow(501, 999, "emulator-5554"), emulatorRow(502, 999, "emulator-5556")],
+    });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "adb -s $EXPORTED_ELSEWHERE install app.apk",
+    });
+
+    expect(decision.decision).toBe("deny");
+    const message = decision.decision === "deny" ? decision.message : "";
+    expect(message).toContain("can't resolve");
+    expect(message).toContain("emulator-5554");
+    expect(message).toContain("emulator-5556");
+    expect(message).toContain("Name the device literally");
+  });
+
+  test("an unresolved variable target with exactly one running emulator still refuses when a connected phone is also reachable", async () => {
+    const { manager } = createManager({
+      rows: [emulatorRow(501, 999, "emulator-5554")],
+      countPhysicalAndroidDevices: 1,
+    });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "adb -s $EXPORTED_ELSEWHERE install app.apk",
+    });
+
+    expect(decision.decision).toBe("deny");
+    const message = decision.decision === "deny" ? decision.message : "";
+    expect(message).toContain("can't resolve");
+    expect(message).toContain("emulator-5554");
+    expect(message).toContain("phone");
+  });
+
+  test("simctl install booted with two booted simulators refuses, naming both", async () => {
+    const { manager } = createManager({
+      rows: [simulatorRow(1, UDID_A), simulatorRow(2, UDID_B)],
+    });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "xcrun simctl install booted App.app",
+    });
+
+    expect(decision.decision).toBe("deny");
+    const message = decision.decision === "deny" ? decision.message : "";
+    expect(message).toContain(UDID_A);
+    expect(message).toContain(UDID_B);
+    expect(message).toContain("booted");
+  });
+
+  test("simctl install booted with exactly one booted simulator, unheld, binds it to the caller and allows", async () => {
+    const { manager } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+
+    expect(
+      await manager.gateInstall({
+        agentId: "agent-1",
+        command: "xcrun simctl install booted App.app",
+      }),
+    ).toEqual({ decision: "allow" });
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.devices).toEqual([
+      expect.objectContaining({
+        deviceId: UDID_A,
+        agentId: "agent-1",
+        attribution: "lease",
+        source: "launch",
+      }),
+    ]);
+  });
+
+  test("simctl install booted with exactly one booted simulator held by someone else refuses", async () => {
+    const { manager } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+    await manager.checkout({ agentId: "agent-2", platform: "ios", device: UDID_A });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "xcrun simctl install booted App.app",
+    });
+
+    expect(decision.decision).toBe("deny");
+    const message = decision.decision === "deny" ? decision.message : "";
+    expect(message).toContain("agent-2");
+  });
+
+  test("a plain adb install ambiguous across a running emulator and a connected phone is allowed — adb refuses to pick for itself", async () => {
+    const { manager } = createManager({
+      rows: [emulatorRow(501, 999, "emulator-5554")],
+      countPhysicalAndroidDevices: 1,
+    });
+
+    expect(
+      await manager.gateInstall({ agentId: "agent-1", command: "adb install app.apk" }),
+    ).toEqual({ decision: "allow" });
+  });
+
+  test("read-only commands are allowed and never take a lease", async () => {
+    const { manager } = createManager({ rows: [emulatorRow(501, 999, "emulator-5554")] });
+
+    expect(await manager.gateInstall({ agentId: "agent-1", command: "adb devices" })).toEqual({
+      decision: "allow",
+    });
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.devices).toEqual([
+      expect.objectContaining({ deviceId: "emulator-5554", attribution: "none" }),
+    ]);
+  });
+
+  test("an unheld device with no process-tree owner binds to the caller", async () => {
+    const { manager } = createManager({ rows: [emulatorRow(501, 999, "emulator-5559")] });
+
+    expect(
+      await manager.gateInstall({
+        agentId: "agent-1",
+        command: "adb -s emulator-5559 install app.apk",
+      }),
+    ).toEqual({ decision: "allow" });
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.devices).toEqual([
+      expect.objectContaining({ deviceId: "emulator-5559", agentId: "agent-1", source: "launch" }),
+    ]);
+  });
+
+  test("dry run records the blocked install and lets it through", async () => {
+    const { manager } = createManager({
+      config: { enabled: true, dryRun: true },
+      rows: [emulatorRow(501, 999, "emulator-5560")],
+    });
+    await manager.checkout({ agentId: "agent-2", platform: "android", device: "emulator-5560" });
+
+    expect(
+      await manager.gateInstall({
+        agentId: "agent-1",
+        command: "adb -s emulator-5560 install app.apk",
+      }),
+    ).toEqual({ decision: "allow" });
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.blocked).toEqual([
+      expect.objectContaining({ agentId: "agent-1", dryRun: true, platform: "android" }),
+    ]);
+  });
+
+  test("adb shell am force-stop refuses on another agent's emulator but allows and takes no lease on a free one", async () => {
+    const { manager } = createManager({
+      rows: [emulatorRow(501, 999, "emulator-5561"), emulatorRow(502, 999, "emulator-5562")],
+    });
+    await manager.checkout({ agentId: "agent-2", platform: "android", device: "emulator-5561" });
+
+    const held = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "adb -s emulator-5561 shell am force-stop com.x",
+    });
+    expect(held.decision).toBe("deny");
+
+    const free = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "adb -s emulator-5562 shell am force-stop com.x",
+    });
+    expect(free).toEqual({ decision: "allow" });
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.devices).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ deviceId: "emulator-5562", attribution: "none" }),
+      ]),
+    );
+  });
+
+  test("xcodebuild test onto another agent's simulator destination refuses", async () => {
+    const { manager } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+    await manager.checkout({ agentId: "agent-2", platform: "ios", device: UDID_A });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: `xcodebuild test -destination 'platform=iOS Simulator,id=${UDID_A}'`,
+    });
+
+    expect(decision.decision).toBe("deny");
+    const message = decision.decision === "deny" ? decision.message : "";
+    expect(message).toContain("agent-2");
+  });
+
+  test("simctl launch with --console before the device still refuses against two booted simulators", async () => {
+    const { manager } = createManager({
+      rows: [simulatorRow(1, UDID_A), simulatorRow(2, UDID_B)],
+    });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "xcrun simctl launch --console booted com.example",
+    });
+
+    expect(decision.decision).toBe("deny");
+    const message = decision.decision === "deny" ? decision.message : "";
+    expect(message).toContain(UDID_A);
+    expect(message).toContain(UDID_B);
+  });
+
+  test("simctl launch with --console before a literal UDID still refuses against another agent's simulator", async () => {
+    const { manager } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+    await manager.checkout({ agentId: "agent-2", platform: "ios", device: UDID_A });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: `xcrun simctl launch --console ${UDID_A} com.example`,
+    });
+
+    expect(decision.decision).toBe("deny");
+    const message = decision.decision === "deny" ? decision.message : "";
+    expect(message).toContain("agent-2");
   });
 });
 

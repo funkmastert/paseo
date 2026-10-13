@@ -10,7 +10,7 @@
 
 import { containsWholeToken, type DevicePlatform, type RunningDevice } from "./device-detection.js";
 
-export type DeviceLeaseSource = "checkout" | "launch";
+export type DeviceLeaseSource = "checkout" | "launch" | "install";
 
 export interface DeviceLease {
   id: string;
@@ -18,7 +18,9 @@ export interface DeviceLease {
   platform: DevicePlatform;
   /** Free text from the agent: what it wants the device for. Shown in the UI and in denials. */
   reason?: string;
-  /** "checkout" — the agent asked first. "launch" — the gate leased one on its behalf. */
+  /** "checkout" — the agent asked first. "launch" — the boot gate leased one on its behalf.
+   * "install" — the install gate leased one on its behalf (an install/launch/test command named
+   * a running device nobody held yet). */
   source: DeviceLeaseSource;
   acquiredAtMs: number;
   /** Set once reconciliation matches a running device to this lease. */

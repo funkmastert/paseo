@@ -214,16 +214,36 @@ describe("detectInstallCommandIntents", () => {
     ]);
   });
 
-  test("xcodebuild -destination targets a physical device by id or name, not a simulator", () => {
+  test("xcodebuild -destination targets a physical device by id or name", () => {
     expect(
       detectInstallCommandIntents("xcodebuild test -destination 'id=00004-FAKE-UDID'"),
     ).toEqual([expect.objectContaining({ platform: "ios", target: "00004-FAKE-UDID" })]);
     expect(
       detectInstallCommandIntents("xcodebuild test -destination 'platform=iOS,name=Fake Phone'"),
     ).toEqual([expect.objectContaining({ platform: "ios", target: "Fake Phone" })]);
+  });
+
+  test("xcodebuild -destination 'platform=iOS Simulator' is gated too — a running simulator is the emulator-cap install gate's job, not nothing", () => {
     expect(
       detectInstallCommandIntents(
         "xcodebuild test -destination 'platform=iOS Simulator,name=iPhone 17 Pro'",
+      ),
+    ).toEqual([expect.objectContaining({ platform: "ios", target: "iPhone 17 Pro" })]);
+    expect(
+      detectInstallCommandIntents(
+        "xcodebuild test-without-building -destination 'platform=iOS Simulator,id=FAKE-SIM-UDID-0002'",
+      ),
+    ).toEqual([expect.objectContaining({ platform: "ios", target: "FAKE-SIM-UDID-0002" })]);
+    // No id or name at all: left unmatched, not produced as a target-less intent — the physical
+    // gate shares this detector and would otherwise read a bare iOS intent as ambiguous among
+    // connected phones, a registry this command never touches.
+    expect(
+      detectInstallCommandIntents("xcodebuild test -destination 'platform=iOS Simulator'"),
+    ).toEqual([]);
+    // build/archive on a simulator destination never installs anything.
+    expect(
+      detectInstallCommandIntents(
+        "xcodebuild build -destination 'platform=iOS Simulator,name=iPhone 17 Pro'",
       ),
     ).toEqual([]);
   });
@@ -405,5 +425,116 @@ describe("detectInstallCommandIntents", () => {
     expect(detectInstallCommandIntents("adb devices | xargs -I{} adb -s {} install x.apk")).toEqual(
       [expect.objectContaining({ target: "{}", targetUnresolved: true })],
     );
+  });
+
+  test("xcrun simctl install, uninstall, launch and terminate are gated on a literal udid or name", () => {
+    expect(detectInstallCommandIntents("xcrun simctl install FAKE-SIM-UDID-0001 App.app")).toEqual([
+      expect.objectContaining({
+        platform: "ios",
+        command: "simctl install",
+        target: "FAKE-SIM-UDID-0001",
+      }),
+    ]);
+    expect(
+      detectInstallCommandIntents("xcrun simctl uninstall FAKE-SIM-UDID-0001 com.example"),
+    ).toEqual([
+      expect.objectContaining({ command: "simctl uninstall", target: "FAKE-SIM-UDID-0001" }),
+    ]);
+    expect(
+      detectInstallCommandIntents("xcrun simctl launch FAKE-SIM-UDID-0001 com.example"),
+    ).toEqual([
+      expect.objectContaining({ command: "simctl launch", target: "FAKE-SIM-UDID-0001" }),
+    ]);
+    expect(
+      detectInstallCommandIntents("xcrun simctl terminate FAKE-SIM-UDID-0001 com.example"),
+    ).toEqual([
+      expect.objectContaining({ command: "simctl terminate", target: "FAKE-SIM-UDID-0001" }),
+    ]);
+  });
+
+  test("simctl without the xcrun prefix is still gated", () => {
+    expect(detectInstallCommandIntents("simctl install FAKE-SIM-UDID-0001 App.app")).toEqual([
+      expect.objectContaining({ command: "simctl install", target: "FAKE-SIM-UDID-0001" }),
+    ]);
+  });
+
+  test("simctl install/launch booted is tagged as the booted alias, not a literal device named 'booted'", () => {
+    expect(detectInstallCommandIntents("xcrun simctl install booted App.app")).toEqual([
+      expect.objectContaining({
+        platform: "ios",
+        command: "simctl install",
+        bootedAlias: true,
+      }),
+    ]);
+    const intent = detectInstallCommandIntents("xcrun simctl launch booted com.example")[0];
+    expect(intent?.target).toBeUndefined();
+    expect(intent?.bootedAlias).toBe(true);
+  });
+
+  test("simctl launch skips flags before the device argument instead of reading the flag as the target", () => {
+    expect(detectInstallCommandIntents("xcrun simctl launch --console booted com.example")).toEqual(
+      [expect.objectContaining({ platform: "ios", command: "simctl launch", bootedAlias: true })],
+    );
+    const consoleFlagged = detectInstallCommandIntents(
+      "xcrun simctl launch --console booted com.example",
+    )[0];
+    expect(consoleFlagged?.target).toBeUndefined();
+
+    expect(detectInstallCommandIntents("xcrun simctl launch -w booted com.example")).toEqual([
+      expect.objectContaining({ platform: "ios", command: "simctl launch", bootedAlias: true }),
+    ]);
+
+    expect(
+      detectInstallCommandIntents(
+        "xcrun simctl launch --console-pty --wait-for-debugger --terminate-running-process FAKE-SIM-UDID-0001 com.example",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        platform: "ios",
+        command: "simctl launch",
+        target: "FAKE-SIM-UDID-0001",
+      }),
+    ]);
+
+    expect(
+      detectInstallCommandIntents(
+        "xcrun simctl launch --stdout=/tmp/out.log --stderr=/tmp/err.log FAKE-SIM-UDID-0001 com.example",
+      ),
+    ).toEqual([expect.objectContaining({ platform: "ios", target: "FAKE-SIM-UDID-0001" })]);
+
+    expect(
+      detectInstallCommandIntents(
+        "xcrun simctl launch --stdout /tmp/out.log --stderr /tmp/err.log FAKE-SIM-UDID-0001 com.example",
+      ),
+    ).toEqual([expect.objectContaining({ platform: "ios", target: "FAKE-SIM-UDID-0001" })]);
+  });
+
+  test("install, uninstall and terminate skip flags before the device argument too", () => {
+    for (const command of [
+      "xcrun simctl install --console FAKE-SIM-UDID-0001 App.app",
+      "xcrun simctl uninstall --console FAKE-SIM-UDID-0001 com.example",
+      "xcrun simctl terminate --console FAKE-SIM-UDID-0001 com.example",
+    ]) {
+      expect(detectInstallCommandIntents(command), command).toEqual([
+        expect.objectContaining({ target: "FAKE-SIM-UDID-0001" }),
+      ]);
+    }
+  });
+
+  test("simctl list, shutdown and erase are never gated", () => {
+    for (const command of [
+      "xcrun simctl list",
+      "xcrun simctl shutdown FAKE-SIM-UDID-0001",
+      "xcrun simctl erase FAKE-SIM-UDID-0001",
+      "xcrun simctl boot FAKE-SIM-UDID-0001",
+    ]) {
+      expect(detectInstallCommandIntents(command), command).toEqual([]);
+    }
+  });
+
+  test("a simctl target set via a shell variable resolves the same as every other matcher", () => {
+    expect(
+      detectInstallCommandIntents("UDID=FAKE-SIM-UDID-0001; xcrun simctl install $UDID App.app"),
+    ).toEqual([expect.objectContaining({ target: "FAKE-SIM-UDID-0001" })]);
   });
 });

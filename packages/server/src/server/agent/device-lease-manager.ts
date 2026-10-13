@@ -41,6 +41,10 @@ import {
   type DeviceLaunchIntent,
 } from "./device-launch-commands.js";
 import {
+  detectInstallCommandIntents,
+  type InstallCommandIntent,
+} from "./device-install-commands.js";
+import {
   evaluateDeviceOccupancy,
   evaluateDeviceSlot,
   isPlatformFloorUnfilled,
@@ -176,7 +180,14 @@ export interface DeviceStatusEntry {
   heldForSeconds?: number;
   /** How long the device itself has been up, from `ps`. */
   runningForSeconds?: number;
-  source?: DeviceLease["source"];
+  /**
+   * Narrower than `DeviceLease["source"]` on purpose: the wire schema's `source` enum only knows
+   * `"checkout" | "launch"` (protocol-compatibility.md — an old client's AOT validator would
+   * reject an unrecognized enum value and drop the whole message). An `"install"` lease reports
+   * as `"launch"` on the wire (`toWireLeaseSource`): both mean "the gate leased this on the
+   * agent's behalf without an explicit checkout," which is what this field tells a reader.
+   */
+  source?: "checkout" | "launch";
   reason?: string;
   processCount?: number;
   /** The holder's provider, and how strongly the cap binds it. Absent with no holder. */
@@ -315,6 +326,14 @@ export interface DeviceLeaseManagerOptions {
    * is the physical install gate's business, not the slot cap's.
    */
   isPhysicalDeviceTarget?: (target: string) => boolean;
+  /**
+   * How many physical Android devices (phones) are currently connected — the mirror image of
+   * `PhysicalDeviceLeaseManager`'s `countAndroidEmulators`. A plain, untargeted `adb install`
+   * reachable by more than one Android target (emulators plus phones together) refuses to pick
+   * one on its own, so this gate defers to adb rather than guessing which running emulator the
+   * command meant. Defaults to none.
+   */
+  countPhysicalAndroidDevices?: () => number;
 }
 
 /** What the cap needs from a reservation store — DeviceReservationStore satisfies this. */
@@ -427,6 +446,26 @@ type ResolvedLaunchTarget =
   | { kind: "physical" }
   | { kind: "not-running" };
 
+/**
+ * An install-shaped intent's device selector, resolved against what is running. Unlike
+ * `ResolvedLaunchTarget`, there is no "physical" case here — a target naming no running device
+ * is simply nothing this gate protects (a physical device, an emulator not yet booted, a typo).
+ */
+type ResolvedInstallTarget =
+  | { kind: "device"; deviceId: string; platform: DevicePlatform }
+  | { kind: "unmatched" }
+  /** Untargeted, `targetUnresolved`, or `bootedAlias` — resolved against running candidates at
+   * decision time rather than against one named device. */
+  | { kind: "candidates" };
+
+/** What one install intent decided, carrying the platform a denial should be recorded under —
+ * `flutter run -d`'s "unknown" platform resolves to a concrete device by the time there's a
+ * decision to record. */
+interface InstallIntentDenial {
+  message: string;
+  platform: DevicePlatform;
+}
+
 /** What one launch intent did, for the steer that follows the decision. */
 type IntentOutcome =
   | { kind: "allow" }
@@ -456,6 +495,74 @@ function sameLeases(before: readonly DeviceLease[], after: readonly DeviceLease[
     const other = after[index];
     return lease.id === other.id && lease.deviceId === other.deviceId;
   });
+}
+
+/** Collapses an `"install"` lease source to `"launch"` for the wire DTO — see
+ * `DeviceStatusEntry.source`'s comment for why the wire enum can't grow a third value. */
+function toWireLeaseSource(source: DeviceLease["source"]): "checkout" | "launch" {
+  return source === "checkout" ? "checkout" : "launch";
+}
+
+/** The exact command shape that targets this running device, for a refusal to paste — the
+ * install gate's analog of `PhysicalDeviceLeaseManager`'s `targetingFix`. An emulator's
+ * `RunningDevice.deviceId` is its AVD name, not the adb serial a real `adb -s` needs, so a
+ * resolved serial is passed in rather than read off the device itself. */
+function installTargetingFix(
+  intent: InstallCommandIntent,
+  device: RunningDevice,
+  androidSerial: string | undefined,
+): string {
+  if (device.platform === "android") {
+    const serial = androidSerial ?? device.deviceId;
+    return intent.command.startsWith("adb ")
+      ? `adb -s ${serial} …`
+      : `ANDROID_SERIAL=${serial} ${intent.command}`;
+  }
+  return `--device ${device.deviceId}`;
+}
+
+/** The refusal message for an install-shaped intent that resolved to more than one running
+ * candidate (untargeted, `booted`, or an unresolved shell expansion) — split out of
+ * `gateInstallIntent` to keep that method's branching under the complexity budget.
+ * `phoneCount` is the number of connected phones also reachable through a plain, unresolved adb
+ * command (0 when that ambiguity doesn't apply), for the parenthetical note. */
+function buildAmbiguousInstallDenial(input: {
+  intent: InstallCommandIntent;
+  candidates: readonly RunningDevice[];
+  unresolvedTarget: boolean;
+  phoneCount: number;
+  androidSerials: ReadonlyMap<string, string>;
+}): InstallIntentDenial {
+  const { intent, candidates, unresolvedTarget, phoneCount, androidSerials } = input;
+  const platformLabel = intent.platform === "unknown" ? "" : `${intent.platform} `;
+  const fixes = candidates
+    .map(
+      (device) => `\`${installTargetingFix(intent, device, androidSerials.get(device.deviceId))}\``,
+    )
+    .join(" or ");
+  let situation: string;
+  if (unresolvedTarget) {
+    situation =
+      `\`${intent.command}\` names a device this gate can't resolve — it can't read shell ` +
+      `variables or command substitution`;
+  } else if (intent.bootedAlias) {
+    situation = `\`${intent.command}\` targets \`booted\`, and more than one simulator is booted`;
+  } else {
+    situation = `\`${intent.command}\` does not target a device`;
+  }
+  const advice = unresolvedTarget ? "Name the device literally" : "Name the device you hold";
+  const phoneNote =
+    phoneCount > 0
+      ? ` (adb can also reach ${phoneCount} connected phone${phoneCount === 1 ? "" : "s"}, which could just as well be the real target)`
+      : "";
+  return {
+    message:
+      `${situation}, and ${candidates.length} ${platformLabel}` +
+      `devices are running (${candidates.map((device) => device.deviceId).join(", ")})${phoneNote} — ` +
+      `${intent.installsOnAllIfUntargeted ? "it would install on all of them" : "it could pick any of them"}, ` +
+      `including another agent's. ${advice}: ${fixes}.`,
+    platform: candidates[0]?.platform ?? "android",
+  };
 }
 
 function resolveSimulatorTeardown(
@@ -578,6 +685,7 @@ export class DeviceLeaseManager {
   private readonly identityLookup: DeviceIdentityLookupLike;
   private readonly shutdownRunner: DeviceShutdownRunner;
   private readonly isPhysicalDeviceTarget: (target: string) => boolean;
+  private readonly countPhysicalAndroidDevices: () => number;
 
   private leases: DeviceLease[] = [];
   /**
@@ -623,6 +731,7 @@ export class DeviceLeaseManager {
     this.identityLookup = options.identityLookup ?? new DeviceIdentityLookup();
     this.shutdownRunner = options.shutdownRunner ?? defaultDeviceShutdownRunner;
     this.isPhysicalDeviceTarget = options.isPhysicalDeviceTarget ?? (() => false);
+    this.countPhysicalAndroidDevices = options.countPhysicalAndroidDevices ?? (() => 0);
     this.modeLog = new MonitorModeLog(options.logger);
   }
 
@@ -1391,6 +1500,237 @@ export class DeviceLeaseManager {
   }
 
   /**
+   * The enforcement point for install/uninstall/launch/test commands onto a RUNNING emulator or
+   * simulator — the slot cap's analog of `PhysicalDeviceLeaseManager.gateInstall`
+   * (docs/device-leases.md, "What the gate checks"). Unlike `gateLaunch`, nothing here boots a
+   * device or claims a slot for one that doesn't exist: a free running device is leased to the
+   * agent on the spot and the command proceeds; a device another agent holds — by lease or by
+   * un-leased process-tree attribution — refuses (or, in dry run, records and proceeds); an
+   * untargeted, `booted`, or unresolvable-target command that could hit more than one running
+   * device of the command's platform refuses too, naming each device and the exact fix. A
+   * target naming no running device (a physical device, an emulator not yet booted, a typo) is
+   * nothing here to protect — `PhysicalDeviceLeaseManager.gateInstall` or the command itself
+   * handles the rest.
+   */
+  async gateInstall(input: {
+    agentId: string;
+    command: string;
+  }): Promise<DeviceLaunchGateDecision> {
+    const intents = detectInstallCommandIntents(input.command);
+    if (intents.length === 0) return { decision: "allow" };
+
+    const config = this.resolveConfig(await this.resolveCaps());
+    if (!config.enabled) return { decision: "allow" };
+
+    // Resolved before the decision, same discipline as gateLaunch: matching a simulator by name
+    // or an emulator by adb serial shells out, and nothing slow runs while a decision holds the
+    // queue.
+    await this.ensureSample({ fresh: true });
+    const targets = await Promise.all(intents.map((intent) => this.resolveInstallTarget(intent)));
+    const androidSerials = await this.resolveAndroidSerials(this.sample?.devices ?? []);
+
+    const decisions = await this.exclusive(async () => {
+      await this.ensureSample({ fresh: true });
+      this.reconcile(config);
+      const decided: Array<{ intent: InstallCommandIntent; denial?: InstallIntentDenial }> = [];
+      for (const [index, intent] of intents.entries()) {
+        const denial = this.gateInstallIntent(
+          input.agentId,
+          intent,
+          targets[index] as ResolvedInstallTarget,
+          androidSerials,
+        );
+        decided.push(denial ? { intent, denial } : { intent });
+        if (!denial) continue;
+        this.recordBlocked({
+          agentId: input.agentId,
+          platform: denial.platform,
+          command: intent.command,
+          message: denial.message,
+          dryRun: config.dryRun,
+          at: new Date(this.now()).toISOString(),
+        });
+        if (config.dryRun) {
+          this.logger.info(
+            { dryRun: true, agentId: input.agentId, command: intent.command },
+            "Device cap would have refused an install onto a device another agent holds",
+          );
+          continue;
+        }
+        this.logger.info(
+          { agentId: input.agentId, command: intent.command, platform: denial.platform },
+          "Device cap refused an install onto a device another agent holds",
+        );
+        break;
+      }
+      return decided;
+    });
+
+    const denied = decisions.find((entry) => entry.denial !== undefined);
+    if (denied?.denial && !config.dryRun) {
+      return { decision: "deny", message: denied.denial.message };
+    }
+    return { decision: "allow" };
+  }
+
+  /** Android serials for every running Android device, resolved once before a decision — the
+   * install gate's targeting-fix text needs the real `adb -s` serial, not the AVD name
+   * `RunningDevice.deviceId` carries. Cached by the identity lookup, same as
+   * `resolveSimulatorNames`. */
+  private async resolveAndroidSerials(
+    devices: readonly RunningDevice[],
+  ): Promise<ReadonlyMap<string, string>> {
+    const serials = new Map<string, string>();
+    await Promise.all(
+      devices
+        .filter((device) => device.platform === "android")
+        .map(async (device) => {
+          const serial = await this.identityLookup.androidSerial(device.deviceId);
+          if (serial) serials.set(device.deviceId, serial);
+        }),
+    );
+    return serials;
+  }
+
+  /**
+   * Resolves an install intent's device selector before the decision. A literal target (not
+   * `bootedAlias`, not `targetUnresolved`) is matched the same way a launch's named target is
+   * (`resolveTargetDeviceId`) — a selector that matches no running device is nothing this gate
+   * protects. Everything else (untargeted, `booted`, an unresolvable shell expansion) is decided
+   * against the running candidates at decision time instead of against one named device.
+   */
+  private async resolveInstallTarget(intent: InstallCommandIntent): Promise<ResolvedInstallTarget> {
+    if (intent.bootedAlias || intent.targetUnresolved || intent.target === undefined) {
+      return { kind: "candidates" };
+    }
+    const target = intent.target;
+    const platforms: DevicePlatform[] =
+      intent.platform === "unknown" ? ["ios", "android"] : [intent.platform];
+    for (const platform of platforms) {
+      const deviceId = await this.resolveTargetDeviceId(platform, target);
+      if (deviceId) return { kind: "device", deviceId, platform };
+    }
+    return { kind: "unmatched" };
+  }
+
+  /**
+   * One install intent against the running devices, synchronously — it runs inside `exclusive`,
+   * and reading the lease table and binding one must not be split by an await.
+   */
+  private gateInstallIntent(
+    agentId: string,
+    intent: InstallCommandIntent,
+    target: ResolvedInstallTarget,
+    androidSerials: ReadonlyMap<string, string>,
+  ): InstallIntentDenial | undefined {
+    if (target.kind === "unmatched") return undefined;
+
+    if (target.kind === "device") {
+      const device = (this.sample?.devices ?? []).find(
+        (entry) => entry.deviceId === target.deviceId,
+      );
+      // The sample may have moved between resolving the target and deciding; a device that is
+      // simply gone now is nothing to protect, the same as never having matched one.
+      if (!device) return undefined;
+      return this.resolveInstallDeviceAccess(agentId, device, intent);
+    }
+
+    const platforms: DevicePlatform[] =
+      intent.platform === "unknown" ? ["ios", "android"] : [intent.platform];
+    const candidates = platforms.flatMap((platform) =>
+      (this.sample?.devices ?? []).filter((device) => device.platform === platform),
+    );
+    if (candidates.length === 0) return undefined;
+
+    const unresolvedTarget = intent.targetUnresolved === true;
+    // A plain `adb` command reachable by more than one Android target (running emulators plus
+    // connected phones) refuses to pick one on its own, the same rule
+    // PhysicalDeviceLeaseManager's own ambiguity check applies in the other direction
+    // (countAndroidEmulators) — KTD-5. An unresolved shell expansion never gets this exemption:
+    // `-s $X` already told adb which device, even though this gate can't read which one.
+    const adbTargets =
+      intent.platform === "android" ? candidates.length + this.countPhysicalAndroidDevices() : 0;
+    if (!unresolvedTarget && intent.command.startsWith("adb ") && adbTargets > 1) {
+      return undefined;
+    }
+    // An unresolved target reachable through plain adb could just as well be one of the phones
+    // this manager doesn't lease (they're the physical gate's job) as it could be the lone
+    // running emulator. Auto-binding the emulator here would either phantom-lease a device the
+    // command never touches, or falsely refuse a command that was headed for a phone the whole
+    // time — the same reasoning as `PhysicalDeviceLeaseManager.gateIntent`'s
+    // `ambiguousWithEmulators`, mirrored.
+    const ambiguousWithPhones = unresolvedTarget && adbTargets > candidates.length;
+    if (candidates.length === 1 && !ambiguousWithPhones) {
+      return this.resolveInstallDeviceAccess(agentId, candidates[0] as RunningDevice, intent);
+    }
+
+    return buildAmbiguousInstallDenial({
+      intent,
+      candidates,
+      unresolvedTarget,
+      phoneCount: ambiguousWithPhones ? adbTargets - candidates.length : 0,
+      androidSerials,
+    });
+  }
+
+  /**
+   * One resolved device against the lease table and process attribution. Whoever holds it —
+   * by lease, or by un-leased process-tree attribution — keeps using it; a free, unreserved
+   * device is leased to the caller on the spot (`source: "install"`), the same way the physical
+   * gate's `resolveDeviceAccess` claims a free physical device.
+   */
+  private resolveInstallDeviceAccess(
+    agentId: string,
+    device: RunningDevice,
+    intent: InstallCommandIntent,
+  ): InstallIntentDenial | undefined {
+    const lease = this.leases.find((entry) => entry.deviceId === device.deviceId);
+    if (lease?.agentId === agentId) {
+      lease.lastUsedAtMs = this.now();
+      return undefined;
+    }
+    const harm = intent.stateOnly
+      ? "it would change the app state of another agent's device"
+      : "installing over another agent's device is exactly what this gate exists to stop";
+    if (lease) {
+      return {
+        message:
+          `${device.deviceId} is held by ${this.describeAgent(lease.agentId)}. ` +
+          `\`${intent.command}\` was not run — ${harm}.`,
+        platform: device.platform,
+      };
+    }
+    // No lease, but the device sits in another live agent's process tree — it booted or used
+    // this device without ever checking out. Still theirs: the boot gate (adoptAttributedDevices)
+    // treats process-tree attribution as ownership, and so does this gate.
+    if (device.agentId && device.agentId !== agentId) {
+      return {
+        message:
+          `${device.deviceId} is held by ${this.describeAgent(device.agentId)} (never checked ` +
+          `out). \`${intent.command}\` was not run — ${harm}.`,
+        platform: device.platform,
+      };
+    }
+    // Force-stopping an app on a free device changes nothing anybody is relying on, and is no
+    // reason to claim the device.
+    if (intent.stateOnly) return undefined;
+    if (this.reservations.isReserved(device.deviceId)) {
+      return {
+        message: `${device.deviceId} is reserved for Tyler. \`${intent.command}\` was not run.`,
+        platform: device.platform,
+      };
+    }
+    this.bindLease({
+      agentId,
+      platform: device.platform,
+      device,
+      source: "install",
+      reason: undefined,
+    });
+    return undefined;
+  }
+
+  /**
    * Resolves a launch's device selector before the decision, since matching a simulator by name
    * or an emulator by adb serial shells out. Running devices win over physical ones: a simulator
    * named "iPhone 16e" is the simulator.
@@ -2129,7 +2469,7 @@ export class DeviceLeaseManager {
     if (lease) {
       entry.attribution = "lease";
       entry.agentId = lease.agentId;
-      entry.source = lease.source;
+      entry.source = toWireLeaseSource(lease.source);
       entry.heldForSeconds = (nowMs - lease.acquiredAtMs) / 1000;
       if (lease.reason) entry.reason = lease.reason;
       return entry;
@@ -2190,7 +2530,7 @@ export class DeviceLeaseManager {
             agentId: lease.agentId,
             attribution: "lease",
             heldForSeconds: (nowMs - lease.acquiredAtMs) / 1000,
-            source: lease.source,
+            source: toWireLeaseSource(lease.source),
             ...(lease.reason ? { reason: lease.reason } : {}),
           },
           agentsById,
