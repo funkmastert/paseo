@@ -1989,6 +1989,7 @@ export const ru: TranslationResources = {
   accountAlerts: {
     title_one: "Проблема с аккаунтом",
     title_other: "Проблемы с аккаунтами",
+    dismiss: "Закрыть",
     signIn: "Войти",
     signInPending: "Вход...",
     signInRunOn: "Выполнить на {{host}}",

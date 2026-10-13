@@ -9,6 +9,8 @@ export interface AccountProblem {
   fixCommand: string;
   /** Only ever true for `signed_out`: the daemon can start the login itself. */
   canSignIn: boolean;
+  /** Only present for `signed_out`: when the daemon first saw this sign-out. */
+  since?: string;
 }
 
 /**
@@ -26,6 +28,7 @@ export function resolveAccountProblem(
       summary: accountAuth.summary,
       fixCommand: accountAuth.fixCommand,
       canSignIn: accountAuth.canSignIn,
+      since: accountAuth.since,
     };
   }
   if (accountIdentity) {

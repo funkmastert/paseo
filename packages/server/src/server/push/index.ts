@@ -67,7 +67,12 @@ export function createPushNotifications(options: {
         const results = await options.deliver(tokens, payload, delivery);
         return Array.isArray(results)
           ? results
-          : tokens.map((token) => ({ token, ticketId: null, error: null }));
+          : tokens.map((token) => ({
+              token,
+              ticketId: null,
+              error: null,
+              transportFailure: false,
+            }));
       },
     },
   });

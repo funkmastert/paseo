@@ -7,11 +7,23 @@ import type {
   NotifyOutcome,
 } from "@getpaseo/protocol/notify-policy/types";
 
-import { PushLedger, toWireEntry, type LedgerRecord, type LedgerTicket } from "../push/ledger.js";
+import {
+  PushLedger,
+  stateFromTickets,
+  toWireEntry,
+  type LedgerRecord,
+  type LedgerTicket,
+} from "../push/ledger.js";
 import type { PushDelivery, PushDeliveryResult, PushPayload } from "../push/push-service.js";
 import { digestWindowMs, resolveAvailability, type EffectiveAvailability } from "./availability.js";
 import { decideDelivery, type DeliveryDecision } from "./decide.js";
-import { DEFAULT_NOTIFY_LEVEL, levelRank, type NotifyLevel, type PushSendMeta } from "./levels.js";
+import {
+  DEFAULT_NOTIFY_LEVEL,
+  levelAtLeast,
+  levelRank,
+  type NotifyLevel,
+  type PushSendMeta,
+} from "./levels.js";
 import type { NotifyPolicySettingsStore } from "./settings.js";
 
 /** A repeat of the same dedupe key inside this window is counted against the first, not sent. */
@@ -21,6 +33,13 @@ const UNSENT_RESEND_MAX_AGE_MS = 10 * 60 * 1000;
 const MAX_TIMER_MS = 2 ** 31 - 1;
 const MAX_DIGEST_LINES = 4;
 const HOLDING_MODES: ReadonlySet<NotifyAvailabilityMode> = new Set(["away", "off"]);
+/**
+ * R8: an interrupting push (alert or urgent — never a notice or below) that failed in transport
+ * keeps retrying until it is delivered or this long has passed since it was first attempted.
+ */
+const RETRY_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+/** Roughly 1, 2, 5, 10 minutes, then every 15 minutes. */
+const RETRY_BACKOFF_MS = [1, 2, 5, 10, 15].map((minutes) => minutes * 60 * 1000);
 
 export interface NotifyTransport {
   activeTokens(): string[];
@@ -181,13 +200,18 @@ export class NotifyPolicy {
       return;
     }
     if (decision.outcome === "log") return;
-    await this.dispatch(record, {
+    const retried = await this.dispatch(record, {
       quiet: decision.outcome === "notify",
       ...decisionFlags(decision),
     });
+    // Only a retry needs the timer re-armed here; `tick` re-arms it after every other path.
+    if (retried) this.schedule();
   }
 
-  /** Sends the digest if it is due and re-arms the timer. Called by the timer and on any change. */
+  /**
+   * Sends the digest if it is due, retries any interrupting push past its backoff, and re-arms
+   * the timer. Called by the timer and on any change.
+   */
   async tick(): Promise<void> {
     if (this.stopped) return;
     if (this.flushing) {
@@ -195,11 +219,16 @@ export class NotifyPolicy {
       return;
     }
     const returned = this.noteMode();
-    this.flushing = this.flushIfDue(returned).finally(() => {
+    this.flushing = this.runDueWork(returned).finally(() => {
       this.flushing = null;
     });
     await this.flushing;
     this.schedule();
+  }
+
+  private async runDueWork(returnedFromHold: boolean): Promise<void> {
+    await this.flushIfDue(returnedFromHold);
+    await this.runDueRetries();
   }
 
   /**
@@ -285,7 +314,8 @@ export class NotifyPolicy {
     return prior;
   }
 
-  private async dispatch(record: LedgerRecord, delivery: PushDelivery): Promise<void> {
+  /** Resolves to whether it armed a retry (R8), so a caller outside `tick` knows to re-arm the timer. */
+  private async dispatch(record: LedgerRecord, delivery: PushDelivery): Promise<boolean> {
     const { ledger, transport } = this.options;
     const settledAt = () => new Date(this.now()).toISOString();
     const tokens = transport.activeTokens();
@@ -307,22 +337,80 @@ export class NotifyPolicy {
     );
     if (tokens.length === 0) {
       ledger.markSent(record.id, [], "no registered device", settledAt());
-      return;
+      return false;
     }
+    const retryAttempt = record.retryCount ?? 0;
+    const body = retryAttempt > 0 ? lateBody(record) : record.body;
     try {
       const results = await transport.deliver(
         tokens,
-        { title: record.title, body: record.body, data: record.data },
+        { title: record.title, body, data: record.data },
         delivery,
       );
-      ledger.markSent(record.id, results.map(toTicket), null, settledAt());
+      const tickets = results.map(toTicket);
+      const retry = this.planRetry(record, tickets);
+      ledger.markSent(record.id, tickets, null, settledAt(), retry);
+      return retry !== null;
     } catch (error) {
       ledger.markFailed(
         record.id,
         error instanceof Error ? error.message : String(error),
         settledAt(),
       );
+      return false;
     }
+  }
+
+  /**
+   * R8: the retry schedule for an interrupting push (alert or urgent) that failed in transport,
+   * until it is delivered or `RETRY_MAX_AGE_MS` has passed since it was first attempted. A
+   * ticket-level refusal (a `notice`, or no transport-failed ticket) is never retried. `record` is
+   * the pre-send record: only its `level`, `at`, and `retryCount` are read, none of which change
+   * between the send attempt and this call.
+   */
+  private planRetry(
+    record: LedgerRecord,
+    tickets: readonly LedgerTicket[],
+  ): { nextRetryAt: string; retryCount: number } | null {
+    if (!levelAtLeast(record.level, "alert")) return null;
+    if (stateFromTickets(tickets) !== "failed") return null;
+    if (!tickets.some((ticket) => ticket.transportFailure)) return null;
+    const firstSentMs = Date.parse(record.at);
+    const nowMs = this.now();
+    if (nowMs - firstSentMs >= RETRY_MAX_AGE_MS) return null;
+    const attempt = record.retryCount ?? 0;
+    const delay = RETRY_BACKOFF_MS[Math.min(attempt, RETRY_BACKOFF_MS.length - 1)]!;
+    const nextRetryAt = new Date(
+      Math.min(nowMs + delay, firstSentMs + RETRY_MAX_AGE_MS),
+    ).toISOString();
+    return { nextRetryAt, retryCount: attempt + 1 };
+  }
+
+  /**
+   * Retries what is due, and gives up (no push, no agent) on anything past `RETRY_MAX_AGE_MS`.
+   * Each due record is an independent push to the ledger, so the sends run concurrently instead
+   * of a stalled one blocking the rest behind it.
+   */
+  private async runDueRetries(): Promise<void> {
+    const nowMs = this.now();
+    const due: LedgerRecord[] = [];
+    for (const record of this.options.ledger.listPendingRetries()) {
+      if (Date.parse(record.nextRetryAt!) > nowMs) continue;
+      if (nowMs - Date.parse(record.at) >= RETRY_MAX_AGE_MS) {
+        this.logger.warn(
+          { id: record.id, level: record.level, retryCount: record.retryCount ?? 0 },
+          "Push retries exhausted; giving up",
+        );
+        this.options.ledger.markFailed(
+          record.id,
+          record.error ?? "push retries exhausted",
+          new Date(nowMs).toISOString(),
+        );
+        continue;
+      }
+      due.push(record);
+    }
+    await Promise.all(due.map((record) => this.dispatch(record, redeliveryFor(record))));
   }
 
   private async recoverUnsent(): Promise<void> {
@@ -335,7 +423,7 @@ export class NotifyPolicy {
         );
         continue;
       }
-      await this.dispatch(record, { quiet: record.outcome === "notify" });
+      await this.dispatch(record, redeliveryFor(record));
     }
   }
 
@@ -350,6 +438,9 @@ export class NotifyPolicy {
     const oldest = this.options.ledger.listHeldNotices()[0];
     if (oldest) wakes.push(Date.parse(oldest.at) + digestWindowMs(settings, availability));
     if (availability.until) wakes.push(Date.parse(availability.until));
+    for (const record of this.options.ledger.listPendingRetries()) {
+      wakes.push(Date.parse(record.nextRetryAt!));
+    }
     if (wakes.length === 0) return;
     const delay = Math.min(Math.max(Math.min(...wakes) - nowMs, 1000), MAX_TIMER_MS);
     this.timer = setTimeout(() => void this.tick(), delay);
@@ -399,6 +490,18 @@ function decisionFlags(decision: DeliveryDecision): Pick<PushDelivery, "timeSens
   return decision.timeSensitive ? { timeSensitive: true } : {};
 }
 
+/**
+ * Replays the delivery flags a stored record was originally sent with, for a retry or a
+ * restart-recovered send that never goes through `decideDelivery` again. `timeSensitive` matches
+ * `decideDelivery`: only an interrupt at the urgent level asks iOS to break through Focus.
+ */
+function redeliveryFor(record: LedgerRecord): PushDelivery {
+  return {
+    quiet: record.outcome === "notify",
+    ...(record.outcome === "interrupt" && record.level === "urgent" ? { timeSensitive: true } : {}),
+  };
+}
+
 function toTicket(result: PushDeliveryResult): LedgerTicket {
   let status: LedgerTicket["status"] = "ok";
   if (result.error) status = "error";
@@ -409,7 +512,13 @@ function toTicket(result: PushDeliveryResult): LedgerTicket {
     status,
     error: result.error,
     checkedAt: null,
+    transportFailure: result.transportFailure,
   };
+}
+
+/** R8: a push delivered on a retry says so, with when it was first attempted. */
+function lateBody(record: LedgerRecord): string {
+  return `${record.body}\n\n(sent late — first attempted ${record.at})`;
 }
 
 /** "5 notices" and up to four grouped lines, so the tray shows what piled up without opening. */

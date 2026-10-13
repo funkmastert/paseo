@@ -321,6 +321,8 @@ export type RemediationTriageEvent =
       clearedDuringHold: boolean;
       agentRan: boolean;
       escalated: boolean;
+      /** Closed by the ladder's restart grace (docs/remediation.md), not by an observation. */
+      expiredAfterRestart: boolean;
       triageCallId: string | null;
       triageWouldBe: string | null;
       triageApplied: boolean | null;

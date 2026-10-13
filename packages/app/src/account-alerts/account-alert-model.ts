@@ -57,6 +57,16 @@ export function compareAccountAlertEntries(a: AccountAlertEntry, b: AccountAlert
 }
 
 /**
+ * Identifies one entry across a dismiss and a reload. A signed-out entry's `since` changes the
+ * moment the daemon sees a fresh sign-out, so dismissing an old one does not swallow the next —
+ * identity entries carry no timestamp, so the kind alone stands in for them.
+ */
+export function accountAlertFingerprint(entry: AccountAlertEntry): string {
+  const since = entry.kind === "signed_out" ? (entry.since ?? "") : "";
+  return `${entry.serverId}:${entry.providerId}:${entry.kind}:${since}`;
+}
+
+/**
  * Every enabled account across the given hosts with a sign-in or identity problem, in the
  * banner's order. A disabled provider, or a row carrying neither field, produces nothing.
  */

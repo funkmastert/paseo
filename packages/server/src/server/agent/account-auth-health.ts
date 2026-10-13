@@ -10,6 +10,8 @@
  * nothing from the usage fetcher or the probe: the sweep that gathers that evidence owns deciding
  * what counts, not this tracker.
  */
+import type { Logger } from "pino";
+
 import { claudeSignInCommand, lastKnownClaudeEmail } from "./providers/claude/account-auth.js";
 
 export type AccountAuthState = "ok" | "suspect" | "signed_out";
@@ -245,6 +247,11 @@ function nextRecordFor(evidence: NextRecordEvidence): AccountAuthRecord {
  */
 export class AccountAuthTracker {
   private records = new Map<string, AccountAuthRecord>();
+  private readonly logger: Logger | undefined;
+
+  constructor(options?: { logger?: Logger }) {
+    this.logger = options?.logger;
+  }
 
   observe(input: AccountAuthObserveInput): AccountAuthObserveResult {
     const opened: AccountAuthProblemRecord[] = [];
@@ -274,6 +281,17 @@ export class AccountAuthTracker {
       });
 
       this.records.set(account.providerId, next);
+      if (prevState !== next.state) {
+        this.logger?.info(
+          {
+            providerId: account.providerId,
+            from: prevState,
+            to: next.state,
+            summary: next.summary,
+          },
+          "Account auth: state changed",
+        );
+      }
       if (prevState !== "signed_out" && next.state === "signed_out") {
         opened.push({ ...next });
       }

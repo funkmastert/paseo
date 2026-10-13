@@ -1969,6 +1969,7 @@ export const en = {
   accountAlerts: {
     title_one: "Account problem",
     title_other: "Account problems",
+    dismiss: "Dismiss",
     signIn: "Sign in",
     signInPending: "Signing in...",
     signInRunOn: "Run on {{host}}",

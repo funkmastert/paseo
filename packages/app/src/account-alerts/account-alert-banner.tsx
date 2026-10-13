@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { router } from "expo-router";
-import { Copy } from "lucide-react-native";
+import { AlertTriangle, Copy } from "lucide-react-native";
 import { Pressable, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useQueryClient } from "@tanstack/react-query";
@@ -16,26 +24,40 @@ import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { DEFAULT_REFETCH_INTERVAL_MS } from "@/orchestration/account-budget-strip";
 import { useCopyFixCommand } from "@/provider-usage/use-copy-fix-command";
 import { providerUsageQueryKey, useProviderUsage } from "@/provider-usage/use-provider-usage";
-import { useHostRuntimeClient, useHosts } from "@/runtime/host-runtime";
+import { useHostRegistryLoaded, useHostRuntimeClient, useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
-import type { Theme } from "@/styles/theme";
+import { ICON_SIZE, type Theme } from "@/styles/theme";
 import { buildSettingsHostSectionRoute } from "@/utils/host-routes";
 import { WindowChromeSafeArea } from "@/utils/desktop-window";
 import {
+  accountAlertFingerprint,
   buildAccountAlertEntries,
   signInActionFor,
   type AccountAlertEntry,
 } from "./account-alert-model";
 import { BelowBannerInsets } from "./below-banner-insets";
+import {
+  pruneAccountAlertDismissals,
+  pruneAccountAlertDismissalsForUnknownHosts,
+  useAccountAlertDismissStore,
+} from "./dismiss-store";
 import { SIGN_IN_IDLE, SIGN_IN_TIMEOUT_MS, signInReducer, type SignInEvent } from "./sign-in-state";
 import { NO_ACCOUNT_ALERTS, reportHostAccountAlerts, useAccountAlertEntries } from "./store";
 
 const COMPACT_MAX_ENTRIES = 2;
 const LINE_HEIGHT_RATIO = 1.4;
 
+/**
+ * While any entry stands, poll the daemon often enough that a fix in another terminal clears the
+ * banner within about 15s instead of waiting out the quiet-state interval.
+ */
+const FAST_REFETCH_INTERVAL_MS = 15_000;
+
 const ThemedCopy = withUnistyles(Copy);
+const ThemedAlertTriangle = withUnistyles(AlertTriangle);
 const mutedIconColor = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const filledIconColor = (theme: Theme) => ({ color: theme.colors.destructiveForeground });
+const warningIconColor = (theme: Theme) => ({ color: theme.colors.palette.amber[500] });
 
 /**
  * Subscribes one host's usage and provider snapshot and reports the host's alert entries to the
@@ -43,9 +65,14 @@ const filledIconColor = (theme: Theme) => ({ color: theme.colors.destructiveFore
  * feed mounts one of these per connected host instead.
  */
 function HostAlertSource({ serverId, hostLabel }: { serverId: string; hostLabel: string }) {
+  const [pollFast, setPollFast] = useState(false);
   const { view } = useProviderUsage(serverId, {
-    refetchInterval: DEFAULT_REFETCH_INTERVAL_MS,
-    catchUpOnFocus: true,
+    refetchInterval: pollFast ? FAST_REFETCH_INTERVAL_MS : DEFAULT_REFETCH_INTERVAL_MS,
+    catchUpOnFocus: "always",
+    refetchIntervalInBackground: true,
+    // The daemon serves this from its own cache and reads auth state per call, over a WebSocket
+    // this hook does not share with the browser's own connectivity check.
+    networkMode: "always",
   });
   const { entries: snapshot } = useProvidersSnapshot(serverId);
   const hostSupportsSignIn = useSessionStore(
@@ -60,8 +87,18 @@ function HostAlertSource({ serverId, hostLabel }: { serverId: string; hostLabel:
   }, [serverId, hostLabel, hostSupportsSignIn, view, snapshot]);
 
   useEffect(() => {
+    setPollFast(alertEntries.length > 0);
+  }, [alertEntries]);
+
+  useEffect(() => {
     reportHostAccountAlerts(serverId, alertEntries);
   }, [serverId, alertEntries]);
+
+  // Ready-gated — see pruneAccountAlertDismissalsIn's doc comment for why.
+  useEffect(() => {
+    if (view.kind !== "ready") return;
+    pruneAccountAlertDismissals(serverId, alertEntries.map(accountAlertFingerprint));
+  }, [serverId, view.kind, alertEntries]);
 
   // Unmount only: a cleanup on the report effect would clear and re-add the host every poll.
   useEffect(() => {
@@ -74,6 +111,17 @@ function HostAlertSource({ serverId, hostLabel }: { serverId: string; hostLabel:
 /** One source per connected host; a removed host's source unmounts and clears its entries. */
 function AccountAlertFeed() {
   const hosts = useHosts();
+  const registryLoaded = useHostRegistryLoaded();
+
+  // Loaded-gated for the same reason as the per-host prune: an empty host list before the
+  // registry finishes loading from disk must never read as "every host is gone" and wipe every
+  // dismissal. Once loaded, a host missing from this list entirely (archived, removed) has no
+  // HostAlertSource left to prune it, so this is the only place that ever drops its dismissals.
+  useEffect(() => {
+    if (!registryLoaded) return;
+    pruneAccountAlertDismissalsForUnknownHosts(hosts.map((host) => host.serverId));
+  }, [registryLoaded, hosts]);
+
   return (
     <>
       {hosts.map((host) => (
@@ -105,9 +153,14 @@ function AccountAlertEntryRow({
   // Set synchronously, so a second click before the re-render sends nothing.
   const pendingRef = useRef(false);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Dismissing the row mid-sign-in unmounts it before the in-flight promise settles, so a
+  // callback that fired after return would otherwise dispatch to a dead reducer and arm a
+  // setTimeout nothing will ever clear.
+  const unmountedRef = useRef(false);
 
   useEffect(() => {
     return () => {
+      unmountedRef.current = true;
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
     };
   }, []);
@@ -118,7 +171,7 @@ function AccountAlertEntryRow({
     if (pendingRef.current || !client) return;
     function settle(event: SignInEvent) {
       pendingRef.current = false;
-      dispatchSignIn(event);
+      if (!unmountedRef.current) dispatchSignIn(event);
     }
     pendingRef.current = true;
     dispatchSignIn({ type: "start" });
@@ -129,6 +182,7 @@ function AccountAlertEntryRow({
           settle({ type: "failed", error: response.error });
           return;
         }
+        if (unmountedRef.current) return;
         dispatchSignIn({ type: "started" });
         timeoutRef.current = setTimeout(() => settle({ type: "timed_out" }), SIGN_IN_TIMEOUT_MS);
         return;
@@ -223,29 +277,54 @@ function AccountAlertEntryRow({
 }
 
 /**
- * Not dismissible while a problem stands (docs/design.md §11): filled red the moment any entry
- * is signed out, amber when every entry is only an identity problem. Renders nothing otherwise.
+ * Dismissible via the alert's close button (docs/design.md §11): filled red the moment any
+ * active entry is signed out, amber when every active entry is only an identity problem.
+ * Renders nothing once every current entry is dismissed or fixed; a new problem — a different
+ * account, a different kind, or the same account signed out again — shows again regardless of
+ * what was dismissed before.
  */
 function AccountAlertBanner() {
   const { t } = useTranslation();
   const insets = useSafeAreaInsets();
   const isCompact = useIsCompactFormFactor();
   const entries = useAccountAlertEntries();
+  const dismissedFingerprints = useAccountAlertDismissStore((state) => state.dismissedFingerprints);
+  const dismiss = useAccountAlertDismissStore((state) => state.dismiss);
   const multiHost = useHosts().length > 1;
 
-  const hasSignedOut = entries.some((entry) => entry.kind === "signed_out");
+  const activeEntries = useMemo(() => {
+    if (dismissedFingerprints.length === 0) return entries;
+    const dismissedSet = new Set(dismissedFingerprints);
+    return entries.filter((entry) => !dismissedSet.has(accountAlertFingerprint(entry)));
+  }, [entries, dismissedFingerprints]);
+
+  const hasSignedOut = activeEntries.some((entry) => entry.kind === "signed_out");
   const visibleEntries = useMemo(
-    () => (isCompact ? entries.slice(0, COMPACT_MAX_ENTRIES) : entries),
-    [isCompact, entries],
+    () => (isCompact ? activeEntries.slice(0, COMPACT_MAX_ENTRIES) : activeEntries),
+    [isCompact, activeEntries],
   );
-  const hiddenCount = entries.length - visibleEntries.length;
-  const overflowServerId = entries[visibleEntries.length]?.serverId;
+  const hiddenCount = activeEntries.length - visibleEntries.length;
+  const overflowServerId = activeEntries[visibleEntries.length]?.serverId;
 
   const openMore = useCallback(() => {
     if (overflowServerId) {
       router.push(buildSettingsHostSectionRoute(overflowServerId, "providers"));
     }
   }, [overflowServerId]);
+
+  const handleDismiss = useCallback(() => {
+    dismiss(visibleEntries.map(accountAlertFingerprint));
+  }, [dismiss, visibleEntries]);
+
+  const icon = useMemo(
+    () => (
+      <ThemedAlertTriangle
+        size={ICON_SIZE.sm}
+        uniProps={hasSignedOut ? filledIconColor : warningIconColor}
+      />
+    ),
+    [hasSignedOut],
+  );
 
   const description = useMemo(
     () => (
@@ -276,7 +355,7 @@ function AccountAlertBanner() {
     [visibleEntries, multiHost, hasSignedOut, hiddenCount, openMore, t],
   );
 
-  if (entries.length === 0) return null;
+  if (activeEntries.length === 0) return null;
 
   return (
     <View testID="account-alert-banner">
@@ -285,8 +364,12 @@ function AccountAlertBanner() {
         <Alert
           variant={hasSignedOut ? "error" : "warning"}
           emphasis={hasSignedOut ? "filled" : "quiet"}
-          title={t("accountAlerts.title", { count: entries.length })}
+          icon={icon}
+          title={t("accountAlerts.title", { count: activeEntries.length })}
           description={description}
+          onDismiss={handleDismiss}
+          dismissAccessibilityLabel={t("accountAlerts.dismiss")}
+          testID="account-alert-banner-alert"
         />
       </View>
     </View>

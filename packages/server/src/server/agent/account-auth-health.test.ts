@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { isAccountDeadError, isAuthShapedError } from "./account-failover-detector.js";
 import { AccountAuthTracker } from "./account-auth-health.js";
 
@@ -281,6 +281,30 @@ describe("AccountAuthTracker transitions", () => {
     const result = tracker.observe({ accounts: [account()], turnFailures: [failure(T0)] });
     expect(tracker.stateFor(PERSONAL)?.state).toBe("ok");
     expect(result.opened).toEqual([]);
+  });
+
+  it("logs one info line per state change, with the provider, from, to and summary", () => {
+    const info = vi.fn();
+    const tracker = new AccountAuthTracker({
+      logger: { info } as unknown as import("pino").Logger,
+    });
+    tracker.observe({ accounts: [account()], turnFailures: [failure(T0)] });
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledWith(
+      { providerId: PERSONAL, from: "ok", to: "signed_out", summary: "Not logged in" },
+      "Account auth: state changed",
+    );
+
+    tracker.observe({ accounts: [account()], readings: [reading("ok", T0 + MIN)] });
+    expect(info).toHaveBeenCalledTimes(2);
+    expect(info).toHaveBeenLastCalledWith(
+      { providerId: PERSONAL, from: "signed_out", to: "ok", summary: "A usage read succeeded" },
+      "Account auth: state changed",
+    );
+
+    // Observing again with the same evidence is not a transition: no new line.
+    tracker.observe({ accounts: [account()], readings: [reading("ok", T0 + MIN)] });
+    expect(info).toHaveBeenCalledTimes(2);
   });
 
   it("lists the records standing in a state", () => {

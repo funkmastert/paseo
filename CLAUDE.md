@@ -95,6 +95,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/release.md](docs/release.md)                                   | Release playbook, draft releases, completion checklist                                                                           |
 | [docs/fork-releases.md](docs/fork-releases.md)                       | Fork desktop releases — fork-safe gates, unsigned builds, the runbook, turning on signing                                        |
 | [docs/terminal-activity.md](docs/terminal-activity.md)               | Terminal activity indicators — source-agnostic tracker, agent hook reporting, adding a new hook provider                         |
+| [docs/solutions/](docs/solutions/)                                   | Solutions to past bugs and practices, by category; frontmatter has `module`, `tags`, `problem_type`                              |
 | [SECURITY.md](SECURITY.md)                                           | Relay threat model, E2E encryption, DNS rebinding, agent auth                                                                    |
 | [public-docs/hub/security.md](public-docs/hub/security.md)           | Public Hub guide — trust boundaries, untrusted triggers, provider controls, and output authority                                 |
 

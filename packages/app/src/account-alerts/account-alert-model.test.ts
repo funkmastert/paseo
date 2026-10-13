@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
 import type { ProviderUsage } from "@/provider-usage/types";
 import {
+  accountAlertFingerprint,
   buildAccountAlertEntries,
   signInActionFor,
+  type AccountAlertEntry,
   type AccountAlertHostUsage,
 } from "./account-alert-model";
 
@@ -232,6 +234,56 @@ describe("buildAccountAlertEntries", () => {
       ["server-new", true],
       ["server-old", false],
     ]);
+  });
+});
+
+function alertEntry(overrides: Partial<AccountAlertEntry> = {}): AccountAlertEntry {
+  return {
+    providerId: "claude",
+    serverId: "server-1",
+    hostLabel: "Host One",
+    label: "Claude",
+    kind: "signed_out",
+    summary: "Signed out",
+    fixCommand: "claude auth login",
+    canSignIn: true,
+    hostSupportsSignIn: true,
+    since: "2026-10-12T18:00:00Z",
+    ...overrides,
+  };
+}
+
+describe("accountAlertFingerprint", () => {
+  it("is stable for the same entry", () => {
+    expect(accountAlertFingerprint(alertEntry())).toBe(accountAlertFingerprint(alertEntry()));
+  });
+
+  it("changes when the same account signs out again with a new since", () => {
+    const first = accountAlertFingerprint(alertEntry({ since: "2026-10-12T18:00:00Z" }));
+    const second = accountAlertFingerprint(alertEntry({ since: "2026-10-13T09:00:00Z" }));
+    expect(first).not.toBe(second);
+  });
+
+  it("changes for a different account on the same host", () => {
+    const first = accountAlertFingerprint(alertEntry({ providerId: "claude" }));
+    const second = accountAlertFingerprint(alertEntry({ providerId: "claude-backup" }));
+    expect(first).not.toBe(second);
+  });
+
+  it("changes for the same account on a different host", () => {
+    const first = accountAlertFingerprint(alertEntry({ serverId: "server-1" }));
+    const second = accountAlertFingerprint(alertEntry({ serverId: "server-2" }));
+    expect(first).not.toBe(second);
+  });
+
+  it("changes when the kind differs, ignoring since for identity", () => {
+    const signedOut = accountAlertFingerprint(alertEntry({ kind: "signed_out" }));
+    const identityA = accountAlertFingerprint(alertEntry({ kind: "identity", since: undefined }));
+    const identityB = accountAlertFingerprint(
+      alertEntry({ kind: "identity", since: "2026-10-13T09:00:00Z" }),
+    );
+    expect(signedOut).not.toBe(identityA);
+    expect(identityA).toBe(identityB);
   });
 });
 

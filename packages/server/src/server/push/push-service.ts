@@ -20,6 +20,12 @@ export interface PushDeliveryResult {
   token: string;
   ticketId: string | null;
   error: string | null;
+  /**
+   * Only meaningful when `error` is set. A network error (`fetch failed`, a connect timeout) or
+   * an Expo 429/5xx is retryable; a ticket-level refusal (`DeviceNotRegistered`, an invalid
+   * token, or anything else the provider rejected the message for) is not (docs/notification-policy.md).
+   */
+  transportFailure: boolean;
 }
 
 /** A receipt the provider filed for an accepted message. */
@@ -118,8 +124,8 @@ export class PushService {
   }
 
   private async sendBatch(messages: ExpoPushMessage[]): Promise<PushDeliveryResult[]> {
-    const failAll = (error: string): PushDeliveryResult[] =>
-      messages.map((message) => ({ token: message.to, ticketId: null, error }));
+    const failAll = (error: string, transportFailure: boolean): PushDeliveryResult[] =>
+      messages.map((message) => ({ token: message.to, ticketId: null, error, transportFailure }));
     try {
       const response = await fetch(EXPO_PUSH_URL, {
         method: "POST",
@@ -135,14 +141,17 @@ export class PushService {
           { status: response.status, statusText: response.statusText },
           "Expo push API error",
         );
-        return failAll(`Expo push API returned ${response.status}`);
+        return failAll(
+          `Expo push API returned ${response.status}`,
+          response.status === 429 || response.status >= 500,
+        );
       }
 
       const result = (await response.json()) as { data: ExpoPushTicket[] };
       return this.handleTickets(messages, result.data);
     } catch (error) {
       this.logger.error({ err: error }, "Failed to send push notifications");
-      return failAll(error instanceof Error ? error.message : String(error));
+      return failAll(error instanceof Error ? error.message : String(error), true);
     }
   }
 
@@ -153,10 +162,20 @@ export class PushService {
     return messages.map((message, i) => {
       const ticket = tickets[i];
       if (!ticket) {
-        return { token: message.to, ticketId: null, error: "Expo returned no ticket" };
+        return {
+          token: message.to,
+          ticketId: null,
+          error: "Expo returned no ticket",
+          transportFailure: false,
+        };
       }
       if (ticket.status !== "error") {
-        return { token: message.to, ticketId: ticket.id ?? null, error: null };
+        return {
+          token: message.to,
+          ticketId: ticket.id ?? null,
+          error: null,
+          transportFailure: false,
+        };
       }
       this.logger.error(
         { token: message.to, message: ticket.message, details: ticket.details },
@@ -167,6 +186,7 @@ export class PushService {
         token: message.to,
         ticketId: null,
         error: ticket.details?.error ?? ticket.message ?? "Expo rejected the message",
+        transportFailure: false,
       };
     });
   }
@@ -205,9 +225,17 @@ export class PushService {
     return verdicts;
   }
 
+  /**
+   * Best-effort: `revokeToken` can throw on a disk write failure, and a throw here would bubble
+   * up through `handleTickets`, which runs inside `sendBatch`'s own try/catch -- misreporting
+   * every other token in the batch, including ones Expo already accepted, as a transport failure.
+   */
   private revokeIfDead(token: string, error: string | undefined): void {
-    if (error && REVOKING_ERRORS.has(error)) {
+    if (!error || !REVOKING_ERRORS.has(error)) return;
+    try {
       this.revokeToken(token);
+    } catch (err) {
+      this.logger.warn({ err, token }, "Failed to revoke a dead push token");
     }
   }
 }

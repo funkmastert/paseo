@@ -1,6 +1,13 @@
-import { AlertTriangle, CheckCircle2, Info, XCircle, type LucideIcon } from "lucide-react-native";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Info,
+  X,
+  XCircle,
+  type LucideIcon,
+} from "lucide-react-native";
 import { type ReactNode, useMemo } from "react";
-import { Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 
 export type AlertVariant = "default" | "info" | "success" | "warning" | "error";
@@ -17,6 +24,9 @@ export interface AlertProps {
   icon?: ReactNode;
   children?: ReactNode;
   testID?: string;
+  /** Renders a close button beside the title. Omit to keep the alert non-dismissible. */
+  onDismiss?: () => void;
+  dismissAccessibilityLabel?: string;
 }
 
 const VARIANT_ICON: Record<Exclude<AlertVariant, "default">, LucideIcon> = {
@@ -34,6 +44,8 @@ export function Alert({
   icon,
   children,
   testID,
+  onDismiss,
+  dismissAccessibilityLabel,
 }: AlertProps) {
   const { theme } = useUnistyles();
   const filled = emphasis === "filled";
@@ -67,7 +79,30 @@ export function Alert({
     <View style={containerStyle} testID={testID} accessibilityRole="alert">
       {resolvedIcon ? <View style={styles.iconSlot}>{resolvedIcon}</View> : null}
       <View style={styles.body}>
-        {title ? <Text style={titleStyle}>{title}</Text> : null}
+        {title || onDismiss ? (
+          <View style={styles.titleRow}>
+            {title ? (
+              <Text style={onDismiss ? [titleStyle, styles.titleTextFlex] : titleStyle}>
+                {title}
+              </Text>
+            ) : null}
+            {onDismiss ? (
+              <Pressable
+                onPress={onDismiss}
+                hitSlop={8}
+                style={styles.dismissButton}
+                testID={testID ? `${testID}-dismiss` : undefined}
+                accessibilityRole="button"
+                accessibilityLabel={dismissAccessibilityLabel}
+              >
+                <X
+                  size={theme.iconSize.sm}
+                  color={filled ? theme.colors.destructiveForeground : theme.colors.foregroundMuted}
+                />
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
         {hasDescription && typeof description === "string" ? (
           <Text style={[styles.description, textStyle]}>{description}</Text>
         ) : null}
@@ -122,6 +157,17 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foreground,
     fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.medium,
+  },
+  titleRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: theme.spacing[2],
+  },
+  titleTextFlex: {
+    flex: 1,
+  },
+  dismissButton: {
+    padding: 2,
   },
   description: {
     color: theme.colors.foregroundMuted,

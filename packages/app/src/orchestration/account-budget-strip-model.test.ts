@@ -190,6 +190,7 @@ describe("buildAccountBudgetRows", () => {
       summary: "claude-personal is signed out",
       fixCommand: "CLAUDE_CONFIG_DIR=/home/u/.claude-personal claude auth login",
       canSignIn: true,
+      since: "2026-10-12T18:00:00Z",
     });
     expect(rows.find((row) => row.providerId === "claude")?.problem).toBeNull();
   });

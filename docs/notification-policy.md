@@ -69,6 +69,8 @@ A digest of one is that notification, sent quietly, with its own deep link. A di
 
 **Unreached** is `failed` or `no-device` for anything meant to be pushed, and a notice inside a digest that failed. One device receiving a message is enough to call it `delivered`. A `DeviceNotRegistered` receipt revokes the token, as a ticket error already did. `finish_report_undelivered` (see [finish-reports.md](finish-reports.md)) is the escalation that tells the operator an agent's result reached nobody, so it is `urgent` and its own unreached state matters most.
 
+An `alert` or `urgent` push that `failed` because of a network error or an Expo 429/5xx — not a ticket refusal like `DeviceNotRegistered` — is retried, roughly 1, 2, 5, 10, then every 15 minutes, until it delivers or two hours have passed since it was first sent. `notice` and below never retry: nothing is worth repeating a push for below the interrupt floor. A retry reuses the same ledger record (an attempt count and a next-try time, both absent until the first failure) rather than adding one, resumes from the ledger after a restart, and a push that lands late says so in its body, with when it was first sent. Past two hours it stays `failed` and counts as unreached, same as before this existed.
+
 Read it with `client.listNotificationLedger({ unreachedOnly: true })`. Settings shows the count and the latest entries.
 
 ## Sender inventory

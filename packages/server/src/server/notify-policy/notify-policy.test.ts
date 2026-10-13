@@ -53,6 +53,8 @@ class FakeTransport implements NotifyTransport {
   tokens = ["ExponentPushToken[phone]"];
   sent: Sent[] = [];
   failWith: string | null = null;
+  /** Whether `failWith` is a retryable transport failure rather than a provider refusal. */
+  failIsTransport = false;
   nextTicket = 1;
 
   activeTokens(): string[] {
@@ -66,9 +68,19 @@ class FakeTransport implements NotifyTransport {
   ): Promise<PushDeliveryResult[]> {
     this.sent.push({ payload: push, delivery });
     if (this.failWith) {
-      return tokens.map((token) => ({ token, ticketId: null, error: this.failWith }));
+      return tokens.map((token) => ({
+        token,
+        ticketId: null,
+        error: this.failWith,
+        transportFailure: this.failIsTransport,
+      }));
     }
-    return tokens.map((token) => ({ token, ticketId: `ticket-${this.nextTicket++}`, error: null }));
+    return tokens.map((token) => ({
+      token,
+      ticketId: `ticket-${this.nextTicket++}`,
+      error: null,
+      transportFailure: false,
+    }));
   }
 }
 
@@ -477,6 +489,109 @@ describe("NotifyPolicy", () => {
         state: "failed",
         error: "not sent: the daemon restarted first",
       });
+    });
+  });
+
+  describe("retrying a transport failure", () => {
+    function failTransport(error: string): void {
+      transport.failWith = error;
+      transport.failIsTransport = true;
+    }
+
+    test("an urgent push that fails with fetch failed is retried on the backoff, and stays one record", async () => {
+      const { policy, ledger } = create();
+      failTransport("fetch failed");
+      await policy.submit(payload("Claude account signed out: claude-backup"), { level: "urgent" });
+      expect(transport.sent).toHaveLength(1);
+      expect(ledger.list()).toHaveLength(1);
+      const id = ledger.list()[0]!.id;
+
+      now += 59 * 1000;
+      await policy.tick();
+      expect(transport.sent).toHaveLength(1); // not due yet (first backoff step is 1 minute)
+
+      now += 2 * 1000;
+      await policy.tick();
+      expect(transport.sent).toHaveLength(2);
+      expect(ledger.list()).toHaveLength(1);
+      expect(ledger.get(id)?.state).toBe("failed");
+
+      transport.failWith = null;
+      now += 2 * MINUTE;
+      await policy.tick();
+      expect(transport.sent).toHaveLength(3);
+      expect(ledger.get(id)?.state).toBe("sent");
+      expect(ledger.get(id)?.id).toBe(id);
+      // An urgent retry must keep breaking through Focus, same as the original send.
+      expect(deliveriesOf(transport.sent)).toEqual([
+        { quiet: false, timeSensitive: true },
+        { quiet: false, timeSensitive: true },
+        { quiet: false, timeSensitive: true },
+      ]);
+    });
+
+    test("a notice that fails is not retried", async () => {
+      const { policy, ledger } = create();
+      await policy.updateSettings({ minInterruptLevel: "notice" });
+      failTransport("fetch failed");
+      await policy.submit(payload("Agent is burning tokens fast"), { level: "notice" });
+      expect(transport.sent).toHaveLength(1);
+      now += 20 * MINUTE;
+      await policy.tick();
+      expect(transport.sent).toHaveLength(1);
+      expect(ledger.list()[0]?.state).toBe("failed");
+    });
+
+    test("a DeviceNotRegistered ticket is a refusal, not retried (revocation itself is push-service.test.ts's)", async () => {
+      const { policy, ledger } = create();
+      transport.failWith = "DeviceNotRegistered";
+      await policy.submit(payload("Agent finished"), { level: "alert" });
+      expect(transport.sent).toHaveLength(1);
+      now += 20 * MINUTE;
+      await policy.tick();
+      expect(transport.sent).toHaveLength(1);
+      expect(ledger.list()[0]?.state).toBe("failed");
+    });
+
+    test("a push older than two hours is not retried any more, and stays failed and unreached", async () => {
+      const { policy, ledger } = create();
+      failTransport("fetch failed");
+      await policy.submit(payload("Account nearly exhausted"), { level: "urgent" });
+      now += 2 * HOUR + MINUTE;
+      await policy.tick();
+      const sentCountAtTwoHours = transport.sent.length;
+      now += 20 * MINUTE;
+      await policy.tick();
+      expect(transport.sent).toHaveLength(sentCountAtTwoHours);
+      expect(ledger.list()[0]?.state).toBe("failed");
+      expect(policy.getStatus().unreachedCount).toBe(1);
+    });
+
+    test("retries resume after a restart from the ledger on disk", async () => {
+      const first = create();
+      failTransport("fetch failed");
+      await first.policy.submit(payload("Claude account signed out"), { level: "urgent" });
+      first.policy.stop();
+
+      now += 5 * MINUTE;
+      transport.sent = [];
+      transport.failWith = null;
+      const second = create();
+      await second.policy.start();
+      expect(transport.sent).toHaveLength(1);
+      expect(second.ledger.list()[0]?.state).toBe("sent");
+    });
+
+    test("a late push's body names the time it was first sent", async () => {
+      const { policy, ledger } = create();
+      failTransport("fetch failed");
+      await policy.submit(payload("Claude account signed out"), { level: "urgent" });
+      const firstSentAt = ledger.list()[0]!.at;
+      transport.failWith = null;
+      now += 2 * MINUTE;
+      await policy.tick();
+      const retried = transport.sent.at(-1);
+      expect(retried?.payload.body).toContain(firstSentAt);
     });
   });
 
