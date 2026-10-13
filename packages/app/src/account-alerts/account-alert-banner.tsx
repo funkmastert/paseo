@@ -181,6 +181,7 @@ function AccountAlertEntryRow({
         onPress={openSettings}
         style={styles.inlineLink}
         textStyle={[styles.linkText, filled ? styles.filledText : null]}
+        hoveredTextStyle={filled ? styles.filledText : null}
       >
         {showHost ? `${entry.label} · ${entry.hostLabel}` : entry.label}
       </Button>
@@ -264,6 +265,7 @@ function AccountAlertBanner() {
             onPress={openMore}
             style={styles.inlineLink}
             textStyle={[styles.linkText, hasSignedOut ? styles.filledText : null]}
+            hoveredTextStyle={hasSignedOut ? styles.filledText : null}
             testID="account-alert-more"
           >
             {t("accountAlerts.moreCount", { count: hiddenCount })}
