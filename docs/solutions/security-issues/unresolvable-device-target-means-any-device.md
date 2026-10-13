@@ -58,7 +58,8 @@ A command-text gate sees text, never the shell that runs it. A literal name it c
   - The emulator launch cap fails open on uncertainty ([device-leases.md, "Enforcement"](../../device-leases.md#enforcement)). Its process scan catches an extra emulator a sweep later.
   - The catastrophe gate passes values it can't see ([catastrophe-gate.md, "Known gaps"](../../catastrophe-gate.md#known-gaps)) because its scope is two actions only.
 - Replay the real incident's command shape in a test, not only parser unit cases. `physical-device-lease-manager.test.ts` replays the leader's one-liner, `$(…)` with an inner `|`, `xargs` with and without `{}`, and an unresolved target with an emulator running. `device-install-commands.test.ts` covers the `export`/`declare`/`readonly` forms, and `device-launch-commands.test.ts` covers unterminated `$(` and backtick spans.
-- Known gaps, still open: a variable set in an earlier, separate tool call (the gate sees one command line at a time), `sh -c '…'` wrappers, and installs onto an emulator another agent holds (the emulator cap has no install gate).
+- Known gaps, still open: a variable set in an earlier, separate tool call (the gate sees one command line at a time), and `sh -c '…'` wrappers.
+- Installs onto an emulator or simulator another agent holds were closed in a follow-up: `DeviceLeaseManager.gateInstall` (`device-lease-manager.ts`) applies the same rules to running devices, including the `ambiguousWithPhones` mirror of this gate's `ambiguousWithEmulators`.
 
 ## Related Issues
 

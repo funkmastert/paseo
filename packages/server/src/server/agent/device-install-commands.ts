@@ -25,6 +25,14 @@ export interface InstallCommandIntent {
   /** The serial, UDID, CoreDevice identifier or device name the command names, if it names one. */
   target?: string;
   /**
+   * True when the command named `simctl`'s `booted` keyword instead of a literal device.
+   * `booted` is never a real simulator's name — it resolves dynamically against whatever is
+   * currently booted, which can be zero, one, or more simulators, so `target` is left unset
+   * rather than set to the literal string "booted". The caller resolves this the same way it
+   * resolves an untargeted command, but only against currently-running devices.
+   */
+  bootedAlias?: boolean;
+  /**
    * True when `target` still contains shell syntax this gate couldn't expand — `$(...)`, a
    * backtick, or a `$VAR`/`${VAR}` with no assignment seen earlier in the same command. The
    * command still names exactly one real device; it just isn't the literal string in `target`.
@@ -270,8 +278,8 @@ function matchDevicectl(tokens: readonly string[]): InstallCommandIntent | undef
 const XCODEBUILD_INSTALLING_ACTIONS = new Set(["test", "test-without-building"]);
 
 /** `xcodebuild test … -destination 'id=<udid>'` or `'platform=iOS,name=<name>'` — a physical
- * destination, not `platform=iOS Simulator…` (device-launch-commands.ts's territory) and not
- * `generic/platform=iOS`, which names no device at all. */
+ * destination, not `platform=iOS Simulator…` (matched separately below, since it runs the test
+ * against a SIMULATOR instead) and not `generic/platform=iOS`, which names no device at all. */
 function matchXcodebuildPhysical(tokens: readonly string[]): InstallCommandIntent | undefined {
   if (basename(tokens[0] ?? "") !== "xcodebuild") return undefined;
   if (!tokens.some((token) => XCODEBUILD_INSTALLING_ACTIONS.has(token))) return undefined;
@@ -283,6 +291,28 @@ function matchXcodebuildPhysical(tokens: readonly string[]): InstallCommandInten
   const id = /\bid\s*=\s*([^,]+)/i.exec(destination)?.[1]?.trim();
   const name = /\bname\s*=\s*([^,]+)/i.exec(destination)?.[1]?.trim();
   return intent({ platform: "ios", command: "xcodebuild -destination", target: id ?? name });
+}
+
+/** `xcodebuild test … -destination 'platform=iOS Simulator,id=<udid>'` or `'…,name=<name>'` —
+ * runs the test against a SIMULATOR that already exists (or is about to be booted:
+ * device-launch-commands.ts's `matchXcodebuildDestination` covers the boot half). Running a
+ * test on another agent's simulator is exactly the harm this gate exists to stop, the same as
+ * installing over it. Only gated when `id`/`name` names one literally: an untargeted
+ * `-destination 'platform=iOS Simulator'` (xcodebuild picks one itself) is left unmatched
+ * rather than produced as a target-less intent — this shares `InstallCommandIntent` with
+ * `PhysicalDeviceLeaseManager.gateInstall`, which would otherwise read a target-less iOS intent
+ * as ambiguous among connected PHONES, a registry this command never touches. */
+function matchXcodebuildSimulator(tokens: readonly string[]): InstallCommandIntent | undefined {
+  if (basename(tokens[0] ?? "") !== "xcodebuild") return undefined;
+  if (!tokens.some((token) => XCODEBUILD_INSTALLING_ACTIONS.has(token))) return undefined;
+  const destination = readFlagValue(tokens, "-destination");
+  if (!destination || !/platform\s*=\s*iOS Simulator/i.test(destination)) return undefined;
+  const id = /\bid\s*=\s*([^,]+)/i.exec(destination)?.[1]?.trim();
+  const name = /\bname\s*=\s*([^,]+)/i.exec(destination)?.[1]?.trim();
+  const target = id ?? name;
+  return target
+    ? intent({ platform: "ios", command: "xcodebuild -destination", target })
+    : undefined;
 }
 
 /** `ios-deploy` when it installs or launches (`-b/--bundle`) or uninstalls (`-9/--uninstall_only`).
@@ -298,6 +328,49 @@ function matchIosDeploy(tokens: readonly string[]): InstallCommandIntent | undef
     command: "ios-deploy",
     target: readFlagValue(tokens, "--id", "-i"),
   });
+}
+
+/** `simctl`'s install-like subcommands — the only ones that change a simulator's app state.
+ * `boot`/`shutdown` are device-launch-commands.ts's and device-lease-manager.ts's territory
+ * (booting/stopping the device itself, not an app on it); `erase` wipes the whole device rather
+ * than one app's install, and `list` only reads. None of those four are matched here. */
+const SIMCTL_INSTALL_LIKE = new Set(["install", "uninstall", "launch", "terminate"]);
+
+/** `simctl launch` flags that take their value as a separate following token (`--stdout <path>`),
+ * rather than attached (`--stdout=<path>`) — only the separate form has an extra token to skip
+ * past. The no-value flags (`--console`, `--console-pty`, `-w`/`--wait-for-debugger`,
+ * `--terminate-running-process`) and the attached-value form are both handled by the generic
+ * "starts with -" skip below. */
+const SIMCTL_SEPARATE_VALUE_FLAGS = new Set(["--stdout", "--stderr"]);
+
+/** The device/`booted` argument after `simctl`'s subcommand, skipping any flags in between —
+ * `simctl launch` takes real flags before the device (`--console`, `-w`, `--stdout=…`), and a
+ * fixed-position read would capture one of those as the target instead. The device argument is
+ * never flag-shaped, so any `-`-prefixed token encountered first is a flag to skip, not the
+ * target. */
+function findSimctlTarget(tokens: readonly string[]): string | undefined {
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index] as string;
+    if (!token.startsWith("-")) return token;
+    index += SIMCTL_SEPARATE_VALUE_FLAGS.has(token) ? 2 : 1;
+  }
+  return undefined;
+}
+
+/** `xcrun simctl install|uninstall|launch|terminate <udid|name|booted> ...`. `booted` is a
+ * resolution keyword, not a literal device (see `InstallCommandIntent.bootedAlias`). */
+function matchSimctl(tokens: readonly string[]): InstallCommandIntent | undefined {
+  const program = basename(tokens[0] ?? "");
+  const rest = program === "xcrun" ? tokens.slice(1) : tokens;
+  if (basename(rest[0] ?? "") !== "simctl") return undefined;
+  const sub = rest[1];
+  if (!sub || !SIMCTL_INSTALL_LIKE.has(sub)) return undefined;
+  const positional = findSimctlTarget(rest.slice(2));
+  if (positional === "booted") {
+    return intent({ platform: "ios", command: `simctl ${sub}`, bootedAlias: true });
+  }
+  return intent({ platform: "ios", command: `simctl ${sub}`, target: positional });
 }
 
 /** `flutter run -d <id>`. Flutter's device id can name either platform's device, so the caller
@@ -317,7 +390,9 @@ const MATCHERS = [
   matchReactNativeRun,
   matchDevicectl,
   matchXcodebuildPhysical,
+  matchXcodebuildSimulator,
   matchIosDeploy,
+  matchSimctl,
   matchFlutterRun,
 ];
 

@@ -339,6 +339,7 @@ import { createDaemonProcessOwnershipTracker } from "./agent/daemon-process-owne
 import { createNativeBuildGate } from "./agent/native-build-gate.js";
 import { runProviderRefreshWithDeadline } from "./agent/provider-refresh-deadline.js";
 import { PhysicalDeviceLeaseManager } from "./agent/physical-device-lease-manager.js";
+import { createComposedDeviceLaunchGate } from "./agent/device-gate-composition.js";
 import { physicalDeviceMatches, type PhysicalDevice } from "./agent/physical-device-registry.js";
 import {
   AdbTrackDevicesService,
@@ -2153,6 +2154,7 @@ export async function createPaseoDaemon(
       [...androidPhysicalDevices, ...iosPhysicalDevices].some((device) =>
         physicalDeviceMatches(device, target),
       ),
+    countPhysicalAndroidDevices: () => androidPhysicalDevices.length,
     logger: logger.child({ module: "device-leases" }),
   });
   deviceLeaseManager.reportMode();
@@ -2249,10 +2251,14 @@ export async function createPaseoDaemon(
   daemonConfigStore.onChange(() => physicalDeviceDetection.sync());
 
   // The gate a provider's PreToolUse hook actually calls. The native build gate first, so a build
-  // it refuses never takes a device slot; then the emulator/simulator slot cap (plus the artifact
-  // janitor's disk guard), then the physical-device install gate — disjoint command shapes in
-  // practice (booting a device vs. installing on one that already exists), so order only matters
-  // for which denial wins when a chained command line hits both.
+  // it refuses never takes a device slot; then the emulator/simulator slot cap's boot gate (plus
+  // the artifact janitor's disk guard); then that same cap's install gate, for a command that
+  // uses a running emulator or simulator rather than booting one; then the physical-device
+  // install gate. Four disjoint command shapes in practice (building, booting a device,
+  // installing on a running emulator/simulator, installing on a physical device), so order only
+  // matters for which denial wins when a chained command line hits more than one. The last three
+  // steps are `createComposedDeviceLaunchGate` (device-gate-composition.ts), kept separate from
+  // the native build gate so that composition can be tested against real gate instances.
   // Free space on the volume PASEO_HOME, the worktrees and the build outputs live on. The build
   // gate's disk line and the resource monitor's disk brake must read the same volume.
   const readFreeDiskBytes = async (): Promise<number> => {
@@ -2261,13 +2267,14 @@ export async function createPaseoDaemon(
   };
   // The resource monitor hands it each sweep's attributed `ps` (reportAttributedSample below).
   const daemonProcessOwnership = createDaemonProcessOwnershipTracker(process.pid);
+  const composedDeviceLaunchGate = createComposedDeviceLaunchGate({
+    bootGate: emulatorLaunchGate,
+    emulatorInstallGate: deviceLeaseManager,
+    physicalInstallGate: physicalDeviceLeaseManager,
+  });
   const nativeBuildGate = createNativeBuildGate({
     inner: {
-      async gateLaunch(input) {
-        const capDecision = await emulatorLaunchGate.gateLaunch(input);
-        if (capDecision.decision === "deny") return capDecision;
-        return await physicalDeviceLeaseManager.gateInstall(input);
-      },
+      ...composedDeviceLaunchGate,
       async explainRefusalToAgent(input) {
         await deviceLeaseManager.explainRefusalToAgent(input);
       },
