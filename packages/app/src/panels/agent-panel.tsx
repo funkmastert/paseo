@@ -379,7 +379,8 @@ function useAgentPanelDescriptor(
 }
 
 function AgentPanel() {
-  const { serverId, workspaceId, target, readOnly, openFileInWorkspace } = usePaneContext();
+  const { serverId, workspaceId, target, readOnly, compact, openFileInWorkspace } =
+    usePaneContext();
   const { isInteractive } = usePaneFocus();
   invariant(target.kind === "agent", "AgentPanel requires agent target");
 
@@ -390,6 +391,7 @@ function AgentPanel() {
       agentId={target.agentId}
       isPaneFocused={isInteractive}
       readOnly={readOnly}
+      compact={compact}
       onOpenWorkspaceFile={openFileInWorkspace}
     />
   );
@@ -521,6 +523,7 @@ function AgentPanelContent({
   agentId,
   isPaneFocused,
   readOnly,
+  compact,
   onOpenWorkspaceFile,
 }: {
   serverId: string;
@@ -528,6 +531,7 @@ function AgentPanelContent({
   agentId: string;
   isPaneFocused: boolean;
   readOnly?: boolean;
+  compact?: boolean;
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
 }) {
   const { t } = useTranslation();
@@ -579,6 +583,7 @@ function AgentPanelContent({
       agentId={resolvedAgentId}
       isPaneFocused={isPaneFocused}
       readOnly={readOnly}
+      compact={compact}
       client={runtimeClient}
       isConnected={runtimeIsConnected}
       connectionStatus={connectionStatus}
@@ -593,6 +598,7 @@ function AgentPanelBody({
   agentId,
   isPaneFocused,
   readOnly,
+  compact,
   client,
   isConnected,
   connectionStatus,
@@ -603,6 +609,7 @@ function AgentPanelBody({
   agentId?: string;
   isPaneFocused: boolean;
   readOnly?: boolean;
+  compact?: boolean;
   client: ReturnType<typeof useHostRuntimeClient>;
   isConnected: boolean;
   connectionStatus: HostRuntimeConnectionStatus;
@@ -764,6 +771,7 @@ function AgentPanelBody({
       agentId={agentId}
       isPaneFocused={isPaneFocused}
       readOnly={readOnly}
+      compact={compact}
       client={client}
       isConnected={isConnected}
       connectionStatus={connectionStatus}
@@ -778,6 +786,7 @@ function ChatAgentContent({
   agentId,
   isPaneFocused,
   readOnly,
+  compact,
   client,
   isConnected,
   connectionStatus,
@@ -788,6 +797,7 @@ function ChatAgentContent({
   agentId?: string;
   isPaneFocused: boolean;
   readOnly?: boolean;
+  compact?: boolean;
   client: ReturnType<typeof useHostRuntimeClient>;
   isConnected: boolean;
   connectionStatus: HostRuntimeConnectionStatus;
@@ -1196,6 +1206,7 @@ function ChatAgentContent({
       agentId={agentId}
       isPaneFocused={isPaneFocused}
       readOnly={readOnly}
+      compact={compact}
       isArchivingCurrentAgent={isArchivingCurrentAgent}
       agentState={agentState}
       effectiveAgent={effectiveAgent}
@@ -1226,6 +1237,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   agentId,
   isPaneFocused,
   readOnly,
+  compact,
   isArchivingCurrentAgent,
   agentState,
   effectiveAgent,
@@ -1252,6 +1264,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   agentId: string;
   isPaneFocused: boolean;
   readOnly?: boolean;
+  compact?: boolean;
   isArchivingCurrentAgent: boolean;
   agentState: ChatAgentSelectedState;
   effectiveAgent: AgentScreenAgent;
@@ -1377,6 +1390,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
           toast={toastApi}
           onOpenWorkspaceFile={onOpenWorkspaceFile}
           readOnly={readOnly}
+          compact={compact}
         />
       </RenderProfile>
       {hasActiveComposer ? (
@@ -1476,6 +1490,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
   toast,
   onOpenWorkspaceFile,
   readOnly,
+  compact,
 }: {
   streamViewRef: React.RefObject<AgentStreamViewHandle | null>;
   serverId: string;
@@ -1489,6 +1504,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
   toast: ReturnType<typeof useToastHost>["api"];
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
   readOnly?: boolean;
+  compact?: boolean;
 }) {
   const isCompactFormFactor = useIsCompactFormFactor();
   const hasWorkspaceDiffStat = useWorkspaceHasDiffStat(serverId, workspaceId);
@@ -1562,6 +1578,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
       turnPresentation={turnPresentation}
       onOpenWorkspaceFile={onOpenWorkspaceFile}
       readOnly={readOnly}
+      compact={compact}
     />
   );
 });

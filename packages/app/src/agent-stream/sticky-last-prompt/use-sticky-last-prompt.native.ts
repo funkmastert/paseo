@@ -14,6 +14,8 @@ export interface UseStickyLastPromptInput {
 
 export interface UseStickyLastPromptResult {
   source: StickyLastPromptSource;
+  /** No-op on native: there is no reading-position signal. */
+  reportReadingPosition: (rowId: string | null) => void;
   /** Feed the native transcript's FlatList viewability callback. */
   reportVisibleRowIds: (visibleRowIds: ReadonlySet<string>) => void;
 }
@@ -48,5 +50,5 @@ export function useStickyLastPrompt(input: UseStickyLastPromptInput): UseStickyL
     recomputeAndPublish();
   });
 
-  return { source: publisher, reportVisibleRowIds };
+  return { source: publisher, reportReadingPosition: () => undefined, reportVisibleRowIds };
 }

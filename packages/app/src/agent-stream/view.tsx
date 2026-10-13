@@ -8,8 +8,10 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ComponentProps,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -71,6 +73,12 @@ import { resolveStreamRenderStrategy } from "./strategy-resolver";
 import { type StreamSegmentRenderers, type StreamViewportHandle } from "./strategy";
 import { ChatOutlineRail } from "@/agent-stream/chat-outline/rail";
 import { useChatOutline } from "@/agent-stream/chat-outline/use-chat-outline";
+import { StickyPromptBar } from "@/agent-stream/sticky-last-prompt/sticky-prompt-bar";
+import { useStickyLastPrompt } from "@/agent-stream/sticky-last-prompt/use-sticky-last-prompt";
+import type {
+  StickyLastPromptSource,
+  StickyLastPromptState,
+} from "@/agent-stream/sticky-last-prompt/model";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { planTimelineTailFetch } from "@/timeline/timeline-sync-plan";
 import {
@@ -296,6 +304,8 @@ export interface AgentStreamViewProps {
   toast?: ToastApi | null;
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
   readOnly?: boolean;
+  /** Pinned-grid cells: render the sticky prompt bar one-line and unobtrusive. */
+  compact?: boolean;
   historyPagination?: {
     hasOlder: boolean;
     isLoadingOlder: boolean;
@@ -332,6 +342,30 @@ function resolveBottomOverlayControlOffset(clearance: number | undefined): numbe
   return Math.max(16, clearance ?? 0);
 }
 
+function jumpToStickyLastPrompt(
+  source: StickyLastPromptSource,
+  viewportRef: RefObject<StreamViewportHandle | null>,
+): void {
+  const prompt = source.getState().prompt;
+  if (!prompt) return;
+  viewportRef.current?.scrollToMessage?.(prompt.id);
+}
+
+function StickyPromptOverlay({
+  state,
+  compact,
+  onJumpToOriginal,
+}: {
+  state: StickyLastPromptState;
+  compact: boolean;
+  onJumpToOriginal: () => void;
+}): ReactNode {
+  if (!state.barVisible || !state.prompt) return null;
+  return (
+    <StickyPromptBar prompt={state.prompt} compact={compact} onJumpToOriginal={onJumpToOriginal} />
+  );
+}
+
 const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamViewProps>(
   function AgentStreamView(
     {
@@ -350,6 +384,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       toast,
       onOpenWorkspaceFile,
       readOnly = false,
+      compact,
       historyPagination,
     },
     ref,
@@ -364,6 +399,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       [pendingMessageSubmissions],
     );
     const isMobile = useIsCompactFormFactor();
+    const resolvedCompact = compact === true;
     const streamRenderStrategy = useMemo(
       () =>
         resolveStreamRenderStrategy({
@@ -643,6 +679,22 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       visibleItemIds: visibleHistoryItemIds,
       revealLoadedItem: revealLoadedHistory,
     });
+
+    const stickyLastPrompt = useStickyLastPrompt({ items: effectiveStreamItems });
+    const stickyLastPromptState = useSyncExternalStore(
+      stickyLastPrompt.source.subscribe,
+      stickyLastPrompt.source.getState,
+    );
+    const handleJumpToStickyPrompt = useCallback(() => {
+      jumpToStickyLastPrompt(stickyLastPrompt.source, viewportRef);
+    }, [stickyLastPrompt]);
+    const handleReadingPositionChange = useCallback(
+      (rowId: string | null) => {
+        chatOutline.reportReadingPosition(rowId);
+        stickyLastPrompt.reportReadingPosition(rowId);
+      },
+      [chatOutline, stickyLastPrompt],
+    );
 
     useImperativeHandle(
       ref,
@@ -1110,7 +1162,8 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
               routeBottomAnchorRequest,
               isAuthoritativeHistoryReady,
               onNearBottomChange: setIsNearBottom,
-              onReadingPositionChange: chatOutline.reportReadingPosition,
+              onReadingPositionChange: handleReadingPositionChange,
+              onViewableRowIdsChange: stickyLastPrompt.reportVisibleRowIds,
               onNearHistoryStart: loadOlder,
               isLoadingOlderHistory: isLoadingOlder,
               hasOlderHistory: hasOlder,
@@ -1125,6 +1178,11 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             prompts={chatOutline.prompts}
             activePrompt={chatOutline.activePrompt}
             onJumpToPrompt={chatOutline.jumpToPrompt}
+          />
+          <StickyPromptOverlay
+            state={stickyLastPromptState}
+            compact={resolvedCompact}
+            onJumpToOriginal={handleJumpToStickyPrompt}
           />
           {(!isNearBottom || isTimelineDetached) && (
             <View style={scrollToBottomContainerStyle} pointerEvents="box-none">
@@ -1260,6 +1318,7 @@ function agentStreamViewPropsEqual(
   if (left.toast !== right.toast) reasons.push("toast");
   if (left.onOpenWorkspaceFile !== right.onOpenWorkspaceFile) reasons.push("onOpenWorkspaceFile");
   if (left.readOnly !== right.readOnly) reasons.push("readOnly");
+  if (left.compact !== right.compact) reasons.push("compact");
   if (!historyPaginationPropsEqual(left.historyPagination, right.historyPagination)) {
     reasons.push("historyPagination");
   }

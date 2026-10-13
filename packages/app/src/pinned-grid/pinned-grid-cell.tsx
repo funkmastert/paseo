@@ -145,6 +145,8 @@ export const PinnedGridCell = memo(function PinnedGridCell({
       // A glance: no composer, no forking. Questions, plan approval, and permission requests
       // still answer in place — the agent panel reuses the same timeline cards it always does.
       readOnly: true,
+      // One-line, unobtrusive chrome only — a cell has far less room than a workspace tab.
+      compact: true,
       // The grid has no tab strip or layout of its own. Anything a chat asks the workspace to open
       // — a file, a diff, a side pane — opens in the workspace itself, and leaves the grid.
       onOpenTab: handleOpenTarget,

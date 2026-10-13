@@ -16,6 +16,8 @@ export interface UseStickyLastPromptResult {
   source: StickyLastPromptSource;
   /** Feed the web transcript's existing reading-position signal (`onReadingPositionChange`). */
   reportReadingPosition: (rowId: string | null) => void;
+  /** No-op on web: visibility comes from reading position instead. */
+  reportVisibleRowIds: (visibleRowIds: ReadonlySet<string>) => void;
 }
 
 /**
@@ -55,5 +57,5 @@ export function useStickyLastPrompt(input: UseStickyLastPromptInput): UseStickyL
     recomputeAndPublish();
   });
 
-  return { source: publisher, reportReadingPosition };
+  return { source: publisher, reportReadingPosition, reportVisibleRowIds: () => undefined };
 }
