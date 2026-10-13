@@ -20,6 +20,7 @@ import { useIsCompactFormFactor } from "@/constants/layout";
 import { isWeb } from "@/constants/platform";
 import { menuRowContentInset } from "@/components/ui/menu";
 import type { Theme } from "@/styles/theme";
+import { isImeComposingKeyboardEvent } from "@/utils/keyboard-ime";
 import { createBroadcastPinnedComposerModel } from "./broadcast-pinned-composer-model";
 import type { BroadcastSendResult } from "./broadcast-pinned-send";
 import type { BroadcastPinnedTarget } from "./broadcast-pinned-targets";
@@ -107,8 +108,11 @@ function BroadcastPinnedComposerContent({
   }, [closeMenu, hasTargets, onSend, sending, snapshot, t, toast]);
 
   const handleKeyPress = useCallback(
-    (event: { nativeEvent: { key: string; shiftKey?: boolean } }) => {
+    (event: {
+      nativeEvent: { key: string; shiftKey?: boolean; isComposing?: boolean; keyCode?: number };
+    }) => {
       if (!isWeb) return;
+      if (isImeComposingKeyboardEvent(event.nativeEvent)) return;
       if (event.nativeEvent.key !== "Enter" || event.nativeEvent.shiftKey) return;
       handleSend();
     },
