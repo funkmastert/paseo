@@ -628,6 +628,26 @@ describe("classifyAgent — the live policy", () => {
     expect(hard.model.poolSlot).toBe("hard");
   });
 
+  it("never leaves the provider pointed at the requested family once the model crosses into another one (codex-pool-provider-family)", () => {
+    // codex/gpt-6-luna isn't approved for the mechanical pool, so policy overrides it with the
+    // pool's own entry — a BARE claude-family ref. The bug: a bare ref's `provider` field is
+    // `null`, which `crossesRequestedFamily`'s old check read as "same family as whatever was
+    // requested" instead of resolving it to the pool's actual (claude) family first, so a codex
+    // request falling back to a Claude model never got `provider` rewritten off `codex`.
+    const decision = classifyAgent(
+      child({
+        labels: { "paseo.agent-type": "worker", "paseo.task-class": "mechanical" },
+        requestedProvider: "codex",
+        requestedModel: "gpt-6-luna",
+      }),
+      live(),
+    );
+    expect(decision.model.model).toBe("claude-haiku-4-5-20251001");
+    expect(decision.model.crossesRequestedFamily).toBe(true);
+    expect(decision.model.provider).toBe("claude");
+    expect(decision.model.override).toMatchObject({ requestedRef: "codex/gpt-6-luna" });
+  });
+
   it("gives an unlabelled worker Sonnet 5 — the standard default", () => {
     const decision = classifyAgent(child({ labels: { "paseo.agent-type": "worker" } }), live());
     expect(decision.model.model).toBe("claude-sonnet-5");

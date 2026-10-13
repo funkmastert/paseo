@@ -942,7 +942,20 @@ function decideModel(
 
   const overrideNote = override ? describeOverrideNote(override, slot, fellBack) : "";
 
-  const crossesRequestedFamily = outcome.provider !== null && outcome.provider !== requestedFamily;
+  // A bare pool entry (`outcome.provider === null`) implicitly means POOL_FAMILY, not "whatever
+  // family the request came in on" -- resolve it before comparing, or a non-claude request
+  // (codex/…) that falls back to a bare claude-family pool entry reads as same-family and never
+  // crosses. `effectiveOutcomeFamily` is what the model that is actually about to run belongs to.
+  const effectiveOutcomeFamily = outcome.provider ?? POOL_FAMILY;
+  const crossesRequestedFamily = effectiveOutcomeFamily !== requestedFamily;
+  // Every downstream consumer of `model.provider` (role-router's config.provider rewrite,
+  // decideAccount, effectiveThinkingModel) falls back through its own `?? requestedProvider ??
+  // POOL_FAMILY` chain whenever this is null -- which lands back on the REQUESTED family, the
+  // exact bug this resolves: a codex create landing on a Claude model with every consumer still
+  // reading "codex". Report the resolved family once crossing, so a bare pool entry stops hiding
+  // behind "null means nothing to rewrite." A same-family bare ref keeps reporting `null`
+  // (unchanged: the account router decides the account next).
+  const resolvedProvider = crossesRequestedFamily ? effectiveOutcomeFamily : outcome.provider;
   // A pool default the catalog doesn't list runs for EVERY spawn of this
   // (role, class), not just the one that asked — the louder of the two ways
   // an unverified id gets used.
@@ -968,7 +981,7 @@ function decideModel(
       ...unadvertised,
       ...resolvedField,
       outcome: "unavailable",
-      provider: outcome.provider,
+      provider: resolvedProvider,
       model: outcome.model,
       ...(override ? { override } : {}),
       reason: `No entry in ${poolPhrase(slot, fellBack)} is selectable right now, so its first entry ${effectiveRef} is used anyway rather than dropping the spawn.${resolvedNote}${unverifiedNote}${overrideNote}`,
@@ -981,7 +994,7 @@ function decideModel(
     ...unadvertised,
     ...resolvedField,
     outcome: "selected",
-    provider: outcome.provider,
+    provider: resolvedProvider,
     model: outcome.model,
     ...(override ? { override } : {}),
     reason: `${effectiveRef} is the first selectable entry in ${poolPhrase(slot, fellBack)}.${resolvedNote}${unverifiedNote}${overrideNote}`,
