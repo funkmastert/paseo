@@ -80,6 +80,7 @@ import {
 } from "@/components/sidebar/sidebar-workspace-menu";
 import { PinnedSectionHeader } from "@/components/sidebar/pinned-section-header";
 import { useOpenPinnedGrid } from "@/pinned-grid/use-open-pinned-grid";
+import { useBroadcastPinnedComposer } from "@/broadcast-pinned/use-broadcast-pinned-composer";
 import { SidebarGroupToggleRow } from "@/components/sidebar/sidebar-group-toggle-row";
 import { useLimitedSidebarGroup } from "@/components/sidebar/use-limited-sidebar-group";
 import type { ToggleSidebarWorkspacePin } from "@/hooks/use-sidebar-workspace-pin";
@@ -167,6 +168,8 @@ export function SidebarStatusWorkspaceList({
     toggleExpanded: togglePinnedWorkspacesExpanded,
   } = useLimitedSidebarGroup(pinnedWorkspaces);
   const handleOpenPinnedGrid = useOpenPinnedGrid(pinnedWorkspaces, onWorkspacePress);
+  const { targets: broadcastPinnedTargets, onSend: handleSendBroadcastPinned } =
+    useBroadcastPinnedComposer();
 
   const statusShortcutIndex = showShortcutBadges
     ? shortcutIndexByWorkspaceKey
@@ -214,6 +217,8 @@ export function SidebarStatusWorkspaceList({
             collapsed={pinnedCollapsed}
             onToggle={togglePinnedCollapsed}
             onOpenGrid={handleOpenPinnedGrid}
+            broadcastTargets={broadcastPinnedTargets}
+            onSendBroadcast={handleSendBroadcastPinned}
           />
           {pinnedCollapsed ? null : (
             <>

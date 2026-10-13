@@ -258,6 +258,15 @@ export const ko: TranslationResources = {
     noChat: "이 작업 공간에는 아직 채팅이 없습니다",
     empty: "고정된 채팅 없음",
   },
+  broadcastPinned: {
+    promptPlaceholder: "고정된 모든 리더에게 메시지 보내기...",
+    sendButton_one: "{{count}}개 에이전트에 보내기",
+    sendButton_other: "{{count}}개 에이전트에 보내기",
+    sent_one: "{{count}}개 에이전트에 전송됨",
+    sent_other: "{{count}}개 에이전트에 전송됨",
+    partialFailure: "{{names}}에 전송 실패",
+    noTargets: "보낼 수 있는 고정된 리더가 없습니다.",
+  },
   sessions: {
     title: "기록",
     empty: "아직 세션이 없습니다",
@@ -1140,6 +1149,7 @@ export const ko: TranslationResources = {
     pinned: {
       title: "고정됨",
       openGrid: "고정된 채팅을 그리드로 열기",
+      broadcast: "고정된 모든 리더에게 메시지 보내기",
     },
     host: {
       noHost: "호스트 없음",

@@ -260,6 +260,15 @@ export const ja: TranslationResources = {
     noChat: "このワークスペースにはまだチャットがありません",
     empty: "固定したチャットはありません",
   },
+  broadcastPinned: {
+    promptPlaceholder: "固定されたすべてのリーダーにメッセージを送信...",
+    sendButton_one: "{{count}}件のエージェントに送信",
+    sendButton_other: "{{count}}件のエージェントに送信",
+    sent_one: "{{count}}件のエージェントに送信しました",
+    sent_other: "{{count}}件のエージェントに送信しました",
+    partialFailure: "{{names}}への送信に失敗しました",
+    noTargets: "送信できる固定リーダーがありません。",
+  },
   sessions: {
     title: "履歴",
     empty: "セッションがまだありません",
@@ -1145,6 +1154,7 @@ export const ja: TranslationResources = {
     pinned: {
       title: "固定済み",
       openGrid: "固定したチャットをグリッドで開く",
+      broadcast: "固定されたすべてのリーダーにプロンプトを送信",
     },
     host: {
       noHost: "ホストなし",

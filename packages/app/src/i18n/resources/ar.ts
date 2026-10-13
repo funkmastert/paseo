@@ -257,6 +257,15 @@ export const ar: TranslationResources = {
     noChat: "لا توجد محادثة في مساحة العمل هذه بعد",
     empty: "لا توجد محادثات مثبتة",
   },
+  broadcastPinned: {
+    promptPlaceholder: "راسل كل وكيل رئيسي مثبّت...",
+    sendButton_one: "إرسال إلى {{count}} وكيل",
+    sendButton_other: "إرسال إلى {{count}} وكلاء",
+    sent_one: "تم الإرسال إلى {{count}} وكيل",
+    sent_other: "تم الإرسال إلى {{count}} وكلاء",
+    partialFailure: "فشل الإرسال إلى {{names}}",
+    noTargets: "لا يوجد وكلاء رئيسيون مثبّتون لإرسال الرسالة إليهم.",
+  },
   sessions: {
     title: "السجل",
     empty: "لا توجد جلسات بعد",
@@ -1133,6 +1142,7 @@ export const ar: TranslationResources = {
     pinned: {
       title: "المثبتة",
       openGrid: "فتح المحادثات المثبتة في شبكة",
+      broadcast: "إرسال رسالة إلى كل وكيل رئيسي مثبّت",
     },
     host: {
       noHost: "لا مضيف",

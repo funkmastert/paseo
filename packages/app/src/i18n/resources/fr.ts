@@ -261,6 +261,15 @@ export const fr: TranslationResources = {
     noChat: "Pas encore de discussion dans cet espace de travail",
     empty: "Aucune discussion épinglée",
   },
+  broadcastPinned: {
+    promptPlaceholder: "Message à tous les leaders épinglés...",
+    sendButton_one: "Envoyer à {{count}} agent",
+    sendButton_other: "Envoyer à {{count}} agents",
+    sent_one: "Envoyé à {{count}} agent",
+    sent_other: "Envoyé à {{count}} agents",
+    partialFailure: "Échec de l'envoi à {{names}}",
+    noTargets: "Il ne reste aucun leader épinglé à qui envoyer.",
+  },
   sessions: {
     title: "Historique",
     empty: "Aucune séance pour l'instant",
@@ -1167,6 +1176,7 @@ export const fr: TranslationResources = {
     pinned: {
       title: "Épinglés",
       openGrid: "Ouvrir les discussions épinglées dans une grille",
+      broadcast: "Envoyer un message à tous les leaders épinglés",
     },
     host: {
       noHost: "Aucun hôte",
