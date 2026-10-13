@@ -260,6 +260,14 @@ export const ptBR: TranslationResources = {
     noChat: "Ainda não há chat neste espaço de trabalho",
     empty: "Nenhum chat fixado",
   },
+  broadcastPinned: {
+    promptPlaceholder: "Mensagem para todos os líderes fixados...",
+    sendButton_one: "Enviar para {{count}} agente",
+    sendButton_other: "Enviar para {{count}} agentes",
+    sent_one: "Enviado para {{count}} agente",
+    sent_other: "Enviado para {{count}} agentes",
+    partialFailure: "Falha ao enviar para {{names}}",
+  },
   sessions: {
     title: "Histórico de agentes",
     empty: "Nenhuma sessão ainda",
@@ -1158,6 +1166,7 @@ export const ptBR: TranslationResources = {
     pinned: {
       title: "Fixados",
       openGrid: "Abrir os chats fixados em uma grade",
+      broadcast: "Enviar uma mensagem para todos os líderes fixados",
     },
     host: {
       noHost: "Nenhum host",

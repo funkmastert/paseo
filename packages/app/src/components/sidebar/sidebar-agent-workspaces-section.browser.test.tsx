@@ -8,6 +8,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import "@/i18n/i18next";
 import { KeyboardActionDispatcherProvider } from "@/keyboard/keyboard-action-dispatcher-context";
 import { ToastProvider } from "@/contexts/toast-context";
+import { SidebarModelProvider } from "./sidebar-model";
 import { useSidebarCollapsedSectionsStore } from "@/stores/sidebar-collapsed-sections-store";
 import type {
   SidebarProjectEntry,
@@ -254,19 +255,21 @@ function AgentSectionHarness({ width }: { width: number }) {
     <QueryClientProvider client={queryClient()}>
       <KeyboardActionDispatcherProvider>
         <ToastProvider>
-          <div style={style}>
-            <SidebarStatusWorkspaceList
-              groups={projection.workspaceGroups}
-              pinnedWorkspaces={pinnedWorkspaces}
-              projectIconByProjectViewKey={EMPTY_ICON_MAP}
-              shortcutIndexByWorkspaceKey={EMPTY_SHORTCUT_MAP}
-              showShortcutBadges={false}
-              hostBadgeByServerId={EMPTY_BADGE_MAP}
-              supportsPinningByServerId={SUPPORTS_PINNING_MAP}
-              onToggleWorkspacePin={NOOP}
-              onPinnedWorkspaceReorder={NOOP}
-            />
-          </div>
+          <SidebarModelProvider active={false}>
+            <div style={style}>
+              <SidebarStatusWorkspaceList
+                groups={projection.workspaceGroups}
+                pinnedWorkspaces={pinnedWorkspaces}
+                projectIconByProjectViewKey={EMPTY_ICON_MAP}
+                shortcutIndexByWorkspaceKey={EMPTY_SHORTCUT_MAP}
+                showShortcutBadges={false}
+                hostBadgeByServerId={EMPTY_BADGE_MAP}
+                supportsPinningByServerId={SUPPORTS_PINNING_MAP}
+                onToggleWorkspacePin={NOOP}
+                onPinnedWorkspaceReorder={NOOP}
+              />
+            </div>
+          </SidebarModelProvider>
         </ToastProvider>
       </KeyboardActionDispatcherProvider>
     </QueryClientProvider>

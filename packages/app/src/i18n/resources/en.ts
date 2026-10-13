@@ -255,6 +255,14 @@ export const en = {
     noChat: "No chat in this workspace yet",
     empty: "No pinned chats",
   },
+  broadcastPinned: {
+    promptPlaceholder: "Message every pinned leader...",
+    sendButton_one: "Send to {{count}} agent",
+    sendButton_other: "Send to {{count}} agents",
+    sent_one: "Sent to {{count}} agent",
+    sent_other: "Sent to {{count}} agents",
+    partialFailure: "Failed to send to {{names}}",
+  },
   sessions: {
     title: "History",
     empty: "No sessions yet",
@@ -1142,6 +1150,7 @@ export const en = {
     pinned: {
       title: "Pinned",
       openGrid: "Open pinned chats in a grid",
+      broadcast: "Send a prompt to every pinned leader",
     },
     host: {
       noHost: "No host",

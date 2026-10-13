@@ -257,6 +257,14 @@ export const zhCN: TranslationResources = {
     noChat: "此工作区还没有聊天",
     empty: "没有置顶聊天",
   },
+  broadcastPinned: {
+    promptPlaceholder: "向所有置顶的主控发送消息...",
+    sendButton_one: "发送给 {{count}} 个代理",
+    sendButton_other: "发送给 {{count}} 个代理",
+    sent_one: "已发送给 {{count}} 个代理",
+    sent_other: "已发送给 {{count}} 个代理",
+    partialFailure: "发送失败：{{names}}",
+  },
   sessions: {
     title: "历史",
     empty: "还没有会话",
@@ -1125,6 +1133,7 @@ export const zhCN: TranslationResources = {
     pinned: {
       title: "已置顶",
       openGrid: "以网格打开置顶聊天",
+      broadcast: "向所有置顶的主控发送提示",
     },
     host: {
       noHost: "没有 Host",

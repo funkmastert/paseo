@@ -259,6 +259,14 @@ export const ru: TranslationResources = {
     noChat: "В этом рабочем пространстве пока нет чата",
     empty: "Нет закреплённых чатов",
   },
+  broadcastPinned: {
+    promptPlaceholder: "Сообщение для всех закреплённых лидеров...",
+    sendButton_one: "Отправить {{count}} агенту",
+    sendButton_other: "Отправить {{count}} агентам",
+    sent_one: "Отправлено {{count}} агенту",
+    sent_other: "Отправлено {{count}} агентам",
+    partialFailure: "Не удалось отправить: {{names}}",
+  },
   sessions: {
     title: "История",
     empty: "Сессий пока нет",
@@ -1149,6 +1157,7 @@ export const ru: TranslationResources = {
     pinned: {
       title: "Закреплённые",
       openGrid: "Открыть закреплённые чаты в виде сетки",
+      broadcast: "Отправить сообщение всем закреплённым лидерам",
     },
     host: {
       noHost: "Нет хоста",

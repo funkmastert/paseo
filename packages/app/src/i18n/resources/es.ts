@@ -260,6 +260,14 @@ export const es: TranslationResources = {
     noChat: "Aún no hay chat en este espacio de trabajo",
     empty: "No hay chats anclados",
   },
+  broadcastPinned: {
+    promptPlaceholder: "Mensaje para todos los líderes anclados...",
+    sendButton_one: "Enviar a {{count}} agente",
+    sendButton_other: "Enviar a {{count}} agentes",
+    sent_one: "Enviado a {{count}} agente",
+    sent_other: "Enviado a {{count}} agentes",
+    partialFailure: "Error al enviar a {{names}}",
+  },
   sessions: {
     title: "Historial",
     empty: "Aún no hay sesiones",
@@ -1167,6 +1175,7 @@ export const es: TranslationResources = {
     pinned: {
       title: "Anclados",
       openGrid: "Abrir los chats anclados en una cuadrícula",
+      broadcast: "Enviar un mensaje a todos los líderes anclados",
     },
     host: {
       noHost: "Sin anfitrión",

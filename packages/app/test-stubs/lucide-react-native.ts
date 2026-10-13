@@ -102,6 +102,7 @@ export const RotateCcw = StubIcon;
 export const RotateCw = StubIcon;
 export const Scan = StubIcon;
 export const Search = StubIcon;
+export const Send = StubIcon;
 export const Server = StubIcon;
 export const Settings = StubIcon;
 export const Settings2 = StubIcon;

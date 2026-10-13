@@ -7,6 +7,9 @@ import { paneContentToolbarIconSize, ToolbarButton } from "@/components/ui/pane-
 import { mutedIconColorMapping } from "@/components/ui/icon-color";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
+import { BroadcastPinnedButton } from "@/broadcast-pinned/broadcast-pinned-button";
+import type { BroadcastSendResult } from "@/broadcast-pinned/broadcast-pinned-send";
+import type { BroadcastPinnedTarget } from "@/broadcast-pinned/broadcast-pinned-targets";
 import type { Theme } from "@/styles/theme";
 
 const ThemedChevronDown = withUnistyles(ChevronDown);
@@ -20,10 +23,14 @@ export function PinnedSectionHeader({
   collapsed,
   onToggle,
   onOpenGrid,
+  broadcastTargets,
+  onSendBroadcast,
 }: {
   collapsed: boolean;
   onToggle: () => void;
   onOpenGrid: () => void;
+  broadcastTargets: BroadcastPinnedTarget[];
+  onSendBroadcast: (text: string, targetIds: string[]) => Promise<BroadcastSendResult>;
 }) {
   const { t } = useTranslation();
   const isCompact = useIsCompactFormFactor();
@@ -49,6 +56,7 @@ export function PinnedSectionHeader({
         )}
       </Pressable>
       {/* A sibling of the toggle, not a child: hover and press stay on separate elements. */}
+      <BroadcastPinnedButton targets={broadcastTargets} onSend={onSendBroadcast} />
       <ToolbarButton
         compact={isCompact}
         label={t("sidebar.pinned.openGrid")}
