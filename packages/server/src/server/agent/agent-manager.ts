@@ -17,12 +17,14 @@ import {
   type AgentLifecycleStatus,
 } from "@getpaseo/protocol/agent-lifecycle";
 import {
+  CODEX_GUARDED_LABEL,
   getParentAgentIdFromLabels,
   hasOpenAgentTab,
   isDelegatedAgent,
   isOpenAgentTabLabel,
   JEV_TOOLS_LABEL,
   PARENT_AGENT_ID_LABEL,
+  type AgentCreateOrigin,
 } from "@getpaseo/protocol/agent-labels";
 import type { Logger } from "pino";
 import type {
@@ -150,6 +152,9 @@ import {
 } from "./provider-move.js";
 import { getErrorMessage } from "@getpaseo/protocol/error-utils";
 import { RunMarkerTracker } from "./restart-recovery/run-marker.js";
+import { getCodexGuardHealthState, isCodexGuardHealthy } from "./codex-guard-health.js";
+import { CodexChildGuardError } from "./codex-guard-error.js";
+import { hasCodexGuardMarker, requiresCodexGuard } from "./codex-guard-predicate.js";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
@@ -445,8 +450,14 @@ export interface ResourceMonitorAgentSummary {
 export interface CodexGuardChildCandidateSummary {
   id: string;
   provider: AgentProvider;
+  /** The session family of `provider` (`resolveProviderSessionFamily`), not the literal id -- a
+   * provider declared `extends: "codex"` counts against the cap exactly like `codex` itself. */
+  providerFamily: AgentProvider;
   /** The `paseo.parent-agent-id` label: set on a child agent, null on a root (Tyler's own session). */
   parentAgentId: string | null;
+  /** Whether the durable `paseo.codex-guarded` marker is set -- survives a relabel or detach
+   * that clears `parentAgentId`, so a marker-only child still counts against the cap. */
+  hasGuardMarker: boolean;
   lifecycle: AgentLifecycleStatus;
   /** A foreground turn, an active turn, a pending replacement, or a queued/admitted run. */
   busy: boolean;
@@ -677,6 +688,13 @@ export interface CreateAgentOptions {
   // The agent that initiated this create, if any. Threaded into the
   // agent.create plugin hook read-only; absent for human-initiated creates.
   callerAgentId?: string;
+  /**
+   * Who asked for this create, assigned explicitly by the entry point (session.ts, Hub, the
+   * remediation ladder, a schedule run). Absent is treated as "agent" by
+   * `enforceCodexChildGuard` -- fail closed, so a new or forgotten create path is guarded by
+   * default and only the explicit human path opts out. See `AgentCreateOrigin`.
+   */
+  origin?: AgentCreateOrigin;
 }
 
 export interface AgentManagerOptions {
@@ -1201,8 +1219,12 @@ function validateAgentId(agentId: string, source: string): string {
  * experiment arm (JevToolsEligibility pins it from the agent's stored labels on every daemon
  * restart), so a patch that could write it would let an agent grant itself the tools by setting
  * the label and waiting for a restart, bypassing the classifier's own assignment.
+ *
+ * `paseo.codex-guarded` is the Codex child guard's own marker (codex-guard-predicate.ts):
+ * unprotected, `update_agent` could clear it the same way a relabel or detach already clears
+ * `paseo.parent-agent-id`, undoing the one thing that makes the marker durable.
  */
-const PROTECTED_LABEL_KEYS: ReadonlySet<string> = new Set([JEV_TOOLS_LABEL]);
+const PROTECTED_LABEL_KEYS: ReadonlySet<string> = new Set([JEV_TOOLS_LABEL, CODEX_GUARDED_LABEL]);
 
 function applyLabelPatch(
   labels: Record<string, string>,
@@ -2020,7 +2042,9 @@ export class AgentManager {
     return Array.from(this.agents.values()).map((agent) => ({
       id: agent.id,
       provider: agent.provider,
+      providerFamily: this.resolveProviderSessionFamily(agent.provider),
       parentAgentId: getParentAgentIdFromLabels(agent.labels),
+      hasGuardMarker: hasCodexGuardMarker(agent.labels),
       lifecycle: agent.lifecycle,
       busy: this.isAgentBusy(agent),
       createdAt: agent.createdAt.toISOString(),
@@ -2744,6 +2768,16 @@ export class AgentManager {
         options = { ...options, env: request.env, labels: request.labels };
       }
     }
+    const guard = this.enforceCodexChildGuard(
+      config,
+      options.callerAgentId,
+      options.labels,
+      options.origin,
+    );
+    config = guard.config;
+    if (guard.guarded) {
+      options = { ...options, labels: { ...options.labels, [CODEX_GUARDED_LABEL]: "1" } };
+    }
     await this.deleteAgentState(resolvedAgentId);
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
       config,
@@ -2867,11 +2901,12 @@ export class AgentManager {
       ...overrides,
       provider: handle.provider,
     } as AgentSessionConfig;
+    const guard = this.enforceCodexChildGuardOnResumeOrReload(mergedConfig, options?.labels);
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      mergedConfig,
+      guard.config,
       resolvedAgentId,
       undefined,
-      options?.labels,
+      guard.labels,
     );
 
     const client = this.requireClient(handle.provider);
@@ -2892,7 +2927,7 @@ export class AgentManager {
         reason: "resume",
         purpose: resumeOptions?.purpose ?? "interactive",
         workspaceId: options?.workspaceId ?? null,
-        ...(options?.labels ? { labels: options.labels } : {}),
+        ...(guard.labels ? { labels: guard.labels } : {}),
       },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
@@ -2905,6 +2940,7 @@ export class AgentManager {
     await this.requireExternalMcpSupport(session, storedConfig);
     return this.registerSession(session, storedConfig, resolvedAgentId, {
       ...options,
+      labels: guard.labels,
       persistence: handle,
     });
   }
@@ -2935,11 +2971,16 @@ export class AgentManager {
       throw new Error(`Provider '${input.provider}' does not support importing sessions`);
     }
 
+    // Same guard as resume and reload: an import carrying the marker, or a codex-family import
+    // carrying the parent label, forces guarded mode and backfills the marker -- a CLI
+    // `paseo agent import --label paseo.parent-agent-id=<caller>` or an account-failover
+    // migration that copies a guarded child's labels must not land unguarded.
+    const guard = this.enforceCodexChildGuardOnResumeOrReload(
+      { provider: input.provider, cwd: input.cwd },
+      input.labels,
+    );
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      {
-        provider: input.provider,
-        cwd: input.cwd,
-      },
+      guard.config,
       resolvedAgentId,
     );
     this.paseoToolPolicies.set(resolvedAgentId, paseoToolPolicy);
@@ -2969,7 +3010,7 @@ export class AgentManager {
 
       handedToRegistration = true;
       const agent = await this.registerSession(imported.session, importedConfig, resolvedAgentId, {
-        labels: input.labels,
+        labels: guard.labels,
         workspaceId: input.workspaceId,
         timelineRows,
         timelineNextSeq: timelineRows.length + 1,
@@ -3048,11 +3089,12 @@ export class AgentManager {
       ...overrides,
       provider,
     } as AgentSessionConfig;
+    const guard = this.enforceCodexChildGuardOnResumeOrReload(refreshConfig, existing.labels);
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
-      refreshConfig,
+      guard.config,
       agentId,
       undefined,
-      existing.labels,
+      guard.labels,
     );
     const hadPreviousPaseoToolPolicy = this.paseoToolPolicies.has(agentId);
     const previousPaseoToolPolicy = this.paseoToolPolicies.get(agentId);
@@ -3066,7 +3108,7 @@ export class AgentManager {
         reason: "refresh",
         purpose: "interactive",
         workspaceId: existing.workspaceId,
-        labels: existing.labels,
+        labels: guard.labels,
       },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
@@ -3108,7 +3150,7 @@ export class AgentManager {
       // Preserve existing labels and timeline during reload.
       handedToRegistration = true;
       const registered = await this.registerSession(session, storedConfig, agentId, {
-        labels: existing.labels,
+        labels: guard.labels,
         workspaceId: existing.workspaceId,
         owner: existing.owner,
         createdAt: existing.createdAt,
@@ -3162,20 +3204,42 @@ export class AgentManager {
     targetProviderId: AgentProvider,
   ): Promise<ManagedAgent> {
     const existing = this.requireSessionAgent(agentId);
+    const sourceFamily = this.resolveProviderSessionFamily(existing.provider);
+    const targetFamily = this.resolveProviderSessionFamily(targetProviderId);
     const refusal = checkAgentProviderMove({
       agentId,
       sourceProviderId: existing.provider,
       targetProviderId,
       registeredProviderIds: this.getRegisteredProviderIds(),
       targetEnabled: this.providerEnabled.get(targetProviderId) !== false,
-      sourceFamily: this.resolveProviderSessionFamily(existing.provider),
-      targetFamily: this.resolveProviderSessionFamily(targetProviderId),
+      sourceFamily,
+      targetFamily,
       sessionId: existing.persistence?.sessionId ?? null,
       lifecycle: existing.lifecycle,
       hasInFlightRun: this.hasInFlightRun(agentId),
     });
     if (refusal) {
       throw refusal;
+    }
+    // Defense in depth: `checkAgentProviderMove`'s `incompatible_provider` rule above already
+    // refuses every cross-family move, which is every case this branch would otherwise catch, but
+    // a future loosening of that generic rule (e.g. an "import instead" cross-family path) must
+    // not silently carry a guarded Codex child out of the family with it. Typed as
+    // `AgentProviderMoveError`, matching this method's own JSDoc and what move callers classify on.
+    if (
+      targetFamily !== "codex" &&
+      requiresCodexGuard({ labels: existing.labels, providerFamily: sourceFamily })
+    ) {
+      this.logger.warn(
+        { agentId, targetProviderId },
+        "Refused a provider move that would take a guarded Codex child out of the codex family",
+      );
+      throw new AgentProviderMoveError(
+        "codex_guard_protected",
+        agentId,
+        targetProviderId,
+        `Agent ${agentId} is a guarded Codex child and cannot move to provider '${targetProviderId}' (family '${targetFamily}').`,
+      );
     }
     const handle = retargetPersistenceHandle(existing.persistence, targetProviderId);
     if (!handle) {
@@ -3655,6 +3719,30 @@ export class AgentManager {
 
   async setAgentMode(agentId: string, modeId: string): Promise<AgentProviderNotice | null> {
     const agent = this.requireSessionAgent(agentId);
+    // A Codex CHILD must not be able to leave guarded mode by any route, including an explicit
+    // mode change after the fact -- the create-time guard (`enforceCodexChildGuard` above) would
+    // otherwise be pointless. Keyed on `requiresCodexGuard`, not a raw provider/label check: the
+    // durable `paseo.codex-guarded` marker holds even once a relabel or detach has cleared
+    // `paseo.parent-agent-id`, which `update_agent` can and does clear. Root sessions (no marker,
+    // no caller, no parent label) can switch modes freely.
+    if (
+      requiresCodexGuard({
+        labels: agent.labels,
+        providerFamily: this.resolveProviderSessionFamily(agent.provider),
+      }) &&
+      modeId !== "guarded"
+    ) {
+      this.logger.warn(
+        { agentId, requestedModeId: modeId },
+        "Refused a Codex child's mode change away from guarded",
+      );
+      throw new CodexChildGuardError(
+        "mode_change_refused",
+        getCodexGuardHealthState().status,
+        "a Codex child cannot leave guarded mode",
+        `Codex children cannot leave guarded mode (requested '${modeId}').`,
+      );
+    }
     const notice = (await agent.session.setMode(modeId)) ?? null;
     await this.drainSessionEvents(agentId);
     const currentMode = (await agent.session.getCurrentMode()) ?? modeId;
@@ -7632,6 +7720,108 @@ export class AgentManager {
     if (this.providerEnabled.get(provider) === false) {
       throw new Error(`Provider '${provider}' is disabled`);
     }
+  }
+
+  /**
+   * Independent of the plugin layer (`role-router.ts`'s own guard, which can be absent, down, or
+   * buggy -- it is fail-open by contract): a Codex CHILD create is forced into guarded mode here
+   * too, and the create is refused outright when the guard itself isn't proven healthy. `unknown`
+   * and `red` both refuse -- guards-first, same as the classifier's own `isCodexRefUsable` (KTD-3).
+   * Root creates and internal creates (daemon-owned, e.g. the guard self-test's own session, which
+   * never reaches this path anyway) are untouched: this guard exists for children, not for Tyler.
+   *
+   * "Child" is decided by `requiresCodexGuard` (codex-guard-predicate.ts) on the session FAMILY
+   * of the final provider, not the literal id -- a provider declared `extends: "codex"` guards
+   * exactly like `codex` itself -- and treats a `callerAgentId`, an inherited
+   * `paseo.parent-agent-id` label, or a non-human `origin` as a child: the daemon-assigned origin
+   * is the authority, and a create that forgets to set one defaults to agent-made below.
+   *
+   * Must run on `config` BEFORE `prepareSessionConfig`: that call bakes `modeId` into
+   * `launchConfig`/`providerLaunchConfig`, the values actually sent to `client.createSession`, so
+   * a mutation applied to `storedConfig` afterward would never reach the provider. The caller
+   * stamps the durable `paseo.codex-guarded` marker onto the create's labels when `guarded` comes
+   * back true -- this function only decides the config, not the labels.
+   */
+  private enforceCodexChildGuard(
+    config: AgentSessionConfig,
+    callerAgentId: string | undefined,
+    labels: Record<string, string> | undefined,
+    origin: AgentCreateOrigin | undefined,
+  ): { config: AgentSessionConfig; guarded: boolean } {
+    if (config.internal) {
+      return { config, guarded: false };
+    }
+    const providerFamily = this.resolveProviderSessionFamily(config.provider);
+    if (!requiresCodexGuard({ callerAgentId, labels, providerFamily, origin: origin ?? "agent" })) {
+      return { config, guarded: false };
+    }
+    this.requireHealthyCodexGuardForCreate(callerAgentId);
+    return {
+      config: config.modeId === "guarded" ? config : { ...config, modeId: "guarded" },
+      guarded: true,
+    };
+  }
+
+  /**
+   * Both `unknown` and `red` refuse a brand-new CREATE -- guards-first, same as the classifier's
+   * own `isCodexRefUsable` (KTD-3). Resume and reload use a looser rule (see
+   * `enforceCodexChildGuardOnResumeOrReload`): `unknown` only blocks a brand-new child, not one
+   * already running that a restart just needs to bring back, since guarded mode is itself the
+   * gate and refusing would wedge restart recovery while the self-test is still warming up.
+   */
+  private requireHealthyCodexGuardForCreate(callerAgentId: string | undefined): void {
+    if (isCodexGuardHealthy()) {
+      return;
+    }
+    const health = getCodexGuardHealthState();
+    this.logger.warn(
+      { callerAgentId, status: health.status, reason: health.reason },
+      "Refused a Codex child create: guard health is not green",
+    );
+    throw new CodexChildGuardError(
+      "health_unhealthy",
+      health.status,
+      health.reason,
+      `Codex children are unavailable: Codex guard health is ${health.status} (${health.reason}). Use a Claude model.`,
+    );
+  }
+
+  /**
+   * Resume and reload: force guarded mode on a record carrying the `paseo.codex-guarded` marker,
+   * or one that is codex-family with the `paseo.parent-agent-id` label (a record saved before the
+   * marker existed). Backfills the marker onto the labels this resume/reload persists, so a later
+   * relabel or detach can't undo what this call just proved.
+   *
+   * Looser health rule than a brand-new create: refuse ONLY when health is `red`. `unknown` --
+   * the state at every boot until the self-test completes -- allows the resume/reload in guarded
+   * mode: guarded mode is itself the gate, the self-test runs within a minute of boot, and
+   * refusing here would wedge restart recovery for every Codex child on every daemon start.
+   */
+  private enforceCodexChildGuardOnResumeOrReload(
+    config: AgentSessionConfig,
+    labels: Record<string, string> | undefined,
+  ): { config: AgentSessionConfig; labels: Record<string, string> | undefined } {
+    const providerFamily = this.resolveProviderSessionFamily(config.provider);
+    if (!requiresCodexGuard({ labels, providerFamily })) {
+      return { config, labels };
+    }
+    const health = getCodexGuardHealthState();
+    if (health.status === "red") {
+      this.logger.warn(
+        { status: health.status, reason: health.reason },
+        "Refused to resume/reload a Codex child: guard health is red",
+      );
+      throw new CodexChildGuardError(
+        "health_unhealthy",
+        health.status,
+        health.reason,
+        `This guarded Codex child cannot be resumed while Codex guard health is ${health.status} (${health.reason}).`,
+      );
+    }
+    return {
+      config: config.modeId === "guarded" ? config : { ...config, modeId: "guarded" },
+      labels: hasCodexGuardMarker(labels) ? labels : { ...labels, [CODEX_GUARDED_LABEL]: "1" },
+    };
   }
 
   private getConfiguredProviderIds(): AgentProvider[] {

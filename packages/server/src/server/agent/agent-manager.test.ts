@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -15,15 +15,26 @@ import {
   type ManagedAgent,
 } from "./agent-manager.js";
 import { AgentStorage } from "./agent-storage.js";
+import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
+import {
+  resetCodexGuardHealthStateForTests,
+  setCodexGuardHealthState,
+} from "./codex-guard-health.js";
+import { setAgentModeCommand } from "./lifecycle-command.js";
+import { AgentConfigSession } from "../session/agent-config/agent-config-session.js";
+import type { SessionOutboundMessage } from "../messages.js";
 import { MCP_SCOPE_LABEL } from "./runtime-mcp-config.js";
 import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import {
+  CODEX_GUARDED_LABEL,
   getOpenAgentTabLabel,
   JEV_TOOLS_LABEL,
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
+import { CodexChildGuardError } from "./codex-guard-error.js";
+import { AgentProviderMoveError } from "./provider-move.js";
 import {
   createPromptQueue,
   formatSystemNotificationPrompt,
@@ -66,6 +77,14 @@ import type { ProviderDefinition } from "./provider-registry.js";
 
 const DESKTOP_OPEN_AGENT_TAB_LABEL = getOpenAgentTabLabel("desktop-client");
 const MOBILE_OPEN_AGENT_TAB_LABEL = getOpenAgentTabLabel("mobile-client");
+
+// Most tests in this file use `provider: "codex"` as a generic test fixture, unrelated to the
+// Codex child guard feature -- so default guard health to green, the same way a real daemon
+// reaches it once the self-test has passed. The "Codex child guard" describe block below tests
+// the unknown/red cases explicitly and resets back to this default in its own afterEach.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -265,6 +284,19 @@ class TestAgentClient implements AgentClient {
       cwd: config?.cwd ?? process.cwd(),
       daemonAppendSystemPrompt: config?.daemonAppendSystemPrompt,
     });
+  }
+}
+
+/** `TestAgentSession.getCurrentMode()` hardcodes `null`; this reports whatever mode the config
+ * carries, the way a real provider's session reports its own current mode. */
+class ModeReportingAgentClient extends TestAgentClient {
+  override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+    this.createdConfigs.push(config);
+    return new (class extends TestAgentSession {
+      override async getCurrentMode() {
+        return config.modeId ?? null;
+      }
+    })(config);
   }
 }
 
@@ -3080,7 +3112,7 @@ test("normalizeConfig injects the provider default model while leaving mode omit
       cwd: workdir,
     },
     undefined,
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   expect(snapshot.config.model).toBe("gpt-5.4");
@@ -3120,6 +3152,7 @@ test("normalizeConfig does not ask the provider to synthesize an omitted mode", 
   const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
     workspaceId: undefined,
     env: { CLAUDE_CODE_USE_BEDROCK: "1" },
+    origin: "human",
   });
 
   expect(snapshot.config.modeId).toBeUndefined();
@@ -3181,7 +3214,7 @@ test("normalizeConfig strips legacy 'default' model id", async () => {
       model: "default",
     },
     undefined,
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   expect(snapshot.config.model).toBe("gpt-5.4");
@@ -3609,7 +3642,7 @@ test("setAgentMode persists the selected mode across session reload", async () =
       modeId: "auto",
     },
     undefined,
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   await manager.setAgentMode(snapshot.id, "full-access");
@@ -3621,6 +3654,584 @@ test("setAgentMode persists the selected mode across session reload", async () =
   const reloaded = await manager.reloadAgentSession(snapshot.id);
   expect(reloaded.config.modeId).toBe("full-access");
   expect(reloaded.currentModeId).toBe("full-access");
+});
+
+/**
+ * Daemon-side defense in depth (codex-child-guard fix): a Codex child must run guarded even if
+ * the plugin layer (`role-router.ts`) is absent, down, or buggy. `enforceCodexChildGuard` forces
+ * `modeId: "guarded"` on every Codex child create and refuses the create outright when
+ * `isCodexGuardHealthy()` is not true; `setAgentMode` refuses a Codex child's attempt to leave
+ * guarded mode afterward. Root creates (no `callerAgentId`/`paseo.parent-agent-id` label, i.e.
+ * Tyler's own sessions) are untouched throughout.
+ */
+describe("Codex child guard (daemon-side, codex-child-guard fix)", () => {
+  afterEach(() => {
+    resetCodexGuardHealthStateForTests();
+  });
+
+  test("createAgent forces a Codex child into guarded mode when guard health is green", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    const child = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { workspaceId: undefined, callerAgentId: "parent-1" },
+    );
+
+    expect(child.config.modeId).toBe("guarded"); // was "full-access"
+    expect(client.createdConfigs.at(-1)?.modeId).toBe("guarded"); // the mode that reached the provider
+  });
+
+  test("createAgent guards a Codex create with no origin at all (fail closed on a forgotten path)", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    // No callerAgentId, no labels, no origin: a create path that forgot to assign one.
+    const agent = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { workspaceId: undefined },
+    );
+
+    expect(agent.config.modeId).toBe("guarded");
+  });
+
+  test("createAgent guards a daemon-origin Codex create (Hub, remediation)", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    const agent = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { workspaceId: undefined, origin: "daemon" },
+    );
+
+    expect(agent.config.modeId).toBe("guarded");
+  });
+
+  test("createAgent leaves a human-origin Codex create in its own mode", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    const agent = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { workspaceId: undefined, origin: "human" },
+    );
+
+    expect(agent.config.modeId).toBe("full-access");
+  });
+
+  test("createAgent refuses a Codex child create when guard health is not green (unknown)", async () => {
+    // Override the file-level green default: this test wants the real starting "unknown" state.
+    resetCodexGuardHealthStateForTests();
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    await expect(
+      manager.createAgent(
+        { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
+        undefined,
+        { workspaceId: undefined, callerAgentId: "parent-1" },
+      ),
+    ).rejects.toThrow(/Codex children are unavailable: Codex guard health is unknown/);
+    expect(client.createdConfigs).toHaveLength(0); // never reached the provider
+  });
+
+  test("createAgent refuses a Codex child create when guard health is red", async () => {
+    setCodexGuardHealthState({ status: "red", reason: "the canary ran", codexVersion: "0.160.0" });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    await expect(
+      manager.createAgent(
+        { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
+        undefined,
+        { workspaceId: undefined, callerAgentId: "parent-1" },
+      ),
+    ).rejects.toThrow(
+      /Codex children are unavailable: Codex guard health is red \(the canary ran\)/,
+    );
+    expect(client.createdConfigs).toHaveLength(0);
+  });
+
+  test("createAgent leaves a root Codex create untouched, even when guard health is red", async () => {
+    setCodexGuardHealthState({ status: "red", reason: "the canary ran", codexVersion: "0.160.0" });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    const root = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { workspaceId: undefined, origin: "human" }, // Tyler's own session
+    );
+
+    expect(root.config.modeId).toBe("full-access");
+    expect(client.createdConfigs.at(-1)?.modeId).toBe("full-access");
+  });
+
+  test("setAgentMode refuses a Codex child's attempt to leave guarded mode", async () => {
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+    const child = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "guarded" },
+      undefined,
+      { workspaceId: undefined, labels: { [PARENT_AGENT_ID_LABEL]: "parent-1" } },
+    );
+
+    await expect(manager.setAgentMode(child.id, "full-access")).rejects.toThrow(
+      "Codex children cannot leave guarded mode (requested 'full-access').",
+    );
+    expect(manager.getAgent(child.id)?.config.modeId).toBe("guarded"); // unchanged
+  });
+
+  test("setAgentMode on a root Codex session (no parent label) can leave guarded mode freely", async () => {
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+    const root = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "guarded" },
+      undefined,
+      { workspaceId: undefined, origin: "human" },
+    );
+
+    await manager.setAgentMode(root.id, "full-access");
+
+    expect(manager.getAgent(root.id)?.config.modeId).toBe("full-access");
+  });
+
+  test("the real set_agent_mode_request RPC handler refuses a Codex child's attempt to leave guarded mode", async () => {
+    // End-to-end through the actual session-layer wiring (AgentConfigSession -> setAgentModeCommand
+    // -> AgentManager.setAgentMode), not just a direct AgentManager call -- proving the refusal
+    // survives the real RPC envelope and surfaces as a normal rejected response, not a crash.
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+    const child = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "guarded" },
+      undefined,
+      { workspaceId: undefined, labels: { [PARENT_AGENT_ID_LABEL]: "parent-1" } },
+    );
+
+    const emitted: SessionOutboundMessage[] = [];
+    const session = new AgentConfigSession({
+      host: { emit: (msg) => emitted.push(msg) },
+      operations: {
+        ensureLoaded: async () => {},
+        setMode: (agentId, modeId) =>
+          setAgentModeCommand({ agentManager: manager }, { agentId, modeId }).then(
+            (result) => result.notice,
+          ),
+        setModel: async () => {},
+        setFeature: async () => {},
+        setThinking: async () => null,
+      },
+      logger,
+    });
+
+    await session.handleSetAgentModeRequest({
+      type: "set_agent_mode_request",
+      agentId: child.id,
+      modeId: "full-access",
+      requestId: "req-1",
+    });
+
+    expect(emitted).toEqual([
+      {
+        type: "activity_log",
+        payload: {
+          id: expect.any(String),
+          timestamp: expect.any(Date),
+          type: "error",
+          content:
+            "Failed to set agent mode: Codex children cannot leave guarded mode (requested 'full-access').",
+        },
+      },
+      {
+        type: "set_agent_mode_response",
+        payload: {
+          requestId: "req-1",
+          agentId: child.id,
+          accepted: false,
+          error: "Codex children cannot leave guarded mode (requested 'full-access').",
+        },
+      },
+    ]);
+    expect(manager.getAgent(child.id)?.config.modeId).toBe("guarded"); // unchanged
+  });
+
+  test("createAgent stamps the durable paseo.codex-guarded marker, and currentModeId reports guarded", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new ModeReportingAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    const child = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { workspaceId: undefined, callerAgentId: "parent-1" },
+    );
+
+    expect(child.labels[CODEX_GUARDED_LABEL]).toBe("1");
+    expect(child.currentModeId).toBe("guarded"); // brief item C
+  });
+
+  test("a plugin hook that rewrites a Claude child into a Codex one in full-access is still guarded", async () => {
+    // Daemon-side defense in depth, independent of the plugin's own guard: a real
+    // pluginLifecycle whose before("agent.create") hook changes the provider must not be able
+    // to bypass enforceCodexChildGuard, which runs on whatever config the hook hands back.
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("codex");
+    const pluginLifecycle: PluginLifecycle = {
+      emit: () => {},
+      before: async (name, req) => {
+        if (name !== "agent.create") return req;
+        return {
+          ...req,
+          config: {
+            ...(req as { config: AgentSessionConfig }).config,
+            provider: "codex",
+            modeId: "full-access",
+          },
+        };
+      },
+    };
+    const manager = new AgentManager({ clients: { codex: client }, pluginLifecycle, logger });
+
+    const child = await manager.createAgent(
+      { provider: "claude", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { workspaceId: undefined, callerAgentId: "parent-1" },
+    );
+
+    expect(child.config.provider).toBe("codex");
+    expect(child.config.modeId).toBe("guarded");
+    expect(client.createdConfigs.at(-1)?.modeId).toBe("guarded");
+  });
+
+  test("createAgent guards a label-only child: parent label present, no callerAgentId", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    const child = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { workspaceId: undefined, labels: { [PARENT_AGENT_ID_LABEL]: "parent-1" } },
+    );
+
+    expect(child.config.modeId).toBe("guarded");
+    expect(client.createdConfigs.at(-1)?.modeId).toBe("guarded");
+    expect(child.labels[CODEX_GUARDED_LABEL]).toBe("1");
+  });
+
+  test("an MCP create with no callerAgentId but a parent label is guarded", async () => {
+    // Mirrors create.ts's legacy "detached" relationship shape: callerAgentId absent, parent
+    // label present in the create's own labels.
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    const child = await manager.createAgent(
+      { provider: "codex", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      {
+        workspaceId: undefined,
+        callerAgentId: undefined,
+        labels: { [PARENT_AGENT_ID_LABEL]: "parent-1" },
+      },
+    );
+
+    expect(child.config.modeId).toBe("guarded");
+  });
+
+  test("createAgent guards a derived provider (extends: codex) child, keyed on session family", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("my-codex");
+    const manager = new AgentManager({
+      clients: { "my-codex": client },
+      providerDefinitions: {
+        "my-codex": { enabled: true, derivedFromProviderId: "codex" },
+      },
+      logger,
+    });
+
+    const child = await manager.createAgent(
+      { provider: "my-codex", cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { workspaceId: undefined, callerAgentId: "parent-1" },
+    );
+
+    expect(child.config.modeId).toBe("guarded");
+    expect(client.createdConfigs.at(-1)?.modeId).toBe("guarded");
+  });
+
+  test("a derived provider (extends: codex) child create is refused when guard health is not green", async () => {
+    // Override the file-level green default: this test wants the unhealthy state.
+    resetCodexGuardHealthStateForTests();
+    const client = new TestAgentClient("my-codex");
+    const manager = new AgentManager({
+      clients: { "my-codex": client },
+      providerDefinitions: {
+        "my-codex": { enabled: true, derivedFromProviderId: "codex" },
+      },
+      logger,
+    });
+
+    await expect(
+      manager.createAgent(
+        { provider: "my-codex", cwd: process.cwd(), modeId: "full-access" },
+        undefined,
+        { workspaceId: undefined, callerAgentId: "parent-1" },
+      ),
+    ).rejects.toThrow(CodexChildGuardError);
+    expect(client.createdConfigs).toHaveLength(0);
+  });
+
+  test("relabeling away the parent label, then detaching, still cannot leave guarded mode", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-guard-detach-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+    const parent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: "workspace-a",
+    });
+    const child = await manager.createAgent(
+      { provider: "codex", cwd: workdir, modeId: "full-access" },
+      undefined,
+      { workspaceId: "workspace-a", callerAgentId: parent.id },
+    );
+    expect(child.config.modeId).toBe("guarded");
+
+    // update_agent can't clear the marker: PROTECTED_LABEL_KEYS filters it out of the patch.
+    await manager.setLabels(child.id, {
+      [PARENT_AGENT_ID_LABEL]: null,
+      [CODEX_GUARDED_LABEL]: null,
+    });
+    expect(manager.getAgent(child.id)?.labels[PARENT_AGENT_ID_LABEL]).toBeUndefined();
+    expect(manager.getAgent(child.id)?.labels[CODEX_GUARDED_LABEL]).toBe("1");
+
+    await expect(manager.setAgentMode(child.id, "full-access")).rejects.toThrow(
+      CodexChildGuardError,
+    );
+
+    await manager.detachAgent(child.id);
+    await expect(manager.setAgentMode(child.id, "full-access")).rejects.toThrow(
+      CodexChildGuardError,
+    );
+    expect(manager.getAgent(child.id)?.config.modeId).toBe("guarded"); // unchanged throughout
+  });
+
+  test("moveAgentToProvider refuses to move a guarded Codex child out of the codex family", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const codexClient = new TestAgentClient("codex");
+    const claudeClient = new TestAgentClient("claude");
+    const manager = new AgentManager({
+      clients: { codex: codexClient, claude: claudeClient },
+      providerDefinitions: {
+        codex: { enabled: true, derivedFromProviderId: null },
+        claude: { enabled: true, derivedFromProviderId: null },
+      },
+      logger,
+    });
+    const child = await manager.createAgent({ provider: "codex", cwd: process.cwd() }, undefined, {
+      workspaceId: undefined,
+      callerAgentId: "parent-1",
+    });
+
+    // Typed `AgentProviderMoveError` (its own `codex_guard_protected` code), matching the
+    // generic `incompatible_provider` refusal every other cross-family move already throws, and
+    // what move callers classify on -- not `CodexChildGuardError`.
+    await expect(manager.moveAgentToProvider(child.id, "claude")).rejects.toThrow(
+      AgentProviderMoveError,
+    );
+  });
+
+  test("resumeAgentFromPersistence forces guarded mode on a marked record with a stored full-access mode", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    const resumed = await manager.resumeAgentFromPersistence(
+      { provider: "codex", sessionId: "resume-marked" },
+      { cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { labels: { [CODEX_GUARDED_LABEL]: "1" } },
+    );
+
+    expect(resumed.config.modeId).toBe("guarded");
+    expect(client.createdConfigs).toHaveLength(0); // resume, never a fresh create
+  });
+
+  test("resumeAgentFromPersistence resumes guarded when guard health is unknown", async () => {
+    resetCodexGuardHealthStateForTests();
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    const resumed = await manager.resumeAgentFromPersistence(
+      { provider: "codex", sessionId: "resume-unknown" },
+      { cwd: process.cwd(), modeId: "full-access" },
+      undefined,
+      { labels: { [PARENT_AGENT_ID_LABEL]: "parent-1" } }, // pre-marker record shape
+    );
+
+    expect(resumed.config.modeId).toBe("guarded");
+    expect(resumed.labels[CODEX_GUARDED_LABEL]).toBe("1"); // backfilled
+  });
+
+  test("resumeAgentFromPersistence refuses with CodexChildGuardError when guard health is red", async () => {
+    setCodexGuardHealthState({ status: "red", reason: "the canary ran", codexVersion: "0.160.0" });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    await expect(
+      manager.resumeAgentFromPersistence(
+        { provider: "codex", sessionId: "resume-red" },
+        { cwd: process.cwd(), modeId: "full-access" },
+        undefined,
+        { labels: { [CODEX_GUARDED_LABEL]: "1" } },
+      ),
+    ).rejects.toThrow(CodexChildGuardError);
+  });
+
+  test("reloadAgentSession forces guarded mode even when the reload's own overrides ask for full-access", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const client = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+    const child = await manager.createAgent({ provider: "codex", cwd: process.cwd() }, undefined, {
+      workspaceId: undefined,
+      callerAgentId: "parent-1",
+    });
+    expect(child.config.modeId).toBe("guarded");
+    expect(child.labels[CODEX_GUARDED_LABEL]).toBe("1");
+
+    const reloaded = await manager.reloadAgentSession(child.id, { modeId: "full-access" });
+
+    expect(reloaded.config.modeId).toBe("guarded");
+  });
+
+  test("importProviderSession forces guarded mode on an import carrying the parent label", async () => {
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-import-guard-"));
+    let storedConfigModeId: string | undefined;
+
+    class ImportClient extends TestAgentClient {
+      async importSession(
+        input: ImportProviderSessionInput,
+        context: ImportProviderSessionContext,
+      ) {
+        storedConfigModeId = context.storedConfig.modeId;
+        return {
+          session: new TestAgentSession({ provider: "codex", cwd: workdir }),
+          config: context.storedConfig,
+          persistence: {
+            provider: "codex" as const,
+            sessionId: input.providerHandleId,
+            nativeHandle: input.providerHandleId,
+            metadata: { provider: "codex", cwd: workdir },
+          },
+          timeline: [],
+        };
+      }
+    }
+    const client = new ImportClient();
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    const imported = await manager.importProviderSession({
+      provider: "codex",
+      providerHandleId: "thread-imported-child",
+      cwd: workdir,
+      workspaceId: "ws-imported",
+      labels: { [PARENT_AGENT_ID_LABEL]: "parent-1" },
+    });
+
+    // The guard forces the config the PROVIDER receives, before import ever reaches it.
+    expect(storedConfigModeId).toBe("guarded");
+    expect(imported.config.modeId).toBe("guarded");
+    expect(imported.labels[CODEX_GUARDED_LABEL]).toBe("1"); // backfilled
+  });
+
+  test("importProviderSession refuses with CodexChildGuardError when guard health is red", async () => {
+    setCodexGuardHealthState({ status: "red", reason: "the canary ran", codexVersion: "0.160.0" });
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-import-guard-red-"));
+
+    class ImportClient extends TestAgentClient {
+      async importSession(): Promise<never> {
+        throw new Error("The guard must refuse before an import ever reaches the provider");
+      }
+    }
+    const client = new ImportClient();
+    const manager = new AgentManager({ clients: { codex: client }, logger });
+
+    await expect(
+      manager.importProviderSession({
+        provider: "codex",
+        providerHandleId: "thread-imported-red",
+        cwd: workdir,
+        workspaceId: "ws-imported",
+        labels: { [CODEX_GUARDED_LABEL]: "1" },
+      }),
+    ).rejects.toThrow(CodexChildGuardError);
+  });
 });
 
 test("reload releases the original writer before resuming the same session", async () => {
@@ -4060,7 +4671,7 @@ test("createAgent passes daemon launch env through the provider launch context",
       cwd: workdir,
     },
     undefined,
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   expect(client.lastConfig).toEqual({
@@ -5121,7 +5732,7 @@ test("uses each provider's current policy for new sessions and snapshots it by a
   const codexAgent = await manager.createAgent(
     { provider: "codex", cwd: workdir },
     "00000000-0000-4000-8000-000000000107",
-    { workspaceId: undefined, labels: { "paseo.jev-tools": "on" } },
+    { workspaceId: undefined, labels: { "paseo.jev-tools": "on" }, origin: "human" },
   );
   const claudeAgent = await manager.createAgent(
     { provider: "claude", cwd: workdir },
@@ -5156,7 +5767,7 @@ test("uses each provider's current policy for new sessions and snapshots it by a
   const nextCodexAgent = await manager.createAgent(
     { provider: "codex", cwd: workdir },
     "00000000-0000-4000-8000-000000000111",
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   expect(manager.getPaseoToolPolicy(codexAgent.id)).toEqual({
@@ -7050,7 +7661,7 @@ test("persists live mode, model, and thinking changes without an external snapsh
       thinkingOptionId: "low",
     },
     undefined,
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   await manager.setAgentMode(snapshot.id, "build");
@@ -7215,7 +7826,7 @@ test("setLabels merges and persists labels", async () => {
       title: "Label test",
     },
     undefined,
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   await manager.setLabels(snapshot.id, { surface: "mobile" });
@@ -7300,8 +7911,11 @@ test("detachAgent removes relationship lifecycle labels from a live agent and em
   const storagePath = join(workdir, "agents");
   const storage = new AgentStorage(storagePath, logger);
   const manager = new AgentManager({
+    // Claude, not codex: this test is about detachAgent's generic label handling, not the
+    // Codex child guard, and a guarded child's marker surviving detach would otherwise show up
+    // in these label assertions (by design -- see the "Codex child guard" describe block).
     clients: {
-      codex: new TestAgentClient(),
+      claude: new TestAgentClient("claude"),
     },
     registry: storage,
     logger,
@@ -7309,7 +7923,7 @@ test("detachAgent removes relationship lifecycle labels from a live agent and em
 
   const parent = await manager.createAgent(
     {
-      provider: "codex",
+      provider: "claude",
       cwd: workdir,
       title: "Parent",
     },
@@ -7318,7 +7932,7 @@ test("detachAgent removes relationship lifecycle labels from a live agent and em
   );
   const child = await manager.createAgent(
     {
-      provider: "codex",
+      provider: "claude",
       cwd: workdir,
       title: "Child",
     },
@@ -7359,9 +7973,12 @@ test("detachAgent removes relationship lifecycle labels from a stored-only agent
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-detach-stored-"));
   const storagePath = join(workdir, "agents");
   const storage = new AgentStorage(storagePath, logger);
+  // Claude, not codex: this test is about detachAgent's generic label handling, not the Codex
+  // child guard, and a guarded child's marker surviving detach would otherwise show up in these
+  // label assertions (by design -- see the "Codex child guard" describe block).
   const manager = new AgentManager({
     clients: {
-      codex: new TestAgentClient(),
+      claude: new TestAgentClient("claude"),
     },
     registry: storage,
     logger,
@@ -7369,7 +7986,7 @@ test("detachAgent removes relationship lifecycle labels from a stored-only agent
 
   const parent = await manager.createAgent(
     {
-      provider: "codex",
+      provider: "claude",
       cwd: workdir,
       title: "Parent",
     },
@@ -7378,7 +7995,7 @@ test("detachAgent removes relationship lifecycle labels from a stored-only agent
   );
   const child = await manager.createAgent(
     {
-      provider: "codex",
+      provider: "claude",
       cwd: workdir,
       title: "Stored child",
     },
@@ -10947,16 +11564,19 @@ test("unarchiveSnapshot unarchives native provider storage before clearing archi
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-native-unarchive-"));
   const storagePath = join(workdir, "agents");
   const storage = new AgentStorage(storagePath, logger);
-  const client = new NativeArchiveRecordingClient();
+  // Claude, not codex: this test is about native-archive plumbing on any client that implements
+  // it, not the Codex child guard, and a guarded child's marker surviving unarchive would
+  // otherwise show up in the label assertions below (by design).
+  const client = new NativeArchiveRecordingClient("claude");
   const manager = new AgentManager({
-    clients: { codex: client },
+    clients: { claude: client },
     registry: storage,
     logger,
   });
 
   const agent = await manager.createAgent(
     {
-      provider: "codex",
+      provider: "claude",
       cwd: workdir,
       title: "Native unarchive target",
     },

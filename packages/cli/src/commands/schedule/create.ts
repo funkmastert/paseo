@@ -50,7 +50,14 @@ export async function runCreateCommand(
   });
   const { client } = await connectScheduleClient(options.host);
   try {
-    const payload = await client.scheduleCreate(input);
+    // Mirrors `agent run`'s own PASEO_AGENT_ID -> callerAgentId forwarding: a schedule created
+    // from an agent's shell is agent-made, and its runs should guard a codex-family target the
+    // same way any other agent-made create does.
+    const callerAgentId = process.env.PASEO_AGENT_ID?.trim() || undefined;
+    const payload = await client.scheduleCreate({
+      ...input,
+      ...(callerAgentId ? { callerAgentId } : {}),
+    });
     if (payload.error || !payload.schedule) {
       throw new Error(payload.error ?? "Schedule creation failed");
     }

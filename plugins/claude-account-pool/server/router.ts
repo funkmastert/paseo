@@ -39,6 +39,13 @@ export interface ProviderIdCache {
   forceRefresh(): Promise<ReadonlySet<string> | null>;
   /** Stops the refresh interval. Safe to call more than once. */
   stop(): void;
+  /**
+   * The session family of a provider id: itself, or (recursively) the provider it `extends`,
+   * per the last-loaded snapshot's `derivedFromProviderId` chain -- the same walk the daemon's
+   * own `resolveProviderSessionFamily` does. An id with no recorded parent, or looked up before
+   * the first snapshot resolves, returns the id unchanged.
+   */
+  resolveFamily(providerId: string): string;
 }
 
 const DEFAULT_PROVIDER_ID_INTERVAL_MS = 60_000;
@@ -57,6 +64,7 @@ export function createProviderIdCache(
   const logThrottle = createLogThrottle({ now: options.now });
 
   let current: ReadonlySet<string> | null = null;
+  let derivedFrom: ReadonlyMap<string, string | null> = new Map();
 
   const poller = createIntervalPoller({
     intervalMs,
@@ -66,6 +74,9 @@ export function createProviderIdCache(
       try {
         const snapshot = await paseo.providers.snapshot();
         current = new Set(snapshot.entries.map((entry) => entry.provider));
+        derivedFrom = new Map(
+          snapshot.entries.map((entry) => [entry.provider, entry.derivedFromProviderId ?? null]),
+        );
       } catch (error) {
         // Throttled (not per-tick): a dead daemon connection makes this
         // throw every interval tick indefinitely (see the pool cache's own
@@ -83,10 +94,25 @@ export function createProviderIdCache(
     },
   });
 
+  const resolveFamily = (providerId: string): string => {
+    const seen = new Set<string>();
+    let next = providerId;
+    while (!seen.has(next)) {
+      seen.add(next);
+      const parent = derivedFrom.get(next);
+      if (!parent) {
+        return next;
+      }
+      next = parent;
+    }
+    return next;
+  };
+
   return {
     get: () => current,
     forceRefresh: () => poller.runOnce(),
     stop: () => poller.stop(),
+    resolveFamily,
   };
 }
 

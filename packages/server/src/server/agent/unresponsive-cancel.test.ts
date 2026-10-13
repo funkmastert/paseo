@@ -2,12 +2,20 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import pino from "pino";
 
 import { AgentManager } from "./agent-manager.js";
 import { UNRESPONSIVE_CANCEL_ERROR } from "./turn-cancel.js";
 import { AgentStorage } from "./agent-storage.js";
+import { setCodexGuardHealthState } from "./codex-guard-health.js";
+
+// This file creates codex agents as a generic fixture for unresponsive-cancel behavior unrelated
+// to the Codex child guard, so default guard health to green the way a real daemon reaches it
+// once the self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 import { planAccountFailoverSweep } from "./account-failover-detector.js";
 import { publishAgentStream } from "../plugins/lifecycle/index.js";
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";

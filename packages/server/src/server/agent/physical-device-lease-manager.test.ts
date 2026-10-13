@@ -373,6 +373,23 @@ describe("PhysicalDeviceLeaseManager gateInstall", () => {
     expect(decision.decision).toBe("deny");
   });
 
+  test("installs to a held device via a same-command shell variable are refused too, not just a literal serial", async () => {
+    // The incident: a leader ran `S=<serial>; APP=...; APK=...; adb -s $S install -r -d $APK`
+    // while a sibling agent held the same phone. A literal-token-only target match reads "$S" as
+    // a device nothing is connected as — "nothing to protect" — and lets the install run
+    // unguarded against the real, held device $S resolves to.
+    const { manager } = createManager({ devices: [USB_PIXEL] });
+    await manager.checkout({ agentId: "agent-2", platform: "android" });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: `S=${USB_PIXEL.id}; APP=com.example; APK=app.apk; adb -s $S install -r -d $APK`,
+    });
+    expect(decision.decision).toBe("deny");
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.devices.find((d) => d.id === USB_PIXEL.id)?.agentId).toBe("agent-2");
+  });
+
   test("the same agent re-installing to its own device is allowed", async () => {
     const { manager } = createManager({ devices: [USB_PIXEL] });
     await manager.checkout({ agentId: "agent-1", platform: "android" });
@@ -382,6 +399,118 @@ describe("PhysicalDeviceLeaseManager gateInstall", () => {
       command: `adb -s ${USB_PIXEL.id} install app.apk`,
     });
     expect(decision).toEqual({ decision: "allow" });
+  });
+
+  // A target the gate truly can't resolve fails closed, not open. `$EXPORTED_ELSEWHERE` names no
+  // assignment in these commands, the same as `export`ing it in the agent's shell profile, or
+  // setting it in an earlier, separate tool call — this gate has no way to read either. It still
+  // means exactly one real device, so it must never fall back to "nothing to protect" the way a
+  // genuinely unconnected literal device name does.
+  test("unresolved target, one connected device held by another agent: refused", async () => {
+    const { manager } = createManager({ devices: [USB_PIXEL] });
+    await manager.checkout({ agentId: "agent-2", platform: "android" });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "adb -s $EXPORTED_ELSEWHERE install app.apk",
+    });
+    expect(decision.decision).toBe("deny");
+    const snapshot = await manager.getSnapshot();
+    const entry = snapshot.devices.find((d) => d.id === USB_PIXEL.id);
+    expect(entry?.agentId).toBe("agent-2");
+  });
+
+  test("unresolved target, two connected devices: refused with the exact literal-name targeting fix, no plain-adb exemption", async () => {
+    const other: PhysicalDevice = { ...USB_PIXEL, id: "FAKESERIAL0002" };
+    const { manager } = createManager({ devices: [USB_PIXEL, other] });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "adb -s $EXPORTED_ELSEWHERE install app.apk",
+    });
+    expect(decision.decision).toBe("deny");
+    const message = decision.decision === "deny" ? decision.message : "";
+    expect(message).toContain("names a device this gate can't resolve");
+    expect(message).toContain("Name the device literally");
+    expect(message).toContain(USB_PIXEL.id);
+    expect(message).toContain(other.id);
+    const snapshot = await manager.getSnapshot();
+    const held = snapshot.devices.filter((d) => d.agentId !== undefined);
+    expect(held).toEqual([]);
+  });
+
+  test("unresolved target, one free connected device: bound to the caller, same as a resolved target would be", async () => {
+    const { manager } = createManager({ devices: [USB_PIXEL] });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "adb -s $EXPORTED_ELSEWHERE install app.apk",
+    });
+    expect(decision).toEqual({ decision: "allow" });
+    const snapshot = await manager.getSnapshot();
+    const entry = snapshot.devices.find((d) => d.id === USB_PIXEL.id);
+    expect(entry?.agentId).toBe("agent-1");
+  });
+
+  test("unresolved target, iOS: an unresolved --device target on a device another agent holds is refused", async () => {
+    const { manager } = createManager({ devices: [NETWORK_IPHONE] });
+    await manager.checkout({ agentId: "agent-2", platform: "ios" });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command:
+        "UDID=$(xcrun devicectl list devices | head -1); xcrun devicectl device install app --device $UDID --app app.app",
+    });
+    expect(decision.decision).toBe("deny");
+    const snapshot = await manager.getSnapshot();
+    const entry = snapshot.devices.find((d) => d.id === NETWORK_IPHONE.id);
+    expect(entry?.agentId).toBe("agent-2");
+  });
+
+  test("unresolved target with android emulators also reachable: never auto-binds the lone phone", async () => {
+    // adb can also reach 2 running emulators; `-s $X` could resolve to either of those just as
+    // well as the one physical phone. Binding the phone here would be a phantom lease — the
+    // command may never touch it at all.
+    const { manager } = createManager({ devices: [USB_PIXEL], emulatorCount: 2 });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "adb -s $EXPORTED_ELSEWHERE install app.apk",
+    });
+    expect(decision.decision).toBe("deny");
+    const message = decision.decision === "deny" ? decision.message : "";
+    expect(message).toContain("2 running emulators");
+    const snapshot = await manager.getSnapshot();
+    const entry = snapshot.devices.find((d) => d.id === USB_PIXEL.id);
+    expect(entry?.agentId).toBeUndefined();
+  });
+
+  test("xargs: a piped adb install onto a held device is refused, not run ungated", async () => {
+    const { manager } = createManager({ devices: [USB_PIXEL] });
+    await manager.checkout({ agentId: "agent-2", platform: "android" });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: `ls *.apk | xargs adb -s ${USB_PIXEL.id} install`,
+    });
+    expect(decision.decision).toBe("deny");
+    const snapshot = await manager.getSnapshot();
+    const entry = snapshot.devices.find((d) => d.id === USB_PIXEL.id);
+    expect(entry?.agentId).toBe("agent-2");
+  });
+
+  test("xargs -I{} with a {} placeholder onto a held device is refused", async () => {
+    const { manager } = createManager({ devices: [USB_PIXEL] });
+    await manager.checkout({ agentId: "agent-2", platform: "android" });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "adb devices | xargs -I{} adb -s {} install x.apk",
+    });
+    expect(decision.decision).toBe("deny");
+    const snapshot = await manager.getSnapshot();
+    const entry = snapshot.devices.find((d) => d.id === USB_PIXEL.id);
+    expect(entry?.agentId).toBe("agent-2");
   });
 
   test("a reserved device refuses installs from any agent", async () => {
@@ -779,5 +908,109 @@ describe("PhysicalDeviceLeaseManager reconciling a gone agent", () => {
     );
     const snapshot = await harness.manager.getSnapshot();
     expect(snapshot.devices.find((device) => device.id === USB_PIXEL.id)?.agentId).toBeUndefined();
+  });
+});
+
+describe("PhysicalDeviceLeaseManager holder lineage", () => {
+  test("a held device names the holder's leader when the holder is a child", async () => {
+    // Tyler's report: the status named a leader he didn't recognize. A child's own title may not
+    // say which effort it belongs to, so the snapshot carries the leader's id too (the client
+    // already has every agent's title in its session store and resolves both — the daemon sends
+    // ids, it has no business deciding what an agent is called).
+    const { manager } = createManager({
+      devices: [USB_PIXEL],
+      agents: [
+        { agentId: "child-1", provider: "claude", isRunning: true, parentAgentId: "leader-1" },
+      ],
+    });
+    await manager.checkout({ agentId: "child-1", platform: "android" });
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.devices.find((d) => d.agentId === "child-1")).toMatchObject({
+      agentId: "child-1",
+      leaderAgentId: "leader-1",
+    });
+  });
+
+  test("a held device run by a root leader itself carries no leaderAgentId", async () => {
+    const { manager } = createManager({
+      devices: [USB_PIXEL],
+      agents: [{ agentId: "leader-1", provider: "claude", isRunning: true }],
+    });
+    await manager.checkout({ agentId: "leader-1", platform: "android" });
+
+    const snapshot = await manager.getSnapshot();
+    const entry = snapshot.devices.find((d) => d.agentId === "leader-1");
+    expect(entry?.leaderAgentId).toBeUndefined();
+  });
+
+  test("leaderAgentId walks to the root across a 3-level leader -> worker -> sub-worker chain", async () => {
+    // A grandchild's lease (held by sub-worker, two hops below root-leader) must still name the
+    // root leader, not the intermediate worker — the leader Tyler actually recognizes.
+    const { manager } = createManager({
+      devices: [USB_PIXEL],
+      agents: [
+        { agentId: "sub-worker", provider: "claude", isRunning: true, parentAgentId: "worker" },
+        { agentId: "worker", provider: "claude", isRunning: true, parentAgentId: "root-leader" },
+        { agentId: "root-leader", provider: "claude", isRunning: true },
+      ],
+    });
+    await manager.checkout({ agentId: "sub-worker", platform: "android" });
+
+    const snapshot = await manager.getSnapshot();
+    const entry = snapshot.devices.find((d) => d.agentId === "sub-worker");
+    expect(entry?.leaderAgentId).toBe("root-leader");
+  });
+
+  test("a cycle in parentAgentId doesn't loop forever — it just stops", async () => {
+    const { manager } = createManager({
+      devices: [USB_PIXEL],
+      agents: [
+        { agentId: "a", provider: "claude", isRunning: true, parentAgentId: "b" },
+        { agentId: "b", provider: "claude", isRunning: true, parentAgentId: "a" },
+      ],
+    });
+    await manager.checkout({ agentId: "a", platform: "android" });
+
+    const snapshot = await manager.getSnapshot();
+    const entry = snapshot.devices.find((d) => d.agentId === "a");
+    expect(entry?.leaderAgentId).toBe("b");
+  });
+});
+
+describe("PhysicalDeviceLeaseManager held-time refresh", () => {
+  test("a sweep pushes a fresh snapshot for a quietly-held lease, so heldForSeconds doesn't freeze", async () => {
+    // Tyler's report: the app showed "held 0s" minutes into a real hold. The daemon computes
+    // heldForSeconds correctly on every getSnapshot() call, but nothing re-pushed one: reconcile()
+    // only notifies on an actual lease-table change, and a lease that nobody touches and that
+    // never goes idle never changes. The sweep has to push on its own, on the same cadence as the
+    // resource monitor, or the UI shows whatever heldForSeconds was true at the last bind/release.
+    const harness = createManager({ devices: [USB_PIXEL], agents: [IDLE_HOLDER] });
+    await harness.manager.checkout({ agentId: "agent-1", platform: "android" });
+    harness.state.rows = [agentRootRow(500, "agent-1")];
+    // One sweep right after the bind primes lastUsedAtMs; clear the listener so only the next,
+    // genuinely-quiet sweep is under test.
+    sweepRows(harness);
+    const listener = vi.fn();
+    harness.manager.subscribe(listener);
+
+    harness.state.nowMs += MINUTE;
+    sweepRows(harness);
+
+    expect(listener).toHaveBeenCalled();
+    const snapshot = await harness.manager.getSnapshot();
+    expect(snapshot.devices.find((device) => device.id === USB_PIXEL.id)?.heldForSeconds).toBe(60);
+  });
+
+  test("a sweep with no leases at all pushes nothing new", async () => {
+    const harness = createManager({ devices: [USB_PIXEL] });
+    sweepRows(harness);
+    const listener = vi.fn();
+    harness.manager.subscribe(listener);
+
+    harness.state.nowMs += MINUTE;
+    sweepRows(harness);
+
+    expect(listener).not.toHaveBeenCalled();
   });
 });

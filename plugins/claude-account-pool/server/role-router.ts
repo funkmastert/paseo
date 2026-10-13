@@ -45,6 +45,36 @@ import { withMcpScope } from "./mcp-scope-enforcement";
 /** Stands in for `callerAgentId` in notifications about a root agent, which has none. */
 const ROOT_AGENT_CALLER = "(root agent)";
 
+// The daemon's agent-create request payload does not carry a structural `parentAgentId`
+// property; parentage travels in the request's `labels` record under this key instead (labels
+// are forwarded on the wire). This mirrors the daemon's own PARENT_AGENT_ID_LABEL constant
+// (notify.ts does the same, for the same reason).
+const PARENT_AGENT_ID_LABEL = "paseo.parent-agent-id";
+
+/**
+ * Whether this create is a Codex CHILD, by the daemon's own rule: a `callerAgentId`, or an
+ * inherited `paseo.parent-agent-id` label (a label-only child, such as an agent-made schedule
+ * run, which carries the label but no caller of its own) -- not `callerAgentId` alone. Keyed on
+ * the FINAL provider's session FAMILY (`resolveFamily`), not the literal provider id, so a
+ * derived `extends: "codex"` provider guards exactly like `codex` itself.
+ */
+function isCodexFamilyChild(
+  labels: Record<string, string> | undefined,
+  callerAgentId: string | undefined,
+  finalProviderId: string | null,
+  resolveFamily: ((providerId: string) => string) | undefined,
+): boolean {
+  if (finalProviderId === null) {
+    return false;
+  }
+  const family = resolveFamily?.(finalProviderId) ?? finalProviderId;
+  if (family !== "codex") {
+    return false;
+  }
+  const parentAgentId = labels?.[PARENT_AGENT_ID_LABEL];
+  return Boolean(callerAgentId) || (typeof parentAgentId === "string" && parentAgentId.length > 0);
+}
+
 export interface DeclaredRoleUnknownEpisode {
   callerAgentId: string;
   value: string;
@@ -75,8 +105,13 @@ export interface RoleUnavailableEpisode {
    * the provider registry currently knows about (e.g. removed from daemon
    * config since the role was configured) — the rewrite was skipped
    * entirely rather than pointing the request at a dead provider.
+   * "codex-guard-unhealthy": the fallback-anyway pick was a codex ref, the
+   * child's own create has a caller, and the Codex guard isn't proven
+   * healthy — routing fell back to the request's own provider/model
+   * instead of handing the daemon a create it can only refuse (review
+   * finding #9).
    */
-  reason: "no-eligible-model" | "provider-not-registered";
+  reason: "no-eligible-model" | "provider-not-registered" | "codex-guard-unhealthy";
 }
 
 export interface ToolProfileWithheldEpisode {
@@ -295,8 +330,8 @@ type ProviderOptionsValue = AgentCreateConfig["providerOptions"];
 const CODEX_GUARDED_OVERRIDE_KEYS = ["approval_policy", "sandbox_mode", "sandbox_workspace_write"] as const;
 
 /**
- * Defense in depth for a routed Codex child (review finding #1): these three fields must never
- * reach the provider on a guarded create at all, even though the provider itself
+ * Defense in depth for a routed Codex child: these three fields must never reach the provider on
+ * a guarded create at all, even though the provider itself
  * (codex-app-server-agent.ts's `guardedProviderOptions()`) is also responsible for refusing them
  * for a guarded session. Two independent layers enforcing the same invariant -- a caller-supplied
  * approval_policy/sandbox_mode/sandbox_workspace_write must never be able to turn a guarded
@@ -315,6 +350,76 @@ function stripCodexGuardedOverrides(providerOptions: ProviderOptionsValue | unde
     delete next[key];
   }
   return next as ProviderOptionsValue;
+}
+
+/**
+ * The provider this create will actually run on once routing finishes -- `decision.model`'s own
+ * fields lie for two of its outcomes: `unconfigured` reports `provider: null` though the
+ * request's own provider stands, and a pinned cross-family rewrite target that isn't registered
+ * (recovery path) falls back to the request's own provider too. Both the guard and tool
+ * enforcement need to key on this, not `decision.model.provider` alone: a bare, unprefixed pool
+ * entry inside a same-family selection leaves `crossesRequestedFamily`
+ * false and `provider` null, and a `codex` request left unguarded there is exactly the bypass
+ * this function closes.
+ */
+function resolveFinalProviderId(
+  request: PluginBeforeRequests["agent.create"],
+  decision: AgentDecision,
+  registeredProviderIds: ReadonlySet<string> | null | undefined,
+): string | null {
+  if (decision.model.crossesRequestedFamily && decision.model.provider !== null) {
+    if (!registeredProviderIds || registeredProviderIds.has(decision.model.provider)) {
+      return decision.model.provider;
+    }
+  }
+  return request.config.provider ?? null;
+}
+
+/**
+ * Forces a Codex child's OWN config into guarded mode, stripping whatever caller-supplied
+ * approval_policy/sandbox_mode/sandbox_workspace_write it carries. Pure -- no slot reservation --
+ * so it is safe to compute eagerly even on a path (the guard-unhealthy fallback) that may end up
+ * not using it at all: see `reserveCodexGuardSlot` for the side effect, called separately only at
+ * the return sites that actually hand back a codex-bound create.
+ *
+ * The single step every return path that can hand a child the codex provider runs on its OWN
+ * base config -- BEFORE enforcement/tool-profile runs, never after. Enforcement must be computed
+ * FROM this guarded base, not from `request` directly: it can write its own trusted
+ * providerOptions on top afterward (e.g. a read-only tool profile's `sandbox_mode`, KTD-8) and
+ * that write must survive, while only the caller's own copy gets stripped here. Computing
+ * enforcement from `request` instead would let a caller's
+ * approval_policy/sandbox_mode/sandbox_workspace_write ride through untouched whenever
+ * enforcement itself writes nothing (the common, unrestricted-role case) -- `request`'s
+ * providerOptions would survive into the final config via the plain object spread every return
+ * path does for its "nothing to enforce" fallback.
+ *
+ * Caller is responsible for gating this on the create actually being a Codex CHILD
+ * (`isCodexFamilyChild`): root creates (Tyler, from the app) keep whatever mode they ask for --
+ * the guard is for children, not Tyler.
+ */
+function withCodexGuard(
+  request: PluginBeforeRequests["agent.create"],
+): PluginBeforeRequests["agent.create"] {
+  return {
+    ...request,
+    config: {
+      ...request.config,
+      modeId: "guarded",
+      providerOptions: stripCodexGuardedOverrides(request.config.providerOptions),
+    },
+  };
+}
+
+/**
+ * Reserves this create's Codex guard slot (KTD-9) with a fire-and-forget refresh so the polled
+ * count catches up sooner. Called only at a return site that actually hands back a request
+ * bound for Codex -- never unconditionally alongside `withCodexGuard`'s config build, so a create
+ * that starts as a Codex child but ends up falling back off Codex (the guard-unhealthy fallback)
+ * never reserves a slot it won't use.
+ */
+function reserveCodexGuardSlot(options: RoleRouterOptions): void {
+  options.codexGuardCache?.reserve?.();
+  void options.codexGuardCache?.refresh?.()?.catch(() => undefined);
 }
 
 /**
@@ -974,19 +1079,46 @@ function routeRoleForCreateUnguarded(
     });
   };
 
+  const registeredProviderIds = options.providerIds?.get();
+
+  // The single withCodexGuard step: computed ONCE, here, keyed on the FINAL provider
+  // (resolveFinalProviderId), not `decision.model.provider` alone or a per-path re-check of
+  // `request.config.provider === "codex"`. Every branch below uses `guardedRequest` as its base
+  // instead of `request` -- the honored/unconfigured and recovered paths no longer run their own
+  // copy of this, and the general rewrite path's own inline guard block is gone too.
+  //
+  // "Child" is decided the same way the daemon decides it: `callerAgentId` OR an inherited
+  // `paseo.parent-agent-id` label (a label-only child, e.g. an agent-made schedule run), not
+  // `callerAgentId` alone -- and keyed on the final provider's session FAMILY, resolved from the
+  // provider registry, not a literal `=== "codex"` check, so a derived `extends: "codex"`
+  // provider guards here exactly like `codex` itself.
+  const finalProviderId = resolveFinalProviderId(request, decision, registeredProviderIds);
+  const isCodexChild = isCodexFamilyChild(
+    extended.labels,
+    callerAgentId,
+    finalProviderId,
+    options.providerIds?.resolveFamily,
+  );
+  const guardedRequest = isCodexChild ? withCodexGuard(request) : request;
+
   // Tool enforcement's target family must match what will actually run, not just the
   // classifier's tentative pick: a cross-family rewrite the registry check below rejects falls
   // back to the request's own provider, and enforcement has to follow it there rather than stay
   // aimed at the family the rewrite gave up on.
   let enforcementProvider = decision.model.provider;
   if (decision.model.crossesRequestedFamily) {
-    const registeredProviderIds = options.providerIds?.get();
     if (registeredProviderIds && !registeredProviderIds.has(decision.model.provider as string)) {
       enforcementProvider = request.config.provider ?? null;
     }
   }
+  // Computed from `guardedRequest`, not `request`: a guarded child's base
+  // already has the caller's own approval_policy/sandbox_mode/sandbox_workspace_write stripped,
+  // so enforcement's own trusted providerOptions (e.g. a read-only profile's `sandbox_mode`)
+  // never has to fight a leaked override for the same key, and a no-op enforcement decision
+  // (the common, unrestricted-role case) can't let the caller's stripped fields back in through
+  // its "pass the base through untouched" fallback.
   const enforcement = enforceToolDecision(
-    request,
+    guardedRequest,
     decision.tools,
     decision.outputStyle,
     decision.jevTools,
@@ -1001,9 +1133,18 @@ function routeRoleForCreateUnguarded(
   // effective model (its own, since nothing was rewritten) worth deciding a
   // level for.
   if (decision.model.outcome === "unconfigured" || decision.model.outcome === "honored-request") {
-    let honored = withToolProfile(request, enforcement);
+    // Neither outcome rewrites `config.provider` -- the request's own provider stands, which is
+    // exactly why `decision.model.provider` can't be trusted here: it's null for `unconfigured`
+    // and, for `honored-request`, just echoes what the caller asked for. `guardedRequest` already
+    // reflects this (via `resolveFinalProviderId`, computed once above). Neither outcome can fall
+    // back off Codex once reached, so a Codex child here always ends up running on Codex --
+    // reserve the slot now.
+    if (isCodexChild) {
+      reserveCodexGuardSlot(options);
+    }
+    let honored = withToolProfile(guardedRequest, enforcement);
     const thinkingEnforcement = enforceThinkingDecision(request.config.thinkingOptionId, decision.thinking);
-    const withThinking = withThinkingDecision(honored ?? request, thinkingEnforcement);
+    const withThinking = withThinkingDecision(honored ?? guardedRequest, thinkingEnforcement);
     if (withThinking) {
       honored = withThinking;
     }
@@ -1019,10 +1160,13 @@ function routeRoleForCreateUnguarded(
     // operator's say-so alone, so it is honored LOUDLY — never just quietly
     // let through. (`unconfigured` never carries this: nothing was selected.)
     if (!decision.model.unadvertised) {
-      return honored;
+      // `undefined` means "byte-identical pass-through of `request`" to the plugin framework, so
+      // a guarded Codex child -- which DID change relative to `request` -- must never fall through
+      // to it; `guardedRequest` is the floor.
+      return honored ?? (isCodexChild ? guardedRequest : undefined);
     }
     noteUnadvertised(decision.model.unadvertised.source, decision.model.unadvertised.ref);
-    const base = (honored ?? request) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
+    const base = (honored ?? guardedRequest) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
     return { ...base, labels: { ...base.labels, [UNADVERTISED_MODEL_LABEL]: decision.model.unadvertised.ref } };
   }
 
@@ -1043,7 +1187,6 @@ function routeRoleForCreateUnguarded(
   // the one in active use.
   if (decision.model.crossesRequestedFamily) {
     const pinnedProvider = decision.model.provider as string; // crossesRequestedFamily implies a pinned provider.
-    const registeredProviderIds = options.providerIds?.get();
     if (registeredProviderIds && !registeredProviderIds.has(pinnedProvider)) {
       if (!unavailableRoleIds.has(unavailableDedupeKey)) {
         unavailableRoleIds.add(unavailableDedupeKey);
@@ -1061,20 +1204,35 @@ function routeRoleForCreateUnguarded(
       // `decision.thinking` was decided for the model the rewrite just gave
       // up on, and a level meant for a model this create will never run must
       // not land on it. The subagent invariant still holds.
-      const recovered = withToolProfile(request, enforcement);
-      const guarded = withoutSubagentUltracode(recovered ?? request);
-      if (guarded) {
+      //
+      // Recovery falls back to the REQUEST's own provider, which can itself be codex (e.g. the
+      // caller explicitly asked for codex, it wasn't approved for this role/class so it was never
+      // honored, and ordered selection's own pick -- the one that just vanished -- was some other
+      // family entirely). `guardedRequest` already reflects this, via `resolveFinalProviderId`.
+      // This recovery can't fall back further once reached, so a Codex child here always ends up
+      // running on Codex -- reserve the slot now.
+      if (isCodexChild) {
+        reserveCodexGuardSlot(options);
+      }
+      const recovered = withToolProfile(guardedRequest, enforcement);
+      const withoutUltracode = withoutSubagentUltracode(recovered ?? guardedRequest);
+      if (withoutUltracode) {
         // Named against the model that runs — the request's own — not the one the rewrite gave up on.
         const runningRef = request.config.model
           ? formatModelRef({ provider: request.config.provider ?? null, model: request.config.model })
           : undefined;
         noteThinkingOverridden(runningRef, ULTRACODE_OPTION_ID, null, "subagent-no-ultracode");
       }
-      return guarded ?? recovered;
+      return withoutUltracode ?? recovered ?? (isCodexChild ? guardedRequest : undefined);
     }
   }
 
   if (decision.model.outcome === "unavailable") {
+    // The pool's fallback-anyway pick (role-availability.ts / classifier.ts, "used anyway rather
+    // than dropping the spawn") can be a codex ref nobody asked for. With the guard not proven
+    // healthy, the daemon refuses that create outright -- fall back to the REQUEST's own
+    // provider/model instead of producing a create that can only fail.
+    const guardUnhealthy = isCodexChild && !(options.codexGuardCache?.get()?.healthy ?? false);
     if (!unavailableRoleIds.has(unavailableDedupeKey)) {
       unavailableRoleIds.add(unavailableDedupeKey);
       options.onRoleUnavailable?.({
@@ -1082,36 +1240,42 @@ function routeRoleForCreateUnguarded(
         roleId: role.id,
         requestedModel: modelRef,
         taskClass,
-        reason: "no-eligible-model",
+        reason: guardUnhealthy ? "codex-guard-unhealthy" : "no-eligible-model",
       });
+    }
+    if (guardUnhealthy) {
+      // The fallback runs on the REQUEST's own provider, not the codex ref the classifier picked
+      // -- enforcement must target THAT family, not the stale `enforcement` computed above for
+      // codex. Recomputing from `request` (never `guardedRequest`, which is Codex-shaped) also
+      // means no Codex guard slot is ever reserved for a create that won't run on Codex.
+      const fallbackEnforcement = enforceToolDecision(
+        request,
+        decision.tools,
+        decision.outputStyle,
+        decision.jevTools,
+        request.config.provider ?? undefined,
+      );
+      const fallback = withToolProfile(request, fallbackEnforcement);
+      const withoutUltracode = withoutSubagentUltracode(fallback ?? request);
+      return withoutUltracode ?? fallback ?? undefined;
     }
   } else {
     unavailableRoleIds.delete(unavailableDedupeKey); // Re-arm: this (role, class) recovered.
   }
 
-  const nextConfig: AgentCreateConfig = { ...request.config, model: decision.model.model };
+  // Starts from `guardedRequest.config`, not `request.config`: when `isCodexChild` is true this
+  // already carries `modeId: "guarded"` and stripped
+  // approval_policy/sandbox_mode/sandbox_workspace_write, so there is no separate guard block to
+  // run here -- a routed Codex CHILD runs guarded because its base already does, the same as
+  // every other return path. Reached only when nothing above already returned, so a Codex child
+  // here always ends up running on Codex (the `unavailable`+`guardUnhealthy` case already
+  // returned above) -- reserve the slot now.
+  if (isCodexChild) {
+    reserveCodexGuardSlot(options);
+  }
+  const nextConfig: AgentCreateConfig = { ...guardedRequest.config, model: decision.model.model };
   if (decision.model.crossesRequestedFamily && decision.model.provider !== null) {
     nextConfig.provider = decision.model.provider as AgentCreateConfig["provider"];
-  }
-  // A routed Codex child always runs guarded (KTD-7, docs/catastrophe-gate.md): the daemon
-  // decides every approval itself, never a person. Set unconditionally -- an explicit request
-  // for some other Codex mode must not bypass the guard this classifier just routed it behind.
-  if (decision.model.provider === "codex") {
-    nextConfig.modeId = "guarded";
-    // Defense in depth (review finding #1): strip a caller's own approval_policy/sandbox_mode/
-    // sandbox_workspace_write before anything else touches providerOptions for a guarded Codex
-    // child. The provider itself (codex-app-server-agent.ts's `guardedProviderOptions()`) is also
-    // responsible for refusing these fields, but a caller's request must never carry them past
-    // this hook either. This must run before the enforcement overwrite below, which carries the
-    // daemon's own trusted providerOptions (e.g. a read-only tool profile's sandbox_mode) and must
-    // never be stripped.
-    nextConfig.providerOptions = stripCodexGuardedOverrides(nextConfig.providerOptions);
-    // Code-review finding (round 1): a polled runningChildren count is up to 60s stale, so a
-    // burst of back-to-back creates could all read "under the cap" before any of them shows up
-    // in a poll. Reserve this create's slot immediately, and kick a fire-and-forget refresh so
-    // the real poll catches up sooner -- neither call blocks this create.
-    options.codexGuardCache?.reserve?.();
-    void options.codexGuardCache?.refresh?.()?.catch(() => undefined);
   }
   if (enforcement.providerOptions) {
     nextConfig.providerOptions = enforcement.providerOptions;

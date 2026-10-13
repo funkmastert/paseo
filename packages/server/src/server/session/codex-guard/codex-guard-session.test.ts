@@ -20,7 +20,11 @@ function agent(
   return {
     id: "agent-1",
     provider: "codex",
+    // Defaults to `provider` so existing `{ provider: "claude" }`-style overrides still work
+    // without also having to repeat the family.
+    providerFamily: overrides.provider ?? "codex",
     parentAgentId: "parent-1",
+    hasGuardMarker: false,
     lifecycle: "running",
     busy: false,
     createdAt: new Date(NOW - 20 * 60 * 1000).toISOString(), // created well before the recent-create window
@@ -101,6 +105,21 @@ describe("countRunningCodexChildren", () => {
 
   it("defaults now to Date.now when not supplied", () => {
     expect(countRunningCodexChildren([agent()])).toBe(1);
+  });
+
+  it("counts a marker-only child even after it loses its parent label (detach)", () => {
+    const detached = agent({ parentAgentId: null, hasGuardMarker: true });
+    expect(countRunningCodexChildren([detached], now)).toBe(1);
+  });
+
+  it("does not count a root codex agent with neither a parent label nor the marker", () => {
+    const root = agent({ parentAgentId: null, hasGuardMarker: false });
+    expect(countRunningCodexChildren([root], now)).toBe(0);
+  });
+
+  it('counts a derived extends:"codex" provider\'s child exactly like codex itself', () => {
+    const derived = agent({ provider: "my-codex", providerFamily: "codex" });
+    expect(countRunningCodexChildren([derived], now)).toBe(1);
   });
 });
 

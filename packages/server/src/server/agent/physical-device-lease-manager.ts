@@ -111,6 +111,9 @@ export interface PhysicalDeviceStatusEntry {
   /** Seconds until the lease releases on its own, for a disconnected-but-still-held device. */
   graceRemainingSeconds?: number;
   agentId?: string;
+  /** The holder's leader, when the holder is a child — a child's own title may not say which
+   * effort it belongs to (docs/device-leases.md, Physical devices). Absent for a root leader. */
+  leaderAgentId?: string;
   heldForSeconds?: number;
   reason?: string;
   reserved: boolean;
@@ -227,24 +230,30 @@ export class PhysicalDeviceLeaseManager {
     rows: readonly ProcessSampleRow[];
     agentTrees: readonly AgentProcessTree[];
   }): void {
-    this.reconcile();
-    this.releaseIdleLeases(input);
+    const changed = this.reconcile();
+    const released = this.releaseIdleLeases(input);
+    // A lease nobody touches and that never goes idle never changes, so neither call above
+    // notifies — the UI's heldForSeconds would otherwise freeze at whatever it read on the last
+    // bind/release (docs/device-leases.md, Physical devices: Tyler saw "held 0s" minutes into a
+    // real hold). Tick it on the same cadence as the resource-monitor sweep instead.
+    if (!changed && !released && this.leases.length > 0) this.notify();
   }
 
   /**
    * R1, R2, R4, R6: a phone lease nothing has used for `idleReleaseMinutes` is released, reason
    * `idle`, so an install lease a finished agent forgot to check in comes back on its own.
    * Releasing costs the agent nothing it was using — a phone has no slot to free, only a holder
-   * to clear.
+   * to clear. Returns whether it notified, so `reportProcessSample`'s own tick-notify can skip a
+   * redundant second push.
    */
   private releaseIdleLeases(sample: {
     rows: readonly ProcessSampleRow[];
     agentTrees: readonly AgentProcessTree[];
-  }): void {
+  }): boolean {
     const idleReleaseMs =
       (this.readDaemonConfig().deviceLeases?.idleReleaseMinutes ?? DEFAULT_IDLE_RELEASE_MINUTES) *
       60_000;
-    if (idleReleaseMs <= 0) return;
+    if (idleReleaseMs <= 0) return false;
     const agentsById = new Map(this.listAgents().map((agent) => [agent.agentId, agent]));
     const knownDeviceIds = this.leases.map((lease) => lease.deviceId);
     const references = collectDeviceIdReferences(sample.rows, knownDeviceIds);
@@ -261,7 +270,7 @@ export class PhysicalDeviceLeaseManager {
       }
       if (this.now() - lease.lastUsedAtMs >= idleReleaseMs) idle.push(lease);
     }
-    if (idle.length === 0) return;
+    if (idle.length === 0) return false;
     if (this.isDryRun()) {
       for (const lease of idle) {
         lease.lastUsedAtMs = this.now();
@@ -270,11 +279,12 @@ export class PhysicalDeviceLeaseManager {
           "Would release an idle device lease",
         );
       }
-      return;
+      return false;
     }
     this.leases = this.leases.filter((lease) => !idle.includes(lease));
     this.logRelease(idle.map((lease) => ({ lease, reason: "idle" as const })));
     this.notify();
+    return true;
   }
 
   private connectedFingerprint(): string {
@@ -546,7 +556,7 @@ export class PhysicalDeviceLeaseManager {
         ? connected
         : connected.filter((device) => device.platform === intent.platform);
 
-    if (intent.target) {
+    if (intent.target && !intent.targetUnresolved) {
       const target = intent.target;
       const device = candidates.find((entry) => physicalDeviceMatches(entry, target));
       // Names a device this gate doesn't currently see connected — an emulator, a simulator, or
@@ -555,22 +565,43 @@ export class PhysicalDeviceLeaseManager {
     }
 
     if (candidates.length === 0) return undefined;
+    // A target this gate can't resolve (`$VAR`, `$(…)`, a backtick, `{}`) still means the command
+    // picks exactly one real device — unlike a plain, genuinely untargeted `adb`, it never gets
+    // the "adb picks for you" exemption below: `-s $X` already told adb which device, even though
+    // this gate can't read which one.
+    const unresolvedTarget = intent.targetUnresolved === true;
     // A plain `adb` command with more than one device attached refuses to pick one on its own,
     // so it can't install over anybody — unless an ANDROID_SERIAL the gate can't see (the
     // agent's shell profile) points it somewhere, and then it is a good command. Let adb decide.
     const adbTargets =
       intent.platform === "android" ? candidates.length + this.countAndroidEmulators() : 0;
-    if (intent.command.startsWith("adb ") && adbTargets > 1) return undefined;
-    if (candidates.length === 1) {
+    if (!unresolvedTarget && intent.command.startsWith("adb ") && adbTargets > 1) return undefined;
+    // An unresolved target reachable through plain adb could just as well be one of the
+    // emulators this manager doesn't lease (they're the other cap's job) as it could be the lone
+    // phone — `-s $X` picks exactly one of whatever adb can see, and this gate can't tell which.
+    // Auto-binding the phone here would either phantom-lease a device the command never touches,
+    // or falsely refuse a command that was headed for an emulator the whole time.
+    const ambiguousWithEmulators = unresolvedTarget && adbTargets > candidates.length;
+    if (candidates.length === 1 && !ambiguousWithEmulators) {
       return this.resolveDeviceAccess(agentId, candidates[0] as PhysicalDevice, intent);
     }
     const platformLabel = intent.platform === "unknown" ? "" : `${intent.platform} `;
     const fixes = candidates.map((device) => `\`${targetingFix(intent, device)}\``).join(" or ");
+    const situation = unresolvedTarget
+      ? `\`${intent.command}\` names a device this gate can't resolve — it can't read shell ` +
+        `variables or command substitution`
+      : `\`${intent.command}\` does not target a device`;
+    const advice = unresolvedTarget ? "Name the device literally" : "Name the device you hold";
+    const emulatorCount = adbTargets - candidates.length;
+    const emulatorNote =
+      ambiguousWithEmulators && emulatorCount > 0
+        ? ` (adb can also reach ${emulatorCount} running emulator${emulatorCount === 1 ? "" : "s"}, which could just as well be the real target)`
+        : "";
     return (
-      `\`${intent.command}\` does not target a device, and ${candidates.length} ${platformLabel}` +
-      `devices are connected (${candidates.map((device) => device.name ?? device.id).join(", ")}) — ` +
+      `${situation}, and ${candidates.length} ${platformLabel}` +
+      `devices are connected (${candidates.map((device) => device.name ?? device.id).join(", ")})${emulatorNote} — ` +
       `${intent.installsOnAllIfUntargeted ? "it would install on all of them" : "it could pick any of them"}, ` +
-      `including another agent's. Name the device you hold: ${fixes}. \`device_checkout\` with ` +
+      `including another agent's. ${advice}: ${fixes}. \`device_checkout\` with ` +
       `kind "physical" gets you one.`
     );
   }
@@ -614,6 +645,7 @@ export class PhysicalDeviceLeaseManager {
     const connected = this.listConnectedDevices();
     const reservedIds = this.reservations.reservedDeviceIds();
     const leaseByDeviceId = new Map(this.leases.map((lease) => [lease.deviceId, lease] as const));
+    const agentsById = new Map(this.listAgents().map((agent) => [agent.agentId, agent]));
 
     const seen = new Set<string>();
     const devices: PhysicalDeviceStatusEntry[] = [];
@@ -623,7 +655,7 @@ export class PhysicalDeviceLeaseManager {
       // A phone that is only paired and on the same Wi-Fi is not a device anyone is using.
       const claimed = lease !== undefined || reservedIds.has(device.id);
       if (device.idle && !claimed) continue;
-      devices.push(this.toEntry(device, lease, true, nowMs, reservedIds));
+      devices.push(this.toEntry(device, lease, true, nowMs, reservedIds, agentsById));
     }
     for (const lease of this.leases) {
       if (seen.has(lease.deviceId)) continue;
@@ -639,6 +671,7 @@ export class PhysicalDeviceLeaseManager {
           false,
           nowMs,
           reservedIds,
+          agentsById,
         ),
       );
     }
@@ -658,6 +691,7 @@ export class PhysicalDeviceLeaseManager {
     connected: boolean,
     nowMs: number,
     reservedIds: ReadonlySet<string>,
+    agentsById: ReadonlyMap<string, DeviceLeaseAgentSummary>,
   ): PhysicalDeviceStatusEntry {
     const entry: PhysicalDeviceStatusEntry = {
       id: device.id,
@@ -669,6 +703,8 @@ export class PhysicalDeviceLeaseManager {
     if (device.name) entry.name = device.name;
     if (lease) {
       entry.agentId = lease.agentId;
+      const leaderAgentId = resolveRootLeaderId(lease.agentId, agentsById);
+      if (leaderAgentId) entry.leaderAgentId = leaderAgentId;
       entry.heldForSeconds = (nowMs - lease.acquiredAtMs) / 1000;
       if (lease.reason) entry.reason = lease.reason;
       if (lease.disconnectedAtMs !== undefined) {
@@ -731,6 +767,32 @@ export class PhysicalDeviceLeaseManager {
     this.blocked = [entry, ...this.blocked].slice(0, BLOCKED_HISTORY_LIMIT);
     this.notify();
   }
+}
+
+const MAX_LINEAGE_DEPTH = 32;
+
+/**
+ * Walks `parentAgentId` from the holder up to the root leader — the top-level session Tyler is
+ * tracking, not just the immediate parent, since this orchestration setup routinely runs
+ * leader -> worker -> sub-worker chains and a grandchild's lease should still name the leader,
+ * not the intermediate worker. Absent when the holder is itself a root (no parent at all). A
+ * depth cap and a seen-set guard against a cycle or a pathologically deep chain looping forever.
+ */
+function resolveRootLeaderId(
+  holderId: string,
+  agentsById: ReadonlyMap<string, DeviceLeaseAgentSummary>,
+): string | undefined {
+  let leaderId: string | undefined;
+  let currentId = holderId;
+  const seen = new Set<string>([holderId]);
+  for (let depth = 0; depth < MAX_LINEAGE_DEPTH; depth += 1) {
+    const parentId = agentsById.get(currentId)?.parentAgentId;
+    if (!parentId || seen.has(parentId)) break;
+    leaderId = parentId;
+    seen.add(parentId);
+    currentId = parentId;
+  }
+  return leaderId;
 }
 
 /** The exact command shape that targets this device, for a refusal to paste. */

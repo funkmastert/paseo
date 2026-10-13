@@ -1028,6 +1028,11 @@ export const ProviderSnapshotEntrySchema = z.object({
   description: z.string().optional(),
   iconSvg: z.string().optional(),
   defaultModeId: z.string().nullable().optional(),
+  /** The registered provider id this one extends, e.g. a claude-account-pool entry extending
+   * "claude". Mirrors `ProviderSnapshotEntry.derivedFromProviderId` (agent-types.ts) -- this
+   * schema was missing the field, so a plugin resolving a provider's session family from the
+   * wire snapshot (`paseo.providers.snapshot()`) never saw it. */
+  derivedFromProviderId: z.string().nullable().optional(),
 });
 
 export const CompactProviderSnapshotModelSchema = AgentModelDefinitionSchema.omit({
@@ -6963,6 +6968,10 @@ export const PhysicalDeviceStatusEntrySchema = z.object({
   /** Seconds until an unplugged device's lease releases on its own. Absent when connected. */
   graceRemainingSeconds: z.number().optional(),
   agentId: z.string().optional(),
+  // The root leader of the holder's chain, when the holder is a child — absent for a root
+  // leader. The client resolves both ids' titles from its own session store, the same as
+  // `agentId`.
+  leaderAgentId: z.string().optional(),
   heldForSeconds: z.number().optional(),
   reason: z.string().optional(),
   reserved: z.boolean(),

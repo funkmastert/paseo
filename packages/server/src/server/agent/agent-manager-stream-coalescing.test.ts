@@ -1,11 +1,19 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { AgentManager, type AgentManagerEvent } from "./agent-manager.js";
+import { setCodexGuardHealthState } from "./codex-guard-health.js";
 import { AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS } from "./agent-stream-coalescer.js";
+
+// This file creates codex agents as a generic fixture for stream-coalescing behavior unrelated
+// to the Codex child guard, so default guard health to green the way a real daemon reaches it
+// once the self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 import type { AgentTimelineRow } from "./agent-timeline-store-types.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import type {

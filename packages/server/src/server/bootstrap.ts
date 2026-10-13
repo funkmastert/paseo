@@ -156,11 +156,11 @@ import {
   findDefaultCodexBinary,
 } from "./agent/providers/codex-app-server-agent.js";
 import { resolveBinaryVersion } from "./agent/providers/diagnostic-utils.js";
+import { runCodexGuardSelfTest, setCodexGuardHealthState } from "./agent/codex-guard-health.js";
 import {
-  getCodexGuardHealthState,
-  runCodexGuardSelfTest,
-  shouldRunCodexGuardSelfTest,
-} from "./agent/codex-guard-health.js";
+  createCodexGuardBootHealthScheduler,
+  type CodexGuardBootHealthScheduler,
+} from "./agent/codex-guard-boot-health.js";
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
 import { WorkspaceReconciliationService } from "./workspace-reconciliation-service.js";
 import {
@@ -850,6 +850,14 @@ export interface PaseoDaemonDependencies {
     daemonStatusRpc?: boolean;
     relayConfig?: boolean;
   };
+  /** In-process test harnesses that construct a daemon directly (not the real CLI entry point,
+   * which never sets this) use this to skip the Codex guard's real self-test: a host that
+   * actually has a Codex binary on PATH would otherwise run it for real on every such daemon,
+   * which is slow and -- inside a sandboxed tmp `paseoHome` -- reliably comes back red. Health is
+   * set to green immediately instead, the way a real daemon reaches it once a real self-test has
+   * passed. No config key or env var exposes this; it can only be set by code constructing a
+   * `PaseoDaemon` directly. */
+  skipCodexGuardSelfTest?: boolean;
 }
 
 function createBootstrapManagedProcessRegistry(
@@ -1630,6 +1638,23 @@ function createDaemonReadCheckObserver(input: {
   };
 }
 
+/** See `PaseoDaemonDependencies.skipCodexGuardSelfTest`: an in-process test harness skips the
+ * real self-test and goes straight to green instead of letting the scheduler run it for real. */
+function startOrSkipCodexGuardBootHealth(
+  scheduler: CodexGuardBootHealthScheduler,
+  skipSelfTest: boolean | undefined,
+): void {
+  if (!skipSelfTest) {
+    void scheduler.checkNow();
+    return;
+  }
+  setCodexGuardHealthState({
+    status: "green",
+    reason: "test dependency override: Codex guard self-test skipped",
+    codexVersion: null,
+  });
+}
+
 export async function createPaseoDaemon(
   config: PaseoDaemonConfig,
   rootLogger: Logger,
@@ -2335,49 +2360,49 @@ export async function createPaseoDaemon(
       extraClients: config.agentClients,
     },
   });
-  // Codex guard health's self-test (docs/catastrophe-gate.md, KTD-6): no codex/ ref is usable
-  // for children until this is green. Checked now and hourly after, so a daily re-run and a
-  // Codex binary version change are both caught without a separate timer for each.
-  const checkCodexGuardSelfTest = () => {
-    void (async () => {
-      try {
-        const binaryPath = await findDefaultCodexBinary();
-        if (!binaryPath) return;
-        const codexVersion = await resolveBinaryVersion(binaryPath);
-        if (!shouldRunCodexGuardSelfTest(getCodexGuardHealthState(), Date.now(), codexVersion)) {
-          return;
-        }
-        const codexRuntimeSettings = config.agentProviderSettings?.codex;
-        const probeClient = new CodexAppServerAgentClient(logger, codexRuntimeSettings);
-        // Review finding #9: an unresponsive Codex binary left this probe hanging with no
-        // deadline, unlike the self-test's own 60s turn race below -- matching the provider
-        // catalog registry's own refresh timeout keeps a stuck probe from blocking the hourly
-        // self-test schedule indefinitely.
-        const { models } = await runProviderRefreshWithDeadline({
-          label: "Codex guard self-test catalog",
-          timeoutMs: 120_000,
-          operation: (context) =>
-            probeClient.fetchCatalog({ scope: "global", force: false }, context),
-        });
-        const model = models.find((candidate) => candidate.id.includes("luna")) ?? models[0];
-        if (!model) return;
-        await runCodexGuardSelfTest({
-          createClient: (guardDeviceLaunchGate) =>
-            new CodexAppServerAgentClient(logger, codexRuntimeSettings, {
-              deviceLaunchGate: guardDeviceLaunchGate,
-            }),
-          model: model.id,
-          codexVersion,
-          logger,
-          selfTestRoot: path.join(config.paseoHome, "codex-guard-self-test"),
-        });
-      } catch (error) {
-        logger.warn({ err: error }, "Codex guard self-test scheduling failed");
-      }
-    })();
-  };
-  checkCodexGuardSelfTest();
-  setInterval(checkCodexGuardSelfTest, 60 * 60 * 1000).unref();
+  // Codex guard health's self-test (docs/codex-workers.md): no codex/ ref is usable for
+  // children until this is green. Checked now and hourly after, so a daily re-run and a
+  // Codex binary version change are both caught without a separate timer for each. A tick that
+  // has to skip the self-test itself (no binary, empty catalog, or a self-test that resolves
+  // without proving anything) records why and retries on a short bounded backoff instead of
+  // waiting the full hour.
+  const codexGuardBootHealthScheduler = createCodexGuardBootHealthScheduler({
+    findDefaultCodexBinary,
+    resolveBinaryVersion,
+    fetchCodexCatalogModels: async () => {
+      const codexRuntimeSettings = config.agentProviderSettings?.codex;
+      const probeClient = new CodexAppServerAgentClient(logger, codexRuntimeSettings);
+      // Review finding #9: an unresponsive Codex binary left this probe hanging with no
+      // deadline, unlike the self-test's own 60s turn race below -- matching the provider
+      // catalog registry's own refresh timeout keeps a stuck probe from blocking the self-test
+      // schedule indefinitely.
+      const { models } = await runProviderRefreshWithDeadline({
+        label: "Codex guard self-test catalog",
+        timeoutMs: 120_000,
+        operation: (context) =>
+          probeClient.fetchCatalog({ scope: "global", force: false }, context),
+      });
+      return models;
+    },
+    runSelfTest: ({ model, codexVersion }) => {
+      const codexRuntimeSettings = config.agentProviderSettings?.codex;
+      return runCodexGuardSelfTest({
+        createClient: (guardDeviceLaunchGate) =>
+          new CodexAppServerAgentClient(logger, codexRuntimeSettings, {
+            deviceLaunchGate: guardDeviceLaunchGate,
+          }),
+        model,
+        codexVersion,
+        logger,
+        selfTestRoot: path.join(config.paseoHome, "codex-guard-self-test"),
+      });
+    },
+    logger,
+  });
+  startOrSkipCodexGuardBootHealth(
+    codexGuardBootHealthScheduler,
+    dependencies.skipCodexGuardSelfTest,
+  );
 
   const providerSnapshotManager = agentProviderRuntime.snapshotManager;
   daemonConfigStore.onFieldChange("catalogRefreshTimeoutMs", (value) => {
@@ -2447,6 +2472,7 @@ export async function createPaseoDaemon(
         ),
       };
       if (agent.title) summary.title = agent.title;
+      if (agent.parentAgentId) summary.parentAgentId = agent.parentAgentId;
       return summary;
     });
   // The cap's only lever over a provider it cannot refuse: tell the agent about a device it
@@ -4006,6 +4032,7 @@ export async function createPaseoDaemon(
       // After listening, so a bootstrap that fails (port in use) never leaves an adb child.
       await physicalDeviceDetection.start();
     } catch (error) {
+      codexGuardBootHealthScheduler.stop();
       unsubscribePluginProviders();
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
       await serviceProxy.stopStandalone().catch(() => undefined);
@@ -4037,6 +4064,7 @@ export async function createPaseoDaemon(
     awayReplyJob?.stop();
     workSnapshotSweep?.stop();
     worktreeDiskMonitor?.stop();
+    codexGuardBootHealthScheduler.stop();
   };
 
   const stop = async () => {

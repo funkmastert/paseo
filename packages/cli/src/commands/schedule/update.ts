@@ -53,7 +53,14 @@ export async function runUpdateCommand(
   const { client } = await connectScheduleClient(options.host);
   try {
     await requireNewAgentSchedule(client, id);
-    const payload = await client.scheduleUpdate(input);
+    // Mirrors `schedule create`'s own PASEO_AGENT_ID -> callerAgentId forwarding: an agent
+    // editing a schedule's new-agent config marks it agent-made for the Codex child guard, so a
+    // later run can't dodge the guard by retargeting a human schedule to a codex-family provider.
+    const callerAgentId = process.env.PASEO_AGENT_ID?.trim() || undefined;
+    const payload = await client.scheduleUpdate({
+      ...input,
+      ...(callerAgentId ? { callerAgentId } : {}),
+    });
     if (payload.error || !payload.schedule) {
       throw new Error(payload.error ?? `Failed to update schedule: ${id}`);
     }

@@ -178,11 +178,13 @@ export default function contribute(server: PluginServerContext) {
         ),
       onRoleUnavailable: (episode) => {
         const pool = episode.taskClass ? `${episode.taskClass} pool` : "pool";
-        console.error(
+        const message =
           episode.reason === "provider-not-registered"
             ? `[claude-account-pool] role-router: role "${episode.roleId}"'s resolved provider is not registered with the daemon for caller "${episode.callerAgentId}" (wanted "${episode.requestedModel}"); passing the request through untouched`
-            : `[claude-account-pool] role-router: role "${episode.roleId}" has no eligible model in its ${pool} for caller "${episode.callerAgentId}"; falling back to its top configured model "${episode.requestedModel}"`,
-        );
+            : episode.reason === "codex-guard-unhealthy"
+              ? `[claude-account-pool] role-router: role "${episode.roleId}"'s fallback-anyway pick for caller "${episode.callerAgentId}" is a Codex ref ("${episode.requestedModel}") and the Codex guard isn't proven healthy; routed to the request's own provider/model instead of a create the daemon would refuse`
+              : `[claude-account-pool] role-router: role "${episode.roleId}" has no eligible model in its ${pool} for caller "${episode.callerAgentId}"; falling back to its top configured model "${episode.requestedModel}"`;
+        console.error(message);
       },
       onExplicitModelOverridden: (episode) => {
         const pool = episode.taskClass ? `role "${episode.roleId}"'s ${episode.taskClass} pool` : `role "${episode.roleId}"'s pool`;

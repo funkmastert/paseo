@@ -26,12 +26,60 @@ export interface DeviceLaunchIntent {
   target?: string;
 }
 
+/** Consumes a `$(…)` span starting at the `$`, honouring nested parens. Returns `undefined` when
+ * the scan reaches end-of-string without the parens ever balancing — an unterminated `$(` (a
+ * typo, a truncated prompt) that a real shell would refuse to run. Consuming to EOF anyway would
+ * fold everything after it, including any later `&&`/`;`/`|` and the commands they introduce,
+ * into one opaque token that no matcher recognizes — hiding a gated command rather than catching
+ * it. The caller falls back to treating the `$`/`(` as ordinary characters instead. */
+function consumeSubshell(
+  command: string,
+  dollarIndex: number,
+): { text: string; index: number } | undefined {
+  let index = dollarIndex + 1; // sits on the "("
+  let text = "$(";
+  let depth = 1;
+  while (index + 1 < command.length) {
+    index += 1;
+    const inner = command[index];
+    text += inner;
+    if (inner === "(") depth += 1;
+    else if (inner === ")") depth -= 1;
+    if (depth === 0) return { text, index };
+  }
+  return undefined;
+}
+
+/** Consumes a backtick-delimited span starting at the opening backtick. Returns `undefined` when
+ * no closing backtick exists — same unterminated-span reasoning as `consumeSubshell`. */
+function consumeBacktick(
+  command: string,
+  backtickIndex: number,
+): { text: string; index: number } | undefined {
+  let index = backtickIndex;
+  let text = "`";
+  while (index + 1 < command.length) {
+    index += 1;
+    text += command[index];
+    if (command[index] === "`") return { text, index };
+  }
+  return undefined;
+}
+
 /**
  * Splits a command line into segments (one per `&&`, `||`, `;`, `|` or newline) and each segment
  * into argv-style tokens, honouring quotes. A naive whitespace split turns
  * `-destination 'platform=iOS Simulator,name=iPhone 17 Pro'` into six tokens and loses the
  * destination, and turns `simctl boot 'iPhone 17 Pro'` into a device named `'iPhone` — both of
  * which the gate would then misread.
+ *
+ * `$(…)` and `` `…` `` are atomic the same way a quote is: `$(adb devices | awk '…')` has to stay
+ * one token, or the `|` inside it ends the segment early and `awk …` lands in a segment of its
+ * own, with nothing before it to say what device it was meant to target
+ * (device-install-commands.ts's fail-closed target resolution depends on seeing the whole
+ * substitution as the one token after a flag like `-s`, not fragments of it). An unterminated
+ * span falls back to ordinary character-by-character tokenization instead of swallowing the rest
+ * of the line (`consumeSubshell`/`consumeBacktick`).
  *
  * Exported for test-run-commands.ts, which classifies the same command lines for a different
  * question and must not disagree with this file about where a token ends.
@@ -66,6 +114,27 @@ export function tokenizeCommandSegments(command: string): string[][] {
       hasToken = true;
       continue;
     }
+    if (char === "$" && command[index + 1] === "(") {
+      const consumed = consumeSubshell(command, index);
+      if (consumed) {
+        current += consumed.text;
+        hasToken = true;
+        index = consumed.index;
+        continue;
+      }
+      // Unterminated — fall through and treat "$" as an ordinary character; "(" follows on the
+      // next iteration and is itself ordinary, so normal tokenization resumes right after it.
+    }
+    if (char === "`") {
+      const consumed = consumeBacktick(command, index);
+      if (consumed) {
+        current += consumed.text;
+        hasToken = true;
+        index = consumed.index;
+        continue;
+      }
+      // Unterminated — same fallback as above.
+    }
     if (char === "\\" && index + 1 < command.length) {
       index += 1;
       current += command[index];
@@ -97,9 +166,16 @@ export function basename(token: string): string {
   return last.replace(/\.(exe|cmd|bat)$/i, "");
 }
 
+/** `xargs` flags that take their value as a separate following token (`-I {}`), rather than
+ * attached to the flag itself (`-I{}`, `-n1`, `-0`) — only the separate form has an extra token
+ * to skip past. */
+const XARGS_FLAGS_WITH_SEPARATE_VALUE = new Set(["-I", "-n", "-P", "-L", "-d", "-a", "-E", "-s"]);
+
 /**
- * The tokens of one command, with leading `env`/`VAR=value`/`sudo`/`time` prefixes stripped so
- * the first token is the program being run.
+ * The tokens of one command, with leading `env`/`VAR=value`/`sudo`/`time`/`xargs` prefixes
+ * stripped so the first token is the program being run. `xargs adb -s <serial> install …` runs
+ * `adb` exactly as if it had been typed directly — piping through xargs is not a reason to run
+ * it ungated.
  */
 export function stripCommandPrefixes(tokens: readonly string[]): string[] {
   let index = 0;
@@ -107,6 +183,15 @@ export function stripCommandPrefixes(tokens: readonly string[]): string[] {
     const token = tokens[index];
     if (ENV_ASSIGNMENT.test(token) || ["env", "sudo", "time", "nohup", "exec"].includes(token)) {
       index += 1;
+      continue;
+    }
+    if (token === "xargs") {
+      index += 1;
+      while (index < tokens.length && tokens[index].startsWith("-")) {
+        const flag = tokens[index];
+        index += 1;
+        if (XARGS_FLAGS_WITH_SEPARATE_VALUE.has(flag) && index < tokens.length) index += 1;
+      }
       continue;
     }
     break;

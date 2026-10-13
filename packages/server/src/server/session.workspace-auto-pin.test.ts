@@ -1,9 +1,10 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test } from "vitest";
 
 import { Session } from "./session.js";
+import { setCodexGuardHealthState } from "./agent/codex-guard-health.js";
 import { OWNER_PERMISSIONS } from "./authorization/index.js";
 import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
@@ -27,6 +28,13 @@ import {
 } from "./workspace-registry.js";
 
 const workdirs: string[] = [];
+
+// This file uses `provider: "codex"` as a generic fixture for auto-pin behavior unrelated to
+// the Codex child guard, so default guard health to green the way a real daemon reaches it once
+// the self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 
 afterEach(() => {
   while (workdirs.length > 0) {
@@ -238,7 +246,8 @@ test("create_agent_request with no caller agent auto-pins the workspace it targe
 });
 
 test("create_agent_request with a caller agent does not pin its workspace", async () => {
-  const { cwd, session, agentManager, projectRegistry, workspaceRegistry } = buildHarness();
+  const { cwd, session, agentManager, agentStorage, projectRegistry, workspaceRegistry } =
+    buildHarness();
 
   await projectRegistry.upsert(
     createPersistedProjectRecord({
@@ -290,6 +299,11 @@ test("create_agent_request with a caller agent does not pin its workspace", asyn
 
   const stored = await workspaceRegistry.get("ws-target");
   expect(stored?.pinnedAt).toBeNull();
+  // The child was actually created (guarded, since it's a real Codex child), not refused --
+  // otherwise `pinnedAt` reading null proves nothing about the callerAgentId branch at all.
+  const children = await agentStorage.listByWorkspace("ws-target");
+  expect(children).toHaveLength(1);
+  expect(children[0]?.lastModeId ?? children[0]?.config?.modeId).toBe("guarded");
 });
 
 test("an existing manual pin is not touched by a later session start", async () => {

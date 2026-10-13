@@ -2,17 +2,25 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import pino from "pino";
 
 import { AgentManager } from "./agent-manager.js";
 import { AgentStorage } from "./agent-storage.js";
+import { setCodexGuardHealthState } from "./codex-guard-health.js";
 import {
   DEFAULT_REACTIVE_SIGNAL_TTL_MS,
   isAuthShapedError,
   isLimitShapedError,
   planAccountFailoverSweep,
 } from "./account-failover-detector.js";
+
+// This file creates codex agents as a generic fixture for account-failover cancellation
+// behavior unrelated to the Codex child guard, so default guard health to green the way a real
+// daemon reaches it once the self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 import type {
   AgentClient,
   AgentSession,

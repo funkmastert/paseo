@@ -96,7 +96,7 @@ describe("paseo daemon bootstrap", () => {
       const agent = await daemonHandle.daemon.agentManager.createAgent(
         { provider: "codex", cwd: agentCwd },
         undefined,
-        { workspaceId: undefined },
+        { workspaceId: undefined, origin: "human" },
       );
       await daemonHandle.daemon.agentManager.appendTimelineItem(agent.id, {
         type: "assistant_message",
@@ -123,7 +123,7 @@ describe("paseo daemon bootstrap", () => {
       const agent = await daemonHandle.daemon.agentManager.createAgent(
         { provider: "codex", cwd: agentCwd },
         undefined,
-        { workspaceId: undefined },
+        { workspaceId: undefined, origin: "human" },
       );
       await daemonHandle.daemon.agentManager.appendTimelineItem(agent.id, {
         type: "assistant_message",
@@ -313,6 +313,7 @@ describe("paseo daemon bootstrap", () => {
       await expect(
         daemon.agentManager.createAgent({ provider: "codex", cwd: agentCwd }, undefined, {
           workspaceId: undefined,
+          origin: "human",
         }),
       ).rejects.toThrow(/disabled/i);
       expect((await client.getDaemonStatus()).relay?.enabled).toBe(true);
@@ -1235,7 +1236,7 @@ async function beginDaemonShutdownWithAgentClosing(): Promise<BlockedDaemonShutd
       cwd: agentCwd,
     },
     undefined,
-    { workspaceId: undefined },
+    { workspaceId: undefined, origin: "human" },
   );
 
   heldAgentClose.arm();
@@ -1252,7 +1253,7 @@ async function beginDaemonShutdownWithAgentClosing(): Promise<BlockedDaemonShutd
             cwd: agentCwd,
           },
           undefined,
-          { workspaceId: undefined },
+          { workspaceId: undefined, origin: "human" },
         );
         return "created";
       } catch (error) {
