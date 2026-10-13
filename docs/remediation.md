@@ -113,7 +113,7 @@ The ladder polls in-flight agents every 60 seconds on an unref'd timer and re-re
 
 ## Plugging in a monitor
 
-Take a `RemediationSink` at construction. `bootstrap.ts` creates one forwarding sink (`createForwardingRemediationSink()`) before the monitors and attaches the ladder once the WebSocket server exists; an observation before then is dropped, and the monitor reports again next sweep. Report every sweep while the condition holds and once after it clears. Accumulate `attempts` across the episode yourself. Do not push about the condition: the ladder owns that push. Test against a fake sink that records observations.
+Take a `RemediationSink` at construction. `bootstrap.ts` creates one forwarding sink (`createForwardingRemediationSink()`) before the monitors and attaches the ladder once the WebSocket server exists; an observation before then is dropped, and the monitor reports again next sweep. Report every sweep while the condition holds and once after it clears. The ladder keeps its episodes across a restart and your monitor's memory doesn't, so on your first sweep after a start, report every key's current state, `active: false` included. Otherwise an episode an earlier process left open never closes, and the next real occurrence lands in it without a push. The account sign-out sweep's `reconciled` set does this. A one-time report has to come after the attach, or it is dropped and never sent again. Accumulate `attempts` across the episode yourself. Do not push about the condition: the ladder owns that push. Test against a fake sink that records observations.
 
 Add a row below for a new kind, and add the kind to `RemediationConditionKind`.
 
