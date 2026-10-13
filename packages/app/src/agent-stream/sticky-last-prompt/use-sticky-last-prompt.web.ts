@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import type { StreamItem } from "@/types/stream";
 import {
@@ -21,6 +21,8 @@ export interface UseStickyLastPromptResult {
   /** No-op on web: visibility comes from reading position instead. */
   reportVisibleRowIds: (visibleRowIds: ReadonlySet<string>) => void;
 }
+
+function noopReportVisibleRowIds(_visibleRowIds: ReadonlySet<string>): void {}
 
 /**
  * Derives sticky-bar visibility from the same reading-position signal the chat
@@ -48,10 +50,15 @@ export function useStickyLastPrompt(input: UseStickyLastPromptInput): UseStickyL
     publisher.publish({ prompt: lastPrompt, barVisible });
   });
 
-  // Reset before the items-driven recompute below runs, so a pane that switches agents without
-  // remounting never paints the previous agent's prompt first (mirrors use-chat-outline.ts's
-  // `activePrompt.publish(null)` reset keyed on agentId).
-  useEffect(() => {
+  // useLayoutEffect, not useEffect: StickyPromptOverlay subscribes to `publisher` directly via
+  // useSyncExternalStore, and that subscription forces the overlay to re-render on a publish
+  // regardless of memo (memo only bails out parent-driven re-renders, not a subscribed store's
+  // own notify). A layout effect's publish is flushed synchronously before the browser paints;
+  // a passive effect's publish lands only after that frame already painted, which is the flash
+  // this is fixing (mirrors use-chat-outline.ts's `activePrompt.publish(null)` reset keyed on
+  // agentId, upgraded here because the overlay is now memoized -- see sticky-prompt-fixes.json
+  // finding 2).
+  useLayoutEffect(() => {
     readingPositionRowIdRef.current = null;
     publisher.publish(NO_STICKY_PROMPT);
   }, [publisher, input.agentId]);
@@ -67,5 +74,12 @@ export function useStickyLastPrompt(input: UseStickyLastPromptInput): UseStickyL
     recomputeAndPublish();
   });
 
-  return { source: publisher, reportReadingPosition, reportVisibleRowIds: () => undefined };
+  return useMemo(
+    () => ({
+      source: publisher,
+      reportReadingPosition,
+      reportVisibleRowIds: noopReportVisibleRowIds,
+    }),
+    [publisher, reportReadingPosition],
+  );
 }
