@@ -25,24 +25,46 @@ export interface SendBroadcastPinnedPromptInput {
     turnId?: string;
   };
   makeSubmission: (serverId: string) => MessageSubmissionWriter;
+  /**
+   * True when a target should queue client-side instead of dispatching — the "queue" send
+   * behavior against a mid-turn agent, the same branch `runDefaultSendAction` takes in the
+   * ordinary composer. The daemon never sees the message; `queueLocally` writes it to that
+   * agent's local queue instead.
+   */
+  shouldQueueLocally?: (target: BroadcastPinnedTarget) => boolean;
+  queueLocally?: (target: BroadcastPinnedTarget) => void;
 }
 
 /**
- * Sends one prompt to every target agent, through the same path the ordinary composer uses
- * (`dispatchComposerAgentMessage`) — one request per agent, in parallel, so a running agent gets
- * its configured queue/steer/interrupt behavior exactly as if the text had been typed into its
- * own composer. `Promise.allSettled` means one target's failure never cancels the others.
+ * Sends one prompt to every target agent — one request per agent, in parallel — so a running
+ * agent gets its configured queue/steer/interrupt behavior exactly as if the text had been typed
+ * into its own composer. A target routed to `queueLocally` is queued client-side and never reaches
+ * `dispatchComposerAgentMessage`; every other target dispatches through that same path the
+ * ordinary composer uses. `Promise.allSettled` means one target's failure never cancels the
+ * others.
  */
 export async function sendBroadcastPinnedPrompt(
   input: SendBroadcastPinnedPromptInput,
 ): Promise<BroadcastSendResult> {
-  const { targets, text, getClient, resolveActiveTurn, makeSubmission } = input;
+  const {
+    targets,
+    text,
+    getClient,
+    resolveActiveTurn,
+    makeSubmission,
+    shouldQueueLocally,
+    queueLocally,
+  } = input;
   if (targets.length === 0) {
     return { succeeded: [], failed: [] };
   }
 
   const outcomes = await Promise.allSettled(
     targets.map(async (target) => {
+      if (shouldQueueLocally?.(target)) {
+        queueLocally?.(target);
+        return target.id;
+      }
       const client = getClient(target.serverId);
       if (!client) {
         throw new Error("Host disconnected.");

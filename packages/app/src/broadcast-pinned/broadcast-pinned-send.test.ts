@@ -147,4 +147,28 @@ describe("sendBroadcastPinnedPrompt", () => {
       expect.objectContaining({ activeTurnBehavior: "interrupt" }),
     );
   });
+
+  it("queues a target locally instead of dispatching, when shouldQueueLocally says so", async () => {
+    const sendAgentMessage = vi.fn().mockResolvedValue(undefined);
+    const client: ComposerSendClient = { sendAgentMessage, uploadFile: vi.fn() };
+    const queueLocally = vi.fn();
+    const targets = [target({ id: "queued" }), target({ id: "dispatched" })];
+
+    const result = await sendBroadcastPinnedPrompt({
+      targets,
+      text: "status please",
+      getClient: () => client,
+      resolveActiveTurn: () => DEFAULT_ACTIVE_TURN,
+      makeSubmission: noopSubmission,
+      shouldQueueLocally: (t) => t.id === "queued",
+      queueLocally,
+    });
+
+    expect(queueLocally).toHaveBeenCalledTimes(1);
+    expect(queueLocally).toHaveBeenCalledWith(expect.objectContaining({ id: "queued" }));
+    expect(sendAgentMessage).toHaveBeenCalledTimes(1);
+    expect(sendAgentMessage).toHaveBeenCalledWith("dispatched", "status please", expect.anything());
+    expect(result.succeeded.sort()).toEqual(["dispatched", "queued"]);
+    expect(result.failed).toEqual([]);
+  });
 });
