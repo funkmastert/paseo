@@ -8,10 +8,9 @@
  * restores the sign the controller expects without changing the controller
  * itself.
  */
-export function offsetYToPseudoScrollTop(offsetY: number): number {
-  return offsetY === 0 ? 0 : -offsetY;
+function negateUnlessZero(value: number): number {
+  return value === 0 ? 0 : -value;
 }
 
-export function pseudoScrollTopToOffsetY(pseudoScrollTop: number): number {
-  return pseudoScrollTop === 0 ? 0 : -pseudoScrollTop;
-}
+export const offsetYToPseudoScrollTop = negateUnlessZero;
+export const pseudoScrollTopToOffsetY = negateUnlessZero;
