@@ -7,9 +7,11 @@
  * The call is one tiny Haiku turn, so it is billed: it runs only on a `suspect` account, at most
  * once per account per 15 minutes, and never while an agent is running on the account.
  */
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Logger } from "pino";
+import { z } from "zod";
 import { execCommand } from "../../utils/spawn.js";
 import { isAuthShapedError } from "./account-failover-detector.js";
 import type { AccountAuthProbeEvidence, AccountAuthProbeResult } from "./account-auth-health.js";
@@ -46,6 +48,17 @@ const PROBE_ARGS = [
 ];
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MIN_INTERVAL_MS = 15 * 60_000;
+/** How much of an inconclusive run's output the warning keeps. */
+const LOGGED_OUTPUT_CHARS = 500;
+
+/** What `execFile` rejects with: the output so far, the exit code, and whether it was killed. */
+const ExecFailureSchema = z.object({
+  stdout: z.string().optional(),
+  stderr: z.string().optional(),
+  message: z.string().optional(),
+  code: z.union([z.number(), z.string()]).nullish(),
+  killed: z.boolean().optional(),
+});
 
 /** `execCommand` rejects on a non-zero exit or a timeout; both are still a result to classify. */
 async function execProbeProcess(
@@ -62,21 +75,19 @@ async function execProbeProcess(
     });
     return { stdout, stderr, exitCode: 0, timedOut: false };
   } catch (error) {
-    const err = (typeof error === "object" && error !== null ? error : {}) as Record<
-      string,
-      unknown
-    >;
-    const text = (value: unknown) => (typeof value === "string" ? value : "");
+    const parsed = ExecFailureSchema.safeParse(error);
+    const failure = parsed.success ? parsed.data : {};
     return {
-      stdout: text(err.stdout),
-      stderr: text(err.stderr) || text(err.message),
-      exitCode: typeof err.code === "number" ? err.code : null,
-      timedOut: err.killed === true,
+      stdout: failure.stdout ?? "",
+      stderr: failure.stderr || failure.message || "",
+      exitCode: typeof failure.code === "number" ? failure.code : null,
+      timedOut: failure.killed === true,
     };
   }
 }
 
 export interface AccountAuthProbeOptions {
+  logger: Logger;
   runProcess?: RunProbeProcess;
   /** Rejects when no binary resolves. */
   resolveBinary?: () => Promise<string>;
@@ -92,6 +103,8 @@ export interface AccountAuthProbeRequest {
   configDir: string;
   /** The probe must never run while a turn is in flight on this account. */
   hasRunningAgent: boolean;
+  /** The sweep's clock, for the once-per-window limit. */
+  nowMs: number;
 }
 
 /**
@@ -99,6 +112,7 @@ export interface AccountAuthProbeRequest {
  * while that account has a running agent.
  */
 export class AccountAuthProbe {
+  private readonly logger: Logger;
   private readonly runProcess: RunProbeProcess;
   private readonly resolveBinary: () => Promise<string>;
   private readonly timeoutMs: number;
@@ -110,7 +124,8 @@ export class AccountAuthProbe {
   private running = new Set<string>();
   private finished: AccountAuthProbeEvidence[] = [];
 
-  constructor(options: AccountAuthProbeOptions = {}) {
+  constructor(options: AccountAuthProbeOptions) {
+    this.logger = options.logger;
     this.runProcess = options.runProcess ?? execProbeProcess;
     this.resolveBinary = options.resolveBinary ?? (() => resolveClaudeBinary());
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -125,8 +140,8 @@ export class AccountAuthProbe {
    * result waits in `takeFinished()`: a suspect account is not dead to failover, so nothing has
    * to wait for the answer.
    */
-  start(request: AccountAuthProbeRequest, nowMs: number): boolean {
-    if (!this.claim(request, nowMs)) return false;
+  start(request: AccountAuthProbeRequest): boolean {
+    if (!this.claim(request)) return false;
     void this.collect(request);
     return true;
   }
@@ -148,50 +163,70 @@ export class AccountAuthProbe {
   }
 
   /** Runs one probe now. Null when skipped: a skip is evidence of nothing. */
-  async run(
-    request: AccountAuthProbeRequest,
-    nowMs: number,
-  ): Promise<AccountAuthProbeResult | null> {
-    if (!this.claim(request, nowMs)) return null;
+  async run(request: AccountAuthProbeRequest): Promise<AccountAuthProbeResult | null> {
+    if (!this.claim(request)) return null;
     return this.probeClaimed(request);
   }
 
-  private claim(request: AccountAuthProbeRequest, nowMs: number): boolean {
+  private claim(request: AccountAuthProbeRequest): boolean {
     if (request.hasRunningAgent || this.running.has(request.providerId)) return false;
     const last = this.lastRunMs.get(request.providerId);
-    if (last !== undefined && nowMs - last < this.minIntervalMs) return false;
-    this.lastRunMs.set(request.providerId, nowMs);
+    if (last !== undefined && request.nowMs - last < this.minIntervalMs) return false;
+    this.lastRunMs.set(request.providerId, request.nowMs);
     this.running.add(request.providerId);
     return true;
   }
 
   private async probeClaimed(request: AccountAuthProbeRequest): Promise<AccountAuthProbeResult> {
     try {
-      return await this.probe(request.configDir);
-    } catch {
+      return await this.probe(request);
+    } catch (error) {
+      this.logger.warn(
+        { err: error, providerId: request.providerId },
+        "Account sign-in probe could not run the CLI",
+      );
       return "inconclusive";
     } finally {
       this.running.delete(request.providerId);
     }
   }
 
-  private async probe(configDir: string): Promise<AccountAuthProbeResult> {
+  private async probe(request: AccountAuthProbeRequest): Promise<AccountAuthProbeResult> {
     let binary: string;
     try {
       binary = await this.resolveBinary();
-    } catch {
+    } catch (error) {
+      this.logger.warn(
+        { err: error, providerId: request.providerId },
+        "Account sign-in probe found no claude binary",
+      );
       return "inconclusive";
     }
-    this.scratchDir ??= this.makeScratchDir();
     const result = await this.runProcess(binary, PROBE_ARGS, {
-      envOverlay: { CLAUDE_CONFIG_DIR: configDir },
-      cwd: this.scratchDir,
+      envOverlay: { CLAUDE_CONFIG_DIR: request.configDir },
+      cwd: this.ensureScratchDir(),
       timeoutMs: this.timeoutMs,
     });
 
-    if (result.timedOut) return "inconclusive";
-    if (isAuthShapedError(`${result.stdout}\n${result.stderr}`)) return "auth_failure";
-    if (result.exitCode === 0) return "success";
+    if (!result.timedOut) {
+      if (isAuthShapedError(`${result.stdout}\n${result.stderr}`)) return "auth_failure";
+      if (result.exitCode === 0) return "success";
+    }
+    this.logger.warn(
+      {
+        providerId: request.providerId,
+        exitCode: result.exitCode,
+        timedOut: result.timedOut,
+        stderr: result.stderr.slice(-LOGGED_OUTPUT_CHARS),
+      },
+      "Account sign-in probe was inconclusive",
+    );
     return "inconclusive";
+  }
+
+  /** The OS can purge tmp during a long daemon run, so a vanished directory is made again. */
+  private ensureScratchDir(): string {
+    if (!this.scratchDir || !existsSync(this.scratchDir)) this.scratchDir = this.makeScratchDir();
+    return this.scratchDir;
   }
 }

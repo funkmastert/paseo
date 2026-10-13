@@ -120,7 +120,7 @@ class Harness {
           this.nudges.push(input);
           return { kind: "sent", via: "replace" };
         },
-        handOffToFailover: async (agentId) => {
+        handOffToFailover: async ({ agentId }) => {
           this.handoffs.push(agentId);
           return { kind: "handed-off", lastError: "usage limit" };
         },

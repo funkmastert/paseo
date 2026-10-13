@@ -95,6 +95,12 @@ export type StallHandoffResult =
   | { kind: "not-running" }
   | { kind: "failed"; error: string };
 
+/** A stuck turn to cancel for account failover, and the dead account's reason. */
+export interface StallHandoffRequest {
+  agentId: string;
+  cancelReason: AccountDeadCancelReason;
+}
+
 /** Everything the sweep touches, as seams. Production wiring is in bootstrap.ts. */
 export interface StallSweepDependencies {
   listAgents(): StallSweepAgentSummary[];
@@ -105,10 +111,7 @@ export interface StallSweepDependencies {
   /** Sends `prompt` as it is (already in its envelope), replacing the stuck run. */
   nudgeAgent(input: { agentId: string; prompt: string }): Promise<StallNudgeResult>;
   /** Cancels the stuck turn so it leaves a limit- or auth-shaped `lastError` for account failover. */
-  handOffToFailover(
-    agentId: string,
-    cancelReason: AccountDeadCancelReason,
-  ): Promise<StallHandoffResult>;
+  handOffToFailover(input: StallHandoffRequest): Promise<StallHandoffResult>;
   /**
    * The newest `limit` timeline rows, oldest first; null when the agent is not loaded. The stall
    * judgment and the background-wait rule read it. Absent: neither runs.
@@ -1205,7 +1208,10 @@ export class AgentStallSweep {
     episode.attempts.push(describeSnapshot(snapshot, this.now()));
 
     if (!health.askable) {
-      const result = await this.deps.handOffToFailover(agent.id, health.cancelReason);
+      const result = await this.deps.handOffToFailover({
+        agentId: agent.id,
+        cancelReason: health.cancelReason,
+      });
       const at = new Date(this.now()).toISOString();
       if (result.kind === "failed") {
         episode.exhausted = true;
@@ -1734,10 +1740,9 @@ async function nudgeNow(
 /** The production handoff: a cancel with the dead account's reason, checked for the error
  * failover reads. */
 export async function handOffStalledAgentToFailover(
-  agentManager: Pick<AgentManager, "cancelAgentRun" | "getAgent">,
-  agentId: string,
-  cancelReason: AccountDeadCancelReason,
+  input: StallHandoffRequest & { agentManager: Pick<AgentManager, "cancelAgentRun" | "getAgent"> },
 ): Promise<StallHandoffResult> {
+  const { agentManager, agentId, cancelReason } = input;
   try {
     const result = await agentManager.cancelAgentRun(agentId, cancelReason);
     if (result.status === "not_running") return { kind: "not-running" };

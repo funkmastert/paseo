@@ -131,9 +131,9 @@ export interface PlanAccountFailoverSweepInput {
   /** The previous plan's `providerSightings`, plus whatever a move recorded since. */
   previousProviderSightings: ReadonlyMap<string, ProviderLimitSighting>;
   /**
-   * This sweep's `AccountAuthTracker.providerIdsIn("signed_out")`. Unlike the reactive sightings above,
-   * sign-in evidence carries no TTL of its own (account-auth-health.ts) — it stays dead here for
-   * as long as the tracker says so, with no decay in this function.
+   * The accounts the sign-in tracker holds `signed_out` this sweep. Unlike the reactive sightings
+   * above, sign-in evidence carries no TTL of its own (account-auth-health.ts) — it stays dead here
+   * for as long as the tracker says so, with no decay in this function.
    */
   signedOutProviderIds: ReadonlySet<string>;
   nowMs: number;

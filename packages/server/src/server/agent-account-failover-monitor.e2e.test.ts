@@ -234,6 +234,7 @@ async function createHarness(): Promise<Harness> {
         isClaimedByRestartRecovery: (agentId) => claimedByRestartRecovery.has(agentId),
         // Never the real CLI: a probe run is recorded and answered by the test.
         accountAuthProbe: new AccountAuthProbe({
+          logger: pino({ level: "silent" }),
           runProcess: async (_command, _args, options) => {
             probeRuns.push(options.envOverlay["CLAUDE_CONFIG_DIR"] ?? "");
             return probeReply();

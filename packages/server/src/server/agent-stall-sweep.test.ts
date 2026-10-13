@@ -87,7 +87,7 @@ class Harness {
         this.nudges.push(input);
         return this.nudgeResult;
       },
-      handOffToFailover: async (agentId, cancelReason) => {
+      handOffToFailover: async ({ agentId, cancelReason }) => {
         this.handoffs.push(agentId);
         this.handoffReasons.push(cancelReason);
         return this.handoffResult;
@@ -497,7 +497,11 @@ describe("handOffStalledAgentToFailover", () => {
 
   test("cancels with account-capped and accepts a limit-shaped lastError", async () => {
     const { cancelReasons, manager } = fakeAgentManager("You've hit your monthly spend limit");
-    const result = await handOffStalledAgentToFailover(manager, "a1", "account-capped");
+    const result = await handOffStalledAgentToFailover({
+      agentManager: manager,
+      agentId: "a1",
+      cancelReason: "account-capped",
+    });
     expect(cancelReasons).toEqual(["account-capped"]);
     expect(result).toEqual({
       kind: "handed-off",
@@ -509,14 +513,22 @@ describe("handOffStalledAgentToFailover", () => {
     const { cancelReasons, manager } = fakeAgentManager(
       "Account claude-personal is signed out (Failed to authenticate), and this turn stalled",
     );
-    const result = await handOffStalledAgentToFailover(manager, "a1", "account-signed-out");
+    const result = await handOffStalledAgentToFailover({
+      agentManager: manager,
+      agentId: "a1",
+      cancelReason: "account-signed-out",
+    });
     expect(cancelReasons).toEqual(["account-signed-out"]);
     expect(result.kind).toBe("handed-off");
   });
 
   test("fails when the cancel settles without leaving an account-dead error", async () => {
     const { manager } = fakeAgentManager("some unrelated error");
-    const result = await handOffStalledAgentToFailover(manager, "a1", "account-capped");
+    const result = await handOffStalledAgentToFailover({
+      agentManager: manager,
+      agentId: "a1",
+      cancelReason: "account-capped",
+    });
     expect(result).toEqual({
       kind: "failed",
       error: "the cancel settled but left no limit- or auth-shaped error for failover to read",

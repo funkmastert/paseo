@@ -322,10 +322,13 @@ export class ClaudeCredentialsUnreadableError extends Error {
   }
 }
 
-function asUnreadable(error: unknown, message: string): ClaudeCredentialsUnreadableError {
-  return error instanceof ClaudeCredentialsUnreadableError
-    ? error
-    : new ClaudeCredentialsUnreadableError(message, { cause: error });
+function asUnreadable(input: {
+  error: unknown;
+  message: string;
+}): ClaudeCredentialsUnreadableError {
+  return input.error instanceof ClaudeCredentialsUnreadableError
+    ? input.error
+    : new ClaudeCredentialsUnreadableError(input.message, { cause: input.error });
 }
 
 /** Resolves to the item's text; null only when the Keychain holds no such item. */
@@ -385,11 +388,11 @@ function parseClaudeKeychainRaw(raw: string): unknown | null {
   return creds.data.claudeAiOauth?.accessToken ? parsed : null;
 }
 
-async function readKeychainItem(
-  run: ClaudeKeychainCommandRunner,
-  args: string[],
-): Promise<unknown | null> {
-  const raw = await run(args);
+async function readKeychainItem(input: {
+  run: ClaudeKeychainCommandRunner;
+  args: string[];
+}): Promise<unknown | null> {
+  const raw = await input.run(input.args);
   return raw === null ? null : parseClaudeKeychainRaw(raw);
 }
 
@@ -409,13 +412,13 @@ export async function readClaudeKeychainCredentials(
   let failure: unknown = null;
   for (const args of lookups) {
     try {
-      const parsed = await readKeychainItem(run, args);
+      const parsed = await readKeychainItem({ run, args });
       if (parsed) return parsed;
     } catch (error) {
       failure ??= error;
     }
   }
-  if (failure) throw asUnreadable(failure, "The Keychain could not be read");
+  if (failure) throw asUnreadable({ error: failure, message: "The Keychain could not be read" });
   return null;
 }
 
@@ -453,7 +456,10 @@ export async function readClaudeConfigDirKeychainCredentials(
   run: ClaudeKeychainCommandRunner = runSecurityCommand,
   account: string = claudeKeychainAccount(),
 ): Promise<unknown | null> {
-  return readKeychainItem(run, ["find-generic-password", "-a", account, "-w", "-s", service]);
+  return readKeychainItem({
+    run,
+    args: ["find-generic-password", "-a", account, "-w", "-s", service],
+  });
 }
 
 export class ClaudeQuotaProvider implements ProviderUsageFetcher {
@@ -509,9 +515,9 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
       return unavailableUsage(this);
     }
     if (!credentials) {
-      // `.claude.json` keeps naming an account after its OAuth session can no longer refresh, so
-      // its presence — not "signed-in" — is what makes a missing credential worth a reading. A config dir nothing ever signed into reports no reading at
-      // all: there is no account there to be signed out of.
+      // `.claude.json` keeps naming the account after its session can no longer refresh, so a
+      // missing credential counts only where it names one ("signed-in" means no more than that).
+      // A config dir nothing ever signed into gets no reading: it has no account to sign out of.
       this.authReading =
         readClaudeAccountAuth(this.claudeHome).state === "signed-in" ? "credentials_missing" : null;
       return unavailableUsage(this);
@@ -642,7 +648,7 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
         ? await this.readConfigDirKeychainCredentials(this.keychainService)
         : await this.readKeychainCredentials();
     } catch (error) {
-      throw asUnreadable(error, "The Keychain could not be read");
+      throw asUnreadable({ error, message: "The Keychain could not be read" });
     }
     if (raw === null && this.keychainService) {
       this.logger.warn(

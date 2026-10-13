@@ -523,6 +523,28 @@ describe("ProviderUsageService", () => {
     expect(readings.has("codex")).toBe(false);
   });
 
+  it("dates a forced read's auth reading by the forced read, not the cached list", async () => {
+    const t0 = Date.parse("2026-06-19T00:00:00.000Z");
+    let now = t0;
+    let reading: AccountAuthReading = "rejected_expired";
+    const service = new ProviderUsageService({
+      logger: createLogger(),
+      now: () => now,
+      cacheTtlMs: 60_000,
+      fetchers: [unavailableFetcher("claude-personal", () => reading)],
+    });
+
+    await service.listUsage();
+    now += 10_000;
+    reading = "ok";
+    await service.listUsage({ forceRefreshProviderIds: new Set(["claude-personal"]) });
+
+    expect(service.getAuthReadings().get("claude-personal")).toEqual({
+      reading: "ok",
+      atMs: t0 + 10_000,
+    });
+  });
+
   it("writes a forced row back into the cache, so a later plain read sees it", async () => {
     let now = Date.parse("2026-06-19T00:00:00.000Z");
     let reads = 0;

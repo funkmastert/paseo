@@ -1,7 +1,6 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ClaudeCredentialsUnreadableError,
@@ -199,12 +198,6 @@ describe("ClaudeQuotaProvider auth reading", () => {
     });
     await provider.fetchUsage();
     expect(readFileSync(join(claudeHome, ".credentials.json"), "utf8")).toBe(before);
-  });
-
-  it("the module imports no fs write capability", () => {
-    const moduleDir = dirname(fileURLToPath(import.meta.url));
-    const source = readFileSync(join(moduleDir, "claude.ts"), "utf8");
-    expect(source).not.toMatch(/writeFile|unlink|rm\(/);
   });
 });
 

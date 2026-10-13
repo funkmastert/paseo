@@ -2919,8 +2919,6 @@ export class Session {
       case "checkout.forge.set_auto_merge.request":
       case "checkout.github.set_auto_merge.request":
         return this.checkoutSession.handleCheckoutForgeSetAutoMergeRequest(msg);
-      case "account.claude.sign_in.request":
-        return this.handleAccountClaudeSignInRequest(msg);
       case "checkout.forge.get_check_details.request":
       case "checkout.github.get_check_details.request":
         return this.checkoutSession.handleCheckoutForgeGetCheckDetailsRequest(msg);
@@ -3082,6 +3080,8 @@ export class Session {
         return this.providerCatalogSession.handleProviderDiagnosticRequest(msg);
       case "provider.usage.list.request":
         return this.providerCatalogSession.handleProviderUsageListRequest(msg);
+      case "account.claude.sign_in.request":
+        return this.handleAccountClaudeSignInRequest(msg);
       default:
         return undefined;
     }

@@ -14,9 +14,7 @@ import type { WorkspaceProvisioningService } from "./session/workspace-provision
 import type { ProviderUsageService } from "../services/quota-fetcher/service.js";
 import {
   DEFAULT_REACTIVE_SIGNAL_TTL_MS,
-  failureTimeMs,
   isAccountDeadError,
-  isAuthShapedError,
   isLimitShapedError,
   parseResetTimeHint,
   planAccountFailoverSweep,
@@ -24,15 +22,8 @@ import {
   type ProviderLimitSighting,
 } from "./agent/account-failover-detector.js";
 import { AccountAuthProbe } from "./agent/account-auth-probe.js";
-import {
-  AccountAuthTracker,
-  readingState,
-  type AccountAuthProbeEvidence,
-  type AccountAuthReading,
-  type AccountAuthReadingInput,
-  type AccountAuthTurnFailureInput,
-} from "./agent/account-auth-health.js";
-import type { AccountAuthReadingAt } from "../services/quota-fetcher/service.js";
+import { AccountAuthTracker } from "./agent/account-auth-health.js";
+import { AccountAuthSweep } from "./agent/account-auth-sweep.js";
 import {
   headroomByProvider,
   saturatedProviderIds,
@@ -65,17 +56,9 @@ import {
 import { formatSystemNotificationPrompt, sendPromptToAgent } from "./agent/agent-prompt.js";
 import { pacedResume, unpacedResume, type PaceResume } from "./agent/resume-pacer.js";
 import type { PushNotificationSender } from "./push/index.js";
-import {
-  NULL_REMEDIATION_SINK,
-  type RemediationObservation,
-  type RemediationSink,
-} from "./remediation/contract.js";
+import { NULL_REMEDIATION_SINK, type RemediationSink } from "./remediation/contract.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
-/** How often a suspect or signed-out account's usage is re-read past the cache: its lifetime. */
-const AUTH_REREAD_INTERVAL_MS = 5 * 60_000;
-/** How long a suspect reading a probe answered with a sign-in is ignored for that account. */
-const PROBE_QUIETS_READING_MS = 6 * 60 * 60_000;
 const DEFAULT_MIGRATION_CONCURRENCY = 3;
 /**
  * Resume sends allowed per migration, the first one included — so two retries, one per sweep.
@@ -210,18 +193,8 @@ export class AccountFailoverMonitor {
   private readonly reactiveSignalTtlMs: number;
   private readonly now: () => number;
   private readonly accountIdentity: PoolAccountIdentityTracker;
-  private readonly accountAuth: AccountAuthTracker;
-  private readonly accountAuthProbe: AccountAuthProbe;
-  /** When each suspect or signed-out account's usage was last read past the cache. */
-  private authRereadAtMs = new Map<string, number>();
-  /** What the ladder was last told about each signed-out account. */
-  private signedOutReported = new Map<string, string>();
-  /**
-   * Per account, each suspect reading a probe has since answered with a sign-in, and until when it
-   * is ignored. Without it a Keychain item looked up under the wrong name reads as missing on every
-   * usage read, and every read buys another billed probe.
-   */
-  private quietedReadings = new Map<string, Map<AccountAuthReading, number>>();
+  /** Which pool accounts can sign in (account-auth-sweep.ts). */
+  private readonly accountAuth: AccountAuthSweep;
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweepInFlight = false;
   private sightings = new Map<string, LimitErrorSighting>();
@@ -249,8 +222,12 @@ export class AccountFailoverMonitor {
     this.reactiveSignalTtlMs = options.reactiveSignalTtlMs ?? DEFAULT_REACTIVE_SIGNAL_TTL_MS;
     this.now = options.now ?? Date.now;
     this.accountIdentity = options.accountIdentity ?? new PoolAccountIdentityTracker();
-    this.accountAuth = options.accountAuth ?? new AccountAuthTracker();
-    this.accountAuthProbe = options.accountAuthProbe ?? new AccountAuthProbe();
+    this.accountAuth = new AccountAuthSweep({
+      tracker: options.accountAuth ?? new AccountAuthTracker(),
+      probe: options.accountAuthProbe ?? new AccountAuthProbe({ logger: options.logger }),
+      providerUsage: options.providerUsage,
+      remediationSink: options.remediationSink ?? NULL_REMEDIATION_SINK,
+    });
   }
 
   start(): void {
@@ -298,11 +275,11 @@ export class AccountFailoverMonitor {
     const agents = poolEntries.length > 0 ? this.listUnclaimedAgents() : [];
     const usage =
       poolEntries.length > 0
-        ? await this.readUsage({ forceRefreshProviderIds: this.dueAuthRereads(nowMs) })
+        ? await this.readUsage({ forceRefreshProviderIds: this.accountAuth.dueRereads(nowMs) })
         : null;
     // Same reasoning as identity above: whether an account can sign in is worth knowing whether
     // or not failover is enabled to act on it.
-    await this.observeAccountAuth(poolEntries, agents, nowMs).catch((error) => {
+    await this.accountAuth.observe({ accounts: poolEntries, agents, nowMs }).catch((error) => {
       this.options.logger.warn({ err: error }, "Account auth check failed");
     });
     if (daemonConfig.accountFailover?.enabled === false) {
@@ -327,7 +304,7 @@ export class AccountFailoverMonitor {
       usage: usage?.providers ?? null,
       previousSightings: this.sightings,
       previousProviderSightings: this.providerSightings,
-      signedOutProviderIds: this.accountAuth.providerIdsIn("signed_out"),
+      signedOutProviderIds: this.accountAuth.signedOutProviderIds(),
       nowMs,
       reactiveSignalTtlMs: this.reactiveSignalTtlMs,
       migrateSubagents: config.migrateSubagents,
@@ -725,134 +702,6 @@ export class AccountFailoverMonitor {
   }
 
   /**
-   * Suspect and signed-out accounts due a usage read past the cache, about once per cache
-   * lifetime each. A sign-in started from the app forces its own read when the login exits.
-   */
-  private dueAuthRereads(nowMs: number): Set<string> {
-    const standing = new Set([
-      ...this.accountAuth.providerIdsIn("suspect"),
-      ...this.accountAuth.providerIdsIn("signed_out"),
-    ]);
-    for (const providerId of this.authRereadAtMs.keys()) {
-      if (!standing.has(providerId)) this.authRereadAtMs.delete(providerId);
-    }
-    const due = new Set<string>();
-    for (const providerId of standing) {
-      const last = this.authRereadAtMs.get(providerId);
-      if (last !== undefined && nowMs - last < AUTH_REREAD_INTERVAL_MS) continue;
-      this.authRereadAtMs.set(providerId, nowMs);
-      due.add(providerId);
-    }
-    return due;
-  }
-
-  /**
-   * Feeds this sweep's evidence to the AccountAuthTracker: auth-shaped turn failures, the usage
-   * fetcher's newest auth reading for every pool account (so an idle account nobody runs on is
-   * still caught), and the probes that finished since the last sweep. Then starts a probe for each
-   * suspect in the background and tells the ladder what changed.
-   */
-  private async observeAccountAuth(
-    accounts: readonly PoolAccount[],
-    agents: readonly AccountFailoverAgentSummary[],
-    nowMs: number,
-  ): Promise<void> {
-    const poolProviderIds = new Set(accounts.map((account) => account.providerId));
-    const turnFailures: AccountAuthTurnFailureInput[] = agents.flatMap((agent) =>
-      poolProviderIds.has(agent.provider) && isAuthShapedError(agent.lastError)
-        ? [
-            {
-              providerId: agent.provider,
-              error: agent.lastError,
-              atMs: failureTimeMs(agent.lastTimelineAt, nowMs),
-            },
-          ]
-        : [],
-    );
-    const probes = this.accountAuthProbe.takeFinished();
-    const latestReadings = this.options.providerUsage.getAuthReadings();
-    this.quietReadingsProbesAnswered({ probes, latestReadings, nowMs });
-    const readings: AccountAuthReadingInput[] = [...latestReadings].flatMap(
-      ([providerId, { reading, atMs }]) =>
-        poolProviderIds.has(providerId) && !this.isQuieted({ providerId, reading, atMs })
-          ? [{ providerId, reading, atMs }]
-          : [],
-    );
-    this.accountAuth.observe({ accounts, turnFailures, readings, probes });
-
-    // A suspect account is not dead to failover, so nothing this sweep waits for the answer.
-    for (const providerId of this.accountAuth.providerIdsIn("suspect")) {
-      const configDir = accounts.find((account) => account.providerId === providerId)?.configDir;
-      if (!configDir) continue;
-      const hasRunningAgent = agents.some(
-        (agent) => agent.provider === providerId && agent.lifecycle === "running",
-      );
-      this.accountAuthProbe.start({ providerId, configDir, hasRunningAgent }, nowMs);
-    }
-
-    await this.reportSignedOutAccounts();
-  }
-
-  /**
-   * A probe that signed in answered the suspect reading standing then. That same kind of reading is
-   * ignored for six hours after, so a fetcher that cannot see what the CLI sees costs one probe per
-   * six hours, not one per fifteen minutes. Sign-in failures are never quieted.
-   */
-  private quietReadingsProbesAnswered(input: {
-    probes: readonly AccountAuthProbeEvidence[];
-    latestReadings: ReadonlyMap<string, AccountAuthReadingAt>;
-    nowMs: number;
-  }): void {
-    for (const [providerId, quieted] of this.quietedReadings) {
-      for (const [reading, untilMs] of quieted) {
-        if (untilMs <= input.nowMs) quieted.delete(reading);
-      }
-      if (quieted.size === 0) this.quietedReadings.delete(providerId);
-    }
-    for (const probe of input.probes) {
-      if (probe.result !== "success") continue;
-      const latest = input.latestReadings.get(probe.providerId);
-      if (!latest || readingState(latest.reading) !== "suspect") continue;
-      const quieted = this.quietedReadings.get(probe.providerId) ?? new Map();
-      quieted.set(latest.reading, probe.atMs + PROBE_QUIETS_READING_MS);
-      this.quietedReadings.set(probe.providerId, quieted);
-    }
-  }
-
-  private isQuieted(input: AccountAuthReadingInput): boolean {
-    const untilMs = this.quietedReadings.get(input.providerId)?.get(input.reading);
-    return untilMs !== undefined && input.atMs < untilMs;
-  }
-
-  /**
-   * One urgent push per sign-out episode, naming the account, its login and the sign-in command.
-   * The ladder hears about an episode when it opens and again only if what it would say changes,
-   * and once more when the account stops being signed out (signed in, disabled, or removed).
-   */
-  private async reportSignedOutAccounts(): Promise<void> {
-    const sink = this.options.remediationSink ?? NULL_REMEDIATION_SINK;
-    const standing = new Set<string>();
-    for (const providerId of this.accountAuth.providerIdsIn("signed_out")) {
-      const record = this.accountAuth.stateFor(providerId);
-      if (record?.state !== "signed_out") continue;
-      standing.add(providerId);
-      const summary =
-        `${providerId} can't authenticate (${record.summary}). Sign in as ` +
-        `${record.email ?? "its account"}: ${record.fixCommand}`;
-      if (this.signedOutReported.get(providerId) === summary) continue;
-      await sink.observe(signedOutObservation(providerId, true, summary));
-      this.signedOutReported.set(providerId, summary);
-    }
-    for (const providerId of this.signedOutReported.keys()) {
-      if (standing.has(providerId)) continue;
-      await sink.observe(
-        signedOutObservation(providerId, false, `${providerId} is no longer signed out.`),
-      );
-      this.signedOutReported.delete(providerId);
-    }
-  }
-
-  /**
    * Which Claude login each pool account is signed into, so two providers that turn out to be one
    * account are never a rescue target for each other. A file read per
    * entry (docs/providers.md), so it is cheap enough to do every sweep and does not need caching.
@@ -985,7 +834,7 @@ export class AccountFailoverMonitor {
         workspaceProvisioning: this.options.workspaceProvisioning,
         logger,
         paceResume: this.options.paceResume,
-        sourceSignedOut: this.accountAuth.stateFor(agent.provider)?.state === "signed_out",
+        sourceSignedOut: this.accountAuth.isSignedOut(agent.provider),
       });
     } catch (error) {
       logger.warn(
@@ -1211,20 +1060,4 @@ function strandingEvidence(input: {
     "Stranded agents:",
     ...lines,
   ].join("\n");
-}
-
-function signedOutObservation(
-  providerId: string,
-  active: boolean,
-  summary: string,
-): RemediationObservation {
-  return {
-    key: `account-signed-out:${providerId}`,
-    kind: "account-signed-out",
-    active,
-    remedy: "none",
-    level: "urgent",
-    title: `Claude account signed out: ${providerId}`,
-    summary,
-  };
 }

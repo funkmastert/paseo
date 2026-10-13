@@ -232,3 +232,70 @@ describe("AccountAuthTracker", () => {
     }
   });
 });
+
+describe("AccountAuthTracker transitions", () => {
+  const PERSONAL = "claude-personal";
+  const failure = (atMs: number) => ({ providerId: PERSONAL, error: "Not logged in", atMs });
+  const reading = (value: "ok" | "rejected_expired", atMs: number) => ({
+    providerId: PERSONAL,
+    reading: value,
+    atMs,
+  });
+
+  it("keeps a sign-out when a later reading only says the token expired", () => {
+    const tracker = new AccountAuthTracker();
+    tracker.observe({ accounts: [account()], turnFailures: [failure(T0)] });
+    const result = tracker.observe({
+      accounts: [account()],
+      readings: [reading("rejected_expired", T0 + MIN)],
+    });
+    expect(tracker.stateFor(PERSONAL)?.state).toBe("signed_out");
+    expect(result.closed).toEqual([]);
+  });
+
+  it("reads ok when an ok reading is newer than the failure seen with it", () => {
+    const tracker = new AccountAuthTracker();
+    tracker.observe({
+      accounts: [account()],
+      turnFailures: [failure(T0)],
+      readings: [reading("ok", T0 + MIN)],
+    });
+    expect(tracker.stateFor(PERSONAL)?.state).toBe("ok");
+  });
+
+  it("reads signed_out when a failure and an ok reading carry the same instant", () => {
+    const tracker = new AccountAuthTracker();
+    tracker.observe({
+      accounts: [account()],
+      turnFailures: [failure(T0)],
+      readings: [reading("ok", T0)],
+    });
+    expect(tracker.stateFor(PERSONAL)?.state).toBe("signed_out");
+  });
+
+  it("stays ok when the failure from before the recovery is seen again", () => {
+    const tracker = new AccountAuthTracker();
+    tracker.observe({ accounts: [account()], turnFailures: [failure(T0)] });
+    tracker.observe({ accounts: [account()], readings: [reading("ok", T0 + MIN)] });
+    // The agent that failed still carries its old error on every later sweep.
+    const result = tracker.observe({ accounts: [account()], turnFailures: [failure(T0)] });
+    expect(tracker.stateFor(PERSONAL)?.state).toBe("ok");
+    expect(result.opened).toEqual([]);
+  });
+
+  it("lists the records standing in a state", () => {
+    const tracker = new AccountAuthTracker();
+    tracker.observe({
+      accounts: [
+        account({ providerId: "a" }),
+        account({ providerId: "b" }),
+        account({ providerId: "c" }),
+      ],
+      turnFailures: [{ providerId: "a", error: "Not logged in", atMs: T0 }],
+      readings: [{ providerId: "b", reading: "rejected_expired", atMs: T0 }],
+    });
+    expect(tracker.recordsIn("signed_out").map((record) => record.providerId)).toEqual(["a"]);
+    expect(tracker.recordsIn("suspect").map((record) => record.providerId)).toEqual(["b"]);
+    expect(tracker.recordsIn("ok").map((record) => record.providerId)).toEqual(["c"]);
+  });
+});

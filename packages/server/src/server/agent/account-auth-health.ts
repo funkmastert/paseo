@@ -289,12 +289,10 @@ export class AccountAuthTracker {
     return this.records.get(providerId) ?? null;
   }
 
-  /** The providers standing in `state`. */
-  providerIdsIn(state: AccountAuthState): Set<string> {
-    const ids = new Set<string>();
-    for (const record of this.records.values()) {
-      if (record.state === state) ids.add(record.providerId);
-    }
-    return ids;
+  /** The records standing in `state`. */
+  recordsIn(state: "ok"): AccountAuthOkRecord[];
+  recordsIn(state: AccountAuthProblemRecord["state"]): AccountAuthProblemRecord[];
+  recordsIn(state: AccountAuthState): AccountAuthRecord[] {
+    return [...this.records.values()].filter((record) => record.state === state);
   }
 }

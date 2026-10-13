@@ -1342,8 +1342,7 @@ function createAgentStallSweep(input: {
           { agentManager, agentStorage, logger, paceResume: input.paceResume },
           nudge,
         ),
-      handOffToFailover: (agentId, cancelReason) =>
-        handOffStalledAgentToFailover(agentManager, agentId, cancelReason),
+      handOffToFailover: (handoff) => handOffStalledAgentToFailover({ ...handoff, agentManager }),
       // Feature 10 (docs/jev.md) and the background-wait rule (docs/stalled-agents.md). Timeline
       // reads only: a judgment is recorded in the decision store, never as a timeline row, which
       // would re-date an account-failover failure.
