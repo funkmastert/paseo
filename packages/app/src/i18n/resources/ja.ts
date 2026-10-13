@@ -206,8 +206,8 @@ export const ja: TranslationResources = {
     empty: "このエージェントとチャットを始めましょう...",
     scrollToBottom: "下にスクロール",
     stickyPromptJumpToOriginal: "元のプロンプトに移動",
-    stickyPromptExpand: "プロンプトを展開",
-    stickyPromptCollapse: "プロンプトを折りたたむ",
+    stickyPromptShowFull: "プロンプト全文を表示",
+    stickyPromptViewerTitle: "プロンプト全文",
     historyLoadFailed: "エージェントの履歴を読み込めませんでした",
     messageCapped: "このメッセージは上限で切り詰められました（{{bytes}}バイト）。",
     permission: {

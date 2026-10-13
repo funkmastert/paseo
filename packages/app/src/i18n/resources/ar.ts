@@ -206,8 +206,8 @@ export const ar: TranslationResources = {
     empty: "ابدأ الدردشة مع هذا الوكيل...",
     scrollToBottom: "قم بالتمرير إلى الأسفل",
     stickyPromptJumpToOriginal: "الانتقال إلى الطلب الأصلي",
-    stickyPromptExpand: "توسيع الطلب",
-    stickyPromptCollapse: "طي الطلب",
+    stickyPromptShowFull: "إظهار الطلب الكامل",
+    stickyPromptViewerTitle: "الطلب الكامل",
     historyLoadFailed: "تعذر تحميل سجل الوكيل",
     messageCapped: "تم اقتطاع هذه الرسالة ({{bytes}} بايت).",
     permission: {

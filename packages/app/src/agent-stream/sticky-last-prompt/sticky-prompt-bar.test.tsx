@@ -12,6 +12,37 @@ vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
+vi.mock("@/components/adaptive-modal-sheet", async () => {
+  const ReactModule = await import("react");
+  const AdaptiveModalSheet = ({
+    header,
+    visible,
+    onClose,
+    children,
+    testID,
+  }: {
+    header: { title: string; actions?: React.ReactNode };
+    visible: boolean;
+    onClose: () => void;
+    children: React.ReactNode;
+    testID?: string;
+  }) => {
+    if (!visible) return null;
+    return ReactModule.createElement(
+      "div",
+      { "data-testid": testID, "data-modal-title": header.title },
+      ReactModule.createElement(
+        "button",
+        { type: "button", "data-testid": `${testID}-close`, onClick: onClose },
+        "Close",
+      ),
+      header.actions,
+      children,
+    );
+  };
+  return { AdaptiveModalSheet };
+});
+
 function prompt(text = "Fix the flaky test"): UserMessageItem {
   return { kind: "user_message", id: "p1", text, timestamp: new Date("2026-01-01T00:00:00.000Z") };
 }
@@ -58,41 +89,68 @@ describe("StickyPromptBar", () => {
     mount({ onJumpToOriginal: vi.fn() });
     const body = query("sticky-prompt-bar-body");
     expect(body?.textContent).toContain("Fix the flaky test");
-    expect(query("sticky-prompt-bar-expanded")).toBeNull();
+    expect(query("sticky-prompt-viewer")).toBeNull();
   });
 
-  it("toggles the expanded panel when tapped in non-compact mode", () => {
+  it("opens the full-prompt viewer with the full text when the body is tapped", () => {
     const onJump = vi.fn();
-    mount({ onJumpToOriginal: onJump });
+    mount({ onJumpToOriginal: onJump, text: "A very long prompt that keeps going" });
     act(() => {
       query("sticky-prompt-bar-body")?.click();
     });
-    expect(query("sticky-prompt-bar-expanded")).not.toBeNull();
+    const viewer = query("sticky-prompt-viewer");
+    expect(viewer).not.toBeNull();
+    expect(query("sticky-prompt-viewer-text")?.textContent).toBe(
+      "A very long prompt that keeps going",
+    );
     expect(onJump).not.toHaveBeenCalled();
-
-    act(() => {
-      query("sticky-prompt-bar-body")?.click();
-    });
-    expect(query("sticky-prompt-bar-expanded")).toBeNull();
   });
 
-  it("jumps to the original instead of expanding when tapped in compact mode", () => {
+  it("opens the viewer when tapped in compact mode too", () => {
     const onJump = vi.fn();
     mount({ compact: true, onJumpToOriginal: onJump });
     act(() => {
       query("sticky-prompt-bar-body")?.click();
     });
-    expect(onJump).toHaveBeenCalledTimes(1);
-    expect(query("sticky-prompt-bar-expanded")).toBeNull();
+    expect(query("sticky-prompt-viewer")).not.toBeNull();
+    expect(onJump).not.toHaveBeenCalled();
   });
 
-  it("calls onJumpToOriginal exactly once from the jump control without toggling expand", () => {
+  it("calls onJumpToOriginal exactly once from the bar's own jump control without opening the viewer", () => {
     const onJump = vi.fn();
     mount({ onJumpToOriginal: onJump });
     act(() => {
       query("sticky-prompt-bar-jump")?.click();
     });
     expect(onJump).toHaveBeenCalledTimes(1);
-    expect(query("sticky-prompt-bar-expanded")).toBeNull();
+    expect(query("sticky-prompt-viewer")).toBeNull();
+  });
+
+  it("jumping from the viewer calls onJumpToOriginal and closes the viewer", () => {
+    const onJump = vi.fn();
+    mount({ onJumpToOriginal: onJump });
+    act(() => {
+      query("sticky-prompt-bar-body")?.click();
+    });
+    expect(query("sticky-prompt-viewer")).not.toBeNull();
+
+    act(() => {
+      query("sticky-prompt-viewer-jump")?.click();
+    });
+    expect(onJump).toHaveBeenCalledTimes(1);
+    expect(query("sticky-prompt-viewer")).toBeNull();
+  });
+
+  it("closes the viewer via its close control without jumping", () => {
+    const onJump = vi.fn();
+    mount({ onJumpToOriginal: onJump });
+    act(() => {
+      query("sticky-prompt-bar-body")?.click();
+    });
+    act(() => {
+      query("sticky-prompt-viewer-close")?.click();
+    });
+    expect(onJump).not.toHaveBeenCalled();
+    expect(query("sticky-prompt-viewer")).toBeNull();
   });
 });

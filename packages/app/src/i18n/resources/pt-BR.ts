@@ -206,8 +206,8 @@ export const ptBR: TranslationResources = {
     empty: "Comece a conversar com este agente...",
     scrollToBottom: "Rolar para o fim",
     stickyPromptJumpToOriginal: "Ir para o prompt original",
-    stickyPromptExpand: "Expandir prompt",
-    stickyPromptCollapse: "Recolher prompt",
+    stickyPromptShowFull: "Mostrar prompt completo",
+    stickyPromptViewerTitle: "Prompt completo",
     historyLoadFailed: "Não foi possível carregar o histórico do agente",
     messageCapped: "Esta mensagem foi truncada ({{bytes}} bytes).",
     permission: {

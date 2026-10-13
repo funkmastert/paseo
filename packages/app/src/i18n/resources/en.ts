@@ -203,8 +203,8 @@ export const en = {
     empty: "Start chatting with this agent...",
     scrollToBottom: "Scroll to bottom",
     stickyPromptJumpToOriginal: "Jump to original prompt",
-    stickyPromptExpand: "Expand prompt",
-    stickyPromptCollapse: "Collapse prompt",
+    stickyPromptShowFull: "Show full prompt",
+    stickyPromptViewerTitle: "Full prompt",
     historyLoadFailed: "Couldn't load agent history",
     messageCapped: "This message was capped ({{bytes}} bytes).",
     permission: {

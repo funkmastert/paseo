@@ -1,19 +1,15 @@
-import { ArrowUp, ChevronDown, ChevronUp } from "lucide-react-native";
+import { ArrowUp } from "lucide-react-native";
 import { useCallback, useMemo, useState } from "react";
-import { Pressable, ScrollView, Text, useWindowDimensions, View } from "react-native";
+import type { ReactNode } from "react";
+import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet } from "react-native-unistyles";
+import { AdaptiveModalSheet, type SheetHeader } from "@/components/adaptive-modal-sheet";
 import type { UserMessageItem } from "@/types/stream";
-
-// A true "40% of this panel" requires plumbing a measured container height down
-// to every host (including pinned-grid cells). The window height is a close,
-// dependency-free stand-in that still caps the expanded panel well short of
-// the screen on every form factor.
-const EXPANDED_HEIGHT_RATIO = 0.4;
 
 export interface StickyPromptBarProps {
   prompt: UserMessageItem;
-  /** Pinned-grid cells: one line, no expand affordance, tap jumps directly. */
+  /** Pinned-grid cells: one line, unobtrusive; tapping the body still opens the full viewer. */
   compact?: boolean;
   onJumpToOriginal: () => void;
 }
@@ -24,20 +20,15 @@ export function StickyPromptBar({
   onJumpToOriginal,
 }: StickyPromptBarProps) {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
-  const { height: windowHeight } = useWindowDimensions();
-  const expandedMaxHeight = useMemo(
-    () => Math.round(windowHeight * EXPANDED_HEIGHT_RATIO),
-    [windowHeight],
-  );
+  const [viewerOpen, setViewerOpen] = useState(false);
 
   const handlePressBody = useCallback(() => {
-    if (compact) {
-      onJumpToOriginal();
-      return;
-    }
-    setExpanded((current) => !current);
-  }, [compact, onJumpToOriginal]);
+    setViewerOpen(true);
+  }, []);
+
+  const handleCloseViewer = useCallback(() => {
+    setViewerOpen(false);
+  }, []);
 
   const handlePressJump = useCallback(
     (event: { stopPropagation?: () => void }) => {
@@ -47,40 +38,28 @@ export function StickyPromptBar({
     [onJumpToOriginal],
   );
 
+  const handleJumpFromViewer = useCallback(() => {
+    setViewerOpen(false);
+    onJumpToOriginal();
+  }, [onJumpToOriginal]);
+
+  const bodyPressableStyle = useCallback(
+    ({ pressed }: { pressed: boolean }) => [styles.body, pressed && styles.bodyPressed],
+    [],
+  );
+
   return (
     <View style={[styles.container, compact && styles.containerCompact]} testID="sticky-prompt-bar">
       <Pressable
-        style={styles.body}
+        style={bodyPressableStyle}
         onPress={handlePressBody}
         accessibilityRole="button"
-        accessibilityLabel={
-          compact
-            ? prompt.text
-            : t(expanded ? "agentStream.stickyPromptCollapse" : "agentStream.stickyPromptExpand")
-        }
+        accessibilityLabel={t("agentStream.stickyPromptShowFull")}
         testID="sticky-prompt-bar-body"
       >
-        {expanded && !compact ? (
-          <ScrollView
-            style={[styles.expandedScroll, { maxHeight: expandedMaxHeight }]}
-            testID="sticky-prompt-bar-expanded"
-          >
-            <Text style={styles.expandedText}>{prompt.text}</Text>
-          </ScrollView>
-        ) : (
-          <Text style={styles.text} numberOfLines={compact ? 1 : 2}>
-            {prompt.text}
-          </Text>
-        )}
-        {!compact ? (
-          <View style={styles.chevronSlot}>
-            {expanded ? (
-              <ChevronUp size={14} color={styles.icon.color} />
-            ) : (
-              <ChevronDown size={14} color={styles.icon.color} />
-            )}
-          </View>
-        ) : null}
+        <Text style={styles.text} numberOfLines={compact ? 1 : 2}>
+          {prompt.text}
+        </Text>
       </Pressable>
       <Pressable
         style={styles.jumpButton}
@@ -92,7 +71,63 @@ export function StickyPromptBar({
       >
         <ArrowUp size={14} color={styles.icon.color} />
       </Pressable>
+      <FullPromptViewer
+        visible={viewerOpen}
+        text={prompt.text}
+        onClose={handleCloseViewer}
+        onJumpToOriginal={handleJumpFromViewer}
+      />
     </View>
+  );
+}
+
+interface FullPromptViewerProps {
+  visible: boolean;
+  text: string;
+  onClose: () => void;
+  onJumpToOriginal: () => void;
+}
+
+function FullPromptViewer({
+  visible,
+  text,
+  onClose,
+  onJumpToOriginal,
+}: FullPromptViewerProps): ReactNode {
+  const { t } = useTranslation();
+
+  const headerActions = useMemo(
+    () => (
+      <Pressable
+        onPress={onJumpToOriginal}
+        hitSlop={8}
+        style={styles.viewerJumpButton}
+        accessibilityRole="button"
+        accessibilityLabel={t("agentStream.stickyPromptJumpToOriginal")}
+        testID="sticky-prompt-viewer-jump"
+      >
+        <ArrowUp size={16} color={styles.icon.color} />
+      </Pressable>
+    ),
+    [onJumpToOriginal, t],
+  );
+
+  const header = useMemo<SheetHeader>(
+    () => ({ title: t("agentStream.stickyPromptViewerTitle"), actions: headerActions }),
+    [headerActions, t],
+  );
+
+  return (
+    <AdaptiveModalSheet
+      header={header}
+      visible={visible}
+      onClose={onClose}
+      testID="sticky-prompt-viewer"
+    >
+      <Text selectable style={styles.viewerText} testID="sticky-prompt-viewer-text">
+        {text}
+      </Text>
+    </AdaptiveModalSheet>
   );
 }
 
@@ -123,22 +158,13 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[2],
     minWidth: 0,
   },
+  bodyPressed: {
+    opacity: 0.85,
+  },
   text: {
     flex: 1,
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
-  },
-  expandedScroll: {
-    flex: 1,
-  },
-  expandedText: {
-    color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
-  },
-  chevronSlot: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingTop: 2,
   },
   jumpButton: {
     alignItems: "center",
@@ -147,5 +173,14 @@ const styles = StyleSheet.create((theme) => ({
   },
   icon: {
     color: theme.colors.foregroundMuted,
+  },
+  viewerText: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.base,
+  },
+  viewerJumpButton: {
+    alignItems: "center",
+    justifyContent: "center",
+    padding: theme.spacing[2],
   },
 }));
