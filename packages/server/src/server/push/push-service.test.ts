@@ -65,13 +65,13 @@ describe("PushService", () => {
     const service = new PushService(createLogger(), (token) => revoked.push(token));
     const results = await service.sendPush(["a", "b"], { title: "T", body: "B" });
     expect(results).toEqual([
-      { token: "a", ticketId: "t1", error: null },
-      { token: "b", ticketId: null, error: "DeviceNotRegistered" },
+      { token: "a", ticketId: "t1", error: null, transportFailure: false },
+      { token: "b", ticketId: null, error: "DeviceNotRegistered", transportFailure: false },
     ]);
     expect(revoked).toEqual(["b"]);
   });
 
-  test("an unreachable push API fails every device instead of throwing", async () => {
+  test("an unreachable push API fails every device instead of throwing, as a transport failure", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
@@ -81,6 +81,31 @@ describe("PushService", () => {
     const service = new PushService(createLogger(), () => undefined);
     const results = await service.sendPush(["a", "b"], { title: "T", body: "B" });
     expect(results.map((result) => result.error)).toEqual(["offline", "offline"]);
+    expect(results.every((result) => result.transportFailure)).toBe(true);
+  });
+
+  test.each([429, 500, 503])(
+    "treats an Expo %s response as a transport failure, not a refusal",
+    async (status) => {
+      stubFetch(() => ({}), status);
+      const service = new PushService(createLogger(), () => undefined);
+      const results = await service.sendPush(["a"], { title: "T", body: "B" });
+      expect(results).toEqual([
+        {
+          token: "a",
+          ticketId: null,
+          error: `Expo push API returned ${status}`,
+          transportFailure: true,
+        },
+      ]);
+    },
+  );
+
+  test("treats a non-429/5xx Expo error response as a refusal, not a transport failure", async () => {
+    stubFetch(() => ({}), 400);
+    const service = new PushService(createLogger(), () => undefined);
+    const results = await service.sendPush(["a"], { title: "T", body: "B" });
+    expect(results[0]).toMatchObject({ transportFailure: false });
   });
 
   test("reads receipts, skipping ids that have none yet, and revokes dead devices", async () => {

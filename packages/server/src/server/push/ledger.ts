@@ -18,6 +18,11 @@ export interface LedgerTicket {
   status: "pending" | "ok" | "error";
   error: string | null;
   checkedAt: string | null;
+  /**
+   * Only meaningful when `status` is `error`: a network failure or an Expo 429/5xx, not a
+   * provider refusal. Optional so a ticket written before this field existed still loads.
+   */
+  transportFailure?: boolean;
 }
 
 /** The wire entry plus what the daemon needs to finish delivering and de-duplicating it. */
@@ -28,6 +33,13 @@ export interface LedgerRecord extends NotifyLedgerEntry {
   data: Record<string, unknown>;
   dedupeKey: string | null;
   tickets: LedgerTicket[];
+  /**
+   * Retry bookkeeping for an interrupting push that failed in transport (docs/notification-policy.md).
+   * Both optional so a ledger written before this field existed still loads: absent reads as
+   * "never retried." Not part of the wire entry — `toWireEntry` strips them.
+   */
+  retryCount?: number;
+  nextRetryAt?: string | null;
 }
 
 const MAX_RECORDS = 1000;
@@ -41,6 +53,8 @@ export function toWireEntry(record: LedgerRecord): NotifyLedgerEntry {
     data: _data,
     dedupeKey: _dedupeKey,
     tickets: _tickets,
+    retryCount: _retryCount,
+    nextRetryAt: _nextRetryAt,
     ...entry
   } = record;
   return entry;
@@ -139,12 +153,31 @@ export class PushLedger {
         state,
         error: error ?? firstTicketError(tickets),
         settledAt: state === "sent" ? null : settledAt,
+        // Delivered, pending or without a device: nothing left to retry. A failure past this
+        // point is re-armed by `scheduleRetry`, called right after this on the fresh record.
+        nextRetryAt: null,
       };
     });
   }
 
   markFailed(id: string, error: string, settledAt: string): void {
-    this.update(id, (record) => ({ ...record, state: "failed", error, settledAt }));
+    this.update(id, (record) => ({
+      ...record,
+      state: "failed",
+      error,
+      settledAt,
+      nextRetryAt: null,
+    }));
+  }
+
+  /** R8: the next time to retry an interrupting push that failed in transport, and the attempt it will be. */
+  scheduleRetry(id: string, nextRetryAt: string, retryCount: number): void {
+    this.update(id, (record) => ({ ...record, nextRetryAt, retryCount }));
+  }
+
+  /** Pushes waiting on a retry after a transport failure (R8). */
+  listPendingRetries(): LedgerRecord[] {
+    return this.records.filter((record) => record.nextRetryAt != null);
   }
 
   /** Applies receipt verdicts (keyed by ticket id) and re-derives each affected notification. */
