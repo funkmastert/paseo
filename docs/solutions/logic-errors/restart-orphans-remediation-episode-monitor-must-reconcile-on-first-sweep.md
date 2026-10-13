@@ -28,7 +28,7 @@ The remediation ladder keeps its episodes on disk across a restart (`$PASEO_HOME
 ## What Didn't Work
 
 - **Closing only what this process opened.** The sweep sent `active: false` for a key only when its in-memory `signedOutReported` map held it (`packages/server/src/server/agent/account-auth-sweep.ts`, `reportSignedOutAccounts`). A restart empties that map, while the ladder's episode survives.
-- **Relying on the ladder to expire episodes.** It doesn't. An episode closes only when an observation with `active: false` arrives for its key (`handleObservation`, `packages/server/src/server/remediation/ladder.ts:294`).
+- **Relying on the ladder to expire episodes.** At the time, it didn't: an episode closed only when an observation with `active: false` arrived for its key (`handleObservation`, `packages/server/src/server/remediation/ladder.ts:294`). It does now — see [State and restarts](../../remediation.md#state-and-restarts) — but this sweep's own reconcile-on-first-sweep still stands as a belt-and-braces measure, and was the only fix available before that.
 
 ## Solution
 
@@ -61,15 +61,8 @@ The ladder's episode is the only memory that survives a restart. A monitor that 
 
 ## Prevention
 
-- A monitor that keeps its "what I reported" state in memory reports every key's current state once on its first sweep after a restart, including `active: false` for keys that are fine now. [Plugging in a monitor](../../remediation.md#plugging-in-a-monitor) states this rule.
-- **Open, as of this writing:** the other monitors still have this gap. An audit of every `active: false` site found these close their episodes only on a transition remembered in memory:
-  - `cpu-saturation`, `orphan-build-daemons` and `system-memory` (`agent-resource-monitor.ts`)
-  - `disk-critical`, `disk-low` and `disk-falling` (`worktree-disk-monitor.ts`)
-  - `account-pool-exhausted` (`agent-token-burn-monitor.ts`)
-  - `account-failover-stranded` (`agent-account-failover-monitor.ts`)
-  - `stalled-agent:<id>` and `looping-agent:<id>` (`agent-stall-sweep.ts`)
-
-  `token-audit:*` gets a new key each run. `work-at-risk` keeps its open flag on disk, so a gap remains only if the process crashes between observing and saving. A per-agent episode for an agent that no longer exists is never closed. Fixing this once in the ladder would cover every monitor. One way: on load, treat episodes from an earlier process as unconfirmed, and close any that no monitor re-reports as active within a grace window. Monitors already report every sweep while a condition holds.
+- A monitor that keeps its "what I reported" state in memory reports every key's current state once on its first sweep after a restart, including `active: false` for keys that are fine now. [Plugging in a monitor](../../remediation.md#plugging-in-a-monitor) states this rule — now a belt-and-braces measure, since the ladder closes what nobody confirms on its own.
+- **Fixed in the ladder, once, for every monitor** (see [State and restarts](../../remediation.md#state-and-restarts)): on load, the episodes open at that moment are kept as unconfirmed, with when. Any observation for a key, active or not, confirms it. One nobody confirms within a 30-minute restart grace closes with no push and no agent, from the poll tick. `token-audit` (a new key each run) and `work-at-risk` (its sweep only sends `active: true` for a fresh batch, not every sweep its open flag holds) are excluded; a new kind defaults to being expired.
 
 ## Related Issues
 
