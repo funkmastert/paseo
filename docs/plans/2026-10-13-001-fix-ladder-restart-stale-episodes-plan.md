@@ -14,7 +14,7 @@ execution: code
 
 - **Objective:** after a daemon restart, an open remediation episode that no monitor confirms is closed by the ladder, so the next real occurrence of that condition opens a new episode and reaches rung 3 (the push) again. The fix is in the ladder, once, for every monitor.
 - **Authority:** this plan, then `docs/remediation.md`, `docs/notification-policy.md`, `docs/coding-standards.md`, `docs/testing.md`, `CLAUDE.md`.
-- **Execution profile:** one worker, serial units U1, then U2, then U3, in the worktree `/Users/tylerthackray/.paseo/worktrees/3jvw4yw6/peaceful-blowfish` on branch `fix/ladder-restart-episodes`. That branch already holds a docs commit (`8fdac4c4b`); build on top of it.
+- **Execution profile:** one worker, serial units U1, U2, U4, then U3 (docs last), in the worktree `/Users/tylerthackray/.paseo/worktrees/3jvw4yw6/peaceful-blowfish` on branch `fix/ladder-restart-episodes`. That branch already holds a docs commit (`8fdac4c4b`); build on top of it.
 - **Stop conditions:** stop and report if the fix would close an episode that has an in-flight remediation agent, or send a push or start an agent on close. Also stop if it would need a monitor to change what it reports while its condition holds, or if a test needs the real `claude` provider.
 - **Tail ownership:** the worker commits locally and never pushes, opens a PR, or restarts the 6767 daemon. The leader reviews, merges and stages.
 
@@ -46,12 +46,13 @@ After a restart, an episode whose condition cleared while the daemon was down st
 - R4. Kinds that report once per occurrence rather than every sweep while the condition holds are never expired this way. `token-audit` is one: each run has its own key and the job closes the previous one. Verify `work-at-risk`: if its sweep does not re-send `active: true` every sweep while its on-disk `episodeOpen` holds, exclude it too.
 - R5. An expired episode with an in-flight agent is not closed until that agent ends; follow how `handleObservation` keeps such an episode. Closing sends no push and starts no agent. It is recorded in the triage log like any close, with a reason or field that marks it as expired after a restart.
 - R6. One info log line per expired episode (key, kind, opened at).
+- R8. Separately (U4): an interrupting push (`urgent` or `alert`) that failed in transport is retried until it is delivered or two hours have passed since it was made. A transport failure is a network error (`fetch failed`, connect timeout) or an Expo 429/5xx. A provider refusal is not retried: `DeviceNotRegistered`, an invalid token, or any other ticket-level error. Retries back off (about 1, 2, 5, 10, then every 15 minutes), survive a restart (the ledger is on disk), and update the same ledger record rather than adding entries. A push that lands late says so in its body, with the time it was first sent. Today such a push is marked `failed` and never retried. Observed 2026-10-13 17:42Z: the urgent "Claude account signed out: claude-backup" push failed on a network outage (`exp.host` connect timeout), and rung 3 fires once per episode, so Tyler never heard.
 - R7. Separately (U2): `AccountAuthTracker` logs one info line when an account's state changes (provider id, from, to, summary). Today nothing is logged when an account goes `signed_out`, so a live check has to infer it from the ladder file.
 
 ### Scope boundaries
 
 - Do not change the monitors. The monitor-side reconcile in `account-auth-sweep.ts` stays.
-- No protocol, app or plugin change.
+- No protocol, app or plugin change. U4 stays inside the daemon's push layer (`packages/server/src/server/push/`, `notify-policy/`).
 
 ## Planning Contract
 
@@ -90,22 +91,41 @@ After a restart, an episode whose condition cleared while the daemon was down st
 - **Files:** `packages/server/src/server/agent/account-auth-health.ts` (it may need a logger option; follow how `account-auth-probe.ts` takes one) and its construction site. Tests in `account-auth-health.test.ts` only if the logger becomes a required option.
 - **Verification:** `npx vitest run src/server/agent/account-auth-health.test.ts src/server/agent/account-auth-sweep.test.ts` passes, and typecheck is clean.
 
+### U4. Retry interrupting pushes that failed in transport
+
+- **Goal:** R8.
+- **Files:**
+  - `packages/server/src/server/push/push-service.ts`: tell a transport failure from a refusal. The batch `catch` and Expo's 429/5xx are transport failures; ticket errors are refusals.
+  - `push/ledger.ts`: retry bookkeeping on the record (an attempt count and a next-try time), optional in the schema so an older ledger still loads.
+  - `notify-policy/notify-policy.ts`: the retry timer beside `schedule()`, plus resuming retries on start, the way `recoverUnsent` resumes.
+  - Tests in `notify-policy.test.ts` and `push/ledger.test.ts`, or the nearest existing files.
+- **Execution note:** test first, with a fake transport that fails twice and then delivers.
+- **Test scenarios:**
+  - An urgent push that fails with `fetch failed` is retried on the backoff, and is `delivered` once the transport recovers. It stays one ledger record.
+  - A `notice` that fails is not retried.
+  - A `DeviceNotRegistered` ticket is not retried, and its token is still revoked.
+  - A push older than two hours is not retried any more. It stays `failed` and still counts as unreached.
+  - Retries resume after a restart from the ledger on disk.
+  - A late push's body names the time it was first sent.
+- **Verification:** the touched test files pass, and typecheck is clean.
+
 ### U3. Docs
 
 - **Files:**
   - `docs/remediation.md`: the "State and restarts" section, and the "Plugging in a monitor" sentence about reporting every key after a start. That sentence is now a belt-and-braces measure, because the ladder closes what nobody confirms. Keep it short.
   - `docs/solutions/logic-errors/restart-orphans-remediation-episode-monitor-must-reconcile-on-first-sweep.md`: replace the "Open, as of this writing" bullet with what the ladder now does.
+  - `docs/notification-policy.md`: the ledger and unreached section says which failed pushes are retried, for how long, and why only interrupting ones.
 - **Verification:** `npm run format:files -- --ignore-path=$HOME/.cache/self-heal-briefs/empty-ignore <abs paths>` leaves no diff, and the doc voice rules in `CLAUDE.md` hold.
 
 ## Verification Contract
 
-- Targeted tests only, never the full suite: `ladder.test.ts`, `account-auth-health.test.ts` and `account-auth-sweep.test.ts`, plus any test file that constructs `RemediationLadder` or `AccountAuthTracker` (grep for them).
+- Targeted tests only, never the full suite: `ladder.test.ts`, `account-auth-health.test.ts`, `account-auth-sweep.test.ts`, and U4's notify-policy and push tests (including `notify-policy.e2e.test.ts` and `push-callers.test.ts`), plus any test file that constructs `RemediationLadder` or `AccountAuthTracker` (grep for them).
 - `npm run typecheck` in `packages/server`.
 - Lint: `npm run lint -- -c .oxlintrc.json --no-ignore <abs paths>`.
 - Format with the `format:files` command above. Commit with `LEFTHOOK=0`.
 
 ## Definition of Done
 
-- U1 to U3 committed on `fix/ladder-restart-episodes`, each commit ending with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- U1 to U4 committed on `fix/ladder-restart-episodes`, each commit ending with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - Targeted tests, typecheck and lint pass.
 - The final message lists the commits, the grace value chosen and why, the excluded kinds and why (including the `work-at-risk` verdict), and the test evidence.
