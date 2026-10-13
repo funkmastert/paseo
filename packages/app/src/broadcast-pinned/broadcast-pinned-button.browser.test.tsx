@@ -9,6 +9,21 @@ import { BroadcastPinnedButton } from "./broadcast-pinned-button";
 import type { BroadcastSendResult } from "./broadcast-pinned-send";
 import type { BroadcastPinnedTarget } from "./broadcast-pinned-targets";
 
+// This is the only browser test that mounts DropdownMenu, whose floating surface runs a real
+// Reanimated web Keyframe entering animation (menu-overlay.tsx). Under this Vite/Playwright
+// harness, react-native-reanimated's web `createReactDOMStyle` helper never initializes — its
+// internal `require("react-native-web/...")` (webUtils.web.ts) is a no-op outside Metro's module
+// system — so when the animation's native `animationstart` event fires on a still-mounted
+// surface, `_updatePropsJS` falls through reanimated's dead legacy branch (`Object.keys(ref.props)`
+// on a plain DOM node with no `.props`) and throws, asynchronously, outside any `act()` this test
+// can observe. Stub in the same passthrough `createReactDOMStyle` Metro would have supplied, so
+// reanimated's own update path runs as intended; this test doesn't assert on the resulting CSS.
+vi.mock("react-native-reanimated/lib/module/ReanimatedModule/js-reanimated/webUtils", () => ({
+  createReactDOMStyle: (style: Record<string, unknown>) => style,
+  createTransformValue: undefined,
+  createTextShadowValue: undefined,
+}));
+
 beforeEach(() => vi.stubGlobal("React", React));
 
 interface Mounted {
