@@ -355,6 +355,11 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
         bottomAnchorController.prepareForStickyViewportChange();
         markNativeViewportSettling();
       },
+      scrollToMessage: (itemId: string) => {
+        const index = historyRows.findIndex((row) => row.id === itemId);
+        if (index === -1) return;
+        flatListRef.current?.scrollToIndex({ index, viewPosition: 0, animated: true });
+      },
     };
     viewportRef.current = handle;
     return () => {
@@ -362,7 +367,22 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
         viewportRef.current = null;
       }
     };
-  }, [agentId, bottomAnchorController, markNativeViewportSettling, viewportRef]);
+  }, [agentId, bottomAnchorController, historyRows, markNativeViewportSettling, viewportRef]);
+
+  // FlatList can't resolve an index outside its currently-measured window on a dynamic-height
+  // list; jump there with an estimate first, then retry the precise scroll (RN's documented
+  // workaround for onScrollToIndexFailed).
+  const handleScrollToIndexFailed = useStableEvent(
+    (info: { index: number; averageItemLength: number }) => {
+      flatListRef.current?.scrollToOffset({
+        offset: info.averageItemLength * info.index,
+        animated: false,
+      });
+      requestAnimationFrame(() => {
+        flatListRef.current?.scrollToIndex({ index: info.index, viewPosition: 0, animated: true });
+      });
+    },
+  );
 
   const isScrollEventNearBottom = useStableEvent(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -602,6 +622,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
       onContentSizeChange={handleContentSizeChange}
       onViewableItemsChanged={handleViewableItemsChanged}
       viewabilityConfig={viewabilityConfigRef.current}
+      onScrollToIndexFailed={handleScrollToIndexFailed}
       maintainVisibleContentPosition={maintainVisibleContentPosition}
       initialNumToRender={12}
       windowSize={10}
