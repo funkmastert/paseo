@@ -205,6 +205,9 @@ export const es: TranslationResources = {
   agentStream: {
     empty: "Comience a chatear con este agente...",
     scrollToBottom: "Desplazarse hacia abajo",
+    stickyPromptJumpToOriginal: "Ir al mensaje original",
+    stickyPromptExpand: "Expandir mensaje",
+    stickyPromptCollapse: "Contraer mensaje",
     historyLoadFailed: "No se pudo cargar el historial del agente",
     messageCapped: "Este mensaje fue truncado ({{bytes}} bytes).",
     permission: {

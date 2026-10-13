@@ -205,6 +205,9 @@ export const zhCN: TranslationResources = {
   agentStream: {
     empty: "开始和这个 Agent 对话...",
     scrollToBottom: "滚动到底部",
+    stickyPromptJumpToOriginal: "跳转到原始提示",
+    stickyPromptExpand: "展开提示",
+    stickyPromptCollapse: "收起提示",
     historyLoadFailed: "无法加载智能体历史记录",
     messageCapped: "此消息已被截断（{{bytes}} 字节）。",
     permission: {

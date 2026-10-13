@@ -207,6 +207,9 @@ export const fr: TranslationResources = {
   agentStream: {
     empty: "Commencez à discuter avec cet agent...",
     scrollToBottom: "Faire défiler vers le bas",
+    stickyPromptJumpToOriginal: "Aller à l'invite d'origine",
+    stickyPromptExpand: "Développer l'invite",
+    stickyPromptCollapse: "Réduire l'invite",
     historyLoadFailed: "Impossible de charger l’historique de l’agent",
     messageCapped: "Ce message a été tronqué ({{bytes}} octets).",
     permission: {
