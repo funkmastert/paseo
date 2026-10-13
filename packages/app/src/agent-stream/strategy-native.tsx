@@ -16,6 +16,7 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   type ViewStyle,
+  type ViewToken,
 } from "react-native";
 import { withUnistyles } from "react-native-unistyles";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
@@ -82,6 +83,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     routeBottomAnchorRequest,
     isAuthoritativeHistoryReady,
     onNearBottomChange,
+    onViewableRowIdsChange,
     onNearHistoryStart,
     isLoadingOlderHistory,
     hasOlderHistory,
@@ -522,6 +524,14 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     },
   );
 
+  const viewabilityConfigRef = useRef({ itemVisiblePercentThreshold: 0 });
+  const handleViewableItemsChanged = useStableEvent(
+    ({ viewableItems }: { viewableItems: ViewToken<StreamItem>[] }) => {
+      if (!onViewableRowIdsChange) return;
+      onViewableRowIdsChange(new Set(viewableItems.map((token) => token.item.id)));
+    },
+  );
+
   const liveHeaderContent = useMemo(() => {
     // Stable render events read the latest expansion state; this revision makes
     // the memo invoke them again when that state changes.
@@ -590,6 +600,8 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
       onMomentumScrollEnd={handleMomentumScrollEnd}
       scrollEventThrottle={16}
       onContentSizeChange={handleContentSizeChange}
+      onViewableItemsChanged={handleViewableItemsChanged}
+      viewabilityConfig={viewabilityConfigRef.current}
       maintainVisibleContentPosition={maintainVisibleContentPosition}
       initialNumToRender={12}
       windowSize={10}
