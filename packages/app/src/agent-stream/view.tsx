@@ -75,10 +75,7 @@ import { ChatOutlineRail } from "@/agent-stream/chat-outline/rail";
 import { useChatOutline } from "@/agent-stream/chat-outline/use-chat-outline";
 import { StickyPromptBar } from "@/agent-stream/sticky-last-prompt/sticky-prompt-bar";
 import { useStickyLastPrompt } from "@/agent-stream/sticky-last-prompt/use-sticky-last-prompt";
-import type {
-  StickyLastPromptSource,
-  StickyLastPromptState,
-} from "@/agent-stream/sticky-last-prompt/model";
+import type { StickyLastPromptSource } from "@/agent-stream/sticky-last-prompt/model";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { planTimelineTailFetch } from "@/timeline/timeline-sync-plan";
 import {
@@ -351,20 +348,24 @@ function jumpToStickyLastPrompt(
   viewportRef.current?.scrollToMessage?.(prompt.id);
 }
 
-function StickyPromptOverlay({
-  state,
+// Subscribes to the publisher itself (mirroring ChatOutlineRail's
+// `useSyncExternalStore(activePrompt.subscribe, activePrompt.getActiveSeq)`) so a visibility
+// change re-renders only this leaf, not the whole AgentStreamView.
+const StickyPromptOverlay = memo(function StickyPromptOverlay({
+  source,
   compact,
   onJumpToOriginal,
 }: {
-  state: StickyLastPromptState;
+  source: StickyLastPromptSource;
   compact: boolean;
   onJumpToOriginal: () => void;
 }): ReactNode {
+  const state = useSyncExternalStore(source.subscribe, source.getState);
   if (!state.barVisible || !state.prompt) return null;
   return (
     <StickyPromptBar prompt={state.prompt} compact={compact} onJumpToOriginal={onJumpToOriginal} />
   );
-}
+});
 
 const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamViewProps>(
   function AgentStreamView(
@@ -680,11 +681,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       revealLoadedItem: revealLoadedHistory,
     });
 
-    const stickyLastPrompt = useStickyLastPrompt({ items: effectiveStreamItems });
-    const stickyLastPromptState = useSyncExternalStore(
-      stickyLastPrompt.source.subscribe,
-      stickyLastPrompt.source.getState,
-    );
+    const stickyLastPrompt = useStickyLastPrompt({ agentId, items: effectiveStreamItems });
     const handleJumpToStickyPrompt = useCallback(() => {
       jumpToStickyLastPrompt(stickyLastPrompt.source, viewportRef);
     }, [stickyLastPrompt]);
@@ -1180,7 +1177,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             onJumpToPrompt={chatOutline.jumpToPrompt}
           />
           <StickyPromptOverlay
-            state={stickyLastPromptState}
+            source={stickyLastPrompt.source}
             compact={resolvedCompact}
             onJumpToOriginal={handleJumpToStickyPrompt}
           />
