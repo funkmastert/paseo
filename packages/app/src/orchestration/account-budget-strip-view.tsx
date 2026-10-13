@@ -1,5 +1,4 @@
 import { Fragment, useCallback, useMemo, useState } from "react";
-import * as Clipboard from "expo-clipboard";
 import { ChevronRight } from "lucide-react-native";
 import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
@@ -8,8 +7,9 @@ import { useIsCompactFormFactor } from "@/constants/layout";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useCompactTimeAgo } from "@/hooks/use-compact-time-ago";
-import { useToast } from "@/contexts/toast-context";
+import type { AccountProblem, AccountProblemKind } from "@/provider-usage/account-problem";
 import { formatPct, formatResetLabel } from "@/provider-usage/format";
+import { useCopyFixCommand } from "@/provider-usage/use-copy-fix-command";
 import { ProviderUsageMeter, ProviderUsageWindowBar } from "@/provider-usage/window-bar";
 import type { Theme } from "@/styles/theme";
 import { formatDuration } from "@/utils/time";
@@ -19,7 +19,6 @@ import {
   type AccountBalanceViewModel,
   type AccountBudgetRowViewModel,
   type AccountDetailViewModel,
-  type AccountIdentityViewModel,
   type AccountPoolRole,
   type AccountUsageCount,
   type WorstBudgetWindow,
@@ -299,39 +298,43 @@ function AccountBudgetBody({
   );
 }
 
+// Each kind keeps its own test id, so a test can tell which problem a row shows.
+const PROBLEM_TEST_ID_PREFIX: Readonly<Record<AccountProblemKind, string>> = {
+  signed_out: "orchestration-account-auth",
+  identity: "orchestration-account-identity",
+};
+
 /**
- * The daemon found this pool entry on the wrong login. The fix is a command to run on the host, so
- * the row offers it as a copy rather than an action.
+ * The daemon found a sign-in or identity problem on this pool entry. The fix is a command to run
+ * on the host, so the row offers it as a copy rather than an action.
  */
-function AccountIdentityNotice({
+function AccountProblemNotice({
   providerId,
-  identity,
+  problem,
 }: {
   providerId: string;
-  identity: AccountIdentityViewModel;
+  problem: AccountProblem;
 }) {
   const { t } = useTranslation();
-  const toast = useToast();
-  const handleCopy = useCallback(() => {
-    void (async () => {
-      try {
-        await Clipboard.setStringAsync(identity.fixCommand);
-        toast.copied(t("panels.orchestration.identityCopied"));
-      } catch {
-        toast.error(t("panels.orchestration.identityCopyError"));
-      }
-    })();
-  }, [identity.fixCommand, t, toast]);
+  const handleCopy = useCopyFixCommand(problem.fixCommand);
+  const testIDPrefix = PROBLEM_TEST_ID_PREFIX[problem.kind];
   return (
-    <View style={styles.identityNotice} testID={`orchestration-account-identity-${providerId}`}>
-      <Text style={styles.identityText}>{identity.summary}</Text>
+    <View style={styles.identityNotice} testID={`${testIDPrefix}-${providerId}`}>
+      <Text
+        style={[
+          styles.identityText,
+          problem.kind === "signed_out" ? styles.identityTextDanger : null,
+        ]}
+      >
+        {problem.summary}
+      </Text>
       <Pressable
         onPress={handleCopy}
         accessibilityRole="button"
         accessibilityLabel={t("panels.orchestration.identityCopyFix")}
-        testID={`orchestration-account-identity-copy-${providerId}`}
+        testID={`${testIDPrefix}-copy-${providerId}`}
       >
-        <Text style={styles.identityCopy}>{identity.fixCommand}</Text>
+        <Text style={styles.identityCopy}>{problem.fixCommand}</Text>
       </Pressable>
     </View>
   );
@@ -395,8 +398,8 @@ function AccountBudgetRow({
         ) : null}
         {isJev ? <ThemedChevronRight size={14} uniProps={mutedIconColor} /> : null}
       </View>
-      {row.identity ? (
-        <AccountIdentityNotice providerId={row.providerId} identity={row.identity} />
+      {row.problem ? (
+        <AccountProblemNotice providerId={row.providerId} problem={row.problem} />
       ) : null}
       {row.usage ? <AccountPresence providerId={row.providerId} usage={row.usage} /> : null}
       {capMinutes != null && row.kind === "available" ? (
@@ -549,6 +552,9 @@ const styles = StyleSheet.create((theme) => ({
   identityText: {
     color: theme.colors.statusWarning,
     fontSize: theme.fontSize.sm,
+  },
+  identityTextDanger: {
+    color: theme.colors.statusDanger,
   },
   identityCopy: {
     color: theme.colors.foregroundMuted,

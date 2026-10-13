@@ -120,7 +120,7 @@ class Harness {
           this.nudges.push(input);
           return { kind: "sent", via: "replace" };
         },
-        handOffToFailover: async (agentId) => {
+        handOffToFailover: async ({ agentId }) => {
           this.handoffs.push(agentId);
           return { kind: "handed-off", lastError: "usage limit" };
         },
@@ -510,7 +510,11 @@ describe("a stall candidate's judgment", () => {
 
   test("a capped account's handoff is never judged", async () => {
     const h = new Harness({ jev: ANSWERED, answers: choice("blocked_missing_info", 0.95) });
-    h.health.set("claude", { askable: false, reason: "at its weekly limit" });
+    h.health.set("claude", {
+      askable: false,
+      reason: "at its weekly limit",
+      cancelReason: "account-capped",
+    });
     h.add("a1");
     await h.warmUp();
     expect(h.handoffs).toEqual(["a1"]);
@@ -901,7 +905,11 @@ describe("an idle agent nothing will wake", () => {
 
   test("is left alone while its account is not askable, and recorded once it is", async () => {
     const h = new Harness();
-    h.health.set("claude", { askable: false, reason: "at its usage limit" });
+    h.health.set("claude", {
+      askable: false,
+      reason: "at its usage limit",
+      cancelReason: "account-capped",
+    });
     h.addIdle("a1", WAIT, 12);
     await h.sweep.tick();
     expect(h.linesOf("background-wait")).toEqual([]);

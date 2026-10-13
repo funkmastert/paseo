@@ -142,7 +142,8 @@ import {
   isUnresponsiveCancelReason,
   UNRESPONSIVE_CANCEL_ERROR,
   UNRESPONSIVE_CANCEL_REASON,
-  formatAccountCappedCancelError,
+  ACCOUNT_DEAD_CANCEL_ERRORS,
+  type AccountDeadCancelReason,
 } from "./turn-cancel.js";
 import {
   AgentProviderMoveError,
@@ -635,6 +636,8 @@ export type AgentCancelReason =
   | "hub"
   /** The stalled-agent sweep, handing a turn stuck on a capped account to account failover. */
   | "account-capped"
+  /** The stalled-agent sweep, handing a turn stuck on a signed-out account to account failover. */
+  | "account-signed-out"
   /** The remediation ladder, cancelling a timed-out or over-budget escalation agent. */
   | "remediation"
   | "unspecified";
@@ -5107,21 +5110,28 @@ export class AgentManager {
       return { status: "settled" };
     }
     const result = await this.cancelAgentRunNow(agentId, cancelReason);
-    if (cancelReason === "account-capped" && result.status === "settled") {
-      await this.recordAccountCappedCancel(agentId);
+    if (
+      (cancelReason === "account-capped" || cancelReason === "account-signed-out") &&
+      result.status === "settled"
+    ) {
+      await this.recordAccountDeadCancel(agentId, cancelReason);
     }
     return result;
   }
 
   /**
-   * A cancel clears `lastError`, and failover reads nothing else, so an account-capped cancel
-   * leaves a limit-shaped one. The timeline row dates the failure now: failover dates a failure
-   * by the newest row, and the stuck turn's newest row can be many hours old.
+   * A cancel clears `lastError`, and failover reads nothing else, so an account-capped or
+   * account-signed-out cancel leaves a limit- or auth-shaped one in its place. The timeline row
+   * dates the failure now: failover dates a failure by the newest row, and the stuck turn's
+   * newest row can be many hours old.
    */
-  private async recordAccountCappedCancel(agentId: string): Promise<void> {
+  private async recordAccountDeadCancel(
+    agentId: string,
+    cancelReason: AccountDeadCancelReason,
+  ): Promise<void> {
     const agent = this.requireSessionAgent(agentId);
     if (agent.lifecycle === "running") return;
-    agent.lastError = formatAccountCappedCancelError(agent.provider);
+    agent.lastError = ACCOUNT_DEAD_CANCEL_ERRORS[cancelReason](agent.provider);
     await this.appendSystemErrorTimelineMessage(agent, agent.provider, agent.lastError);
     this.touchUpdatedAt(agent);
     this.emitState(agent);

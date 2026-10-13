@@ -1,5 +1,6 @@
 import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
 import { getProviderIcon, type ProviderIconComponent } from "@/components/provider-icons";
+import { resolveAccountProblem, type AccountProblem } from "@/provider-usage/account-problem";
 import { formatAmount, resolveUsedPct } from "@/provider-usage/format";
 import type {
   ProviderUsage,
@@ -45,16 +46,10 @@ export interface AccountBalanceViewModel {
   tone: ProviderUsageTone;
 }
 
-/** A pool entry signed into the wrong login, or sharing one. The daemon's words and command. */
-export interface AccountIdentityViewModel {
-  summary: string;
-  fixCommand: string;
-}
-
 interface AccountBudgetRowBase {
   providerId: string;
-  /** Null for a healthy account; set while the daemon's identity check still flags it. */
-  identity: AccountIdentityViewModel | null;
+  /** Null for a healthy account; set while the daemon finds it signed out or on the wrong login. */
+  problem: AccountProblem | null;
   section: AccountSection;
   label: string;
   /** The plan the provider reports for the account; only read for the `other` section. */
@@ -255,7 +250,7 @@ export function countAccountUsage(
 // Snapshot label wins (it reflects custom-provider configuration); usage.displayName is
 // the fallback for accounts the providers snapshot hasn't reported yet.
 export function resolveAccountLabel(
-  entries: ProviderSnapshotEntry[] | undefined,
+  entries: readonly ProviderSnapshotEntry[] | undefined,
   usage: ProviderUsage,
 ): string {
   const entry = entries?.find((candidate) => candidate.provider === usage.providerId);
@@ -350,11 +345,6 @@ function unavailableReason(
   return error ? { error } : {};
 }
 
-function identityOf(usage: ProviderUsage | undefined): AccountIdentityViewModel | null {
-  const identity = usage?.accountIdentity;
-  return identity ? { summary: identity.summary, fixCommand: identity.fixCommand } : null;
-}
-
 function buildAccountRow(
   providerId: string,
   providers: ProviderUsage[],
@@ -374,7 +364,7 @@ function buildAccountRow(
     : (entries?.find((candidate) => candidate.provider === providerId)?.label ?? providerId);
   const base = {
     providerId: resolvedId,
-    identity: identityOf(usage),
+    problem: usage ? resolveAccountProblem(usage) : null,
     section,
     label: section === "other" ? withVendor(resolvedId, label) : label,
     plan: section === "other" ? formatPlan(usage?.planLabel) : null,

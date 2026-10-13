@@ -1,9 +1,12 @@
+import { homedir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AgentAccountAuth } from "./agent-sdk-types.js";
 import {
   pickFailoverTarget,
   providersShareAccount,
   resolveAccountPoolEntries,
+  resolvePoolAccounts,
 } from "./account-pool-providers.js";
 
 describe("resolveAccountPoolEntries", () => {
@@ -116,6 +119,33 @@ describe("resolveAccountPoolEntries", () => {
 
   it("returns an empty array when providers is undefined", () => {
     expect(resolveAccountPoolEntries(undefined)).toEqual([]);
+  });
+});
+
+describe("resolvePoolAccounts", () => {
+  it("gives each pool entry the config dir its account lives in, with ~ expanded", () => {
+    const accounts = resolvePoolAccounts({
+      claude: {
+        env: { CLAUDE_CONFIG_DIR: "/accounts/leader" },
+        params: { accountPool: { role: "leader", priority: 1 } },
+      },
+      "claude-personal": {
+        extends: "claude",
+        env: { CLAUDE_CONFIG_DIR: "~/.claude-personal" },
+        params: { accountPool: { role: "worker", priority: 1, email: "someone@example.com" } },
+      },
+      "claude-unscoped": {
+        extends: "claude",
+        params: { accountPool: { role: "worker", priority: 2 } },
+      },
+    });
+
+    expect(accounts.map(({ providerId, configDir }) => ({ providerId, configDir }))).toEqual([
+      { providerId: "claude", configDir: "/accounts/leader" },
+      { providerId: "claude-personal", configDir: path.join(homedir(), ".claude-personal") },
+      { providerId: "claude-unscoped", configDir: null },
+    ]);
+    expect(accounts[1]).toMatchObject({ role: "worker", expectedEmail: "someone@example.com" });
   });
 });
 

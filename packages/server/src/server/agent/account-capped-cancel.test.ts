@@ -10,6 +10,7 @@ import { AgentStorage } from "./agent-storage.js";
 import { setCodexGuardHealthState } from "./codex-guard-health.js";
 import {
   DEFAULT_REACTIVE_SIGNAL_TTL_MS,
+  isAuthShapedError,
   isLimitShapedError,
   planAccountFailoverSweep,
 } from "./account-failover-detector.js";
@@ -165,11 +166,26 @@ describe("an account-capped cancel hands a stalled turn to account failover", ()
       usage: null,
       previousSightings: new Map(),
       previousProviderSightings: new Map(),
+      signedOutProviderIds: new Set(),
       nowMs: Date.now(),
       reactiveSignalTtlMs: DEFAULT_REACTIVE_SIGNAL_TTL_MS,
       migrateSubagents: true,
     });
     expect([...plan.deadProviderIds]).toEqual(["codex"]);
     expect(plan.candidates.map((candidate) => candidate.id)).toEqual([agentId]);
+  });
+
+  test("an account-signed-out cancel leaves an auth-shaped lastError that reads as no limit", async () => {
+    const { manager, agentId } = await startAStalledTurn();
+
+    const result = await manager.cancelAgentRun(agentId, "account-signed-out");
+
+    expect(result.status).toBe("settled");
+    const lastError = manager.getAccountFailoverSummary(agentId)?.lastError;
+    expect(lastError).toContain("codex");
+    // Failover reads it as a sign-in failure: the account is dead, the rescue prompt says signed
+    // out, and the limit-only paths (reset hints, provider sightings) leave it alone.
+    expect(isAuthShapedError(lastError)).toBe(true);
+    expect(isLimitShapedError(lastError)).toBe(false);
   });
 });

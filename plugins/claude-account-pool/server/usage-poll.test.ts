@@ -33,6 +33,43 @@ describe("createUsagePoller", () => {
     poller.stop();
   });
 
+  it("maps an accountAuth row into a durable signed-out report, and clears it once gone", async () => {
+    const tracker = createHealthTracker({ now: () => new Date("2026-09-10T10:00:00Z") });
+    let accountAuth: { state: "signed_out" } | null = { state: "signed_out" };
+    const poller = createUsagePoller(tracker, {
+      fetchUsage: vi.fn().mockImplementation(async () => ({
+        providers: [{ providerId: PROVIDER, windows: [], accountAuth }],
+      })),
+      setIntervalFn: vi.fn() as unknown as typeof setInterval,
+      clearIntervalFn: vi.fn() as unknown as typeof clearInterval,
+    });
+
+    await poller.pollOnce();
+    expect(tracker.isHealthyFor(PROVIDER, "claude-sonnet-5")).toBe(false);
+
+    accountAuth = null;
+    await poller.pollOnce();
+    expect(tracker.isHealthyFor(PROVIDER, "claude-sonnet-5")).toBe(true);
+    poller.stop();
+  });
+
+  it("passes the row's sign-in command through to the tracker", async () => {
+    const tracker = createHealthTracker({ now: () => new Date("2026-09-10T10:00:00Z") });
+    const fixCommand = "CLAUDE_CONFIG_DIR=/accounts/a claude auth login --email someone@example.com";
+    const poller = createUsagePoller(tracker, {
+      fetchUsage: vi.fn().mockResolvedValue({
+        providers: [{ providerId: PROVIDER, windows: [], accountAuth: { state: "signed_out", fixCommand } }],
+      }),
+      setIntervalFn: vi.fn() as unknown as typeof setInterval,
+      clearIntervalFn: vi.fn() as unknown as typeof clearInterval,
+    });
+
+    await poller.pollOnce();
+
+    expect(tracker.describeWindow(PROVIDER, "account")?.signedOut).toEqual({ fixCommand });
+    poller.stop();
+  });
+
   it("drops an unparseable reset time rather than handing the tracker an Invalid Date", async () => {
     const tracker = createHealthTracker();
     const poller = createUsagePoller(tracker, {

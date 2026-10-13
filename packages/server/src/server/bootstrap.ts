@@ -257,6 +257,7 @@ import {
 import { ResumePacer, type PaceResume } from "./agent/resume-pacer.js";
 import { PluginConnectionMonitor } from "./plugin-connection-monitor.js";
 import { AccountFailoverMonitor } from "./agent-account-failover-monitor.js";
+import type { AccountAuthProbe } from "./agent/account-auth-probe.js";
 import { FinishObligationService } from "./agent/finish-obligation-service.js";
 import type { FinishReportLadderConfig } from "./agent/finish-obligation.js";
 import {
@@ -726,7 +727,7 @@ export interface PaseoDaemonConfig {
    * `getAccountFailoverMonitor().tick()`, and advance `now` to expire reactive evidence.
    */
   accountFailoverOverrides?: {
-    providerUsage?: Pick<ProviderUsageService, "listUsage">;
+    providerUsage?: Pick<ProviderUsageService, "listUsage" | "getAuthReadings">;
     sweepIntervalMs?: number;
     now?: () => number;
     remediationSink?: RemediationSink;
@@ -737,6 +738,8 @@ export interface PaseoDaemonConfig {
      * through: a turn starting while the move waited for its slot.
      */
     wrapPaceResume?: (paceResume: PaceResume) => PaceResume;
+    /** Stands in for the sign-in probe, which would otherwise run the real `claude` CLI. */
+    accountAuthProbe?: AccountAuthProbe;
   };
   /**
    * Test seams for FinishObligationService; production leaves this unset. Tests push the timer
@@ -1347,7 +1350,7 @@ function createAgentStallSweep(input: {
           { agentManager, agentStorage, logger, paceResume: input.paceResume },
           nudge,
         ),
-      handOffToFailover: (agentId) => handOffStalledAgentToFailover(agentManager, agentId),
+      handOffToFailover: (handoff) => handOffStalledAgentToFailover({ ...handoff, agentManager }),
       // Feature 10 (docs/jev.md) and the background-wait rule (docs/stalled-agents.md). Timeline
       // reads only: a judgment is recorded in the decision store, never as a timeline row, which
       // would re-date an account-failover failure.
@@ -1441,7 +1444,10 @@ function createAccountFailoverMonitor(input: {
   workspaceProvisioning: Pick<WorkspaceProvisioningService, "runInImportWorkspace">;
   wsServer: Pick<
     VoiceAssistantWebSocketServer,
-    "getProviderUsageService" | "getPushNotificationSender" | "getAccountIdentity"
+    | "getProviderUsageService"
+    | "getPushNotificationSender"
+    | "getAccountIdentity"
+    | "getAccountAuth"
   >;
   daemonConfigStore: Pick<DaemonConfigStore, "get">;
   remediationSink: RemediationSink;
@@ -1469,6 +1475,8 @@ function createAccountFailoverMonitor(input: {
       ((agentId) => input.restartRecovery.isAboutToResume(agentId)),
     paceResume: overrides?.wrapPaceResume?.(input.paceResume) ?? input.paceResume,
     accountIdentity: input.wsServer.getAccountIdentity(),
+    accountAuth: input.wsServer.getAccountAuth(),
+    accountAuthProbe: overrides?.accountAuthProbe,
     sweepIntervalMs: overrides?.sweepIntervalMs,
     now: overrides?.now,
   });

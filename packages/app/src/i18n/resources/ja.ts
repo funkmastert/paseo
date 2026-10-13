@@ -1974,6 +1974,15 @@ export const ja: TranslationResources = {
   sidebarCallout: {
     dismiss: "閉じる",
   },
+  accountAlerts: {
+    title_one: "アカウントの問題",
+    title_other: "アカウントの問題",
+    signIn: "サインイン",
+    signInPending: "サインイン中...",
+    signInRunOn: "{{host}} で実行",
+    signInError: "サインインを開始できませんでした",
+    moreCount: "他 {{count}} 件",
+  },
   restartRecovery: {
     summary_one: "{{count}} 件のエージェントがターンの途中で中断されました",
     summary_other: "{{count}} 件のエージェントがターンの途中で中断されました",

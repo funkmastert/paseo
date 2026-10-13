@@ -3237,6 +3237,49 @@ test("marks a workspace unread through the dotted RPC", async () => {
   await expect(markPromise).resolves.toBeUndefined();
 });
 
+test("starts a Claude account sign-in through the dotted RPC", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const signInPromise = client.accountClaudeSignIn("claude-personal", "req-sign-in");
+  expect(parseSentFrame(mock.sent[0])).toEqual({
+    type: "account.claude.sign_in.request",
+    providerId: "claude-personal",
+    requestId: "req-sign-in",
+  });
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "account.claude.sign_in.response",
+      payload: {
+        providerId: "claude-personal",
+        outcome: "started",
+        error: null,
+        requestId: "req-sign-in",
+      },
+    }),
+  );
+
+  await expect(signInPromise).resolves.toEqual({
+    providerId: "claude-personal",
+    outcome: "started",
+    error: null,
+    requestId: "req-sign-in",
+  });
+});
+
 test("searches GitHub repositories through the dotted RPC", async () => {
   const logger = createMockLogger();
   const mock = createMockTransport();

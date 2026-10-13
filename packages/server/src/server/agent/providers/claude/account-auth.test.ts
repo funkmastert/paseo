@@ -42,7 +42,7 @@ describe("readClaudeAccountAuth", () => {
 
     expect(readClaudeAccountAuth(dir)).toEqual({
       state: "signed-out",
-      signInCommand: `CLAUDE_CONFIG_DIR=${dir} claude /login`,
+      signInCommand: claudeSignInCommand(dir, null),
     });
   });
 
@@ -73,20 +73,64 @@ describe("readClaudeAccountAuth", () => {
 
 describe("claudeSignInCommand", () => {
   test("pre-fills the expected email so the browser does not default to another account", () => {
-    expect(claudeSignInCommand("/home/u/.claude-personal", "worker@example.com")).toBe(
+    expect(claudeSignInCommand("/home/u/.claude-personal", "worker@example.com", "linux")).toBe(
       "CLAUDE_CONFIG_DIR=/home/u/.claude-personal claude auth login --email worker@example.com",
     );
   });
 
   test("falls back to the bare command when no email is known", () => {
-    expect(claudeSignInCommand("/home/u/.claude-personal", null)).toBe(
+    expect(claudeSignInCommand("/home/u/.claude-personal", null, "linux")).toBe(
       "CLAUDE_CONFIG_DIR=/home/u/.claude-personal claude /login",
     );
   });
 
+  test("leaves the config dir out when none resolves", () => {
+    expect(claudeSignInCommand(null, "worker@example.com", "linux")).toBe(
+      "claude auth login --email worker@example.com",
+    );
+    expect(claudeSignInCommand(null, null, "linux")).toBe("claude /login");
+  });
+
   test("quotes an email that is not a plain shell word", () => {
-    expect(claudeSignInCommand("/c", "o'brien@example.com")).toBe(
+    expect(claudeSignInCommand("/c", "o'brien@example.com", "linux")).toBe(
       "CLAUDE_CONFIG_DIR=/c claude auth login --email 'o'\\''brien@example.com'",
+    );
+  });
+
+  test("quotes a config dir with a space, so the POSIX command still runs", () => {
+    expect(
+      claudeSignInCommand("/Users/some one/.claude-work", "worker@example.com", "darwin"),
+    ).toBe(
+      "CLAUDE_CONFIG_DIR='/Users/some one/.claude-work' claude auth login --email worker@example.com",
+    );
+  });
+
+  test("leaves a plain home-relative dir unquoted", () => {
+    expect(claudeSignInCommand("~/.claude_work-2", null, "linux")).toBe(
+      "CLAUDE_CONFIG_DIR=~/.claude_work-2 claude /login",
+    );
+  });
+
+  test("prints a PowerShell command on Windows, where VAR=value does not run", () => {
+    expect(
+      claudeSignInCommand("C:\\Users\\some one\\.claude-work", "worker@example.com", "win32"),
+    ).toBe(
+      "$env:CLAUDE_CONFIG_DIR='C:\\Users\\some one\\.claude-work'; claude auth login --email 'worker@example.com'",
+    );
+  });
+
+  test("doubles single quotes in the Windows form", () => {
+    expect(claudeSignInCommand("C:\\o'dir", "o'brien@example.com", "win32")).toBe(
+      "$env:CLAUDE_CONFIG_DIR='C:\\o''dir'; claude auth login --email 'o''brien@example.com'",
+    );
+  });
+
+  test("on Windows without an email or a dir, falls back the same way", () => {
+    expect(claudeSignInCommand("C:\\c", null, "win32")).toBe(
+      "$env:CLAUDE_CONFIG_DIR='C:\\c'; claude /login",
+    );
+    expect(claudeSignInCommand(null, "worker@example.com", "win32")).toBe(
+      "claude auth login --email 'worker@example.com'",
     );
   });
 });

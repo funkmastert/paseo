@@ -177,6 +177,7 @@ import { isVoicePermissionAllowed } from "./voice-permission-policy.js";
 import { ProjectIconReader, setProjectCustomIcon } from "../utils/project-custom-icon.js";
 import { removeProjectRecord } from "./project-removal.js";
 import { VoiceSession } from "./session/voice/voice-session.js";
+import type { ClaudeAccountSignIn } from "./session/account/claude-account-sign-in.js";
 import { CheckoutSession } from "./session/checkout/checkout-session.js";
 import {
   createWorkspaceGitObserverService,
@@ -595,6 +596,8 @@ export interface SessionOptions {
   usageHistory?: UsageHistoryStore;
   tokenUsage?: TokenUsageReader;
   contextUsage?: AgentContextUsageService;
+  /** The daemon's one sign-in launcher, shared by every connection. Absent: sign-in fails. */
+  accountSignIn?: Pick<ClaudeAccountSignIn, "start">;
   jev?: JevService | null;
   hubExecutionAgents?: HubExecutionAgents;
   hubRelationships?: HubRelationshipManagement;
@@ -849,6 +852,7 @@ export class Session {
   private readonly workspaceDirectory: WorkspaceDirectory;
   private readonly voiceSession: VoiceSession;
   private readonly checkoutSession: CheckoutSession;
+  private readonly accountSignIn: Pick<ClaudeAccountSignIn, "start"> | undefined;
   private readonly scheduleSession: ScheduleSession;
   private readonly notifyPolicySession: NotifyPolicySession;
   private readonly restartRecoverySession: RestartRecoverySession;
@@ -914,6 +918,7 @@ export class Session {
       usageHistory,
       tokenUsage,
       contextUsage,
+      accountSignIn,
       jev,
       serviceProxy,
       scriptRuntimeStore,
@@ -1026,6 +1031,7 @@ export class Session {
       worktreesRoot: this.worktreesRoot,
       logger: this.sessionLogger,
     });
+    this.accountSignIn = accountSignIn;
     this.workspaceGitObserver = createWorkspaceGitObserverService({
       workspaceGitService: this.workspaceGitService,
       describeWorkspaceRecordWithGitData: (workspace) =>
@@ -3074,6 +3080,8 @@ export class Session {
         return this.providerCatalogSession.handleProviderDiagnosticRequest(msg);
       case "provider.usage.list.request":
         return this.providerCatalogSession.handleProviderUsageListRequest(msg);
+      case "account.claude.sign_in.request":
+        return this.handleAccountClaudeSignInRequest(msg);
       default:
         return undefined;
     }
@@ -3371,6 +3379,18 @@ export class Session {
         },
       });
     }
+  }
+
+  private async handleAccountClaudeSignInRequest(
+    msg: Extract<SessionInboundMessage, { type: "account.claude.sign_in.request" }>,
+  ): Promise<void> {
+    const result = this.accountSignIn
+      ? await this.accountSignIn.start(msg.providerId)
+      : { outcome: "failed" as const, error: "This daemon cannot start a Claude sign-in" };
+    this.emit({
+      type: "account.claude.sign_in.response",
+      payload: { providerId: msg.providerId, ...result, requestId: msg.requestId },
+    });
   }
 
   private async handleAgentProviderMoveRequest(

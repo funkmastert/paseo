@@ -3,12 +3,19 @@ import pino from "pino";
 
 import {
   AgentStallSweep,
+  handOffStalledAgentToFailover,
   type StallHandoffResult,
   type StallNudgeResult,
 } from "./agent-stall-sweep.js";
-import type { StallSweepAgentSummary } from "./agent/agent-manager.js";
+import type {
+  AgentCancelReason,
+  AgentManager,
+  AgentRunCancellationResult,
+  StallSweepAgentSummary,
+} from "./agent/agent-manager.js";
 import type { ProcessSampleRow } from "./agent/process-sampler.js";
 import type { ProviderHealth } from "./agent-done-janitor.js";
+import type { AccountDeadCancelReason } from "./agent/turn-cancel.js";
 import type { RemediationConfig } from "./remediation/config.js";
 import type {
   RemediationObservation,
@@ -40,6 +47,7 @@ class Harness {
   readonly snapshots: WorktreeSnapshotRequest[] = [];
   readonly nudges: Array<{ agentId: string; prompt: string }> = [];
   readonly handoffs: string[] = [];
+  readonly handoffReasons: AccountDeadCancelReason[] = [];
   health = new Map<string, ProviderHealth>();
   config: RemediationConfig | undefined = undefined;
   psFails = false;
@@ -79,8 +87,9 @@ class Harness {
         this.nudges.push(input);
         return this.nudgeResult;
       },
-      handOffToFailover: async (agentId) => {
+      handOffToFailover: async ({ agentId, cancelReason }) => {
         this.handoffs.push(agentId);
+        this.handoffReasons.push(cancelReason);
         return this.handoffResult;
       },
     },
@@ -357,7 +366,11 @@ describe("what is not a stall", () => {
 
 describe("a stalled agent on a capped account", () => {
   beforeEach(() => {
-    h.health.set("claude-personal", { askable: false, reason: "account is at its usage cap" });
+    h.health.set("claude-personal", {
+      askable: false,
+      reason: "account is at its usage cap",
+      cancelReason: "account-capped",
+    });
   });
 
   test("is handed to account failover after the shorter threshold, never nudged", async () => {
@@ -394,6 +407,27 @@ describe("a stalled agent on a capped account", () => {
     h.add("a1", { lastActivityAt: new Date(START + 4 * MINUTE).toISOString() });
     await h.warmUp();
     expect(h.observations).toEqual([]);
+  });
+});
+
+describe("a stalled agent on a signed-out account", () => {
+  beforeEach(() => {
+    h.health.set("claude-personal", {
+      askable: false,
+      reason: "an agent on account claude-personal failed to authenticate",
+      cancelReason: "account-signed-out",
+    });
+  });
+
+  test("is handed to account failover with the signed-out reason", async () => {
+    h.add("a1", {
+      provider: "claude-personal",
+      lastActivityAt: new Date(START - 6 * MINUTE).toISOString(),
+    });
+    await h.warmUp();
+    expect(h.handoffs).toEqual(["a1"]);
+    expect(h.handoffReasons).toEqual(["account-signed-out"]);
+    expect(h.nudges).toEqual([]);
   });
 });
 
@@ -442,5 +476,62 @@ describe("modes and limits", () => {
     const [first, second] = await Promise.all([h.sweep.tick(), h.sweep.tick()]);
     expect(first).not.toBeNull();
     expect(second).toBeNull();
+  });
+});
+
+describe("handOffStalledAgentToFailover", () => {
+  function fakeAgentManager(lastErrorAfterCancel: string) {
+    const cancelReasons: AgentCancelReason[] = [];
+    const manager: Pick<AgentManager, "cancelAgentRun" | "getAgent"> = {
+      cancelAgentRun: async (
+        _agentId: string,
+        reason?: AgentCancelReason,
+      ): Promise<AgentRunCancellationResult> => {
+        cancelReasons.push(reason ?? "unspecified");
+        return { status: "settled" };
+      },
+      getAgent: () => ({ lastError: lastErrorAfterCancel }) as ReturnType<AgentManager["getAgent"]>,
+    };
+    return { cancelReasons, manager };
+  }
+
+  test("cancels with account-capped and accepts a limit-shaped lastError", async () => {
+    const { cancelReasons, manager } = fakeAgentManager("You've hit your monthly spend limit");
+    const result = await handOffStalledAgentToFailover({
+      agentManager: manager,
+      agentId: "a1",
+      cancelReason: "account-capped",
+    });
+    expect(cancelReasons).toEqual(["account-capped"]);
+    expect(result).toEqual({
+      kind: "handed-off",
+      lastError: "You've hit your monthly spend limit",
+    });
+  });
+
+  test("cancels with account-signed-out and accepts an auth-shaped lastError", async () => {
+    const { cancelReasons, manager } = fakeAgentManager(
+      "Account claude-personal is signed out (Failed to authenticate), and this turn stalled",
+    );
+    const result = await handOffStalledAgentToFailover({
+      agentManager: manager,
+      agentId: "a1",
+      cancelReason: "account-signed-out",
+    });
+    expect(cancelReasons).toEqual(["account-signed-out"]);
+    expect(result.kind).toBe("handed-off");
+  });
+
+  test("fails when the cancel settles without leaving an account-dead error", async () => {
+    const { manager } = fakeAgentManager("some unrelated error");
+    const result = await handOffStalledAgentToFailover({
+      agentManager: manager,
+      agentId: "a1",
+      cancelReason: "account-capped",
+    });
+    expect(result).toEqual({
+      kind: "failed",
+      error: "the cancel settled but left no limit- or auth-shaped error for failover to read",
+    });
   });
 });

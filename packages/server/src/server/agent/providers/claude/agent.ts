@@ -1882,7 +1882,13 @@ export class ClaudeAgentClient implements AgentClient {
   }
 }
 
-async function resolveClaudeBinary(runtimeSettings?: ProviderRuntimeSettings): Promise<string> {
+/**
+ * The `claude` executable this host runs, found the way every Claude launch finds it rather than
+ * from the daemon's own PATH, which a launchd- or Electron-started daemon may not have.
+ */
+export async function resolveClaudeBinary(
+  runtimeSettings?: ProviderRuntimeSettings,
+): Promise<string> {
   const launch = await resolveProviderLaunch({
     commandConfig: runtimeSettings?.command,
     defaultBinary: "claude",

@@ -1934,6 +1934,15 @@ export const zhCN: TranslationResources = {
   sidebarCallout: {
     dismiss: "关闭",
   },
+  accountAlerts: {
+    title_one: "账户问题",
+    title_other: "账户问题",
+    signIn: "登录",
+    signInPending: "正在登录...",
+    signInRunOn: "在 {{host}} 上运行",
+    signInError: "无法开始登录",
+    moreCount: "另外 {{count}} 个",
+  },
   restartRecovery: {
     summary_one: "{{count}} 个代理在轮次中途被中断",
     summary_other: "{{count}} 个代理在轮次中途被中断",

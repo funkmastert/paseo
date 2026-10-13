@@ -16,6 +16,11 @@ export interface WindowSnapshot {
   resetsAt?: Date;
   /** Last observed utilization percent (0-100) from a usage reading, if any. */
   utilizationPct?: number;
+  /**
+   * Present while the daemon reports this account signed out (only ever on WINDOW_ACCOUNT), with
+   * the command that signs it in when the daemon sent one.
+   */
+  signedOut?: { fixCommand: string | null };
 }
 
 /** One provider's windows, keyed by window id (e.g. "account", "five_hour", "weekly_model_opus"). */
@@ -76,6 +81,14 @@ export interface HealthTracker {
   reportTurnFailure(providerId: string, message: string): void;
   /** Proactive signal: feeds per-window usage readings. Windows not present are left untouched. */
   reportUsage(providerId: string, windows: UsageWindowReading[]): void;
+  /**
+   * Durable signed-out signal from the daemon's `AccountAuthTracker`, mirrored here via
+   * usage-poll.ts's `accountAuth` field. Unlike `reportTurnFailure`'s auth-failure cap, this
+   * never decays to probation on its own TTL — it holds the account unroutable for as long as
+   * `signedOut` keeps coming back true, and clears the moment a poll reports it false. Clearing it
+   * leaves alone any other cap on the same window: signing in proves nothing about budget.
+   */
+  reportAccountAuth(providerId: string, signedOut: boolean, fixCommand?: string | null): void;
   /** A turn completed successfully: any window in probation for this provider heals to healthy. */
   noteTurnCompleted(providerId: string): void;
   /** True when the account is usable for a fresh spawn of the given model. */
@@ -158,6 +171,28 @@ interface InternalWindowState {
    * reading at the cap or by refusal-grade text for the same window.
    */
   placementOnly?: boolean;
+  /**
+   * True while `reportAccountAuth`'s signed-out signal is the reason this window (always
+   * WINDOW_ACCOUNT) is capped. `settle()` never decays a durable cap to probation, and an
+   * unrelated usage reading for the same window never heals it either -- only `reportAccountAuth`
+   * can set this false again, mirroring the daemon's sign-in evidence: no TTL, clears only on
+   * contrary evidence.
+   */
+  signedOutDurable?: boolean;
+  /** The daemon's command that signs the account in, while `signedOutDurable` holds. */
+  signInCommand?: string | null;
+  /**
+   * The budget cap that stood when the signed-out signal arrived, or that a turn failure reported
+   * while it held. Restored when the signal clears. An auth-failure cap is not kept: the sign-in
+   * that clears the signal fixes it too.
+   */
+  capBeneathSignedOut?: CapBeneathSignedOut;
+}
+
+interface CapBeneathSignedOut {
+  resetsAt?: Date;
+  capExpiry?: Date;
+  placementOnly: boolean;
 }
 
 /**
@@ -194,6 +229,15 @@ export function gatingWindowIds(modelId: string, observedWindowIds: readonly str
   );
 }
 
+function toSnapshot(state: InternalWindowState): WindowSnapshot {
+  return {
+    status: state.status,
+    resetsAt: state.resetsAt,
+    utilizationPct: state.utilizationPct,
+    ...(state.signedOutDurable ? { signedOut: { fixCommand: state.signInCommand ?? null } } : {}),
+  };
+}
+
 export function createHealthTracker(options: HealthTrackerOptions = {}): HealthTracker {
   const now = options.now ?? (() => new Date());
   const drainThresholdPct = options.drainThresholdPct ?? DEFAULT_DRAIN_THRESHOLD_PCT;
@@ -226,6 +270,11 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     const currentTime = now().getTime();
 
     if (state.status === "capped") {
+      // A durable signed-out cap has no expiry to resolve: it holds until reportAccountAuth
+      // clears it, not on a timer.
+      if (state.signedOutDurable) {
+        return;
+      }
       const expiry = state.capExpiry?.getTime();
       if (expiry !== undefined && currentTime >= expiry) {
         state.status = "probation";
@@ -252,6 +301,9 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     state.probationExpiry = undefined;
     state.authFailure = false;
     state.placementOnly = false;
+    state.signedOutDurable = false;
+    state.signInCommand = undefined;
+    state.capBeneathSignedOut = undefined;
     if (wasCappedLineage) {
       emit({ providerId, window, kind: "recovered" });
     }
@@ -265,11 +317,16 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     authFailure = false,
     placementOnly = false,
   ): void {
-    const currentTime = now().getTime();
     state.status = "capped";
     state.resetsAt = resetsAt;
     state.authFailure = authFailure;
     state.placementOnly = placementOnly;
+    state.capExpiry = capExpiryFor(window, resetsAt, authFailure);
+    state.probationExpiry = undefined;
+    emit({ providerId, window, kind: "capped", resetsAt: state.resetsAt ?? state.capExpiry });
+  }
+
+  function capExpiryFor(window: string, resetsAt: Date | undefined, authFailure: boolean): Date {
     // An auth failure is account-wide and retried quickly; otherwise the fallback tracks the
     // window's own clock, so a weekly cap with no reset time doesn't expire on a session-window
     // timer and hand the account back out days early.
@@ -278,9 +335,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
       : isWeeklyWindow(window)
         ? weeklyCapTtlMs
         : defaultCapTtlMs;
-    state.capExpiry = resetsAt ?? new Date(currentTime + fallbackTtlMs);
-    state.probationExpiry = undefined;
-    emit({ providerId, window, kind: "capped", resetsAt: state.resetsAt ?? state.capExpiry });
+    return resetsAt ?? new Date(now().getTime() + fallbackTtlMs);
   }
 
   function getSettled(providerId: string, window: string): InternalWindowState {
@@ -302,6 +357,18 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     const window = classification.window ?? WINDOW_ACCOUNT;
     const placementOnly = classification.placementOnly === true;
     const state = getSettled(providerId, window);
+    if (state.signedOutDurable && !classification.isAuthFailure) {
+      // A budget cap under the signed-out one: kept aside so signing in does not lift it.
+      const beneath = state.capBeneathSignedOut;
+      state.capBeneathSignedOut = beneath
+        ? { ...beneath, placementOnly: beneath.placementOnly && placementOnly }
+        : {
+            resetsAt: classification.resetsAt,
+            capExpiry: capExpiryFor(window, classification.resetsAt, false),
+            placementOnly,
+          };
+      return;
+    }
     if (state.status === "capped") {
       state.placementOnly = state.placementOnly === true && placementOnly;
       return;
@@ -336,13 +403,60 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
         continue;
       }
 
-      // Below the drain threshold: a healthy usage reading clears any cap/drain for this window.
+      // Below the drain threshold: a healthy usage reading clears any cap/drain for this window --
+      // except a durable signed-out cap, which only reportAccountAuth may clear. An ordinary usage
+      // window reading says nothing about whether the account can authenticate.
+      if (state.signedOutDurable) continue;
       if (state.status === "capped" || state.status === "probation") {
         toHealthy(providerId, reading.window, state);
       } else {
         state.status = "healthy";
       }
     }
+  }
+
+  function reportAccountAuth(providerId: string, signedOut: boolean, fixCommand: string | null = null): void {
+    if (!signedOut) {
+      // Never creates state for a provider nothing has been reported for yet -- only clears an
+      // existing durable cap.
+      const existing = windowsByProvider.get(providerId)?.get(WINDOW_ACCOUNT);
+      if (existing?.signedOutDurable) {
+        clearSignedOut(providerId, existing);
+      }
+      return;
+    }
+    const state = getSettled(providerId, WINDOW_ACCOUNT);
+    state.signInCommand = fixCommand;
+    if (state.signedOutDurable) {
+      return;
+    }
+    state.signedOutDurable = true;
+    if (state.status === "capped") {
+      state.capBeneathSignedOut = state.authFailure
+        ? undefined
+        : { resetsAt: state.resetsAt, capExpiry: state.capExpiry, placementOnly: state.placementOnly === true };
+      state.authFailure = true;
+      state.placementOnly = false;
+    } else {
+      toCapped(providerId, WINDOW_ACCOUNT, state, undefined, true, false);
+    }
+  }
+
+  /** Lifts the signed-out cap; a cap that stood beneath it comes back with its own expiry. */
+  function clearSignedOut(providerId: string, state: InternalWindowState): void {
+    const beneath = state.capBeneathSignedOut;
+    if (!beneath) {
+      toHealthy(providerId, WINDOW_ACCOUNT, state);
+      return;
+    }
+    state.signedOutDurable = false;
+    state.signInCommand = undefined;
+    state.capBeneathSignedOut = undefined;
+    state.resetsAt = beneath.resetsAt;
+    state.capExpiry = beneath.capExpiry;
+    state.authFailure = false;
+    state.placementOnly = beneath.placementOnly;
+    settle(providerId, WINDOW_ACCOUNT, state);
   }
 
   function noteTurnCompleted(providerId: string): void {
@@ -411,7 +525,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
       return undefined;
     }
     settle(providerId, window, state);
-    return { status: state.status, resetsAt: state.resetsAt, utilizationPct: state.utilizationPct };
+    return toSnapshot(state);
   }
 
   function windowIds(providerId: string): string[] {
@@ -431,11 +545,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
       const providerSnapshot: ProviderSnapshot = {};
       for (const [window, state] of providerWindows) {
         settle(providerId, window, state);
-        providerSnapshot[window] = {
-          status: state.status,
-          resetsAt: state.resetsAt,
-          utilizationPct: state.utilizationPct,
-        };
+        providerSnapshot[window] = toSnapshot(state);
       }
       result[providerId] = providerSnapshot;
     }
@@ -450,6 +560,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
   return {
     reportTurnFailure,
     reportUsage,
+    reportAccountAuth,
     noteTurnCompleted,
     isHealthyFor,
     isLastResortEligible,

@@ -4,7 +4,7 @@ import { buildFinishReportNotificationPayload } from "@getpaseo/protocol/finish-
 import type { AgentManager, AgentManagerEvent, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent-storage.js";
 import type { PushNotificationSender } from "../push/index.js";
-import { HANDOFF_FROM_LABEL, isLimitShapedError } from "./account-failover-detector.js";
+import { HANDOFF_FROM_LABEL, isAccountDeadError } from "./account-failover-detector.js";
 import { findExistingSuccessor } from "./account-failover-migration.js";
 import {
   followMigratedToAsync,
@@ -673,13 +673,13 @@ export class FinishObligationService {
     const notes: string[] = [];
     if (
       reason === "errored" &&
-      isLimitShapedError(context.child.lastError) &&
+      isAccountDeadError(context.child.lastError) &&
       (this.options.isAccountFailoverEnabled?.() ?? false)
     ) {
       notes.push(
-        "It hit its account's usage cap. Account failover moves it to another account and " +
-          "resumes it, and you get another report when it finishes. Do not create another " +
-          "agent for the same task.",
+        "Its account hit a usage cap or signed out. Account failover moves it to another " +
+          "account and resumes it, and you get another report when it finishes. Do not create " +
+          "another agent for the same task.",
       );
     }
     return formatFinishNotificationBody({

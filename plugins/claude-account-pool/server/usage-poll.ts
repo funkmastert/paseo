@@ -18,6 +18,12 @@ export interface UsagePollWindowRow {
 export interface UsagePollProviderRow {
   providerId: string;
   windows: UsagePollWindowRow[];
+  /**
+   * Mirrors the daemon's `ProviderUsage.accountAuth` field (presence means `state: "signed_out"`;
+   * see packages/protocol/src/messages.ts), with the command that signs the account in. Null/absent
+   * means nothing is known to be wrong.
+   */
+  accountAuth?: { state: "signed_out"; fixCommand?: string } | null;
 }
 
 export interface UsagePollResult {
@@ -115,6 +121,11 @@ export function createUsagePoller(tracker: HealthTracker, options: UsagePollerOp
           resetsAt: parseResetsAt(window.resetsAt),
         }));
         tracker.reportUsage(provider.providerId, readings);
+        tracker.reportAccountAuth(
+          provider.providerId,
+          provider.accountAuth != null,
+          provider.accountAuth?.fixCommand ?? null,
+        );
         options.accountIdentity?.reportUsage(provider.providerId, readings);
       }
     },

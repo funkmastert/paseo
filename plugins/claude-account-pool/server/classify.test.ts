@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { classify, LIMIT_PATTERN } from "./classify";
+import { classify, LIMIT_PATTERN, REFRESH_LOCK_PATTERN } from "./classify";
 import { WINDOW_ACCOUNT, WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, weeklyModelWindow } from "./windows";
 
 /**
@@ -25,17 +25,19 @@ const CLI_CAP_MESSAGES: ReadonlyArray<{ message: string; window: string }> = [
 ];
 
 /**
- * The daemon's own detector, read out of its source. The plugin compiles on its own and cannot
- * import daemon code, so it carries a copy of the pattern; this is what keeps the copy honest.
+ * One of the daemon's own detector patterns, read out of its source. The plugin compiles on its own
+ * and cannot import daemon code, so it carries copies of the patterns; this keeps the copies honest.
  */
-function daemonLimitPattern(): RegExp {
+function daemonPattern(
+  constName: "LIMIT_TEXT_PATTERN" | "AUTH_TEXT_PATTERN" | "REFRESH_LOCK_PATTERN",
+): RegExp {
   const source = readFileSync(
     new URL("../../../packages/server/src/server/agent/account-failover-detector.ts", import.meta.url),
     "utf8",
   );
-  const match = /const LIMIT_TEXT_PATTERN =\s*\/(.+)\/([a-z]*);/.exec(source);
+  const match = new RegExp(`const ${constName} =\\s*\\/(.+)\\/([a-z]*);`).exec(source);
   if (!match) {
-    throw new Error("LIMIT_TEXT_PATTERN not found in account-failover-detector.ts; update this test");
+    throw new Error(`${constName} not found in account-failover-detector.ts; update this test`);
   }
   return new RegExp(match[1], match[2]);
 }
@@ -103,8 +105,8 @@ describe("classify — the CLI's per-window cap messages", () => {
   });
 
   it("uses the same limit pattern as the daemon's failover detector", () => {
-    expect(LIMIT_PATTERN.source).toBe(daemonLimitPattern().source);
-    expect(LIMIT_PATTERN.flags).toBe(daemonLimitPattern().flags);
+    expect(LIMIT_PATTERN.source).toBe(daemonPattern("LIMIT_TEXT_PATTERN").source);
+    expect(LIMIT_PATTERN.flags).toBe(daemonPattern("LIMIT_TEXT_PATTERN").flags);
   });
 });
 
@@ -158,6 +160,58 @@ describe("classify", () => {
 
   it("does not flag ordinary limit-shaped text as an auth failure", () => {
     expect(classify("You've hit your limit").isAuthFailure).toBeFalsy();
+  });
+
+  // An expired OAuth session that cannot refresh fails a turn with exactly this text.
+  it("flags an expired or revoked sign-in as an auth failure", () => {
+    expect(
+      classify("Failed to authenticate: OAuth session expired and could not be refreshed")
+        .isAuthFailure,
+    ).toBe(true);
+    expect(classify("OAuth session expired").isAuthFailure).toBe(true);
+    expect(classify("OAuth token revoked").isAuthFailure).toBe(true);
+    expect(classify("Session expired").isAuthFailure).toBe(true);
+    expect(classify("Your session has expired").isAuthFailure).toBe(true);
+  });
+
+  it("does not flag the transient refresh-lock message as an auth failure", () => {
+    const result = classify(
+      "OAuth access token could not be refreshed: another Claude Code process is holding the refresh lock",
+    );
+    expect(result.isAuthFailure).toBeFalsy();
+  });
+
+  /**
+   * `AUTH_FAILURE_PATTERN` must recognize every string the daemon's `isAuthShapedError` does, or a
+   * sign-in failure the daemon sees would keep looking healthy to the pool. It may recognize more
+   * (`invalid auth token`, `oauth login failed`, `cloud authentication failed`), so this checks
+   * containment, not equality.
+   */
+  it("recognizes every string in the daemon's AUTH_TEXT_PATTERN", () => {
+    const alternatives = daemonPattern("AUTH_TEXT_PATTERN")
+      .source.split("|")
+      .map((alt) => alt.replace(/\\\//g, "/"));
+    expect(alternatives.length).toBeGreaterThan(1);
+    for (const alternative of alternatives) {
+      expect(classify(alternative).isAuthFailure, alternative).toBe(true);
+    }
+  });
+
+  /**
+   * The daemon checks REFRESH_LOCK_PATTERN before AUTH_TEXT_PATTERN, so a lock message the CLI
+   * wraps in "Failed to authenticate: …" is not a sign-in failure there. It must not be one here
+   * either, or the pool would park a healthy account the daemon keeps using.
+   */
+  it("rejects a wrapped refresh-lock message in both copies", () => {
+    const wrapped =
+      "Failed to authenticate: OAuth access token could not be refreshed: another Claude Code process is holding the refresh lock";
+    const daemonSaysAuth =
+      !daemonPattern("REFRESH_LOCK_PATTERN").test(wrapped) && daemonPattern("AUTH_TEXT_PATTERN").test(wrapped);
+
+    expect(daemonSaysAuth).toBe(false);
+    expect(classify(wrapped)).toEqual({ isLimit: false });
+    expect(REFRESH_LOCK_PATTERN.source).toBe(daemonPattern("REFRESH_LOCK_PATTERN").source);
+    expect(REFRESH_LOCK_PATTERN.flags).toBe(daemonPattern("REFRESH_LOCK_PATTERN").flags);
   });
 
   it("parses an ISO resetsAt timestamp from the message", () => {

@@ -137,6 +137,7 @@ import { resolveNotificationTapAction } from "@/utils/notification-routing";
 import { openExternalUrl } from "@/utils/open-external-url";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { AgentMoveNoticeToast } from "@/components/agent-move-notice-toast";
+import { AccountAlertFrame } from "@/account-alerts/account-alert-banner";
 import { PluginCatalogSync } from "@/plugins";
 import {
   ensureOsNotificationPermission,
@@ -891,7 +892,11 @@ function AppWithSidebar({ children }: { children: ReactNode }) {
       pathname === "/pinned-grid" ||
       routeHasKnownHost);
 
-  return <AppContainer chromeEnabled={shouldShowAppChrome}>{children}</AppContainer>;
+  return (
+    <AccountAlertFrame>
+      <AppContainer chromeEnabled={shouldShowAppChrome}>{children}</AppContainer>
+    </AccountAlertFrame>
+  );
 }
 
 function FaviconStatusSync() {

@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type { AgentAccountAuth, AgentPromptInput } from "./agent/agent-sdk-types.js";
+import type { AccountAuthReading } from "./agent/account-auth-health.js";
+import { AccountAuthProbe, type ProbeProcessResult } from "./agent/account-auth-probe.js";
 import {
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
   HANDOFF_FROM_LABEL,
@@ -33,6 +35,26 @@ const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 
 const POOL_PROVIDERS = ["claude", "claude-personal", "claude-backup"] as const;
+const OAUTH_EXPIRED_MESSAGE =
+  "Failed to authenticate: OAuth session expired and could not be refreshed";
+const PROBE_INCONCLUSIVE: ProbeProcessResult = {
+  stdout: "",
+  stderr: "network error",
+  exitCode: 1,
+  timedOut: false,
+};
+const PROBE_SIGNED_OUT: ProbeProcessResult = {
+  stdout: "",
+  stderr: OAUTH_EXPIRED_MESSAGE,
+  exitCode: 1,
+  timedOut: false,
+};
+const PROBE_SIGNED_IN: ProbeProcessResult = {
+  stdout: "ok",
+  stderr: "",
+  exitCode: 0,
+  timedOut: false,
+};
 type PoolProvider = (typeof POOL_PROVIDERS)[number];
 
 interface Harness {
@@ -63,6 +85,17 @@ interface Harness {
   failResumes(provider: PoolProvider, times: number): void;
   /** What `describeAccountAuth` reports for a provider — which Claude login it runs as. */
   setAccount(provider: PoolProvider, auth: AgentAccountAuth): void;
+  /**
+   * What the usage fetcher's newest auth reading says for a provider, read now. `"ok"` is how a
+   * sign-in recovers without a later successful turn.
+   */
+  setAuthReading(provider: PoolProvider, reading: AccountAuthReading): void;
+  /** The providers each usage read so far forced past the cache, oldest first. */
+  forcedUsageReads: string[][];
+  /** The `CLAUDE_CONFIG_DIR` of each sign-in probe run so far, oldest first. */
+  probeRuns: string[];
+  /** How the sign-in probe's CLI answers from now on. Until a test says, it is inconclusive. */
+  setProbeReply(reply: () => Promise<ProbeProcessResult>): void;
   advanceClock(ms: number): void;
   setClock(ms: number): void;
   sweep(): Promise<void>;
@@ -113,6 +146,10 @@ async function createHarness(): Promise<Harness> {
     "claude-backup": [],
   };
   let usage: ProviderUsage[] = [];
+  const forcedUsageReads: string[][] = [];
+  const authReadings = new Map<string, { reading: AccountAuthReading; atMs: number }>();
+  const probeRuns: string[] = [];
+  let probeReply = async (): Promise<ProbeProcessResult> => PROBE_INCONCLUSIVE;
   let sweepHook: (() => Promise<void>) | null = null;
   let paceHook: (() => Promise<void>) | null = null;
   const resumeFailures: Record<PoolProvider, number> = {
@@ -178,12 +215,14 @@ async function createHarness(): Promise<Harness> {
       },
       accountFailoverOverrides: {
         providerUsage: {
-          listUsage: async () => {
+          listUsage: async (options) => {
+            forcedUsageReads.push([...(options?.forceRefreshProviderIds ?? [])]);
             const hook = sweepHook;
             sweepHook = null;
             await hook?.();
             return { fetchedAt: new Date(clockMs).toISOString(), providers: usage };
           },
+          getAuthReadings: () => new Map(authReadings),
         },
         sweepIntervalMs: 60 * MINUTE_MS,
         now: () => clockMs,
@@ -193,6 +232,17 @@ async function createHarness(): Promise<Harness> {
           },
         },
         isClaimedByRestartRecovery: (agentId) => claimedByRestartRecovery.has(agentId),
+        // Never the real CLI: a probe run is recorded and answered by the test.
+        accountAuthProbe: new AccountAuthProbe({
+          logger: pino({ level: "silent" }),
+          runProcess: async (_command, _args, options) => {
+            probeRuns.push(options.envOverlay["CLAUDE_CONFIG_DIR"] ?? "");
+            return probeReply();
+          },
+          resolveBinary: async () => "claude",
+          scratchDir: () => cwd,
+          now: () => clockMs,
+        }),
         wrapPaceResume: (paceResume) => (resume, fn) =>
           paceResume(resume, async () => {
             const hook = paceHook;
@@ -246,6 +296,14 @@ async function createHarness(): Promise<Harness> {
     claimedByRestartRecovery,
     failResumes: (provider, times) => {
       resumeFailures[provider] = times;
+    },
+    forcedUsageReads,
+    probeRuns,
+    setProbeReply: (reply) => {
+      probeReply = reply;
+    },
+    setAuthReading: (provider, reading) => {
+      authReadings.set(provider, { reading, atMs: clockMs });
     },
     setAccount: (provider, auth) => {
       accounts[provider] = auth;
@@ -346,6 +404,26 @@ function providerOf(harness: Harness, agentId: string): string {
  */
 function windowHasReset(harness: Harness): void {
   harness.setClock(Date.now() + REACTIVE_TTL_MS + HOUR_MS);
+}
+
+/**
+ * Makes every probe run wait for its answer, and returns how to give it: the clock moves on by
+ * the time the CLI takes, then the oldest waiting run answers and its result is collected.
+ */
+function answerProbesByHand(harness: Harness): (result: ProbeProcessResult) => Promise<void> {
+  const waiting: Array<(result: ProbeProcessResult) => void> = [];
+  harness.setProbeReply(
+    () =>
+      new Promise<ProbeProcessResult>((resolve) => {
+        waiting.push(resolve);
+      }),
+  );
+  return async (result) => {
+    await expect.poll(() => waiting.length).toBeGreaterThan(0);
+    harness.advanceClock(20_000);
+    waiting.shift()?.(result);
+    await new Promise((resolve) => setImmediate(resolve));
+  };
 }
 
 async function settle(harness: Harness, agentId: string): Promise<void> {
@@ -621,6 +699,61 @@ describe("AccountFailoverMonitor (e2e)", () => {
     expect(agentCount(harness)).toBe(agentsBeforeSweep);
     expect(failoverPushes(harness)).toHaveLength(1);
     expect(providerOf(harness, leader)).toBe("claude-personal");
+  }, 60_000);
+
+  test("migrates a worker stuck on a signed-out account to a healthy one", async () => {
+    // Same shape as the capped-leader test above, but the evidence is a sign-in failure, not a
+    // usage cap: a signed-out account is dead the same way, so the rescue leg reads it alike.
+    const leader = await createAgent(harness, { provider: "claude", title: "Build failover" });
+    await converse(harness, leader, "CONTEXT-MARKER-AUTH");
+    await failOnLimit(
+      harness,
+      leader,
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+    );
+
+    await harness.sweep();
+
+    const moved = managed(harness, leader);
+    expect(moved.provider).toBe("claude-personal");
+    expect(moved.lastError).toBeUndefined();
+    expect(failoverPushes(harness)).toEqual([
+      expect.objectContaining({
+        title: "Agent moved to a new account",
+        data: expect.objectContaining({ agentId: leader, reason: "account_failover" }),
+      }),
+    ]);
+    const resumePrompt = handoffPrompts(harness).join("\n");
+    expect(resumePrompt).toContain('"claude" failed because that account is signed out');
+    expect(resumePrompt).not.toContain("usage limit");
+  }, 60_000);
+
+  test("moves an idle root off a signed-out account onto the leader account", async () => {
+    // A different agent on the same account provides the sign-in evidence; the idle root itself
+    // never failed a turn, so this exercises deadProviderIds alone, not isAccountDeadFor on the
+    // root's own lastError.
+    const sentinel = await createAgent(harness, {
+      provider: "claude-backup",
+      title: "Sentinel",
+    });
+    await converse(harness, sentinel, "SENTINEL-MARKER");
+    await failOnLimit(
+      harness,
+      sentinel,
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+    );
+
+    const root = await createAgent(harness, {
+      provider: "claude-backup",
+      title: "Check mobile support needs",
+    });
+    await converse(harness, root, "ROOT-MARKER");
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude");
+    expect(assistantText(harness, root)).toContain("ROOT-MARKER");
+    expect(managed(harness, root).lifecycle).toBe("idle");
   }, 60_000);
 
   test("paces the resumes of a mass move through the shared resume budget", async () => {
@@ -1068,6 +1201,244 @@ describe("AccountFailoverMonitor (e2e)", () => {
     await harness.sweep();
     expect(strandedObservations(harness)).toHaveLength(count);
   });
+
+  test("reports a standing signed-out account once, and closes it once on recovery", async () => {
+    const signedOutObservations = () =>
+      harness.observations.filter((o) => o.key === "account-signed-out:claude");
+
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await converse(harness, leader, "SIGNED-OUT-MARKER");
+    await failOnLimit(
+      harness,
+      leader,
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+    );
+
+    await harness.sweep();
+    expect(signedOutObservations()).toHaveLength(1);
+    expect(signedOutObservations()[0]).toMatchObject({
+      kind: "account-signed-out",
+      active: true,
+      remedy: "none",
+      level: "urgent",
+      title: "Claude account signed out: claude",
+    });
+
+    // Still signed out, nothing new to say: the ladder is not written again.
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(signedOutObservations()).toHaveLength(1);
+
+    // Credentials restored: the next reading sees it, and the episode closes.
+    harness.setAuthReading("claude", "ok");
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(signedOutObservations()).toHaveLength(2);
+    expect(signedOutObservations()[1]).toMatchObject({ active: false });
+
+    // Closed once; a quiet account says nothing more.
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(signedOutObservations()).toHaveLength(2);
+  }, 60_000);
+
+  test("re-reads a signed-out account's usage past the cache at most once per five minutes", async () => {
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await converse(harness, leader, "THROTTLE-MARKER");
+    await failOnLimit(
+      harness,
+      leader,
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+    );
+    const forcedReadsOfClaude = () =>
+      harness.forcedUsageReads.filter((ids) => ids.includes("claude")).length;
+
+    await harness.sweep();
+    expect(forcedReadsOfClaude()).toBe(0);
+
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(forcedReadsOfClaude()).toBe(1);
+
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(forcedReadsOfClaude()).toBe(1);
+
+    harness.advanceClock(5 * MINUTE_MS);
+    await harness.sweep();
+    expect(forcedReadsOfClaude()).toBe(2);
+  }, 60_000);
+
+  test("two accounts signed out at once produce two episodes with distinct keys", async () => {
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await converse(harness, leader, "L");
+    await failOnLimit(
+      harness,
+      leader,
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+    );
+    const worker = await createAgent(harness, { provider: "claude-backup", title: "Worker" });
+    await converse(harness, worker, "W");
+    await failOnLimit(
+      harness,
+      worker,
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+    );
+
+    await harness.sweep();
+
+    expect(
+      harness.observations.filter((o) => o.key === "account-signed-out:claude" && o.active),
+    ).toHaveLength(1);
+    expect(
+      harness.observations.filter((o) => o.key === "account-signed-out:claude-backup" && o.active),
+    ).toHaveLength(1);
+  }, 60_000);
+
+  test("an idle enabled account with no credentials is signed out once the probe confirms it; a disabled one is never probed", async () => {
+    const answerProbe = answerProbesByHand(harness);
+    await harness.client.patchDaemonConfig({
+      providers: {
+        "claude-backup": {
+          extends: "claude",
+          label: "Claude Backup",
+          enabled: false,
+          params: { accountPool: { role: "worker", priority: 2 } },
+        },
+      },
+    });
+    // No agent ever ran on either account: the usage fetcher's own read is the only evidence, and
+    // a missing credential is only suspect until the CLI itself says it cannot sign in.
+    harness.setAuthReading("claude-personal", "credentials_missing");
+    harness.setAuthReading("claude-backup", "credentials_missing");
+
+    await harness.sweep();
+    expect(
+      harness.observations.filter(
+        (o) => o.key === "account-signed-out:claude-personal" && o.active,
+      ),
+    ).toEqual([]);
+    await answerProbe(PROBE_SIGNED_OUT);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+
+    expect(harness.probeRuns).toEqual([expect.stringContaining("personal-config")]);
+    expect(
+      harness.observations.filter(
+        (o) => o.key === "account-signed-out:claude-personal" && o.active,
+      ),
+    ).toEqual([expect.objectContaining({ active: true, level: "urgent" })]);
+    expect(
+      harness.observations.filter((o) => o.key === "account-signed-out:claude-backup" && o.active),
+    ).toEqual([]);
+  }, 60_000);
+
+  test("a probe that signs in quiets that suspect reading for six hours, so it cannot loop billed probes", async () => {
+    const answerProbe = answerProbesByHand(harness);
+    const signedOut = () =>
+      harness.observations.filter(
+        (o) => o.key === "account-signed-out:claude-personal" && o.active,
+      );
+    // A Keychain item looked up under the wrong name: the fetcher finds nothing on every read,
+    // while the CLI signs in fine.
+    harness.setAuthReading("claude-personal", "credentials_missing");
+    await harness.sweep();
+    await answerProbe(PROBE_SIGNED_IN);
+
+    for (let read = 0; read < 10; read += 1) {
+      harness.advanceClock(20 * MINUTE_MS);
+      harness.setAuthReading("claude-personal", "credentials_missing");
+      await harness.sweep();
+    }
+    expect(harness.probeRuns).toHaveLength(1);
+    expect(signedOut()).toEqual([]);
+
+    // Six hours after the probe, the reading counts again: one more probe, then quiet again.
+    harness.advanceClock(4 * HOUR_MS);
+    harness.setAuthReading("claude-personal", "credentials_missing");
+    await harness.sweep();
+    await answerProbe(PROBE_SIGNED_IN);
+    expect(harness.probeRuns).toHaveLength(2);
+    harness.advanceClock(20 * MINUTE_MS);
+    harness.setAuthReading("claude-personal", "credentials_missing");
+    await harness.sweep();
+    expect(harness.probeRuns).toHaveLength(2);
+    expect(signedOut()).toEqual([]);
+  }, 60_000);
+
+  test("never probes an account while a turn restart recovery resumed is running on it", async () => {
+    const resumed = await createAgent(harness, { provider: "claude-personal", title: "Resumed" });
+    await startHeldTurn(harness, resumed);
+    harness.claimedByRestartRecovery.add(resumed);
+    harness.setAuthReading("claude-personal", "rejected_expired");
+
+    await harness.sweep();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(harness.probeRuns).toEqual([]);
+    await endHeldTurn(harness, resumed);
+  }, 60_000);
+
+  test("a quieted reading never hides a sign-in failure", async () => {
+    const answerProbe = answerProbesByHand(harness);
+    harness.setAuthReading("claude-personal", "credentials_missing");
+    await harness.sweep();
+    await answerProbe(PROBE_SIGNED_IN);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+
+    // The API rejects a token that has not expired: proof on its own, quiet window or not.
+    harness.advanceClock(MINUTE_MS);
+    harness.setAuthReading("claude-personal", "rejected_unexpired");
+    await harness.sweep();
+
+    expect(
+      harness.observations.filter(
+        (o) => o.key === "account-signed-out:claude-personal" && o.active,
+      ),
+    ).toEqual([expect.objectContaining({ active: true, level: "urgent" })]);
+  }, 60_000);
+
+  test("a probe-confirmed sign-out survives the next sweeps' forced re-reads of an expired token", async () => {
+    const personal = () =>
+      harness.observations.filter((o) => o.key === "account-signed-out:claude-personal");
+    let answer: (result: ProbeProcessResult) => void = () => {};
+    harness.setProbeReply(
+      () =>
+        new Promise<ProbeProcessResult>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    harness.setAuthReading("claude-personal", "rejected_expired");
+
+    await harness.sweep();
+    await expect.poll(() => harness.probeRuns.length).toBe(1);
+    expect(personal().filter((o) => o.active)).toEqual([]);
+
+    // The CLI takes a while, then says it cannot sign in.
+    harness.advanceClock(30_000);
+    answer(PROBE_SIGNED_OUT);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // The next sweep force-reads the suspect account, and the usage API still only says the token
+    // expired: a reading dated after the probe that must not undo what the probe confirmed.
+    harness.advanceClock(30_000);
+    harness.duringNextSweep(async () =>
+      harness.setAuthReading("claude-personal", "rejected_expired"),
+    );
+    await harness.sweep();
+    expect(harness.forcedUsageReads.at(-1)).toContain("claude-personal");
+
+    harness.advanceClock(5 * MINUTE_MS);
+    harness.duringNextSweep(async () =>
+      harness.setAuthReading("claude-personal", "rejected_expired"),
+    );
+    await harness.sweep();
+    expect(harness.forcedUsageReads.at(-1)).toContain("claude-personal");
+
+    expect(personal().filter((o) => o.active)).toHaveLength(1);
+    expect(personal().at(-1)).toMatchObject({ active: true, level: "urgent" });
+  }, 60_000);
 
   test("pushes once when a pool entry shares another's login, and again only after it clears", async () => {
     const shared: AgentAccountAuth = {

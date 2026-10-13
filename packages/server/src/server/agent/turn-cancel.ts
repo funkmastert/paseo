@@ -21,12 +21,25 @@ export function isUnresponsiveCancelReason(reason: string): boolean {
   return reason === UNRESPONSIVE_CANCEL_REASON;
 }
 
+/** Why the stalled-agent sweep cancels a turn stuck on an account that cannot serve it. */
+export type AccountDeadCancelReason = "account-capped" | "account-signed-out";
+
+const STALLED_TURN_CANCELED =
+  "and this turn stalled in running with no activity; the daemon canceled it so account failover can move the agent.";
+
 /**
- * What `lastError` carries after the stalled-agent sweep cancels a turn stuck on an account at
- * its cap (docs/stalled-agents.md). A turn stuck in `running` never fails, so without this the
- * account-failover detector, which reads only `lastError`, would never see the agent. The text
- * has to stay limit-shaped for `isLimitShapedError`.
+ * What `lastError` carries after the stalled-agent sweep cancels a turn stuck on a dead account
+ * (docs/stalled-agents.md). A turn stuck in `running` never fails, so without this the
+ * account-failover detector, which reads only `lastError`, would never see the agent. Each text
+ * has to stay limit-shaped (`isLimitShapedError`) or auth-shaped (`isAuthShapedError`, through
+ * the CLI's own "Failed to authenticate") to match its reason.
  */
-export function formatAccountCappedCancelError(provider: string): string {
-  return `Account ${provider} is at its usage limit or unusable, and this turn stalled in running with no activity; the daemon canceled it so account failover can move the agent.`;
-}
+export const ACCOUNT_DEAD_CANCEL_ERRORS: Record<
+  AccountDeadCancelReason,
+  (provider: string) => string
+> = {
+  "account-capped": (provider) =>
+    `Account ${provider} is at its usage limit or unusable, ${STALLED_TURN_CANCELED}`,
+  "account-signed-out": (provider) =>
+    `Account ${provider} is signed out (Failed to authenticate), ${STALLED_TURN_CANCELED}`,
+};

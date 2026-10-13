@@ -1987,6 +1987,15 @@ export const ptBR: TranslationResources = {
   sidebarCallout: {
     dismiss: "Dispensar",
   },
+  accountAlerts: {
+    title_one: "Problema de conta",
+    title_other: "Problemas de conta",
+    signIn: "Entrar",
+    signInPending: "Entrando...",
+    signInRunOn: "Executar em {{host}}",
+    signInError: "Não foi possível iniciar o login",
+    moreCount: "+{{count}} mais",
+  },
   restartRecovery: {
     summary_one: "{{count}} agente foi interrompido no meio do turno",
     summary_other: "{{count}} agentes foram interrompidos no meio do turno",

@@ -2006,6 +2006,15 @@ export const fr: TranslationResources = {
   sidebarCallout: {
     dismiss: "Rejeter",
   },
+  accountAlerts: {
+    title_one: "Problème de compte",
+    title_other: "Problèmes de compte",
+    signIn: "Se connecter",
+    signInPending: "Connexion en cours...",
+    signInRunOn: "Exécuter sur {{host}}",
+    signInError: "Impossible de démarrer la connexion",
+    moreCount: "+{{count}} de plus",
+  },
   restartRecovery: {
     summary_one: "{{count}} agent a été interrompu en plein tour",
     summary_other: "{{count}} agents ont été interrompus en plein tour",

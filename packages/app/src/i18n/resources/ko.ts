@@ -1965,6 +1965,15 @@ export const ko: TranslationResources = {
   sidebarCallout: {
     dismiss: "닫기",
   },
+  accountAlerts: {
+    title_one: "계정 문제",
+    title_other: "계정 문제",
+    signIn: "로그인",
+    signInPending: "로그인 중...",
+    signInRunOn: "{{host}}에서 실행",
+    signInError: "로그인을 시작할 수 없습니다",
+    moreCount: "+{{count}}개 더보기",
+  },
   restartRecovery: {
     summary_one: "에이전트 {{count}}개가 턴 도중 중단되었습니다",
     summary_other: "에이전트 {{count}}개가 턴 도중 중단되었습니다",

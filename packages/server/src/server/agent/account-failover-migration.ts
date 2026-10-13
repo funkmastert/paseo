@@ -13,6 +13,8 @@ import {
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
   getMigratedToFromLabels,
   HANDOFF_FROM_LABEL,
+  isAccountDeadError,
+  isAuthShapedError,
   isLimitShapedError,
   isStuckTurn,
   parseResetTimeHint,
@@ -57,7 +59,51 @@ export interface MigrateStuckAgentInput {
    * agents restart a few a minute instead of all at once. Unset sends immediately.
    */
   paceResume?: PaceResume;
+  /**
+   * Whether the agent's account is signed out (account-auth-health.ts), for the resume prompt
+   * when the agent's own error names no cause. Unset reads as not signed out.
+   */
+  sourceSignedOut?: boolean;
 }
+
+/** Why a rescued agent left its account, which the resume prompt has to say. */
+export type AccountFailoverCause = "limit" | "signed_out";
+
+/**
+ * The agent's own error names the cause when it can; else the account's sign-in state does. An
+ * agent stuck with some other error on a capped account reads as a limit, as it always has.
+ */
+export function rescueCause(input: {
+  lastError: string | undefined;
+  sourceSignedOut: boolean;
+}): AccountFailoverCause {
+  if (isAuthShapedError(input.lastError)) return "signed_out";
+  if (isLimitShapedError(input.lastError)) return "limit";
+  return input.sourceSignedOut ? "signed_out" : "limit";
+}
+
+interface CauseWording {
+  /** What happened on the old account, after "provider "<id>"". */
+  happened: (resetHint: string | null) => string;
+  /** What the latest messages, and any subagents to relaunch, died on. */
+  failedOn: string;
+  /** Why no new subagent may go back to the old account. */
+  oldAccount: string;
+}
+
+const CAUSE_WORDING: Record<AccountFailoverCause, CauseWording> = {
+  limit: {
+    happened: (resetHint) =>
+      `hit that account's usage limit${resetHint ? ` (it reports a reset at ${resetHint})` : ""}`,
+    failedOn: "the limit",
+    oldAccount: "is out of budget",
+  },
+  signed_out: {
+    happened: () => "failed because that account is signed out",
+    failedOn: "the sign-in failure",
+    oldAccount: "is signed out until someone signs it back in, with no reset to wait for",
+  },
+};
 
 /**
  * The resume prompt that restarts the conversation on its new account, and whether sending it
@@ -113,6 +159,8 @@ export type AccountFailoverOutcome =
        */
       staleError: { error: string; timelineSeq: number | null } | null;
       resume: AccountFailoverResume;
+      /** Why it left, for the parent's message. */
+      cause: AccountFailoverCause;
     }
   /** A successor already existed (an earlier sweep, or a person running `paseo import`). */
   | { kind: "adopted"; oldAgentId: string; newAgentId: string }
@@ -350,7 +398,9 @@ export function buildResumePrompt(input: {
   thinkingOptionId: string | undefined;
   modeId: string | undefined;
   resetHint: string | null;
+  cause: AccountFailoverCause;
 }): string {
+  const wording = CAUSE_WORDING[input.cause];
   const providerRef = `${input.targetProviderId}/${input.model ?? "<model>"}`;
   const settings = [
     input.model ? `model ${input.model}` : null,
@@ -358,20 +408,16 @@ export function buildResumePrompt(input: {
     input.modeId ? `mode ${input.modeId}` : null,
   ].filter((value): value is string => value !== null);
   const settingsClause = settings.length > 0 ? ` with ${settings.join(", ")}` : "";
-  const resetClause = input.resetHint ? ` (it reports a reset at ${input.resetHint})` : "";
   return [
-    `Account handoff: agent ${input.oldAgentId} on provider "${input.oldProviderId}" hit that ` +
-      `account's usage limit${resetClause}. This is the same conversation, now running on ` +
+    `Account handoff: agent ${input.oldAgentId} on provider "${input.oldProviderId}" ` +
+      `${wording.happened(input.resetHint)}. This is the same conversation, now running on ` +
       `provider "${input.targetProviderId}"${settingsClause}.`,
     "",
-    "1. Pick up where you left off: answer the latest message(s) that failed on the limit. If " +
-      "the work was already done or is waiting on a person, orient, verify, report, and stop.",
-    `2. Create every new subagent with provider "${providerRef}" explicitly. ` +
-      `"${input.oldProviderId}" is out of budget, and the default provider or a role/model ` +
-      "policy can still place an unqualified spawn there, where it dies immediately.",
+    pickUpStep(wording),
+    newSubagentStep({ wording, oldProviderId: input.oldProviderId, providerRef }),
     `3. Your existing subagents are still parented to ${input.oldAgentId}. Their finish ` +
       "reports are forwarded to you, but list_agents lists them under the old id. Check them " +
-      "with get_agent_activity and relaunch only the ones that died on the limit, with " +
+      `with get_agent_activity and relaunch only the ones that died on ${wording.failedOn}, with ` +
       `provider "${providerRef}".`,
   ].join("\n");
 }
@@ -382,20 +428,38 @@ export function buildMoveResumePrompt(input: {
   targetProviderId: string;
   model: string | undefined;
   resetHint: string | null;
+  cause: AccountFailoverCause;
 }): string {
+  const wording = CAUSE_WORDING[input.cause];
   const providerRef = `${input.targetProviderId}/${input.model ?? "<model>"}`;
-  const resetClause = input.resetHint ? ` (it reports a reset at ${input.resetHint})` : "";
   return [
-    `Account handoff: provider "${input.oldProviderId}" hit that account's usage ` +
-      `limit${resetClause}. You are the same agent (${input.agentId}) with the same conversation ` +
-      `and the same subagents, now running on provider "${input.targetProviderId}".`,
+    `Account handoff: provider "${input.oldProviderId}" ${wording.happened(input.resetHint)}. ` +
+      `You are the same agent (${input.agentId}) with the same conversation and the same ` +
+      `subagents, now running on provider "${input.targetProviderId}".`,
     "",
-    "1. Pick up where you left off: answer the latest message(s) that failed on the limit. If " +
-      "the work was already done or is waiting on a person, orient, verify, report, and stop.",
-    `2. Create every new subagent with provider "${providerRef}" explicitly. ` +
-      `"${input.oldProviderId}" is out of budget, and the default provider or a role/model ` +
-      "policy can still place an unqualified spawn there, where it dies immediately.",
+    pickUpStep(wording),
+    newSubagentStep({ wording, oldProviderId: input.oldProviderId, providerRef }),
   ].join("\n");
+}
+
+function pickUpStep(wording: CauseWording): string {
+  return (
+    `1. Pick up where you left off: answer the latest message(s) that failed on ` +
+    `${wording.failedOn}. If the work was already done or is waiting on a person, orient, ` +
+    "verify, report, and stop."
+  );
+}
+
+function newSubagentStep(input: {
+  wording: CauseWording;
+  oldProviderId: string;
+  providerRef: string;
+}): string {
+  return (
+    `2. Create every new subagent with provider "${input.providerRef}" explicitly. ` +
+    `"${input.oldProviderId}" ${input.wording.oldAccount}, and the default provider or a ` +
+    "role/model policy can still place an unqualified spawn there, where it dies immediately."
+  );
 }
 
 /**
@@ -441,6 +505,7 @@ async function moveStuckAgentInPlace(input: {
   agent: AccountFailoverAgentSummary;
   title: string | null;
   targetProviderId: string;
+  cause: AccountFailoverCause;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   logger: Logger;
@@ -486,6 +551,7 @@ async function moveStuckAgentInPlace(input: {
     targetProviderId,
     model,
     resetHint: parseResetTimeHint(agent.lastError),
+    cause: input.cause,
   });
   try {
     await paceResume(pacedResume(agent.id, agent.labels, "account-failover"), () =>
@@ -551,6 +617,7 @@ async function sendResumePrompt(input: {
   agent: AccountFailoverAgentSummary;
   successorId: string;
   targetProviderId: string;
+  cause: AccountFailoverCause;
   logger: Logger;
   paceResume?: PaceResume;
 }): Promise<AccountFailoverResume> {
@@ -566,6 +633,7 @@ async function sendResumePrompt(input: {
     thinkingOptionId: config?.thinkingOptionId,
     modeId: config?.modeId,
     resetHint: parseResetTimeHint(agent.lastError),
+    cause: input.cause,
   });
   try {
     await paceResume(pacedResume(successorId, agent.labels, "account-failover"), () =>
@@ -825,7 +893,7 @@ export async function settleBackAgent(input: SettleBackAgentInput): Promise<Sett
       oldProviderId: agent.provider,
       targetProviderId,
       staleError:
-        revived && isLimitShapedError(revived.lastError)
+        revived && isAccountDeadError(revived.lastError)
           ? { error: revived.lastError, timelineSeq: revived.timelineSeq }
           : null,
     };
@@ -885,11 +953,16 @@ export async function migrateStuckAgent(
   if (!targetProviderId) {
     return { kind: "no-target", oldAgentId: agent.id };
   }
+  const cause = rescueCause({
+    lastError: agent.lastError,
+    sourceSignedOut: input.sourceSignedOut ?? false,
+  });
 
   const moved = await moveStuckAgentInPlace({
     agent,
     title: predecessor.title ?? null,
     targetProviderId,
+    cause,
     agentManager,
     agentStorage,
     logger,
@@ -946,7 +1019,7 @@ export async function migrateStuckAgent(
       predecessorId: agent.id,
     });
     const handle = agentManager.getAccountFailoverSummary(successorId);
-    if (handle && isLimitShapedError(handle.lastError)) {
+    if (handle && isAccountDeadError(handle.lastError)) {
       staleError = { error: handle.lastError, timelineSeq: handle.timelineSeq };
     }
   }
@@ -960,6 +1033,7 @@ export async function migrateStuckAgent(
     agent,
     successorId,
     targetProviderId,
+    cause,
     logger,
     paceResume: input.paceResume,
   });
@@ -977,5 +1051,6 @@ export async function migrateStuckAgent(
     revived,
     staleError,
     resume,
+    cause,
   };
 }

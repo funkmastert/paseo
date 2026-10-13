@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentAccountAuth } from "./agent-sdk-types.js";
 import {
+  blocksInAppSignIn,
   findPoolAccountIdentityProblems,
   PoolAccountIdentityTracker,
   type PoolAccountReading,
@@ -99,6 +100,27 @@ describe("findPoolAccountIdentityProblems", () => {
     ]);
   });
 
+  it("says nothing for a disabled entry with a wrong login", () => {
+    const problems = findPoolAccountIdentityProblems([
+      reading("claude-personal", signedIn("leader@example.com", "uuid-1"), {
+        expectedEmail: "worker@example.com",
+        enabled: false,
+      }),
+    ]);
+    expect(problems).toEqual([]);
+  });
+
+  it("says nothing for a disabled entry sharing a login with an enabled one", () => {
+    const problems = findPoolAccountIdentityProblems([
+      reading("claude", signedIn("leader@example.com", "uuid-1"), { role: "leader" }),
+      reading("claude-personal", signedIn("leader@example.com", "uuid-1"), {
+        expectedEmail: "worker@example.com",
+        enabled: false,
+      }),
+    ]);
+    expect(problems).toEqual([]);
+  });
+
   it("says nothing for signed-out, unknown, or unlabelled accounts", () => {
     expect(
       findPoolAccountIdentityProblems([
@@ -131,5 +153,39 @@ describe("PoolAccountIdentityTracker", () => {
     expect(tracker.observe([])).toEqual([]);
     expect(tracker.problemFor("claude-personal")).toBeNull();
     expect(tracker.observe(problem)).toHaveLength(1);
+  });
+});
+
+describe("in-app sign-in and identity problems", () => {
+  // claude-backup declares no email and its dir holds the leader's login: `.claude.json` keeps
+  // whatever login the dir last held, so signing that in again would make the drift stick.
+  const shared = findPoolAccountIdentityProblems([
+    reading("claude", signedIn("leader@example.com", "uuid-1"), { role: "leader" }),
+    reading("claude-backup", signedIn("leader@example.com", "uuid-1")),
+    reading("claude-personal", signedIn("leader@example.com", "uuid-1"), {
+      expectedEmail: "worker@example.com",
+    }),
+  ]);
+  const backup = shared.find((p) => p.providerId === "claude-backup") ?? null;
+  const personal = shared.find((p) => p.providerId === "claude-personal") ?? null;
+
+  it("refuses an entry with no declared email while an identity problem stands for it", () => {
+    expect(blocksInAppSignIn(backup, null)).toBe(true);
+    expect(blocksInAppSignIn(backup, undefined)).toBe(true);
+  });
+
+  it("allows it when the entry declares its email, or no problem stands", () => {
+    expect(blocksInAppSignIn(backup, "backup@example.com")).toBe(false);
+    expect(blocksInAppSignIn(null, null)).toBe(false);
+  });
+
+  it("the tracker judges each standing problem by the email its entry declared", () => {
+    const tracker = new PoolAccountIdentityTracker();
+    tracker.observe(shared);
+
+    expect(tracker.blocksInAppSignIn("claude-backup")).toBe(true);
+    expect(tracker.blocksInAppSignIn("claude-personal")).toBe(false);
+    expect(tracker.blocksInAppSignIn("claude")).toBe(false);
+    expect(personal?.expectedEmail).toBe("worker@example.com");
   });
 });

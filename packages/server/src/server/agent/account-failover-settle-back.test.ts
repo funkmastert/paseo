@@ -135,6 +135,13 @@ describe("planSettleBacks", () => {
     expect(settled({ agents: [capped] })).toEqual([]);
   });
 
+  it("leaves a root cut off by a sign-in failure to the rescue leg too", () => {
+    const signedOut = root({
+      lastError: "Failed to authenticate: OAuth session expired and could not be refreshed",
+    });
+    expect(settled({ agents: [signedOut] })).toEqual([]);
+  });
+
   it("waits two quiet minutes, so a move never lands between two messages of a live exchange", () => {
     const justAnswered = root({ lastActivityAt: new Date(NOW - 90 * 1000).toISOString() });
     expect(settled({ agents: [justAnswered] })).toEqual([]);

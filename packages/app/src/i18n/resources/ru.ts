@@ -1986,6 +1986,15 @@ export const ru: TranslationResources = {
   sidebarCallout: {
     dismiss: "Закрыть",
   },
+  accountAlerts: {
+    title_one: "Проблема с аккаунтом",
+    title_other: "Проблемы с аккаунтами",
+    signIn: "Войти",
+    signInPending: "Вход...",
+    signInRunOn: "Выполнить на {{host}}",
+    signInError: "Не удалось начать вход",
+    moreCount: "ещё {{count}}",
+  },
   restartRecovery: {
     summary_one: "{{count}} агент прерван посреди хода",
     summary_other: "Агентов, прерванных посреди хода: {{count}}",

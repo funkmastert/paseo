@@ -7,6 +7,7 @@ export type PermissionRequirement = DaemonPermission | readonly DaemonPermission
 
 const INBOUND_PERMISSION = {
   abort_request: "workspace.write",
+  "account.claude.sign_in.request": "daemon.manage",
   "agent.config.apply.request": ["workspace.write", "hub.execute"],
   "agent.detach.request": "workspace.write",
   "agent.fork_context.request": "workspace.read",
@@ -230,6 +231,7 @@ const INBOUND_PERMISSION = {
 } as const satisfies Record<InboundOperation, PermissionRequirement>;
 
 const OUTBOUND_PERMISSION = {
+  "account.claude.sign_in.response": "daemon.manage",
   activity_log: "workspace.read",
   "agent.config.apply.response": ["workspace.write", "hub.execute"],
   "agent.detach.response": "workspace.write",

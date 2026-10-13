@@ -1966,6 +1966,15 @@ export const en = {
   sidebarCallout: {
     dismiss: "Dismiss",
   },
+  accountAlerts: {
+    title_one: "Account problem",
+    title_other: "Account problems",
+    signIn: "Sign in",
+    signInPending: "Signing in...",
+    signInRunOn: "Run on {{host}}",
+    signInError: "Could not start sign-in",
+    moreCount: "+{{count}} more",
+  },
   restartRecovery: {
     summary_one: "{{count}} agent was cut off mid-turn",
     summary_other: "{{count}} agents were cut off mid-turn",

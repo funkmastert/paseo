@@ -3882,6 +3882,15 @@ export const SessionEventsSetSubscriptionResponseSchema = z.object({
   payload: z.object({ requestId: z.string() }),
 });
 
+// account.claude.sign_in.* (docs/rpc-namespacing.md). The request takes no email or path: the
+// daemon resolves the entry's CLAUDE_CONFIG_DIR and sign-in email itself from its own config, so
+// a principal cannot direct the login at an arbitrary account or binary.
+export const AccountClaudeSignInRequestSchema = z.object({
+  type: z.literal("account.claude.sign_in.request"),
+  providerId: z.string(),
+  requestId: z.string(),
+});
+
 export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   SessionEventsSetSubscriptionRequestSchema,
   RestartRecoveryGetPlanRequestSchema,
@@ -4104,6 +4113,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   LoopInspectRequestSchema,
   LoopLogsRequestSchema,
   LoopStopRequestSchema,
+  AccountClaudeSignInRequestSchema,
 ]);
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
@@ -4448,6 +4458,9 @@ export const ServerInfoStatusPayloadSchema = z
         mcpGatewayAdopt: z.boolean().optional(),
         // COMPAT(deviceLeases): added in v0.8.1, remove gate after 2027-03-18.
         deviceLeases: z.boolean().optional(),
+        // COMPAT(claudeAccountSignIn): added in v0.8.x, remove gate after 2027-10-12. Whether the
+        // daemon serves account.claude.sign_in.* (docs/account-failover.md).
+        claudeAccountSignIn: z.boolean().optional(),
         // COMPAT(usageHistory): added in v0.8.2, remove gate after 2027-09-23.
         usageHistory: z.boolean().optional(),
         // COMPAT(tokenUsage): added in v0.8.x, remove gate after 2027-10-07. Token usage by model
@@ -7129,6 +7142,23 @@ export const ProviderUsageAccountIdentitySchema = z.object({
   fixCommand: z.string(),
 });
 
+// COMPAT(accountAuth): added in v0.8.x, remove after 2027-10-12.
+// A sibling field next to accountIdentity rather than a new `status` value --
+// ProviderUsageStatusSchema is a closed enum an old client would fail to parse on an unrecognized
+// value. `state` is the literal string "signed_out" when present; its absence means nothing is
+// known to be wrong; a `suspect` account shows nothing.
+export const ProviderUsageAccountAuthSchema = z.object({
+  state: z.literal("signed_out"),
+  since: z.string(),
+  summary: z.string(),
+  fixCommand: z.string(),
+  /** Whether the daemon can start this account's sign-in itself: an email to pre-fill the login
+   * page is known, a `claude` binary resolves, and the email is declared or no identity problem
+   * stands (a drifted login is not signed in again). Otherwise only `fixCommand`, run in a
+   * terminal, can sign it in. */
+  canSignIn: z.boolean(),
+});
+
 export const ProviderUsageSchema = z.object({
   providerId: z.string(),
   displayName: z.string(),
@@ -7142,6 +7172,19 @@ export const ProviderUsageSchema = z.object({
   details: z.array(ProviderUsageDetailSchema).optional(),
   error: z.string().nullable().optional(),
   accountIdentity: ProviderUsageAccountIdentitySchema.optional(),
+  accountAuth: ProviderUsageAccountAuthSchema.optional(),
+});
+
+export const AccountClaudeSignInOutcomeSchema = z.enum(["started", "already_running", "failed"]);
+
+export const AccountClaudeSignInResponseSchema = z.object({
+  type: z.literal("account.claude.sign_in.response"),
+  payload: z.object({
+    providerId: z.string(),
+    outcome: AccountClaudeSignInOutcomeSchema,
+    error: z.string().nullable(),
+    requestId: z.string(),
+  }),
 });
 
 export const ProviderUsageListResponseMessageSchema = z.object({
@@ -7838,6 +7881,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   LoopStopResponseSchema,
   DaemonUpdateProgressMessageSchema,
   DaemonUpdateResponseSchema,
+  AccountClaudeSignInResponseSchema,
 ]);
 
 export type SessionOutboundMessage = z.infer<typeof SessionOutboundMessageSchema>;

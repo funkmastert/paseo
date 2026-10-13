@@ -73,6 +73,7 @@ function plan(overrides: Partial<PlanAccountFailoverSweepInput>) {
     usage: [],
     previousSightings: new Map(),
     previousProviderSightings: new Map(),
+    signedOutProviderIds: new Set(),
     nowMs: 1_000_000,
     reactiveSignalTtlMs: TTL_MS,
     migrateSubagents: true,
@@ -192,6 +193,62 @@ describe("planAccountFailoverSweep", () => {
 
     expect([...result.deadProviderIds]).toEqual(["claude-backup"]);
     expect(ids(result.candidates)).toEqual(["stalled"]);
+  });
+
+  it("takes an agent the stalled-agent sweep cancelled with the signed-out reason too", () => {
+    // Same shape as the capped case above, but the cancel used account-signed-out
+    // (turn-cancel.ts's formatAccountSignedOutCancelError) because the account couldn't sign in.
+    // isStuckTurn has to recognize this auth-shaped lastError or the agent matches neither the
+    // rescue leg nor the idle leg (which excludes it via isAccountDeadError) and is stuck in
+    // neither list.
+    const stalled = agent({
+      id: "stalled",
+      provider: "claude-backup",
+      lifecycle: "idle",
+      lastError:
+        "Account claude-backup is signed out (Failed to authenticate), and this turn stalled " +
+        "in running with no activity; the daemon canceled it so account failover can move the agent.",
+    });
+
+    const result = plan({ agents: [stalled], signedOutProviderIds: new Set(["claude-backup"]) });
+
+    expect(ids(result.candidates)).toEqual(["stalled"]);
+  });
+
+  it("adds the tracker's signed-out providers to deadProviderIds, with no TTL of its own", () => {
+    const result = plan({ signedOutProviderIds: new Set(["claude-personal"]) });
+    expect([...result.deadProviderIds]).toEqual(["claude-personal"]);
+
+    // Unlike reactiveSignalTtlMs-bound evidence, this input has no expiry inside the function —
+    // it is dead for as long as the caller's set says so, however old `nowMs` runs.
+    const stillDead = plan({ signedOutProviderIds: new Set(["claude-personal"]), nowMs: 0 });
+    expect([...stillDead.deadProviderIds]).toEqual(["claude-personal"]);
+  });
+
+  it("ignores a signed-out id outside the pool", () => {
+    const result = plan({ signedOutProviderIds: new Set(["codex"]) });
+    expect(result.deadProviderIds.size).toBe(0);
+  });
+
+  it("a root cut off on a signed-out account is a candidate, like a capped one", () => {
+    const stuck = agent({
+      id: "stuck",
+      provider: "claude-backup",
+      lastError: "Failed to authenticate: OAuth session expired and could not be refreshed",
+    });
+    const idleOnSameAccount = agent({
+      id: "idle-sibling",
+      provider: "claude-backup",
+      lifecycle: "idle",
+    });
+
+    const result = plan({
+      agents: [stuck, idleOnSameAccount],
+      signedOutProviderIds: new Set(["claude-backup"]),
+    });
+
+    expect([...result.deadProviderIds]).toEqual(["claude-backup"]);
+    expect(ids(result.candidates)).toEqual(["stuck"]);
   });
 
   it("takes an agent in error on a dead account even when the error is not limit-shaped", () => {

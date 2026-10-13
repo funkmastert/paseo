@@ -76,6 +76,16 @@ describe("planIdleRehomes", () => {
     expect(plan([cutOff])).toEqual([]);
   });
 
+  it("leaves an idle agent whose lastError is a sign-in failure to the rescue leg too", () => {
+    // Lifecycle stays idle, as it does after the stalled-agent sweep cancels a turn and leaves
+    // an auth-shaped error behind — this is the signed-out counterpart of that cancelled-stall
+    // case, not a plain idle root.
+    const cutOff = idleRoot({
+      lastError: "Failed to authenticate: OAuth session expired and could not be refreshed",
+    });
+    expect(plan([cutOff])).toEqual([]);
+  });
+
   it.each([
     ["running", idleRoot({ lifecycle: "running" })],
     ["initializing", idleRoot({ lifecycle: "initializing" })],

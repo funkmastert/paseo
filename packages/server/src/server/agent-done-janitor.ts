@@ -13,8 +13,9 @@ import type {
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import { ensureAgentLoaded } from "./agent/agent-loading.js";
 import { formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
-import { isLimitShapedError } from "./agent/account-failover-detector.js";
+import { isAuthShapedError, isLimitShapedError } from "./agent/account-failover-detector.js";
 import { isRunMarkerOpen } from "./agent/restart-recovery/run-marker.js";
+import type { AccountDeadCancelReason } from "./agent/turn-cancel.js";
 import {
   buildDoneQuestion,
   formatDuration,
@@ -179,7 +180,14 @@ export type AskAgentResult =
   | { kind: "busy" }
   | { kind: "failed"; error: string };
 
-export type ProviderHealth = { askable: true } | { askable: false; reason: string };
+export type ProviderHealth =
+  | { askable: true }
+  | {
+      askable: false;
+      reason: string;
+      /** How the stalled-agent sweep cancels a turn stuck here, so failover reads the right error. */
+      cancelReason: AccountDeadCancelReason;
+    };
 
 /**
  * Everything the janitor touches, as seams. Production wiring is `createDoneJanitor` in
@@ -2362,9 +2370,10 @@ function fromLive(
 
 /**
  * An account is askable unless something says it is not: a provider that reports itself
- * unavailable, a usage window at or past its cap, a usage source in error (how a logged-out
- * account shows), or any agent on it whose last error reads like a spent budget. Asking an agent
- * on a dead account would fail its turn and flag it — noise the janitor would have made itself.
+ * unavailable, a usage row the daemon marked signed out, a usage source in error, a usage window
+ * at or past its cap, or any agent on it whose last error reads like a spent budget or a sign-in
+ * failure. Asking an agent on a dead account would fail its turn and flag it — noise the janitor
+ * would have made itself.
  */
 export async function readProviderHealth(input: {
   provider: string;
@@ -2373,22 +2382,52 @@ export async function readProviderHealth(input: {
   lastErrorsByProvider: ReadonlyMap<string, readonly (string | undefined)[]>;
 }): Promise<ProviderHealth> {
   if (!(await input.isAvailable(input.provider))) {
-    return { askable: false, reason: `provider ${input.provider} is unavailable` };
+    return {
+      askable: false,
+      reason: `provider ${input.provider} is unavailable`,
+      cancelReason: "account-capped",
+    };
   }
   const usage = (await input.listUsage())?.find((entry) => entry.providerId === input.provider);
+  // Before the error check: a signed-out account's usage read can fail too, and the sign-in
+  // answer is what the stall cancel has to name.
+  if (usage?.accountAuth) {
+    return {
+      askable: false,
+      reason: `account ${input.provider} is signed out`,
+      cancelReason: "account-signed-out",
+    };
+  }
   if (usage?.status === "error") {
     return {
       askable: false,
       reason: `account ${input.provider} reports a usage error${usage.error ? ` (${usage.error})` : ""}; it may be logged out`,
+      cancelReason: "account-capped",
     };
   }
   if (
     usage?.windows.some((window) => typeof window.usedPct === "number" && window.usedPct >= 100)
   ) {
-    return { askable: false, reason: `account ${input.provider} is at its usage cap` };
+    return {
+      askable: false,
+      reason: `account ${input.provider} is at its usage cap`,
+      cancelReason: "account-capped",
+    };
   }
-  if ((input.lastErrorsByProvider.get(input.provider) ?? []).some(isLimitShapedError)) {
-    return { askable: false, reason: `an agent on account ${input.provider} hit a usage limit` };
+  const providerErrors = input.lastErrorsByProvider.get(input.provider) ?? [];
+  if (providerErrors.some(isAuthShapedError)) {
+    return {
+      askable: false,
+      reason: `an agent on account ${input.provider} failed to authenticate`,
+      cancelReason: "account-signed-out",
+    };
+  }
+  if (providerErrors.some(isLimitShapedError)) {
+    return {
+      askable: false,
+      reason: `an agent on account ${input.provider} hit a usage limit`,
+      cancelReason: "account-capped",
+    };
   }
   return { askable: true };
 }

@@ -13,8 +13,8 @@ import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import type { AccountFailoverAgentSummary } from "./agent-manager.js";
 import {
   getMigratedToFromLabels,
+  isAccountDeadError,
   isAccountDeadFor,
-  isLimitShapedError,
 } from "./account-failover-detector.js";
 
 export interface PlanIdleRehomesInput {
@@ -34,8 +34,8 @@ export function planIdleRehomes(input: PlanIdleRehomesInput): AccountFailoverAge
     if (!input.poolProviderIds.has(agent.provider)) return false;
     if (!isAccountDeadFor(input, agent)) return false;
     if (getMigratedToFromLabels(agent.labels)) return false;
-    // Cut off by the cap: the rescue leg moves it and resumes the turn it lost.
-    if (isLimitShapedError(agent.lastError)) return false;
+    // Cut off by the cap or signed out: the rescue leg moves it and resumes the turn it lost.
+    if (isAccountDeadError(agent.lastError)) return false;
     // Mid-turn: the daemon refuses the move. A turn that is dead rather than slow is cancelled by
     // the stalled-agent sweep with a limit-shaped error, and the rescue leg picks it up from there.
     // An agent in error is the rescue leg's: it moves and resumes it.

@@ -28,6 +28,29 @@ export function isLimitShapedError(text: string | undefined | null): text is str
   return typeof text === "string" && LIMIT_TEXT_PATTERN.test(text);
 }
 
+// The CLI owns refresh and retries it lazily (docs/providers.md), so an idle account can throw
+// this mid-turn while its refresh token is fine — a lock held by another process on the same
+// config dir, not a dead account. Checked first so it can never match the patterns below.
+const REFRESH_LOCK_PATTERN = /holding the refresh lock/i;
+
+// The CLI's sign-in failure strings, read from its binary, plus the text an expired OAuth
+// session that cannot refresh fails a turn with.
+// "Session expired" also matches "Your session has expired"; both are kept literal rather than
+// generalized to "session" because "session limit" (a cap, not an auth failure) must not match.
+const AUTH_TEXT_PATTERN =
+  /Failed to authenticate|OAuth session expired|OAuth token revoked|Not logged in|Session expired|Your session has expired|Please run \/login|Invalid API key/i;
+
+export function isAuthShapedError(text: string | undefined | null): text is string {
+  if (typeof text !== "string") return false;
+  if (REFRESH_LOCK_PATTERN.test(text)) return false;
+  return AUTH_TEXT_PATTERN.test(text);
+}
+
+/** Either shape of error that makes an account dead to failover: out of budget, or signed out. */
+export function isAccountDeadError(text: string | undefined | null): text is string {
+  return isLimitShapedError(text) || isAuthShapedError(text);
+}
+
 // "your session limit resets 3:10pm (America/Los_Angeles)" -> "3:10pm (America/Los_Angeles)".
 // Free text rather than a Date: it is only ever shown to a person or an agent.
 const RESET_HINT_PATTERN = /resets?\s+(?:at\s+)?([^\n.]+)/i;
@@ -74,7 +97,7 @@ const NON_CANDIDATE_LIFECYCLES: ReadonlySet<AgentLifecycleStatus> = new Set([
 // not by when this process first noticed it. Otherwise a restart would present every old,
 // abandoned failure as brand new: its account would read dead for five more hours, and the
 // agent would be migrated and told to resume work nobody wants anymore.
-function failureTimeMs(lastTimelineAt: string | null, nowMs: number): number {
+export function failureTimeMs(lastTimelineAt: string | null, nowMs: number): number {
   const parsed = lastTimelineAt === null ? Number.NaN : Date.parse(lastTimelineAt);
   return Number.isFinite(parsed) ? Math.min(parsed, nowMs) : nowMs;
 }
@@ -107,6 +130,12 @@ export interface PlanAccountFailoverSweepInput {
   previousSightings: ReadonlyMap<string, LimitErrorSighting>;
   /** The previous plan's `providerSightings`, plus whatever a move recorded since. */
   previousProviderSightings: ReadonlyMap<string, ProviderLimitSighting>;
+  /**
+   * The accounts the sign-in tracker holds `signed_out` this sweep. Unlike the reactive sightings
+   * above, sign-in evidence carries no TTL of its own (account-auth-health.ts) — it stays dead here
+   * for as long as the tracker says so, with no decay in this function.
+   */
+  signedOutProviderIds: ReadonlySet<string>;
   nowMs: number;
   reactiveSignalTtlMs: number;
   migrateSubagents: boolean;
@@ -178,7 +207,12 @@ export function isStuckTurn(
 ): boolean {
   return (
     !agent.internal &&
-    (agent.lifecycle === "error" || isLimitShapedError(agent.lastError)) &&
+    // isAccountDeadError, not isLimitShapedError: the stalled-agent sweep's cancel lands an agent
+    // idle (not error) with a limit- or auth-shaped lastError depending on which reason it used
+    // (account-capped / account-signed-out, turn-cancel.ts). Both are a cut-off turn the rescue
+    // leg must take, or an idle+signed-out agent would match neither this nor the idle leg's
+    // exclusion (account-failover-rehome.ts) and be stuck in neither list.
+    (agent.lifecycle === "error" || isAccountDeadError(agent.lastError)) &&
     !NON_CANDIDATE_LIFECYCLES.has(agent.lifecycle)
   );
 }
@@ -216,6 +250,8 @@ export function planAccountFailoverSweep(
   for (const agent of input.agents) {
     if (agent.internal || !input.poolProviderIds.has(agent.provider)) continue;
     if (agent.lifecycle === "running") continue;
+    // Limit-shaped only: sign-in evidence lives in signedOutProviderIds above, dated and expired
+    // by the tracker rather than this sighting's reactiveSignalTtlMs.
     if (!isLimitShapedError(agent.lastError)) continue;
 
     const previous = input.previousSightings.get(agent.id);
@@ -243,6 +279,12 @@ export function planAccountFailoverSweep(
   const usageCaps = readUsageCaps(input.usage, input.poolProviderIds);
   for (const providerId of usageCaps.accountWide) deadProviderIds.add(providerId);
   const cappedModelWindows = usageCaps.modelWindows;
+
+  // Signed-out is dead for everyone on the account, like a whole-account usage cap, but the
+  // tracker owns when it clears — no TTL applies here.
+  for (const providerId of input.signedOutProviderIds) {
+    if (input.poolProviderIds.has(providerId)) deadProviderIds.add(providerId);
+  }
 
   // An agent in error on a dead account is a candidate whatever its error says: its turn ended
   // while its account was out, and it is resumed where it can run. Only a limit-shaped error

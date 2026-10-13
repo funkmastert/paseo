@@ -174,6 +174,7 @@ describe("an unresponsive session's cancel reaches the layers that route around 
       usage: [],
       previousSightings: new Map(),
       previousProviderSightings: new Map(),
+      signedOutProviderIds: new Set(),
       nowMs: 1_000_000,
       reactiveSignalTtlMs: 60 * 60 * 1000,
       migrateSubagents: true,

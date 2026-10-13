@@ -36,6 +36,12 @@ export interface PoolAccountReading {
   configDir: string | null;
   expectedEmail: string | null;
   auth: AgentAccountAuth | null;
+  /**
+   * `false` hides this entry from every identity problem: disabling an account is how Tyler
+   * silences one he has abandoned, and it gets no banner, push or probe either. Absent means
+   * enabled.
+   */
+  enabled?: boolean;
 }
 
 function sameEmail(a: string, b: string): boolean {
@@ -43,10 +49,7 @@ function sameEmail(a: string, b: string): boolean {
 }
 
 function fixFor(reading: PoolAccountReading): string {
-  if (reading.configDir) return claudeSignInCommand(reading.configDir, reading.expectedEmail);
-  return reading.expectedEmail
-    ? `claude auth login --email ${reading.expectedEmail}`
-    : "claude /login";
+  return claudeSignInCommand(reading.configDir, reading.expectedEmail);
 }
 
 /** The members of one login that are not the keeper, each as a problem. */
@@ -96,8 +99,9 @@ function wrongLoginProblem(reading: PoolAccountReading): PoolAccountIdentityProb
 export function findPoolAccountIdentityProblems(
   readings: readonly PoolAccountReading[],
 ): PoolAccountIdentityProblem[] {
+  const enabledReadings = readings.filter((reading) => reading.enabled !== false);
   const groups = new Map<string, PoolAccountReading[]>();
-  for (const reading of readings) {
+  for (const reading of enabledReadings) {
     const key = accountKeyOf(reading.auth);
     if (key === null) continue;
     const group = groups.get(key);
@@ -109,11 +113,23 @@ export function findPoolAccountIdentityProblems(
     .filter((members) => members.length > 1)
     .flatMap(sharedLoginProblems);
   const flagged = new Set(shared.map((problem) => problem.providerId));
-  const wrong = readings
+  const wrong = enabledReadings
     .filter((reading) => !flagged.has(reading.providerId))
     .map(wrongLoginProblem)
     .filter((problem): problem is PoolAccountIdentityProblem => problem !== null);
   return [...shared, ...wrong].sort((a, b) => a.providerId.localeCompare(b.providerId));
+}
+
+/**
+ * Whether in-app sign-in must refuse an entry. A declared email is always safe to sign in as.
+ * Without one the login is whatever `.claude.json` last held, and while an identity problem stands
+ * that may be another entry's login: signing it in again would make the drift stick.
+ */
+export function blocksInAppSignIn(
+  problem: PoolAccountIdentityProblem | null,
+  expectedEmail: string | null | undefined,
+): problem is PoolAccountIdentityProblem {
+  return problem !== null && !expectedEmail;
 }
 
 /**
@@ -133,5 +149,11 @@ export class PoolAccountIdentityTracker {
 
   problemFor(providerId: string): PoolAccountIdentityProblem | null {
     return this.standing.get(providerId) ?? null;
+  }
+
+  /** `blocksInAppSignIn` for the standing problem, by the email its entry declared at the sweep. */
+  blocksInAppSignIn(providerId: string): boolean {
+    const problem = this.problemFor(providerId);
+    return blocksInAppSignIn(problem, problem?.expectedEmail);
   }
 }

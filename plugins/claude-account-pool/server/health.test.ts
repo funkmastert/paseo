@@ -368,6 +368,105 @@ describe("auth failure (logged-out / bad-credential account)", () => {
   });
 });
 
+describe("reportAccountAuth — the daemon's durable signed-out signal", () => {
+  it("holds the account unroutable past the 5-minute reactive auth TTL, with no decay to probation", () => {
+    const { tracker, advance } = trackerAt("2026-09-10T10:00:00Z", { authFailureCapTtlMs: 5 * 60 * 1000 });
+
+    tracker.reportAccountAuth(PROVIDER, true);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+    expect(tracker.isExhaustedFor(PROVIDER)).toBe(true);
+
+    // Past the reactive auth cap's TTL, and past a full day: a reactive cap would have decayed
+    // to probation by now, but this signal has no TTL to expire.
+    advance(24 * 60 * 60 * 1000);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("capped");
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+  });
+
+  it("a completed turn does not heal it — only reportAccountAuth(false) does", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportAccountAuth(PROVIDER, true);
+    tracker.noteTurnCompleted(PROVIDER);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+
+    tracker.reportAccountAuth(PROVIDER, false);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("healthy");
+  });
+
+  it("an unrelated healthy usage reading does not heal a durable signed-out cap", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportAccountAuth(PROVIDER, true);
+    tracker.reportUsage(PROVIDER, [{ window: WINDOW_FIVE_HOUR, usedPct: 10 }]);
+
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("capped");
+  });
+
+  it("routes to the account again once accountAuth disappears from a later poll", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportAccountAuth(PROVIDER, true);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+
+    tracker.reportAccountAuth(PROVIDER, false);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+    expect(tracker.isLastResortEligible(PROVIDER)).toBe(true);
+  });
+
+  it("does nothing when the account was never signed out", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+    tracker.reportAccountAuth(PROVIDER, false);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).not.toBe("capped");
+  });
+
+  const SPEND_CAP = "You've hit your monthly spend limit, resets at 2026-09-11T00:00:00Z";
+
+  it("signing in clears only the signed-out state, not a spend cap that was already standing", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+    tracker.reportTurnFailure(PROVIDER, SPEND_CAP);
+
+    tracker.reportAccountAuth(PROVIDER, true);
+    tracker.reportAccountAuth(PROVIDER, false);
+
+    expect(tracker.describeWindow(PROVIDER, "account")).toMatchObject({
+      status: "capped",
+      resetsAt: new Date("2026-09-11T00:00:00Z"),
+    });
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+  });
+
+  it("keeps a spend cap that arrived while signed out, and lets it expire on its own reset", () => {
+    const { tracker, advance } = trackerAt("2026-09-10T10:00:00Z");
+    tracker.reportAccountAuth(PROVIDER, true);
+    tracker.reportTurnFailure(PROVIDER, SPEND_CAP);
+
+    tracker.reportAccountAuth(PROVIDER, false);
+    expect(tracker.describeWindow(PROVIDER, "account")).toMatchObject({
+      status: "capped",
+      resetsAt: new Date("2026-09-11T00:00:00Z"),
+    });
+
+    advance(14 * 60 * 60 * 1000 + 1);
+    expect(tracker.describeWindow(PROVIDER, "account")?.status).toBe("probation");
+  });
+
+  it("carries the signed-out state and its sign-in command into the window snapshot", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+    const fixCommand = "CLAUDE_CONFIG_DIR=/accounts/a claude auth login --email someone@example.com";
+
+    tracker.reportAccountAuth(PROVIDER, true, fixCommand);
+    expect(tracker.describeWindow(PROVIDER, "account")?.signedOut).toEqual({ fixCommand });
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.signedOut).toEqual({ fixCommand });
+
+    tracker.reportAccountAuth(PROVIDER, false);
+    expect(tracker.describeWindow(PROVIDER, "account")?.signedOut).toBeUndefined();
+  });
+});
+
 describe("the CLI's per-window cap messages", () => {
   const NOW = "2026-09-28T21:25:00Z";
 

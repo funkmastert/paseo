@@ -10,6 +10,7 @@ import {
   findExistingSuccessor,
   findLiveSessionHolder,
   formatMovedTitle,
+  rescueCause,
   stripMovedTitlePrefix,
 } from "./account-failover-migration.js";
 
@@ -210,6 +211,7 @@ describe("buildResumePrompt", () => {
     thinkingOptionId: "max",
     modeId: "bypassPermissions",
     resetHint: "3:10pm (America/Los_Angeles)",
+    cause: "limit",
   });
 
   it("names the target provider and model explicitly for new subagents", () => {
@@ -233,10 +235,28 @@ describe("buildResumePrompt", () => {
       thinkingOptionId: undefined,
       modeId: undefined,
       resetHint: null,
+      cause: "limit",
     });
     expect(bare).toContain('provider "claude-backup/<model>"');
     expect(bare).not.toContain(" with model");
     expect(bare).not.toContain("reset");
+  });
+
+  it("tells an agent rescued off a signed-out account that it is signed out, not capped", () => {
+    const signedOut = buildResumePrompt({
+      oldAgentId: "0734543f",
+      oldProviderId: "claude-personal",
+      targetProviderId: "claude-backup",
+      model: "sonnet",
+      thinkingOptionId: undefined,
+      modeId: undefined,
+      resetHint: null,
+      cause: "signed_out",
+    });
+    expect(signedOut).toContain('"claude-personal" failed because that account is signed out');
+    expect(signedOut).toContain("relaunch only the ones that died on the sign-in failure");
+    expect(signedOut).toContain("no reset to wait for");
+    expect(signedOut).not.toMatch(/usage limit|out of budget|on the limit/);
   });
 });
 
@@ -247,6 +267,7 @@ describe("buildMoveResumePrompt", () => {
     targetProviderId: "claude-backup",
     model: "sonnet",
     resetHint: "3:10pm (America/Los_Angeles)",
+    cause: "limit",
   });
 
   it("tells the agent it is the same agent, not a successor", () => {
@@ -262,5 +283,36 @@ describe("buildMoveResumePrompt", () => {
   it("says nothing about relaunching subagents, because none were orphaned", () => {
     expect(prompt).not.toContain("relaunch");
     expect(prompt).not.toContain("list_agents");
+  });
+
+  it("tells an agent moved off a signed-out account that it is signed out, not capped", () => {
+    const signedOut = buildMoveResumePrompt({
+      agentId: "agent-1",
+      oldProviderId: "claude-personal",
+      targetProviderId: "claude-backup",
+      model: "sonnet",
+      resetHint: null,
+      cause: "signed_out",
+    });
+    expect(signedOut).toContain('"claude-personal" failed because that account is signed out');
+    expect(signedOut).toContain("answer the latest message(s) that failed on the sign-in failure");
+    expect(signedOut).toContain("no reset to wait for");
+    expect(signedOut).not.toMatch(/usage limit|out of budget|on the limit/);
+  });
+});
+
+describe("rescueCause", () => {
+  it("reads the agent's own error first", () => {
+    expect(rescueCause({ lastError: "Not logged in", sourceSignedOut: false })).toBe("signed_out");
+    expect(rescueCause({ lastError: "You've hit your weekly limit", sourceSignedOut: true })).toBe(
+      "limit",
+    );
+  });
+
+  it("falls back to the account's sign-in state when the error names neither", () => {
+    expect(rescueCause({ lastError: "API Error: ECONNRESET", sourceSignedOut: true })).toBe(
+      "signed_out",
+    );
+    expect(rescueCause({ lastError: undefined, sourceSignedOut: false })).toBe("limit");
   });
 });

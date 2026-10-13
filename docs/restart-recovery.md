@@ -31,14 +31,14 @@ The RPCs work in every mode. The chaos test below passed on Tyler's machine on 2
 
 Each entry is checked for reachability, not continuity. Nobody can prove the model will carry on exactly where it stopped, so the check does not claim it.
 
-| Check        | Red when                                                    |
-| ------------ | ----------------------------------------------------------- |
-| `session`    | The record has no provider session                          |
-| `workspace`  | The working directory is gone                               |
-| `provider`   | The provider is unavailable                                 |
-| `transcript` | `canResumeHandle` says this account cannot read the session |
-| `account`    | Never. Yellow when the last error was a usage limit         |
-| `live`       | The agent is already running in this daemon                 |
+| Check        | Red when                                                               |
+| ------------ | ---------------------------------------------------------------------- |
+| `session`    | The record has no provider session                                     |
+| `workspace`  | The working directory is gone                                          |
+| `provider`   | The provider is unavailable                                            |
+| `transcript` | `canResumeHandle` says this account cannot read the session            |
+| `account`    | Never. Yellow when the last error was a usage limit or sign-in failure |
+| `live`       | The agent is already running in this daemon                            |
 
 A probe that throws, or a provider that cannot tell (`canResumeHandle` is missing, as for Codex), gives `unknown`, not red. The rollup is `not_restorable` if any check is red, then `unknown`, then `restorable_with_caveats` for yellow, else `restorable`. Apply attempts everything except `not_restorable`.
 

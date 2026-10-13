@@ -21,8 +21,8 @@ import type { AccountFailoverAgentSummary } from "./agent-manager.js";
 import type { AgentAccountAuth } from "./agent-sdk-types.js";
 import {
   getMigratedToFromLabels,
+  isAccountDeadError,
   isAccountDeadFor,
-  isLimitShapedError,
 } from "./account-failover-detector.js";
 import {
   headroomByProvider,
@@ -106,8 +106,8 @@ export function isQuietBetweenTurns(agent: AccountFailoverAgentSummary, nowMs: n
   // cancels it.
   if (agent.runningProviderSubagentCount > 0) return false;
   if (!agent.sessionId || getMigratedToFromLabels(agent.labels)) return false;
-  // Cut off by a cap: the rescue leg moves it and resumes the turn it lost.
-  if (isLimitShapedError(agent.lastError)) return false;
+  // Cut off by a cap or signed out: the rescue leg moves it and resumes the turn it lost.
+  if (isAccountDeadError(agent.lastError)) return false;
   const lastActivityMs =
     agent.lastActivityAt === null ? Number.NaN : Date.parse(agent.lastActivityAt);
   return Number.isFinite(lastActivityMs) && nowMs - lastActivityMs >= SETTLE_BACK_MIN_IDLE_MS;

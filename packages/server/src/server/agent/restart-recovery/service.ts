@@ -21,7 +21,7 @@ import {
   sendPromptToAgent,
   waitForAgentRunStartWithTimeout,
 } from "../agent-prompt.js";
-import { isLimitShapedError } from "../account-failover-detector.js";
+import { isAccountDeadError } from "../account-failover-detector.js";
 import { unpacedResume, type PaceResume } from "../resume-pacer.js";
 import {
   legacyPreviousShutdownString,
@@ -482,12 +482,12 @@ export class RestartRecoveryService {
           : red(`${record.provider} cannot read session ${handle.sessionId} from its account`);
       }),
       check("account", async () =>
-        isLimitShapedError(record.lastError)
+        isAccountDeadError(record.lastError)
           ? yellow(
-              `its last error was a usage limit (${record.lastError}); account failover moves it ` +
-                "if the resumed turn hits the limit again",
+              `its last error was a usage limit or sign-in failure (${record.lastError}); account ` +
+                "failover moves it if the resumed turn fails the same way again",
             )
-          : green("no usage-limit error on record"),
+          : green("no usage-limit or sign-in error on record"),
       ),
       check("live", async () => {
         const live = agentManager.getAgent(record.id);
