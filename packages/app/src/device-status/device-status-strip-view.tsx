@@ -426,8 +426,13 @@ function PhysicalDeviceRow({
   const handlePointerEnter = useCallback(() => setIsHovered(true), []);
   const handlePointerLeave = useCallback(() => setIsHovered(false), []);
 
+  // A child's own title may not say which effort it belongs to (Tyler's report: the status
+  // named a leader he didn't recognize, holding on its child's behalf). Name both, reusing the
+  // existing "Held by {{agent}}" string rather than adding a new one for every locale.
+  const holderName = row.agentLabel ?? row.agentId;
+  const holderWithLeader = row.leaderLabel ? `${holderName} (${row.leaderLabel})` : holderName;
   const holder = row.agentId
-    ? t("deviceStatus.heldBy", { agent: row.agentLabel ?? row.agentId })
+    ? t("deviceStatus.heldBy", { agent: holderWithLeader })
     : t(row.reserved ? "deviceStatus.reservedForYou" : "deviceStatus.free");
   // A phone has no "running for" — only how long it has been held.
   const heldFor =

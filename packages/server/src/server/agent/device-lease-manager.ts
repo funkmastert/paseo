@@ -157,6 +157,9 @@ export interface DeviceLeaseAgentSummary {
   extendsProviderId?: string;
   /** What Tyler sees for this agent in the sidebar — used in confirmations that name it. */
   title?: string;
+  /** Set when this agent is a child — lets a device-status readout name its leader alongside its
+   * own title, since a child's title alone may not say which effort it belongs to. */
+  parentAgentId?: string | null;
 }
 
 export interface DeviceStatusEntry {

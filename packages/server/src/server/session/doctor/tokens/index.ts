@@ -25,6 +25,12 @@ function timeoutFor(check: TokenAuditCheck, ctx: DoctorContext): number {
   return typeof check.timeoutMs === "function" ? check.timeoutMs(ctx) : check.timeoutMs;
 }
 
+/** The slowest item's deadline. The items run concurrently, so an awake run ends within it. */
+export function tokenAuditDeadlineMs(ctx: DoctorContext): number {
+  const deadlines = TOKEN_AUDIT_CHECKS.map((check) => timeoutFor(check, ctx));
+  return Math.max(...deadlines);
+}
+
 /** One item under its own deadline. A slow or failing item is one UNKNOWN row and nothing else. */
 export async function runTokenAuditCheck(
   check: TokenAuditCheck,

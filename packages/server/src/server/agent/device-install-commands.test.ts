@@ -264,4 +264,146 @@ describe("detectInstallCommandIntents", () => {
   test("a comment or grep mentioning these commands is not a command", () => {
     expect(detectInstallCommandIntents("grep -rn 'adb install' docs/")).toEqual([]);
   });
+
+  test("a serial set via a shell variable earlier in the same command resolves, not the literal $VAR", () => {
+    // The exact shape from the incident: S=<serial>; ...; adb -s $S install -r -d $APK — the
+    // agent's own shell resolves $S to the real serial. Without resolving it here too, the
+    // matcher reads the target as the device literally named "$S" (which nothing is ever
+    // connected as), so gateIntent treats it as "nothing to protect" and lets the install run
+    // unguarded against whichever device $S actually names.
+    expect(
+      detectInstallCommandIntents(
+        "S=FAKESERIAL001; APP=com.example; APK=app.apk; adb -s $S install -r -d $APK",
+      ),
+    ).toEqual([expect.objectContaining({ command: "adb install", target: "FAKESERIAL001" })]);
+  });
+
+  test("${VAR} braced form resolves the same way", () => {
+    expect(detectInstallCommandIntents("S=FAKESERIAL001; adb -s ${S} install app.apk")).toEqual([
+      expect.objectContaining({ target: "FAKESERIAL001" }),
+    ]);
+  });
+
+  test("ANDROID_SERIAL set via a shell variable earlier resolves for a gradle install task", () => {
+    expect(
+      detectInstallCommandIntents("S=FAKESERIAL001; ANDROID_SERIAL=$S ./gradlew installDebug"),
+    ).toEqual([
+      expect.objectContaining({ command: "gradlew installDebug", target: "FAKESERIAL001" }),
+    ]);
+  });
+
+  test("a later assignment overrides an earlier one, like a real shell", () => {
+    expect(
+      detectInstallCommandIntents("S=FAKESERIAL001; S=FAKESERIAL002; adb -s $S install app.apk"),
+    ).toEqual([expect.objectContaining({ target: "FAKESERIAL002" })]);
+  });
+
+  test("an unresolvable variable (no assignment seen in this command) is marked unresolved, not read as a literal device name", () => {
+    // It still names exactly one real device — just not one this gate's text matcher can read.
+    // Reading it as the literal string "$EXPORTED_ELSEWHERE" would make the caller treat it as
+    // "names a device nothing is connected as" and wave the install through unguarded.
+    expect(detectInstallCommandIntents("adb -s $EXPORTED_ELSEWHERE install app.apk")).toEqual([
+      expect.objectContaining({ target: "$EXPORTED_ELSEWHERE", targetUnresolved: true }),
+    ]);
+  });
+
+  test("iOS: a UDID set via a shell variable resolves for devicectl, ios-deploy and xcodebuild -destination", () => {
+    expect(
+      detectInstallCommandIntents(
+        "UDID=00005-FAKE-UDID; xcrun devicectl device install app --device $UDID --app app.app",
+      ),
+    ).toEqual([expect.objectContaining({ platform: "ios", target: "00005-FAKE-UDID" })]);
+    expect(
+      detectInstallCommandIntents("UDID=00005-FAKE-UDID; ios-deploy --id $UDID --bundle app.app"),
+    ).toEqual([expect.objectContaining({ platform: "ios", target: "00005-FAKE-UDID" })]);
+    expect(
+      detectInstallCommandIntents("UDID=00005-FAKE-UDID; xcodebuild test -destination 'id=$UDID'"),
+    ).toEqual([expect.objectContaining({ platform: "ios", target: "00005-FAKE-UDID" })]);
+  });
+
+  test("export NAME=value resolves the same as a bare assignment", () => {
+    expect(
+      detectInstallCommandIntents("export S=FAKESERIAL001; adb -s $S install app.apk"),
+    ).toEqual([expect.objectContaining({ target: "FAKESERIAL001" })]);
+  });
+
+  test("export A=1 B=2 resolves both assignments in one export", () => {
+    expect(
+      detectInstallCommandIntents(
+        "export APP=com.example S=FAKESERIAL001; adb -s $S install app.apk",
+      ),
+    ).toEqual([expect.objectContaining({ target: "FAKESERIAL001" })]);
+  });
+
+  test("declare and readonly resolve the same way as export", () => {
+    expect(
+      detectInstallCommandIntents("declare S=FAKESERIAL001; adb -s $S install app.apk"),
+    ).toEqual([expect.objectContaining({ target: "FAKESERIAL001" })]);
+    expect(
+      detectInstallCommandIntents("readonly S=FAKESERIAL001; adb -s $S install app.apk"),
+    ).toEqual([expect.objectContaining({ target: "FAKESERIAL001" })]);
+  });
+
+  test("a $(…) command substitution target is marked unresolved, not split apart or ignored", () => {
+    // The incident-adjacent shape Tyler's leader flagged: a pipe inside $(…) must not end the
+    // segment early and strand "install" in a fragment with nothing before it.
+    expect(
+      detectInstallCommandIntents("adb -s $(adb devices | awk 'NR==2{print $1}') install app.apk"),
+    ).toEqual([
+      expect.objectContaining({
+        command: "adb install",
+        target: "$(adb devices | awk 'NR==2{print $1}')",
+        targetUnresolved: true,
+      }),
+    ]);
+  });
+
+  test("a backtick command substitution target is marked unresolved the same way", () => {
+    expect(detectInstallCommandIntents("adb -s `cat /tmp/serial` install app.apk")).toEqual([
+      expect.objectContaining({ target: "`cat /tmp/serial`", targetUnresolved: true }),
+    ]);
+  });
+
+  test("a quoted default-value expansion ($VAR:-default) is marked unresolved, not matched as a literal", () => {
+    expect(detectInstallCommandIntents('adb -s "${S:-x}" install app.apk')).toEqual([
+      expect.objectContaining({ target: "${S:-x}", targetUnresolved: true }),
+    ]);
+  });
+
+  test("an unterminated $(...) doesn't swallow a later adb install — it falls back to literal tokenization", () => {
+    // A real shell refuses to run this (missing close paren), so the swallowed command never
+    // executes there — but the gate must not silently fail to see the adb install either.
+    expect(
+      detectInstallCommandIntents("echo $(uname -s && adb -s FAKESERIAL001 install evil.apk"),
+    ).toEqual([expect.objectContaining({ command: "adb install", target: "FAKESERIAL001" })]);
+  });
+
+  test("an unterminated backtick doesn't swallow a later adb install either", () => {
+    expect(
+      detectInstallCommandIntents("echo `uname -s && adb -s FAKESERIAL001 install evil.apk"),
+    ).toEqual([expect.objectContaining({ command: "adb install", target: "FAKESERIAL001" })]);
+  });
+
+  test("xargs is stripped so a piped adb install is still gated", () => {
+    expect(detectInstallCommandIntents("ls *.apk | xargs adb -s FAKESERIAL001 install")).toEqual([
+      expect.objectContaining({ command: "adb install", target: "FAKESERIAL001" }),
+    ]);
+  });
+
+  test("xargs with flags (-0, -n1) is stripped the same way", () => {
+    expect(
+      detectInstallCommandIntents(
+        "find . -name '*.apk' -print0 | xargs -0 adb -s FAKESERIAL001 install",
+      ),
+    ).toEqual([expect.objectContaining({ command: "adb install", target: "FAKESERIAL001" })]);
+    expect(
+      detectInstallCommandIntents("echo FAKESERIAL001 | xargs -n1 adb -s FAKESERIAL001 install"),
+    ).toEqual([expect.objectContaining({ command: "adb install", target: "FAKESERIAL001" })]);
+  });
+
+  test("xargs -I{} with a {} placeholder target is marked unresolved, not read as a literal device", () => {
+    expect(detectInstallCommandIntents("adb devices | xargs -I{} adb -s {} install x.apk")).toEqual(
+      [expect.objectContaining({ target: "{}", targetUnresolved: true })],
+    );
+  });
 });

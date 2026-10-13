@@ -310,6 +310,58 @@ describe("buildDeviceStatusStripModel and physical devices", () => {
     expect(model.physicalRows).toEqual([]);
   });
 
+  test("a held device run by a child resolves its leader's title too, from the same label map", () => {
+    // Tyler's report: the status named a leader he didn't recognize. The row needs the leader's
+    // title alongside the holder's, so the UI can show both — not just whichever one happens to
+    // resolve.
+    const model = buildDeviceStatusStripModel(
+      payload({
+        physicalDevices: [
+          {
+            id: "FAKESERIAL45291",
+            platform: "android",
+            transport: "usb",
+            connected: true,
+            reserved: false,
+            agentId: "child-1",
+            leaderAgentId: "leader-1",
+            heldForSeconds: 120,
+          },
+        ],
+      }),
+      { "child-1": "Report stale-deals test APK work", "leader-1": "Ship PR: Android header" },
+    );
+
+    expect(model.physicalRows[0]).toMatchObject({
+      agentId: "child-1",
+      agentLabel: "Report stale-deals test APK work",
+      leaderAgentId: "leader-1",
+      leaderLabel: "Ship PR: Android header",
+    });
+  });
+
+  test("a held device run by a root leader itself carries no leaderLabel", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        physicalDevices: [
+          {
+            id: "FAKESERIAL45291",
+            platform: "android",
+            transport: "usb",
+            connected: true,
+            reserved: false,
+            agentId: "leader-1",
+            heldForSeconds: 120,
+          },
+        ],
+      }),
+      { "leader-1": "Ship PR: Android header" },
+    );
+
+    expect(model.physicalRows[0]?.leaderLabel).toBeUndefined();
+    expect(model.physicalRows[0]?.leaderAgentId).toBeUndefined();
+  });
+
   test("a simulator row shows its simctl name, with the short UDID after it", () => {
     const model = buildDeviceStatusStripModel(
       payload({
