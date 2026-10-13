@@ -892,6 +892,7 @@ export class HubRelationshipHarness {
       { provider: "codex", cwd: this.root },
       undefined,
       {
+        origin: "human",
         workspaceId: "foreign-workspace",
         owner: { kind: "daemon", daemonId: "another-daemon", executionId },
       },
@@ -1148,7 +1149,7 @@ export class HubRelationshipHarness {
     const agent = await this.daemon!.agentManager.createAgent(
       { provider: "codex", cwd: this.root },
       undefined,
-      { workspaceId: "local-workspace" },
+      { workspaceId: "local-workspace", origin: "human" },
     );
     return agent.id;
   }
@@ -1421,6 +1422,12 @@ export class HubRelationshipHarness {
       hubRelationshipClock: this.clock,
       hubRelationshipRetryPolicy: this.clock,
       createHubDaemonId: () => "daemon-test",
+      // Fake agent clients (the default: `this.agentClients` unset) have no real Codex binary
+      // behind them, so there's nothing for a real self-test to prove -- skip it rather than let
+      // it run for real and come back red on this sandboxed tmp paseoHome (see
+      // PaseoDaemonDependencies.skipCodexGuardSelfTest). `startWithRealAgentClients` sets
+      // `agentClients` and keeps the real self-test, matching its real-provider intent.
+      skipCodexGuardSelfTest: this.agentClients === undefined,
     });
     await this.daemon.start();
     const target = this.daemon.getListenTarget();
@@ -1550,7 +1557,10 @@ export class HubRelationshipHarness {
   private ownedCreateInput(executionId: string) {
     return {
       executionId,
-      provider: "codex",
+      // claude, not codex: most tests here are about Hub ownership/workspace/worktree mechanics,
+      // not provider-specific behavior, and a real daemon's Codex child guard would otherwise
+      // depend on a real self-test passing in this sandboxed test environment.
+      provider: "claude",
       cwd: this.root,
       prompt: "Create through the Hub",
     };

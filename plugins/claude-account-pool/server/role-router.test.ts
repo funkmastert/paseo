@@ -85,6 +85,10 @@ function baseOptions(overrides: Partial<RoleRouterOptions> = {}): RoleRouterOpti
     poolCache: fakePoolCache({ workers: [], leader: null }),
     health: createHealthTracker(),
     recentAgentTypes: createRecentAgentTypes(),
+    // Most tests here are not about the Codex guard's own health -- default to healthy (a
+    // daemon whose self-test passed) so a codex pick routes the way it always used to. Override
+    // explicitly to exercise the unavailable-outcome health fallback.
+    codexGuardCache: { get: () => ({ healthy: true, runningChildren: 0 }) },
     ...overrides,
   };
 }
@@ -366,7 +370,12 @@ describe("createRoleRouter", () => {
         baseOptions({
           policyCache: fakePolicyCache(policy),
           catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
-          providerIds: { get: () => new Set(["claude"]), forceRefresh: vi.fn(), stop: vi.fn() },
+          providerIds: {
+            get: () => new Set(["claude"]),
+            forceRefresh: vi.fn(),
+            stop: vi.fn(),
+            resolveFamily: (providerId: string) => providerId,
+          },
         }),
       );
 
@@ -920,7 +929,7 @@ describe("createRoleRouter", () => {
     expect(result?.config.cwd).toBe("/tmp/work");
   });
 
-  it("strips a caller's approval_policy/sandbox_mode/sandbox_workspace_write for a codex-routed create (review finding #1)", () => {
+  it("strips a caller's approval_policy/sandbox_mode/sandbox_workspace_write for a codex-routed create", () => {
     const router = createRoleRouter(
       baseOptions({
         policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-5.1"])),
@@ -950,6 +959,144 @@ describe("createRoleRouter", () => {
     expect(result?.config.provider).toBe("codex");
     expect(result?.config.modeId).toBe("guarded");
     expect(result?.config.providerOptions).toEqual({ foo: "bar" });
+  });
+
+  /**
+   * A Codex child the classifier honors, recovers, or leaves to an unconfigured pool is a child
+   * running on the codex provider too -- `decision.model.provider` just doesn't say so reliably
+   * on these paths (null for `unconfigured`; an echo of the request for `honored-request`). Each
+   * of these reproduces the live incident (2026-10-11 03:17Z): a Codex child created with
+   * `modeId: full-access` kept it, because the guard step only ran on the ordinary rewrite path.
+   */
+  describe("Codex guard forced on every return path, not just the rewrite (codex-child-guard fix)", () => {
+    it("HONORED-REQUEST: forces guarded mode on an explicit codex request the classifier approves and honors", () => {
+      const health = createHealthTracker();
+      health.reportUsage("codex", [{ window: "session", usedPct: 10 }]); // selectable right now, not budget-gated
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-5.1"])),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
+          codexGuardCache: { get: () => ({ healthy: true, runningChildren: 0 }) },
+          health,
+        }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: {
+            provider: "codex",
+            model: "gpt-5.1",
+            modeId: "full-access",
+            providerOptions: { approval_policy: "never", sandbox_mode: "danger-full-access" },
+            cwd: "/tmp/work",
+          },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("codex"); // honored, untouched by the model rewrite
+      expect(result?.config.model).toBe("gpt-5.1");
+      expect(result?.config.modeId).toBe("guarded"); // was "full-access" -- the live bug
+      expect(result?.config.providerOptions).toEqual({});
+    });
+
+    it("UNCONFIGURED: forces guarded mode on an explicit codex request when the role's pool is empty", () => {
+      const router = createRoleRouter(baseOptions()); // worker role's pool is empty by default
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: {
+            provider: "codex",
+            model: "gpt-6-luna",
+            modeId: "full-access",
+            providerOptions: { approval_policy: "never", sandbox_mode: "danger-full-access" },
+            cwd: "/tmp/work",
+          },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("codex"); // unconfigured: the request's own model/provider stand
+      expect(result?.config.model).toBe("gpt-6-luna");
+      expect(result?.config.modeId).toBe("guarded"); // was "full-access"
+      expect(result?.config.providerOptions).toEqual({});
+    });
+
+    it("RECOVERED (provider-not-registered): forces guarded mode when the rewrite target vanishes and the caller's own codex request runs instead", () => {
+      const pool: ResolvedPool = { workers: [{ providerId: "worker-a", priority: 1 }], leader: { providerId: "leader" } };
+      // The registry knows about "codex" (so the caller's own pick is launchable) but not
+      // "deadfamily" -- the role's pinned rewrite target, which vanished from daemon config.
+      const providerIds = { get: () => new Set(["claude", "codex", "worker-a", "leader"]), forceRefresh: vi.fn(), stop: vi.fn(), resolveFamily: (id: string) => id };
+      const router = createRoleRouter({
+        ...baseOptions({ poolCache: fakePoolCache(pool) }),
+        policyCache: fakePolicyCache(policyWithWorkerModels(["deadfamily/some-model"])),
+        catalogCache: fakeCatalogCache(new Map()), // "deadfamily" never resolves in the catalog either
+        providerIds,
+      });
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: {
+            provider: "codex",
+            model: "gpt-6-luna",
+            modeId: "full-access",
+            providerOptions: { approval_policy: "never", sandbox_mode: "danger-full-access" },
+            cwd: "/tmp",
+          },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("codex"); // recovered: the caller's own request stands, not the vanished pin
+      expect(result?.config.model).toBe("gpt-6-luna");
+      expect(result?.config.modeId).toBe("guarded"); // was "full-access"
+      expect(result?.config.providerOptions).toEqual({});
+    });
+
+    it("ROOT: a root create's fallback-anyway codex pick keeps the root's own mode (no callerAgentId)", () => {
+      // Leaders are never eligible for Codex (KTD-7), but an all-gated-out pool still runs its
+      // first entry anyway (`decision.model.outcome === "unavailable"`) -- this must still never
+      // force guarded mode on Tyler's own root create.
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache({
+            ...DEFAULT_POLICY,
+            roles: DEFAULT_POLICY.roles.map((role) => (role.id === "leader" ? { ...role, models: ["codex/gpt-5.1"] } : role)),
+          }),
+        }),
+      );
+
+      const result = router(
+        request({ config: { provider: "claude", model: "claude-sonnet", modeId: "full-access", cwd: "/tmp" } }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("codex");
+      expect(result?.config.modeId).toBe("full-access"); // untouched: no callerAgentId, so this is Tyler, not a child
+    });
+
+    it("a non-codex honored-request child is untouched by the Codex guard", () => {
+      const pool: ResolvedPool = { workers: [{ providerId: "claude-backup", priority: 1 }], leader: { providerId: "leader" } };
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["claude-sonnet-5", "claude-opus-5"])),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5", "claude-opus-5"] })),
+          poolCache: fakePoolCache(pool),
+        }),
+      );
+
+      const initial = request({
+        callerAgentId: "c1",
+        config: { provider: "claude-backup", model: "claude-opus-5", modeId: "full-access", cwd: "/tmp" },
+      });
+      const result = router(initial, fakeContext);
+
+      expect(result).toBeUndefined(); // byte-identical pass-through: nothing to enforce, nothing to guard
+      expect((result ?? initial.request).config.modeId).toBe("full-access");
+    });
   });
 
   it("resolves via tier 2 declared role label and routes to that role's model", () => {
@@ -1093,7 +1240,7 @@ describe("createRoleRouter", () => {
     // Registry the account router actually knows about: "deadfamily" was
     // removed from daemon config, so it's absent here even though the
     // role's models[0] still names it.
-    const providerIds = { get: () => new Set(["claude", "worker-a", "leader"]), forceRefresh: vi.fn(), stop: vi.fn() };
+    const providerIds = { get: () => new Set(["claude", "worker-a", "leader"]), forceRefresh: vi.fn(), stop: vi.fn(), resolveFamily: (id: string) => id };
     const router = createRoleRouter({
       ...baseOptions({ poolCache: fakePoolCache(pool), onRoleUnavailable }),
       policyCache: fakePolicyCache(policyWithWorkerModels(["deadfamily/some-model"])),
@@ -1215,7 +1362,7 @@ describe("createRoleRouter", () => {
     }
 
     it("falls back to the next pool entry when no codexGuardCache is wired (guards-first, KTD-3)", () => {
-      const router = createRoleRouter(codexFirstOptions());
+      const router = createRoleRouter(codexFirstOptions({ codexGuardCache: undefined }));
 
       const result = router(request({ callerAgentId: "c1" }), fakeContext);
 
@@ -1243,6 +1390,142 @@ describe("createRoleRouter", () => {
 
       expect(result?.config.provider).not.toBe("codex");
       expect(result?.config.model).toBe("claude-sonnet-5");
+    });
+
+    it("a single-entry codex pool's fallback-anyway pick backs out to the caller's own provider when the guard isn't healthy", () => {
+      // Single entry, no usage reported: codex is ineligible for ordinary selection, so
+      // `selectModel` returns `outcome: "unavailable"` and names codex as its "use it anyway"
+      // pick -- exactly the shape the daemon would otherwise refuse outright.
+      const onRoleUnavailable = vi.fn();
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-6-luna"])),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-6-luna"] })),
+          codexGuardCache: { get: () => ({ healthy: false, runningChildren: 0 }) },
+          onRoleUnavailable,
+        }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: { provider: "claude-sonnet-5", model: "claude-sonnet-5", modeId: "default", cwd: "/tmp" },
+        }),
+        fakeContext,
+      );
+
+      // Nothing to enforce, nothing to guard: the caller's own non-codex request stands
+      // untouched -- never rewritten to a codex ref the daemon can only refuse.
+      expect(result).toBeUndefined();
+      expect(onRoleUnavailable).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "codex-guard-unhealthy" }),
+      );
+    });
+
+    it("the guard-unhealthy fallback recomputes enforcement for the provider that actually runs (a restricted profile)", () => {
+      // Same single-entry-codex-pool unavailable shape as the #9 test above, but the role also
+      // carries a restricted tool profile. The fallback runs on the caller's own claude request,
+      // not on codex -- enforcement must be Claude-shaped (disallowedTools), not Codex-shaped
+      // (sandbox_mode), and must not silently vanish because it was computed against codex.
+      const policy = {
+        ...policyWithWorkerModels(["codex/gpt-6-luna"]),
+        roles: DEFAULT_POLICY.roles.map((role) =>
+          role.id === "worker"
+            ? { ...role, models: ["codex/gpt-6-luna"], toolProfile: { kind: "read-only" as const } }
+            : role,
+        ),
+      };
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policy),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-6-luna"] })),
+          codexGuardCache: { get: () => ({ healthy: false, runningChildren: 0 }) },
+        }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          labels: { [AGENT_ROLE_LABEL]: "worker" },
+          config: { provider: "claude", model: "claude-sonnet-5", modeId: "default", cwd: "/tmp" },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("claude");
+      const options = result?.config.providerOptions as {
+        disallowedTools?: string[];
+        sandbox_mode?: string;
+      };
+      expect(options?.disallowedTools).toContain("Write");
+      expect(options?.sandbox_mode).toBeUndefined();
+    });
+
+    it("never reserves a Codex guard slot in the guard-unhealthy fallback, even though the create started as a Codex child", () => {
+      const reserve = vi.fn();
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-6-luna"])),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-6-luna"] })),
+          codexGuardCache: { get: () => ({ healthy: false, runningChildren: 0 }), reserve },
+        }),
+      );
+
+      router(
+        request({
+          callerAgentId: "c1",
+          config: { provider: "claude-sonnet-5", model: "claude-sonnet-5", modeId: "default", cwd: "/tmp" },
+        }),
+        fakeContext,
+      );
+
+      expect(reserve).not.toHaveBeenCalled();
+    });
+
+    it("a label-only child (parent label, no callerAgentId) on codex is guarded", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-5.1"])),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
+        }),
+      );
+
+      const result = router(
+        request({
+          labels: { [AGENT_ROLE_LABEL]: "worker", "paseo.parent-agent-id": "parent-1" },
+          config: { provider: "claude", model: "claude-sonnet", modeId: "full-access", cwd: "/tmp" },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("codex");
+      expect(result?.config.modeId).toBe("guarded");
+    });
+
+    it("a derived extends:\"codex\" provider is guarded exactly like codex itself", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["my-codex/gpt-5.1"])),
+          catalogCache: fakeCatalogCache(catalog({ "my-codex": ["gpt-5.1"] })),
+          providerIds: {
+            get: () => new Set(["my-codex", "claude"]),
+            forceRefresh: vi.fn(),
+            stop: vi.fn(),
+            resolveFamily: (providerId: string) => (providerId === "my-codex" ? "codex" : providerId),
+          },
+        }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: { provider: "claude", model: "claude-sonnet", modeId: "full-access", cwd: "/tmp" },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("my-codex");
+      expect(result?.config.modeId).toBe("guarded");
     });
 
     it("falls back when the running-children count is already at the policy's cap", () => {
@@ -2052,7 +2335,7 @@ describe("role-router + account router composition", () => {
     });
     // Provider-id cache populated (not the null cold-start state) so the
     // assertion below reflects real target selection, not a fail-open guard.
-    const providerIds = { get: () => new Set(["worker-a", "worker-b", "leader"]), forceRefresh: vi.fn(), stop: vi.fn() };
+    const providerIds = { get: () => new Set(["worker-a", "worker-b", "leader"]), forceRefresh: vi.fn(), stop: vi.fn(), resolveFamily: (id: string) => id };
     const accountRouter = createRouter({ poolCache, health, providerIds });
 
     const initial = request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } });
@@ -2079,7 +2362,7 @@ describe("role-router + account router composition", () => {
       health,
       recentAgentTypes: createRecentAgentTypes(),
     });
-    const providerIds = { get: () => new Set(["worker-a", "leader"]), forceRefresh: vi.fn(), stop: vi.fn() };
+    const providerIds = { get: () => new Set(["worker-a", "leader"]), forceRefresh: vi.fn(), stop: vi.fn(), resolveFamily: (id: string) => id };
     const accountRouter = createRouter({ poolCache, health, providerIds });
 
     const initial = request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } });
@@ -2113,7 +2396,7 @@ describe("role-router + account router composition", () => {
       health,
       recentAgentTypes: createRecentAgentTypes(),
     });
-    const providerIds = { get: () => new Set(["claude-personal"]), forceRefresh: vi.fn(), stop: vi.fn() };
+    const providerIds = { get: () => new Set(["claude-personal"]), forceRefresh: vi.fn(), stop: vi.fn(), resolveFamily: (id: string) => id };
     const accountRouter = createRouter({ poolCache, health, providerIds });
 
     const initial = request({
@@ -2247,7 +2530,7 @@ describe("createRoleRouter — thinking (config.thinkingOptionId)", () => {
   });
 
   it("leaves config.thinkingOptionId untouched on the provider-not-registered path, even though a level was decided for the skipped model", () => {
-    const providerIds = { get: () => new Set(["claude", "claude-backup", "leader"]), forceRefresh: vi.fn(), stop: vi.fn() };
+    const providerIds = { get: () => new Set(["claude", "claude-backup", "leader"]), forceRefresh: vi.fn(), stop: vi.fn(), resolveFamily: (id: string) => id };
     const router = createRoleRouter({
       ...baseOptions({ poolCache: fakePoolCache(pool) }),
       policyCache: fakePolicyCache(policyWithWorkerModels(["deadfamily/some-model"])),
@@ -2272,7 +2555,7 @@ describe("createRoleRouter — thinking (config.thinkingOptionId)", () => {
   });
 
   it("still removes a subagent's Ultra Code on the provider-not-registered path", () => {
-    const providerIds = { get: () => new Set(["claude", "claude-backup", "leader"]), forceRefresh: vi.fn(), stop: vi.fn() };
+    const providerIds = { get: () => new Set(["claude", "claude-backup", "leader"]), forceRefresh: vi.fn(), stop: vi.fn(), resolveFamily: (id: string) => id };
     const onThinkingOverridden = vi.fn();
     const router = createRoleRouter({
       ...baseOptions({ poolCache: fakePoolCache(pool) }),

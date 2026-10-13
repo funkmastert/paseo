@@ -33,7 +33,12 @@ function fakePoolCache(pool: ResolvedPool = POOL): PoolCache {
 }
 
 function fakeProviderIds(ids: string[] | null = ["claude", "claude-personal", "claude-backup"]): ProviderIdCache {
-  return { get: () => (ids === null ? null : new Set(ids)), forceRefresh: vi.fn(), stop: vi.fn() };
+  return {
+    get: () => (ids === null ? null : new Set(ids)),
+    forceRefresh: vi.fn(),
+    stop: vi.fn(),
+    resolveFamily: (providerId: string) => providerId,
+  };
 }
 
 function tracker(): HealthTracker {

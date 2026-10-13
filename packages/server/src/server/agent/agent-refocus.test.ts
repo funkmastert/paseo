@@ -2,10 +2,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { AgentManager } from "./agent-manager.js";
+import { setCodexGuardHealthState } from "./codex-guard-health.js";
 import {
   formatFinishNotificationBody,
   formatSystemNotificationPrompt,
@@ -19,6 +20,13 @@ import {
   type ScriptedSession,
   type ScriptedTurn,
 } from "../test-utils/scripted-context-agent-client.js";
+
+// This file creates codex agents as a generic fixture for refocus behavior unrelated to the
+// Codex child guard, so default guard health to green the way a real daemon reaches it once the
+// self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 
 interface Scenario {
   session: ScriptedSession;

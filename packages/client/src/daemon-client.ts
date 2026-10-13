@@ -833,6 +833,10 @@ export interface CreateScheduleOptions {
   expiresAt?: string;
   runOnCreate?: boolean;
   condition?: ScheduleCondition;
+  /** Set by a CLI run under `PASEO_AGENT_ID`. Marks the schedule's own creates as agent-made for
+   * the Codex child guard, which forces guarded mode on every run of an agent-created schedule
+   * whose target lands on a codex-family provider. */
+  callerAgentId?: string;
   requestId?: string;
 }
 export interface InspectScheduleOptions {
@@ -862,6 +866,10 @@ export interface UpdateScheduleOptions {
   expiresAt?: string | null;
   /** Null clears the condition. */
   condition?: ScheduleCondition | null;
+  /** Set by a CLI run under `PASEO_AGENT_ID`, mirroring `CreateScheduleOptions.callerAgentId`:
+   * an edit to `newAgentConfig` from a caller with this set marks the schedule agent-made for
+   * the Codex child guard. Absent for the app/desktop client. */
+  callerAgentId?: string;
   requestId?: string;
 }
 export interface RenameBranchInput {
@@ -6119,6 +6127,7 @@ export class DaemonClient {
         ...(options.expiresAt ? { expiresAt: options.expiresAt } : {}),
         ...(typeof options.runOnCreate === "boolean" ? { runOnCreate: options.runOnCreate } : {}),
         ...(options.condition ? { condition: options.condition } : {}),
+        ...(options.callerAgentId ? { callerAgentId: options.callerAgentId } : {}),
       },
       responseType: "schedule/create/response",
     });
@@ -6213,6 +6222,7 @@ export class DaemonClient {
         ...(options.maxRuns !== undefined ? { maxRuns: options.maxRuns } : {}),
         ...(options.expiresAt !== undefined ? { expiresAt: options.expiresAt } : {}),
         ...(options.condition !== undefined ? { condition: options.condition } : {}),
+        ...(options.callerAgentId ? { callerAgentId: options.callerAgentId } : {}),
       },
       responseType: "schedule/update/response",
     });

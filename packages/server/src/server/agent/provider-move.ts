@@ -15,7 +15,12 @@ export type AgentProviderMoveRefusalCode =
   | "incompatible_provider"
   | "session_unreachable"
   | "session_conflict"
-  | "agent_busy";
+  | "agent_busy"
+  /** A guarded Codex child's marker forbids a move out of the codex family. Checked by
+   * `moveAgentToProvider` after this function's own `incompatible_provider` rule, which already
+   * refuses every cross-family move -- this is defense in depth for a future loosening of that
+   * rule (e.g. an "import instead" cross-family path), typed the way every other refusal here is. */
+  | "codex_guard_protected";
 
 export class AgentProviderMoveError extends Error {
   constructor(

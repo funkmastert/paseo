@@ -1,5 +1,7 @@
 import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
 import { getCodexGuardHealthState } from "../../agent/codex-guard-health.js";
+import { requiresCodexGuard } from "../../agent/codex-guard-predicate.js";
+import { CODEX_GUARDED_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { CodexGuardChildCandidateSummary } from "../../agent/agent-manager.js";
 
 export interface CodexGuardSessionOptions {
@@ -24,12 +26,18 @@ const RECENT_CREATE_WINDOW_MS = 15 * 60 * 1000;
 /**
  * A Codex child that is, or is about to be, drawing on the Codex window (KTD-9): not archived and
  * not closed, and either running, initializing, created within `RECENT_CREATE_WINDOW_MS`, or
- * carrying a queued/admitted turn (`busy`). Tyler's own Codex sessions (no
- * `paseo.parent-agent-id`) never count. "Not archived and not closed" needs no explicit check
- * here: `agent-manager.ts`'s `this.agents` map never holds either state in the first place
- * (`prepareAgentForClosure` deletes the entry synchronously, before any `await`), so anything
- * `listAgentsForCodexGuardStatus` returns already satisfies it. The `lifecycle !== "closed"` guard
- * below is defense in depth against that invariant changing, not the primary filter.
+ * carrying a queued/admitted turn (`busy`). Tyler's own Codex sessions (no `paseo.parent-agent-id`
+ * and no `paseo.codex-guarded` marker) never count. "Not archived and not closed" needs no
+ * explicit check here: `agent-manager.ts`'s `this.agents` map never holds either state in the
+ * first place (`prepareAgentForClosure` deletes the entry synchronously, before any `await`), so
+ * anything `listAgentsForCodexGuardStatus` returns already satisfies it. The `lifecycle !==
+ * "closed"` guard below is defense in depth against that invariant changing, not the primary
+ * filter.
+ *
+ * "Child" is decided by `requiresCodexGuard`, not a literal `provider === "codex"` check with a
+ * raw parent-label read: a derived `extends: "codex"` provider counts against the cap exactly
+ * like `codex` itself, and a marker-only child (detached, but still guarded) keeps counting even
+ * after `parentAgentId` goes null.
  */
 export function countRunningCodexChildren(
   agents: readonly CodexGuardChildCandidateSummary[],
@@ -37,7 +45,12 @@ export function countRunningCodexChildren(
 ): number {
   const nowMs = now();
   return agents.filter((agent) => {
-    if (agent.provider !== "codex" || agent.parentAgentId === null) return false;
+    const isGuardedChild = requiresCodexGuard({
+      callerAgentId: agent.parentAgentId ?? undefined,
+      labels: agent.hasGuardMarker ? { [CODEX_GUARDED_LABEL]: "1" } : undefined,
+      providerFamily: agent.providerFamily,
+    });
+    if (!isGuardedChild) return false;
     if (agent.lifecycle === "closed") return false;
     if (agent.lifecycle === "running" || agent.lifecycle === "initializing") return true;
     if (agent.busy) return true;

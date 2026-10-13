@@ -21,6 +21,7 @@ function fakeProviderIds(ids: string[] | null): ProviderIdCache {
     get: () => (ids === null ? null : new Set(ids)),
     forceRefresh: vi.fn(),
     stop: vi.fn(),
+    resolveFamily: (providerId: string) => providerId,
   };
 }
 
@@ -505,7 +506,9 @@ describe("createRouter", () => {
 });
 
 describe("createProviderIdCache", () => {
-  function fakeProvidersApi(entries: Array<{ provider: string }>) {
+  function fakeProvidersApi(
+    entries: Array<{ provider: string; derivedFromProviderId?: string | null }>,
+  ) {
     return {
       providers: {
         snapshot: vi.fn().mockResolvedValue({ entries, generatedAt: "now", requestId: "r1" }),
@@ -534,6 +537,30 @@ describe("createProviderIdCache", () => {
     await cache.forceRefresh();
 
     expect(cache.get()).toEqual(new Set(["worker-a"]));
+    cache.stop();
+  });
+
+  it("resolveFamily walks the derivedFromProviderId chain to the root provider", async () => {
+    const paseo = fakeProvidersApi([
+      { provider: "codex" },
+      { provider: "my-codex", derivedFromProviderId: "codex" },
+      { provider: "claude" },
+    ]);
+    const cache = createProviderIdCache(paseo, { intervalMs: 1000 });
+    await cache.forceRefresh();
+
+    expect(cache.resolveFamily("my-codex")).toBe("codex");
+    expect(cache.resolveFamily("codex")).toBe("codex");
+    expect(cache.resolveFamily("claude")).toBe("claude");
+    expect(cache.resolveFamily("unregistered")).toBe("unregistered");
+    cache.stop();
+  });
+
+  it("resolveFamily returns the id unchanged before the first snapshot resolves", () => {
+    const paseo = fakeProvidersApi([{ provider: "my-codex", derivedFromProviderId: "codex" }]);
+    const cache = createProviderIdCache(paseo, { intervalMs: 1000 });
+
+    expect(cache.resolveFamily("my-codex")).toBe("my-codex");
     cache.stop();
   });
 

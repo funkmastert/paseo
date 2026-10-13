@@ -1028,6 +1028,11 @@ export const ProviderSnapshotEntrySchema = z.object({
   description: z.string().optional(),
   iconSvg: z.string().optional(),
   defaultModeId: z.string().nullable().optional(),
+  /** The registered provider id this one extends, e.g. a claude-account-pool entry extending
+   * "claude". Mirrors `ProviderSnapshotEntry.derivedFromProviderId` (agent-types.ts) -- this
+   * schema was missing the field, so a plugin resolving a provider's session family from the
+   * wire snapshot (`paseo.providers.snapshot()`) never saw it. */
+  derivedFromProviderId: z.string().nullable().optional(),
 });
 
 export const CompactProviderSnapshotModelSchema = AgentModelDefinitionSchema.omit({

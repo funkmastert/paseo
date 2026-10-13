@@ -14,6 +14,10 @@ import {
   setProcessPriorityPolicy,
 } from "../../utils/process-priority.js";
 import { createAgentMcpServer } from "./mcp-server.js";
+import {
+  resetCodexGuardHealthStateForTests,
+  setCodexGuardHealthState,
+} from "./codex-guard-health.js";
 import { AgentManager, type CreateAgentOptions, type ManagedAgent } from "./agent-manager.js";
 import { AgentStorage, type StoredAgentRecord } from "./agent-storage.js";
 import { FinishObligationService } from "./finish-obligation-service.js";
@@ -216,6 +220,8 @@ function mcpCreateOptions(
     owner: undefined,
     env: undefined,
     callerAgentId: undefined,
+    // The MCP endpoint is agent-only.
+    origin: "agent",
     ...overrides,
   };
 }
@@ -3572,11 +3578,18 @@ describe("create_agent MCP tool", () => {
       }),
     );
 
+    // The child create below is a real, agent-made Codex child (callerAgentId: parent.id) --
+    // the real AgentManager requires proven guard health before it will run.
+    setCodexGuardHealthState({
+      status: "green",
+      reason: "self-test passed",
+      codexVersion: "0.160.0",
+    });
     try {
       const parent = await agentManager.createAgent(
         { provider: "codex", cwd: existingCwd },
         undefined,
-        { workspaceId: "wks_parent" },
+        { workspaceId: "wks_parent", origin: "human" },
       );
 
       const server = await createAgentMcpServer({
@@ -3600,6 +3613,7 @@ describe("create_agent MCP tool", () => {
       expect(storedChild?.labels[PARENT_AGENT_ID_LABEL]).toBe(parent.id);
     } finally {
       rmSync(workdir, { recursive: true, force: true });
+      resetCodexGuardHealthStateForTests();
     }
   });
 
@@ -4804,6 +4818,8 @@ describe("update_schedule MCP tool", () => {
       id: "schedule-1",
       name: "updated name",
       prompt: "new prompt",
+      editorOrigin: "agent",
+      editorAgentId: null,
     });
   });
 
@@ -4828,6 +4844,8 @@ describe("update_schedule MCP tool", () => {
     expect(update).toHaveBeenCalledWith({
       id: "schedule-1",
       cadence: { type: "cron", expression: "*/10 * * * *" },
+      editorOrigin: "agent",
+      editorAgentId: null,
     });
   });
 
@@ -4857,6 +4875,8 @@ describe("update_schedule MCP tool", () => {
         expression: "0 9 * * 1-5",
         timezone: "Europe/Zurich",
       },
+      editorOrigin: "agent",
+      editorAgentId: null,
     });
   });
 
@@ -4882,6 +4902,8 @@ describe("update_schedule MCP tool", () => {
     expect(update).toHaveBeenCalledWith({
       id: "schedule-1",
       cadence: { type: "cron", expression: "*/10 * * * *" },
+      editorOrigin: "agent",
+      editorAgentId: null,
     });
   });
 
@@ -4919,6 +4941,8 @@ describe("update_schedule MCP tool", () => {
     expect(update).toHaveBeenCalledWith({
       id: "schedule-1",
       cadence,
+      editorOrigin: "agent",
+      editorAgentId: null,
     });
   });
 
@@ -5053,6 +5077,8 @@ describe("update_schedule MCP tool", () => {
         model: null,
         modeId: null,
       },
+      editorOrigin: "agent",
+      editorAgentId: null,
     });
   });
 

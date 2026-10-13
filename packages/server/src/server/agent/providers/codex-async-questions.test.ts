@@ -1,5 +1,5 @@
 import { tmpdir } from "node:os";
-import { expect, test } from "vitest";
+import { beforeEach, expect, test } from "vitest";
 import { CodexAppServerAgentSession } from "./codex-app-server-agent.js";
 import {
   createFakeCodexAppServer,
@@ -9,6 +9,14 @@ import {
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import type { AgentStreamEvent } from "../agent-sdk-types.js";
 import { AgentManager } from "../agent-manager.js";
+import { setCodexGuardHealthState } from "../codex-guard-health.js";
+
+// This file creates real codex app-server sessions as a generic fixture for async-question
+// behavior unrelated to the Codex child guard, so default guard health to green the way a real
+// daemon reaches it once the self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 
 const questionItem = {
   type: "agentMessage",

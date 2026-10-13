@@ -2,11 +2,19 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import pino from "pino";
 
 import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
+import { setCodexGuardHealthState } from "./agent/codex-guard-health.js";
+
+// This file creates codex agents as a generic fixture for stall-sweep behavior unrelated to the
+// Codex child guard, so default guard health to green the way a real daemon reaches it once the
+// self-test has passed.
+beforeEach(() => {
+  setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
+});
 import type {
   AgentClient,
   AgentPromptInput,

@@ -2833,6 +2833,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         ...(name?.trim() ? { name: name.trim() } : {}),
         ...(maxRuns === undefined ? {} : { maxRuns }),
         ...(expiresAt === undefined ? {} : { expiresAt }),
+        createdByAgentId: callerAgentId ?? null,
+        // The MCP endpoint is agent-only.
+        createdByOrigin: "agent",
       });
 
       return {
@@ -2891,6 +2894,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         ...(maxRuns === undefined ? {} : { maxRuns }),
         ...(expiresAt === undefined ? {} : { expiresAt }),
         ...(when === undefined ? {} : { condition: conditionFromNames(when) }),
+        createdByAgentId: callerAgentId,
+        createdByOrigin: "agent",
       });
 
       return {
@@ -3110,7 +3115,14 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       }
 
       await requireScheduleTarget(input.id, "new-agent");
-      const schedule = await scheduleService.update(buildScheduleUpdateInput(input));
+      // The MCP endpoint is agent-only: an edit through it that touches newAgentConfig marks the
+      // schedule agent-made, so a later run can't dodge the Codex guard by retargeting a human
+      // schedule to a codex-family provider.
+      const schedule = await scheduleService.update({
+        ...buildScheduleUpdateInput(input),
+        editorOrigin: "agent",
+        editorAgentId: callerAgentId ?? null,
+      });
 
       return {
         content: [],
