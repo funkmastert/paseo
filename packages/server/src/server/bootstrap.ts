@@ -257,6 +257,7 @@ import {
 import { ResumePacer, type PaceResume } from "./agent/resume-pacer.js";
 import { PluginConnectionMonitor } from "./plugin-connection-monitor.js";
 import { AccountFailoverMonitor } from "./agent-account-failover-monitor.js";
+import type { AccountAuthProbe } from "./agent/account-auth-probe.js";
 import { FinishObligationService } from "./agent/finish-obligation-service.js";
 import type { FinishReportLadderConfig } from "./agent/finish-obligation.js";
 import {
@@ -737,6 +738,8 @@ export interface PaseoDaemonConfig {
      * through: a turn starting while the move waited for its slot.
      */
     wrapPaceResume?: (paceResume: PaceResume) => PaceResume;
+    /** Stands in for the sign-in probe, which would otherwise run the real `claude` CLI. */
+    accountAuthProbe?: AccountAuthProbe;
   };
   /**
    * Test seams for FinishObligationService; production leaves this unset. Tests push the timer
@@ -1466,6 +1469,7 @@ function createAccountFailoverMonitor(input: {
     paceResume: overrides?.wrapPaceResume?.(input.paceResume) ?? input.paceResume,
     accountIdentity: input.wsServer.getAccountIdentity(),
     accountAuth: input.wsServer.getAccountAuth(),
+    accountAuthProbe: overrides?.accountAuthProbe,
     sweepIntervalMs: overrides?.sweepIntervalMs,
     now: overrides?.now,
   });

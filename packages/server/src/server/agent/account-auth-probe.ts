@@ -83,6 +83,8 @@ export interface AccountAuthProbeOptions {
   timeoutMs?: number;
   minIntervalMs?: number;
   scratchDir?: () => string;
+  /** Dates each finished probe. Default `Date.now`. */
+  now?: () => number;
 }
 
 export interface AccountAuthProbeRequest {
@@ -102,6 +104,7 @@ export class AccountAuthProbe {
   private readonly timeoutMs: number;
   private readonly minIntervalMs: number;
   private readonly makeScratchDir: () => string;
+  private readonly now: () => number;
   private scratchDir: string | null = null;
   private lastRunMs = new Map<string, number>();
   private running = new Set<string>();
@@ -114,6 +117,7 @@ export class AccountAuthProbe {
     this.minIntervalMs = options.minIntervalMs ?? MIN_INTERVAL_MS;
     this.makeScratchDir =
       options.scratchDir ?? (() => mkdtempSync(join(tmpdir(), "paseo-account-auth-probe-")));
+    this.now = options.now ?? Date.now;
   }
 
   /**
@@ -123,13 +127,17 @@ export class AccountAuthProbe {
    */
   start(request: AccountAuthProbeRequest, nowMs: number): boolean {
     if (!this.claim(request, nowMs)) return false;
-    void this.collect(request, nowMs);
+    void this.collect(request);
     return true;
   }
 
-  private async collect(request: AccountAuthProbeRequest, nowMs: number): Promise<void> {
+  /**
+   * Dated when the CLI answered, not when it was asked: a usage read the sweep took while the
+   * probe ran is older than the probe's answer, and must not outrank it.
+   */
+  private async collect(request: AccountAuthProbeRequest): Promise<void> {
     const result = await this.probeClaimed(request);
-    this.finished.push({ providerId: request.providerId, result, atMs: nowMs });
+    this.finished.push({ providerId: request.providerId, result, atMs: this.now() });
   }
 
   /** Results of the probes that finished since the last call. */

@@ -26,9 +26,13 @@ import {
 import { AccountAuthProbe } from "./agent/account-auth-probe.js";
 import {
   AccountAuthTracker,
+  readingState,
+  type AccountAuthProbeEvidence,
+  type AccountAuthReading,
   type AccountAuthReadingInput,
   type AccountAuthTurnFailureInput,
 } from "./agent/account-auth-health.js";
+import type { AccountAuthReadingAt } from "../services/quota-fetcher/service.js";
 import {
   headroomByProvider,
   saturatedProviderIds,
@@ -70,6 +74,8 @@ import {
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 /** How often a suspect or signed-out account's usage is re-read past the cache: its lifetime. */
 const AUTH_REREAD_INTERVAL_MS = 5 * 60_000;
+/** How long a suspect reading a probe answered with a sign-in is ignored for that account. */
+const PROBE_QUIETS_READING_MS = 6 * 60 * 60_000;
 const DEFAULT_MIGRATION_CONCURRENCY = 3;
 /**
  * Resume sends allowed per migration, the first one included — so two retries, one per sweep.
@@ -210,6 +216,12 @@ export class AccountFailoverMonitor {
   private authRereadAtMs = new Map<string, number>();
   /** What the ladder was last told about each signed-out account. */
   private signedOutReported = new Map<string, string>();
+  /**
+   * Per account, each suspect reading a probe has since answered with a sign-in, and until when it
+   * is ignored. Without it a Keychain item looked up under the wrong name reads as missing on every
+   * usage read, and every read buys another billed probe.
+   */
+  private quietedReadings = new Map<string, Map<AccountAuthReading, number>>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweepInFlight = false;
   private sightings = new Map<string, LimitErrorSighting>();
@@ -757,17 +769,16 @@ export class AccountFailoverMonitor {
           ]
         : [],
     );
-    const readings: AccountAuthReadingInput[] = [
-      ...this.options.providerUsage.getAuthReadings(),
-    ].flatMap(([providerId, { reading, atMs }]) =>
-      poolProviderIds.has(providerId) ? [{ providerId, reading, atMs }] : [],
+    const probes = this.accountAuthProbe.takeFinished();
+    const latestReadings = this.options.providerUsage.getAuthReadings();
+    this.quietReadingsProbesAnswered({ probes, latestReadings, nowMs });
+    const readings: AccountAuthReadingInput[] = [...latestReadings].flatMap(
+      ([providerId, { reading, atMs }]) =>
+        poolProviderIds.has(providerId) && !this.isQuieted({ providerId, reading, atMs })
+          ? [{ providerId, reading, atMs }]
+          : [],
     );
-    this.accountAuth.observe({
-      accounts,
-      turnFailures,
-      readings,
-      probes: this.accountAuthProbe.takeFinished(),
-    });
+    this.accountAuth.observe({ accounts, turnFailures, readings, probes });
 
     // A suspect account is not dead to failover, so nothing this sweep waits for the answer.
     for (const providerId of this.accountAuth.providerIdsIn("suspect")) {
@@ -780,6 +791,37 @@ export class AccountFailoverMonitor {
     }
 
     await this.reportSignedOutAccounts();
+  }
+
+  /**
+   * A probe that signed in answered the suspect reading standing then. That same kind of reading is
+   * ignored for six hours after, so a fetcher that cannot see what the CLI sees costs one probe per
+   * six hours, not one per fifteen minutes. Sign-in failures are never quieted.
+   */
+  private quietReadingsProbesAnswered(input: {
+    probes: readonly AccountAuthProbeEvidence[];
+    latestReadings: ReadonlyMap<string, AccountAuthReadingAt>;
+    nowMs: number;
+  }): void {
+    for (const [providerId, quieted] of this.quietedReadings) {
+      for (const [reading, untilMs] of quieted) {
+        if (untilMs <= input.nowMs) quieted.delete(reading);
+      }
+      if (quieted.size === 0) this.quietedReadings.delete(providerId);
+    }
+    for (const probe of input.probes) {
+      if (probe.result !== "success") continue;
+      const latest = input.latestReadings.get(probe.providerId);
+      if (!latest || readingState(latest.reading) !== "suspect") continue;
+      const quieted = this.quietedReadings.get(probe.providerId) ?? new Map();
+      quieted.set(latest.reading, probe.atMs + PROBE_QUIETS_READING_MS);
+      this.quietedReadings.set(probe.providerId, quieted);
+    }
+  }
+
+  private isQuieted(input: AccountAuthReadingInput): boolean {
+    const untilMs = this.quietedReadings.get(input.providerId)?.get(input.reading);
+    return untilMs !== undefined && input.atMs < untilMs;
   }
 
   /**
@@ -943,6 +985,7 @@ export class AccountFailoverMonitor {
         workspaceProvisioning: this.options.workspaceProvisioning,
         logger,
         paceResume: this.options.paceResume,
+        sourceSignedOut: this.accountAuth.stateFor(agent.provider)?.state === "signed_out",
       });
     } catch (error) {
       logger.warn(
@@ -1100,8 +1143,9 @@ export class AccountFailoverMonitor {
       return;
     }
     const providerRef = `${outcome.targetProviderId}/${outcome.model ?? "<model>"}`;
+    const left = outcome.cause === "signed_out" ? "was signed out of" : "hit the usage limit on";
     const body =
-      `Your subagent ${outcome.oldAgentId} hit the usage limit on "${outcome.oldProviderId}" and ` +
+      `Your subagent ${outcome.oldAgentId} ${left} "${outcome.oldProviderId}" and ` +
       `now continues as ${outcome.newAgentId} on "${outcome.targetProviderId}" with the same ` +
       `conversation. Do not relaunch ${outcome.oldAgentId}; if you already did, cancel one of the ` +
       `two. Its finish notification arrives from ${outcome.newAgentId}. Create new subagents with ` +

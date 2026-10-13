@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -310,7 +310,37 @@ function scopedWindows(limits: ScopedLimit[]): ProviderUsageWindow[] {
   });
 }
 
+/**
+ * A credential store that could not be read, as opposed to one that holds nothing: a `security`
+ * call that timed out or met a locked Keychain, or a credentials file that does not parse. It says
+ * nothing about whether the account is signed in, so the fetcher gives no sign-in reading for it.
+ */
+export class ClaudeCredentialsUnreadableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "ClaudeCredentialsUnreadableError";
+  }
+}
+
+function asUnreadable(error: unknown, message: string): ClaudeCredentialsUnreadableError {
+  return error instanceof ClaudeCredentialsUnreadableError
+    ? error
+    : new ClaudeCredentialsUnreadableError(message, { cause: error });
+}
+
+/** Resolves to the item's text; null only when the Keychain holds no such item. */
 type ClaudeKeychainCommandRunner = (args: string[]) => Promise<string | null>;
+type ExecSecurity = (args: string[]) => Promise<{ stdout: string }>;
+
+// `security find-generic-password` exits 44 (errSecItemNotFound) when no item matches. That is the
+// one failure that means "nothing stored"; a timeout or a locked Keychain is a read that failed.
+const SECURITY_ITEM_NOT_FOUND = 44;
+const ExecExitSchema = z.object({ code: z.number() });
+const ErrnoSchema = z.object({ code: z.string() });
+
+function execSecurity(args: string[]): Promise<{ stdout: string }> {
+  return execFileAsync("security", args, { timeout: CLAUDE_KEYCHAIN_TIMEOUT_MS });
+}
 
 // Keep this in sync with Claude Code's Keychain account derivation.
 const CLAUDE_KEYCHAIN_ACCOUNT_PATTERN = /^[a-zA-Z0-9._-]+$/;
@@ -322,30 +352,51 @@ export function claudeKeychainAccount(
   return CLAUDE_KEYCHAIN_ACCOUNT_PATTERN.test(user) ? user : CLAUDE_KEYCHAIN_FALLBACK_ACCOUNT;
 }
 
-async function runSecurityCommand(args: string[]): Promise<string | null> {
+/** Runs `security`. Null when no item matches; throws ClaudeCredentialsUnreadableError otherwise. */
+export async function runSecurityCommand(
+  args: string[],
+  exec: ExecSecurity = execSecurity,
+): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync("security", args, {
-      timeout: CLAUDE_KEYCHAIN_TIMEOUT_MS,
-    });
+    const { stdout } = await exec(args);
     return stdout.trim() || null;
-  } catch {
-    return null;
+  } catch (error) {
+    if (ExecExitSchema.safeParse(error).data?.code === SECURITY_ITEM_NOT_FOUND) return null;
+    throw new ClaudeCredentialsUnreadableError("The Keychain could not be read", { cause: error });
   }
 }
 
-function parseClaudeKeychainRaw(raw: string | null): unknown | null {
-  if (!raw) return null;
+/** The item when it carries an access token, else null. Throws when it is not credentials. */
+function parseClaudeKeychainRaw(raw: string): unknown | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch {
-    return null;
+  } catch (error) {
+    throw new ClaudeCredentialsUnreadableError("The Keychain item does not parse", {
+      cause: error,
+    });
   }
   const creds = ClaudeCredentialsSchema.safeParse(parsed);
-  return creds.success && creds.data.claudeAiOauth?.accessToken ? parsed : null;
+  if (!creds.success) {
+    throw new ClaudeCredentialsUnreadableError("The Keychain item is not Claude credentials", {
+      cause: creds.error,
+    });
+  }
+  return creds.data.claudeAiOauth?.accessToken ? parsed : null;
 }
 
-/** Read Claude Code's account-specific Keychain item, then try the legacy lookup. */
+async function readKeychainItem(
+  run: ClaudeKeychainCommandRunner,
+  args: string[],
+): Promise<unknown | null> {
+  const raw = await run(args);
+  return raw === null ? null : parseClaudeKeychainRaw(raw);
+}
+
+/**
+ * Read Claude Code's account-specific Keychain item, then try the legacy lookup. Null when neither
+ * holds credentials; throws ClaudeCredentialsUnreadableError when neither did and one failed.
+ */
 export async function readClaudeKeychainCredentials(
   run: ClaudeKeychainCommandRunner = runSecurityCommand,
   account: string = claudeKeychainAccount(),
@@ -355,10 +406,16 @@ export async function readClaudeKeychainCredentials(
     ["find-generic-password", "-w", "-s", CLAUDE_KEYCHAIN_SERVICE],
   ];
 
+  let failure: unknown = null;
   for (const args of lookups) {
-    const parsed = parseClaudeKeychainRaw(await run(args));
-    if (parsed) return parsed;
+    try {
+      const parsed = await readKeychainItem(run, args);
+      if (parsed) return parsed;
+    } catch (error) {
+      failure ??= error;
+    }
   }
+  if (failure) throw asUnreadable(failure, "The Keychain could not be read");
   return null;
 }
 
@@ -396,9 +453,7 @@ export async function readClaudeConfigDirKeychainCredentials(
   run: ClaudeKeychainCommandRunner = runSecurityCommand,
   account: string = claudeKeychainAccount(),
 ): Promise<unknown | null> {
-  return parseClaudeKeychainRaw(
-    await run(["find-generic-password", "-a", account, "-w", "-s", service]),
-  );
+  return readKeychainItem(run, ["find-generic-password", "-a", account, "-w", "-s", service]);
 }
 
 export class ClaudeQuotaProvider implements ProviderUsageFetcher {
@@ -440,7 +495,19 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
   }
 
   async fetchUsage(): Promise<ProviderUsage> {
-    const credentials = await this.readCredentials();
+    let credentials: ClaudeCredentialRecord | null;
+    try {
+      credentials = await this.readCredentials();
+    } catch (error) {
+      if (!(error instanceof ClaudeCredentialsUnreadableError)) throw error;
+      // A read that failed is no answer about the sign-in, so it must never read as signed out.
+      this.logger.warn(
+        { err: error },
+        "Claude credentials unreadable; no sign-in reading this time",
+      );
+      this.authReading = null;
+      return unavailableUsage(this);
+    }
     if (!credentials) {
       // `.claude.json` keeps naming an account after its OAuth session can no longer refresh, so
       // its presence — not "signed-in" — is what makes a missing credential worth a reading. A config dir nothing ever signed into reports no reading at
@@ -454,7 +521,13 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
     const plan = buildClaudePlan(oauth.subscriptionType, oauth.rateLimitTier);
     const resp = await this.callClaudeApi(oauth.accessToken);
 
-    if (resp === "NEEDS_AUTH") {
+    if (resp === "FORBIDDEN") {
+      // A 403 refuses the request, not necessarily the session: a scope or plan problem looks
+      // the same. The confirming probe decides.
+      this.authReading = "rejected_forbidden";
+      return unavailableUsage(this);
+    }
+    if (resp === "UNAUTHORIZED") {
       // Read-only on credentials; the Claude CLI owns refresh. See docs/providers.md. An
       // expiresAt this file cannot parse is treated as expired: that routes a 401 through the
       // confirming probe rather than straight to signed_out on an assumption that may be wrong.
@@ -527,29 +600,50 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
     return parsed;
   }
 
+  /**
+   * The credentials file, then (on macOS) the Keychain. Null when neither holds credentials;
+   * throws ClaudeCredentialsUnreadableError when neither did and one could not be read.
+   */
   private async readCredentials(): Promise<ClaudeCredentialRecord | null> {
-    const credPath = join(this.claudeHome, ".credentials.json");
-    const fileCredentials = await this.readCredentialFile(credPath);
-    return (
-      fileCredentials ?? (this.platform === "darwin" ? await this.readKeychainCredential() : null)
-    );
+    let fileFailure: ClaudeCredentialsUnreadableError | null = null;
+    try {
+      const fromFile = await this.readCredentialFile(join(this.claudeHome, ".credentials.json"));
+      if (fromFile) return fromFile;
+    } catch (error) {
+      if (!(error instanceof ClaudeCredentialsUnreadableError)) throw error;
+      fileFailure = error;
+    }
+    const fromKeychain = this.platform === "darwin" ? await this.readKeychainCredential() : null;
+    if (fromKeychain) return fromKeychain;
+    if (fileFailure) throw fileFailure;
+    return null;
   }
 
+  /** Null when the file does not exist or carries no access token. */
   private async readCredentialFile(path: string): Promise<ClaudeCredentialRecord | null> {
-    if (!existsSync(path)) return null;
+    let text: string;
     try {
-      return this.toCredentialRecord(
-        ClaudeCredentialsSchema.parse(JSON.parse(await fs.readFile(path, "utf8"))),
-      );
-    } catch {
-      return null;
+      text = await fs.readFile(path, "utf8");
+    } catch (error) {
+      if (ErrnoSchema.safeParse(error).data?.code === "ENOENT") return null;
+      throw new ClaudeCredentialsUnreadableError(`${path} could not be read`, { cause: error });
+    }
+    try {
+      return this.toCredentialRecord(ClaudeCredentialsSchema.parse(JSON.parse(text)));
+    } catch (error) {
+      throw new ClaudeCredentialsUnreadableError(`${path} does not parse`, { cause: error });
     }
   }
 
   private async readKeychainCredential(): Promise<ClaudeCredentialRecord | null> {
-    const raw = this.keychainService
-      ? await this.readConfigDirKeychainCredentials(this.keychainService)
-      : await this.readKeychainCredentials();
+    let raw: unknown;
+    try {
+      raw = this.keychainService
+        ? await this.readConfigDirKeychainCredentials(this.keychainService)
+        : await this.readKeychainCredentials();
+    } catch (error) {
+      throw asUnreadable(error, "The Keychain could not be read");
+    }
     if (raw === null && this.keychainService) {
       this.logger.warn(
         { keychainService: this.keychainService },
@@ -567,7 +661,9 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
     return oauth?.accessToken ? { oauth: { ...oauth, accessToken: oauth.accessToken } } : null;
   }
 
-  private async callClaudeApi(token: string): Promise<ClaudeUsageResponse | "NEEDS_AUTH"> {
+  private async callClaudeApi(
+    token: string,
+  ): Promise<ClaudeUsageResponse | "UNAUTHORIZED" | "FORBIDDEN"> {
     const res = await fetchProviderApi(this.fetchApi, "https://api.anthropic.com/api/oauth/usage", {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -575,7 +671,8 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
         "anthropic-beta": CLAUDE_OAUTH_BETA,
       },
     });
-    if (res.status === 401 || res.status === 403) return "NEEDS_AUTH";
+    if (res.status === 401) return "UNAUTHORIZED";
+    if (res.status === 403) return "FORBIDDEN";
     if (!res.ok) throw new Error(`Claude usage API returned ${res.status}`);
     return ClaudeUsageResponseSchema.parse(await res.json());
   }

@@ -1719,6 +1719,37 @@ describe("readProviderHealth", () => {
     expect(result).toMatchObject({ askable: false, cancelReason: "account-signed-out" });
   });
 
+  test("an account its usage row shows signed out is not, before any agent there fails", async () => {
+    const signedOutRow = (status: "unavailable" | "error") => ({
+      providerId: "claude-b",
+      displayName: "B",
+      status,
+      error: status === "error" ? "Claude usage API returned 401" : null,
+      planLabel: null,
+      windows: [],
+      accountAuth: {
+        state: "signed_out" as const,
+        since: "2026-10-12T18:00:00.000Z",
+        summary: "No credentials found for this account",
+        fixCommand: "claude auth login --email someone@example.com",
+        canSignIn: true,
+      },
+    });
+    const signedOut = {
+      askable: false,
+      reason: "account claude-b is signed out",
+      cancelReason: "account-signed-out",
+    };
+    // What the Claude fetcher returns for a signed-out account: no usage, nothing in error.
+    expect(
+      await readProviderHealth({ ...base, listUsage: async () => [signedOutRow("unavailable")] }),
+    ).toEqual(signedOut);
+    // The sign-in answer is the reason even when the usage read errored too.
+    expect(
+      await readProviderHealth({ ...base, listUsage: async () => [signedOutRow("error")] }),
+    ).toEqual(signedOut);
+  });
+
   test("an unavailable provider is not", async () => {
     const result = await readProviderHealth({ ...base, isAvailable: async () => false });
     expect(result).toEqual({

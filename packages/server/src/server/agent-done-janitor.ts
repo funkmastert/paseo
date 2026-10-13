@@ -2370,8 +2370,8 @@ function fromLive(
 
 /**
  * An account is askable unless something says it is not: a provider that reports itself
- * unavailable, a usage window at or past its cap, a usage source in error (how a logged-out
- * account shows), or any agent on it whose last error reads like a spent budget or a sign-in
+ * unavailable, a usage row the daemon marked signed out, a usage source in error, a usage window
+ * at or past its cap, or any agent on it whose last error reads like a spent budget or a sign-in
  * failure. Asking an agent on a dead account would fail its turn and flag it — noise the janitor
  * would have made itself.
  */
@@ -2389,6 +2389,15 @@ export async function readProviderHealth(input: {
     };
   }
   const usage = (await input.listUsage())?.find((entry) => entry.providerId === input.provider);
+  // Before the error check: a signed-out account's usage read can fail too, and the sign-in
+  // answer is what the stall cancel has to name.
+  if (usage?.accountAuth) {
+    return {
+      askable: false,
+      reason: `account ${input.provider} is signed out`,
+      cancelReason: "account-signed-out",
+    };
+  }
   if (usage?.status === "error") {
     return {
       askable: false,

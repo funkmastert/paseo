@@ -110,6 +110,52 @@ describe("AccountAuthTracker", () => {
     expect(result.opened.map((e) => e.providerId)).toEqual(["claude-personal"]);
   });
 
+  it("lets a probe's sign-in failure outrank a newer suspect reading of the same account", () => {
+    // The probe finishes before the next sweep's forced usage read, which is dated later and still
+    // only says the token expired. The probe answered that question: the reading must not undo it.
+    const tracker = new AccountAuthTracker();
+    tracker.observe({
+      accounts: [account()],
+      readings: [{ providerId: "claude-personal", reading: "rejected_expired", atMs: T0 }],
+    });
+    const result = tracker.observe({
+      accounts: [account()],
+      probes: [{ providerId: "claude-personal", result: "auth_failure", atMs: T0 + MIN / 2 }],
+      readings: [{ providerId: "claude-personal", reading: "rejected_expired", atMs: T0 + MIN }],
+    });
+    expect(tracker.stateFor("claude-personal")?.state).toBe("signed_out");
+    expect(result.opened.map((e) => e.providerId)).toEqual(["claude-personal"]);
+  });
+
+  it("lets a probe that refreshed the account outrank a newer suspect reading", () => {
+    const tracker = new AccountAuthTracker();
+    tracker.observe({
+      accounts: [account()],
+      readings: [{ providerId: "claude-personal", reading: "rejected_expired", atMs: T0 }],
+    });
+    tracker.observe({
+      accounts: [account()],
+      probes: [{ providerId: "claude-personal", result: "success", atMs: T0 + MIN / 2 }],
+      readings: [{ providerId: "claude-personal", reading: "rejected_expired", atMs: T0 + MIN }],
+    });
+    expect(tracker.stateFor("claude-personal")?.state).toBe("ok");
+  });
+
+  it.each([
+    ["credentials_missing", "suspect"],
+    ["rejected_expired", "suspect"],
+    ["rejected_forbidden", "suspect"],
+    ["rejected_unexpired", "signed_out"],
+    ["ok", "ok"],
+  ] as const)("reads %s as %s", (reading, state) => {
+    const tracker = new AccountAuthTracker();
+    tracker.observe({
+      accounts: [account()],
+      readings: [{ providerId: "claude-personal", reading, atMs: T0 }],
+    });
+    expect(tracker.stateFor("claude-personal")?.state).toBe(state);
+  });
+
   it("produces no record for a disabled provider even with auth-shaped failures", () => {
     const tracker = new AccountAuthTracker();
     const result = tracker.observe({

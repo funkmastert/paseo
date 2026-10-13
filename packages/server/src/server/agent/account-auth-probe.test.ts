@@ -177,6 +177,7 @@ describe("AccountAuthProbe", () => {
         }),
       resolveBinary: async () => "claude",
       scratchDir: () => "/tmp/probe-scratch",
+      now: () => T0,
     });
 
     expect(
@@ -195,5 +196,30 @@ describe("AccountAuthProbe", () => {
       ]),
     );
     expect(probe.takeFinished()).toEqual([]);
+  });
+
+  it("dates a finished probe when the CLI answered, not when it was started", async () => {
+    let finish: (result: ProbeProcessResult) => void = () => {};
+    let clock = T0;
+    const probe = new AccountAuthProbe({
+      runProcess: () =>
+        new Promise<ProbeProcessResult>((resolve) => {
+          finish = resolve;
+        }),
+      resolveBinary: async () => "claude",
+      scratchDir: () => "/tmp/probe-scratch",
+      now: () => clock,
+    });
+
+    probe.start({ providerId: "claude-personal", configDir: "/tmp/x", hasRunningAgent: false }, T0);
+    await vi.waitFor(() => expect(probe.takeFinished()).toEqual([]));
+    clock = T0 + 40_000;
+    finish({ stdout: "", stderr: "Not logged in", exitCode: 1, timedOut: false });
+
+    await vi.waitFor(() =>
+      expect(probe.takeFinished()).toEqual([
+        { providerId: "claude-personal", result: "auth_failure", atMs: T0 + 40_000 },
+      ]),
+    );
   });
 });

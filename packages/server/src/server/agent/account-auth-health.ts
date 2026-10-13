@@ -19,6 +19,7 @@ export type AccountAuthReading =
   | "credentials_missing"
   | "rejected_unexpired"
   | "rejected_expired"
+  | "rejected_forbidden"
   | "ok";
 
 export type AccountAuthProbeResult = "success" | "auth_failure" | "inconclusive";
@@ -68,7 +69,7 @@ export interface AccountAuthReadingInput {
 export interface AccountAuthProbeEvidence {
   providerId: string;
   result: AccountAuthProbeResult;
-  /** When the probe started: the moment the CLI was asked to refresh. */
+  /** When the probe finished: the moment the CLI answered. */
   atMs: number;
 }
 
@@ -115,38 +116,54 @@ function isAllowedTransition(prevState: AccountAuthState, candidate: Candidate):
   return true;
 }
 
-function pickCandidate(
-  prevState: AccountAuthState,
-  prevSince: number,
-  candidates: readonly (Candidate | null)[],
-): Candidate | null {
+/**
+ * Whether `candidate` beats `best`. Anything that answers the question outranks a `suspect`
+ * reading, however much newer the reading is: a forced usage read taken after a probe still only
+ * says the token expired, which is the question the probe was run to answer. Among answers the
+ * newest wins, and on a tie the more severe one, so a failure and a success at the same instant
+ * read as a failure.
+ */
+function outranks(candidate: Candidate, best: Candidate): boolean {
+  const candidateSuspect = candidate.state === "suspect";
+  if (candidateSuspect !== (best.state === "suspect")) return !candidateSuspect;
+  if (candidate.atMs !== best.atMs) return candidate.atMs > best.atMs;
+  return SEVERITY[candidate.state] > SEVERITY[best.state];
+}
+
+function pickCandidate(input: {
+  prevState: AccountAuthState;
+  prevSince: number;
+  candidates: readonly (Candidate | null)[];
+}): Candidate | null {
   let best: Candidate | null = null;
-  for (const candidate of candidates) {
+  for (const candidate of input.candidates) {
     if (!candidate) continue;
-    if (candidate.atMs <= prevSince) continue;
-    if (!isAllowedTransition(prevState, candidate)) continue;
-    if (
-      !best ||
-      candidate.atMs > best.atMs ||
-      (candidate.atMs === best.atMs && SEVERITY[candidate.state] > SEVERITY[best.state])
-    ) {
-      best = candidate;
-    }
+    if (candidate.atMs <= input.prevSince) continue;
+    if (!isAllowedTransition(input.prevState, candidate)) continue;
+    if (!best || outranks(candidate, best)) best = candidate;
   }
   return best;
 }
 
-// A 401 on an expired token is only suspect: the CLI refreshes lazily, so the refresh token may
-// still be fine.
+// Only a 401 on a token that has not expired is proof on its own. The rest are suspect until the
+// probe answers: the CLI refreshes an expired token lazily, a Keychain item looked up under the
+// wrong name reads as missing for an account that is fine, and a 403 refuses the request, not
+// necessarily the session.
 const FROM_READING: Record<AccountAuthReading, { state: AccountAuthState; summary: string }> = {
-  credentials_missing: { state: "signed_out", summary: "No credentials found for this account" },
+  credentials_missing: { state: "suspect", summary: "No credentials found for this account" },
   rejected_unexpired: {
     state: "signed_out",
     summary: "The usage API rejected a token that has not expired",
   },
   rejected_expired: { state: "suspect", summary: "The usage API rejected an expired token" },
+  rejected_forbidden: { state: "suspect", summary: "The usage API refused this account's token" },
   ok: { state: "ok", summary: "A usage read succeeded" },
 };
+
+/** The state a reading puts an account in on its own. */
+export function readingState(reading: AccountAuthReading): AccountAuthState {
+  return FROM_READING[reading].state;
+}
 
 function candidateFromTurnFailure(
   turnFailure: AccountAuthTurnFailureInput | null,
@@ -205,11 +222,15 @@ function nextRecordFor(evidence: NextRecordEvidence): AccountAuthRecord {
   const prevState = prev?.state ?? "ok";
   const prevSince = prev?.since ?? 0;
 
-  const picked = pickCandidate(prevState, prevSince, [
-    candidateFromTurnFailure(evidence.turnFailure),
-    candidateFromReading(evidence.reading),
-    candidateFromProbe(evidence.probe),
-  ]);
+  const picked = pickCandidate({
+    prevState,
+    prevSince,
+    candidates: [
+      candidateFromTurnFailure(evidence.turnFailure),
+      candidateFromReading(evidence.reading),
+      candidateFromProbe(evidence.probe),
+    ],
+  });
   // A standing record is rebuilt too, so a login fixed in `.claude.json` updates its command.
   return recordFor(
     account,
