@@ -18,25 +18,33 @@ export interface BroadcastPinnedTargets {
  * Every pinned leader agent across every connected host, reusing the sidebar's own Pinned
  * projection (`useSidebarModel`) rather than a second notion of "pinned". Requires a
  * `SidebarModelProvider` ancestor.
+ *
+ * The store selector only reads the per-server `agents` Map references (O(hosts) via
+ * `useShallow`) — it never walks agent contents, so it stays cheap on every session-store tick,
+ * including streaming ticks, per docs/coding-standards.md's hot-selector rule. `setAgents`
+ * replaces that Map wholesale on any agent change and keeps the old reference otherwise, so a
+ * Map reference is exactly the "did this server's agents change" signal. The actual per-agent
+ * scan happens once, in the `useMemo` below, only when a watched Map reference changes.
  */
 export function useBroadcastPinnedTargets(): BroadcastPinnedTargets {
   const { pinnedGroups } = useSidebarModel();
   const daemons = useHosts();
   const serverIds = useMemo(() => daemons.map((daemon) => daemon.serverId), [daemons]);
 
-  const agents = useSessionStore(
-    useShallow((state) => {
-      const result: BroadcastPinnedAgentCandidate[] = [];
-      for (const serverId of serverIds) {
-        const session = state.sessions[serverId];
-        if (!session) continue;
-        for (const agent of session.agents.values()) {
-          result.push(agent);
-        }
-      }
-      return result;
-    }),
+  const agentMaps = useSessionStore(
+    useShallow((state) => serverIds.map((serverId) => state.sessions[serverId]?.agents)),
   );
+
+  const agents = useMemo(() => {
+    const result: BroadcastPinnedAgentCandidate[] = [];
+    for (const agentsById of agentMaps) {
+      if (!agentsById) continue;
+      for (const agent of agentsById.values()) {
+        result.push(agent);
+      }
+    }
+    return result;
+  }, [agentMaps]);
 
   const targets = useMemo(
     () => selectBroadcastPinnedLeaderTargets({ pinnedChats: pinnedGroups.pinnedChats, agents }),
