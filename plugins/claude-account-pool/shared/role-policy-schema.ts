@@ -117,6 +117,15 @@ export const THINKING_OVERRIDDEN_LABEL = "paseo.thinking-overridden-by-policy";
 export const UNADVERTISED_MODEL_LABEL = "paseo.model-unadvertised";
 
 /**
+ * Set by the role router when a cross-family rewrite (`crossesRequestedFamily`) carries a
+ * `config.modeId` the target provider doesn't have, so the mode was translated instead of
+ * passed through. Value is the mode id the caller asked for; the applied mode is whatever
+ * `config.modeId` now says. Mirrors `MODEL_OVERRIDDEN_LABEL`/`THINKING_OVERRIDDEN_LABEL`. Never
+ * set for a Codex child -- role-router.ts's own guard decides that mode, not this translation.
+ */
+export const MODE_TRANSLATED_LABEL = "paseo.mode-translated-by-policy";
+
+/**
  * Set by the role router on every agent it restricts: the comma-separated
  * tool names that were actually denied at launch.
  *

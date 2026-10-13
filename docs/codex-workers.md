@@ -131,6 +131,17 @@ A child also cannot switch itself out of guarded mode later: `AgentManager.setAg
 
 See "Guard health" above for the `codex.guard.status` RPC and `codex-guard-availability.ts`'s poller. `index.server.ts` passes the resulting cache to both consumers of `ClassifierWorldBase.isCodexGuardHealthy`/`runningCodexChildren`: the create hook (`RoleRouterOptions.codexGuardCache`) and the settings screen's `role-model-policy.explain` preview (`RoleModelPolicyRpcDeps.codexGuardCache`). A daemon older than this bridge, a plugin that hasn't warmed its first poll yet, or a poll that fails all read as `isCodexGuardHealthy() === false` — the same fail-closed default (guards-first, KTD-3) this file already documents for a missing guard-health source.
 
+## Opening a pool to Codex
+
+Before you add a `codex/` ref to a role's pool, or after you change a guard or the classifier's Codex path, create one harmless real child through that pool and read what reached Codex. Ask for the most permissive mode a leader could request (`modeId: "full-access"`) and give it a throwaway task, such as a commit in a scratch repo. Then read two daemon log lines:
+
+- `classifier-decision`: `model.outcome` is `honored-request` when the pool took the codex ref. `selected` or `unavailable` means the pool overrode it, and `reasons.model` says why. `model.final` is the model that runs and `account.providerId` the provider; a Claude model next to `codex` is the bug in [bare-pool-ref-family-resolves-before-compare.md](solutions/logic-errors/bare-pool-ref-family-resolves-before-compare.md).
+- `Starting Codex app-server turn`: `modeId`, `approvalPolicy` and `sandboxPolicyType` are what Codex was told. `modeId` must be `guarded`.
+
+Unit tests and the guard self-test don't cover the create path children take; the self-test builds its own guarded session. Two bugs got past both and showed on the first real child: a full-access child that ran unguarded ([guard-every-return-path-key-on-true-signal.md](solutions/security-issues/guard-every-return-path-key-on-true-signal.md)), and a Codex child sent a Claude model id (above). If the child comes out wrong, take the ref back out of the pool before you fix anything.
+
+A pool edited by hand in `config.json` needs `paseo reload` before the test ([plugin README, step 4](../plugins/claude-account-pool/README.md#4-apply-the-config)).
+
 ## Limitations and future work
 
 - Guarding MCP calls awaits follow-up work.

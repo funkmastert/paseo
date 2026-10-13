@@ -9,6 +9,7 @@ import {
   JEV_CALL_LABEL,
   JEV_SPAWN_LABEL,
   JEV_TOOLS_LABEL,
+  MODE_TRANSLATED_LABEL,
   MODEL_OVERRIDDEN_LABEL,
   MODEL_PIN_LABEL,
   TASK_CLASS_LABEL,
@@ -1097,7 +1098,13 @@ describe("createRoleRouter", () => {
       );
 
       expect(result?.config.provider).toBe("codex");
-      expect(result?.config.modeId).toBe("full-access"); // untouched: no callerAgentId, so this is Tyler, not a child
+      // Translated (never passed through byte-identical), because this is a real cross-family
+      // rewrite (claude -> codex): "full-access" isn't a Claude mode, so it ranks as "other" and
+      // maps to Codex's most restrictive, "auto". The guarantee this test is actually pinning is
+      // the guard, not the mode value: no callerAgentId means this is Tyler, not a child, so the
+      // Codex guard never forces "guarded" here.
+      expect(result?.config.modeId).toBe("auto");
+      expect(result?.labels?.[MODE_TRANSLATED_LABEL]).toBe("full-access");
     });
 
     it("a non-codex honored-request child is untouched by the Codex guard", () => {
@@ -1118,6 +1125,170 @@ describe("createRoleRouter", () => {
 
       expect(result).toBeUndefined(); // byte-identical pass-through: nothing to enforce, nothing to guard
       expect((result ?? initial.request).config.modeId).toBe("full-access");
+    });
+  });
+
+  /**
+   * Live bug (2026-10-13 18:36Z): an agent created with `codex/gpt-6-luna` + `modeId:
+   * "full-access"`; the pool's policy refused it and fell back to a bare Claude pool entry
+   * (crossing families per PR #33's `crossesRequestedFamily` fix), but the create kept
+   * `modeId: "full-access"` -- not a valid Claude mode -- and the daemon refused the whole
+   * create. The reverse direction (a Claude mode crossing to Codex) has the same shape.
+   */
+  describe("cross-family mode translation (crossesRequestedFamily + config.modeId)", () => {
+    it("translates Codex's full-access into Claude's bypassPermissions when a child's request crosses to Claude", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["claude-opus-4"])),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-opus-4"] })),
+        }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: { provider: "codex", model: "gpt-6-luna", modeId: "full-access", cwd: "/tmp/work" },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("claude");
+      expect(result?.config.model).toBe("claude-opus-4");
+      expect(result?.config.modeId).toBe("bypassPermissions"); // was "full-access" -- invalid for Claude, the live bug
+      expect(result?.labels?.[MODE_TRANSLATED_LABEL]).toBe("full-access");
+    });
+
+    it("translates Claude's plan into Codex's auto (never wider) when a root create crosses to Codex", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache({
+            ...DEFAULT_POLICY,
+            roles: DEFAULT_POLICY.roles.map((role) => (role.id === "leader" ? { ...role, models: ["codex/gpt-5.1"] } : role)),
+          }),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
+        }),
+      );
+
+      const result = router(
+        request({ config: { provider: "claude", model: "claude-sonnet", modeId: "plan", cwd: "/tmp" } }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("codex");
+      expect(result?.config.modeId).toBe("auto"); // Codex's most restrictive -- plan is never widened
+      expect(result?.labels?.[MODE_TRANSLATED_LABEL]).toBe("plan");
+    });
+
+    it("leaves the mode untouched for a same-family rewrite", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["claude-opus-4"])),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-opus-4"] })),
+        }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: { provider: "claude", model: "claude-sonnet", modeId: "acceptEdits", cwd: "/tmp/work" },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("claude");
+      expect(result?.config.modeId).toBe("acceptEdits");
+      expect(result?.labels?.[MODE_TRANSLATED_LABEL]).toBeUndefined();
+    });
+
+    it("adds nothing when no mode was requested, even across a crossing rewrite", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["claude-opus-4"])),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-opus-4"] })),
+        }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: { provider: "codex", model: "gpt-6-luna", cwd: "/tmp/work" },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("claude");
+      expect(result?.config.modeId).toBeUndefined();
+      expect(result?.labels?.[MODE_TRANSLATED_LABEL]).toBeUndefined();
+    });
+
+    it("never translates for a Codex child -- the child guard's own forced mode wins, not duplicated or bypassed", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-5.1"])),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
+        }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: { provider: "claude", model: "claude-sonnet", modeId: "plan", cwd: "/tmp/work" },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("codex");
+      expect(result?.config.modeId).toBe("guarded");
+      expect(result?.labels?.[MODE_TRANSLATED_LABEL]).toBeUndefined();
+    });
+
+    /**
+     * Both catalogues reuse the literal string "auto" for a mode at opposite ends of their own
+     * permission spectrum (Codex's most restrictive vs. Claude's near-maximal). A string-membership
+     * short-circuit would let this collide and pass "auto" straight through unmodified -- a silent
+     * escalation when the source is Codex. These two tests pin the correct, ranked translation in
+     * both directions.
+     */
+    it("translates Codex's auto into Claude's plan (never Claude's own auto) when a root create crosses to Claude", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["claude-opus-4"])),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-opus-4"] })),
+        }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: { provider: "codex", model: "gpt-6-luna", modeId: "auto", cwd: "/tmp/work" },
+        }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("claude");
+      expect(result?.config.modeId).toBe("plan"); // Claude's most restrictive -- not the colliding string "auto"
+      expect(result?.labels?.[MODE_TRANSLATED_LABEL]).toBe("auto");
+    });
+
+    it("translates Claude's auto into Codex's auto (its most restrictive) when a root create crosses to Codex", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache({
+            ...DEFAULT_POLICY,
+            roles: DEFAULT_POLICY.roles.map((role) => (role.id === "leader" ? { ...role, models: ["codex/gpt-5.1"] } : role)),
+          }),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
+        }),
+      );
+
+      const result = router(
+        request({ config: { provider: "claude", model: "claude-sonnet", modeId: "auto", cwd: "/tmp" } }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("codex");
+      expect(result?.config.modeId).toBe("auto"); // reached through translation, not a string-membership pass-through
+      expect(result?.labels?.[MODE_TRANSLATED_LABEL]).toBe("auto");
     });
   });
 
