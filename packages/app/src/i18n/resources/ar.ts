@@ -264,6 +264,7 @@ export const ar: TranslationResources = {
     sent_one: "تم الإرسال إلى {{count}} وكيل",
     sent_other: "تم الإرسال إلى {{count}} وكلاء",
     partialFailure: "فشل الإرسال إلى {{names}}",
+    noTargets: "لا يوجد وكلاء رئيسيون مثبّتون لإرسال الرسالة إليهم.",
   },
   sessions: {
     title: "السجل",

@@ -10,6 +10,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   useDropdownMenuClose,
 } from "@/components/ui/dropdown-menu";
@@ -33,7 +34,10 @@ export interface BroadcastPinnedButtonProps {
 /**
  * The sidebar's "send to all pinned leaders" button: a popover on wide screens, a bottom sheet
  * on compact ones (the menu engine already owns that split — see docs/menus.md). Renders nothing
- * when there is nothing to broadcast to (R1).
+ * when there is nothing to broadcast to (R1) and the popover is closed. While the popover is
+ * open, it stays mounted even if `targets` drops to zero (every pinned workspace unpinned, every
+ * target agent archived) — unmounting mid-session would discard the draft and could tear down a
+ * send in flight. The composer shows an empty state and disables sending instead.
  */
 export function BroadcastPinnedButton({
   targets,
@@ -41,11 +45,12 @@ export function BroadcastPinnedButton({
 }: BroadcastPinnedButtonProps): ReactElement | null {
   const { t } = useTranslation();
   const isCompact = useIsCompactFormFactor();
-  if (targets.length === 0) {
+  const [open, setOpen] = useState(false);
+  if (targets.length === 0 && !open) {
     return null;
   }
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
       <ToolbarButton
         kind="menu"
         label={t("sidebar.pinned.broadcast")}
@@ -77,8 +82,10 @@ function BroadcastPinnedComposerContent({
   const snapshot = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot);
   const [sending, setSending] = useState(false);
 
+  const hasTargets = targets.length > 0;
+
   const handleSend = useCallback(() => {
-    if (!snapshot.canSend || sending) return;
+    if (!hasTargets || !snapshot.canSend || sending) return;
     const text = snapshot.text;
     const targetIds = [...snapshot.checked];
     setSending(true);
@@ -97,7 +104,7 @@ function BroadcastPinnedComposerContent({
         return undefined;
       })
       .finally(() => setSending(false));
-  }, [closeMenu, onSend, sending, snapshot, t, toast]);
+  }, [closeMenu, hasTargets, onSend, sending, snapshot, t, toast]);
 
   const handleKeyPress = useCallback(
     (event: { nativeEvent: { key: string; shiftKey?: boolean } }) => {
@@ -122,17 +129,23 @@ function BroadcastPinnedComposerContent({
         />
       </View>
       <DropdownMenuSeparator />
-      {targets.map((target) => (
-        <BroadcastPinnedTargetRow
-          key={target.id}
-          target={target}
-          checked={snapshot.checked.has(target.id)}
-          onToggle={model.toggleTarget}
-        />
-      ))}
+      {hasTargets ? (
+        targets.map((target) => (
+          <BroadcastPinnedTargetRow
+            key={target.id}
+            target={target}
+            checked={snapshot.checked.has(target.id)}
+            onToggle={model.toggleTarget}
+          />
+        ))
+      ) : (
+        <DropdownMenuLabel testID="broadcast-pinned-no-targets">
+          {t("broadcastPinned.noTargets")}
+        </DropdownMenuLabel>
+      )}
       <DropdownMenuSeparator />
       <DropdownMenuItem
-        disabled={!snapshot.canSend || sending}
+        disabled={!hasTargets || !snapshot.canSend || sending}
         status={sending ? "pending" : "idle"}
         closeOnSelect={false}
         onSelect={handleSend}

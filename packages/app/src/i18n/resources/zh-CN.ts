@@ -264,6 +264,7 @@ export const zhCN: TranslationResources = {
     sent_one: "已发送给 {{count}} 个代理",
     sent_other: "已发送给 {{count}} 个代理",
     partialFailure: "发送失败：{{names}}",
+    noTargets: "没有可发送的置顶主控了。",
   },
   sessions: {
     title: "历史",

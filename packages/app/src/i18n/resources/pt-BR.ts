@@ -267,6 +267,7 @@ export const ptBR: TranslationResources = {
     sent_one: "Enviado para {{count}} agente",
     sent_other: "Enviado para {{count}} agentes",
     partialFailure: "Falha ao enviar para {{names}}",
+    noTargets: "Não há líderes fixados para enviar.",
   },
   sessions: {
     title: "Histórico de agentes",

@@ -267,6 +267,7 @@ export const ja: TranslationResources = {
     sent_one: "{{count}}件のエージェントに送信しました",
     sent_other: "{{count}}件のエージェントに送信しました",
     partialFailure: "{{names}}への送信に失敗しました",
+    noTargets: "送信できる固定リーダーがありません。",
   },
   sessions: {
     title: "履歴",

@@ -268,6 +268,7 @@ export const fr: TranslationResources = {
     sent_one: "Envoyé à {{count}} agent",
     sent_other: "Envoyé à {{count}} agents",
     partialFailure: "Échec de l'envoi à {{names}}",
+    noTargets: "Il ne reste aucun leader épinglé à qui envoyer.",
   },
   sessions: {
     title: "Historique",

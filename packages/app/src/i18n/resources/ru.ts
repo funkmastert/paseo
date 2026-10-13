@@ -266,6 +266,7 @@ export const ru: TranslationResources = {
     sent_one: "Отправлено {{count}} агенту",
     sent_other: "Отправлено {{count}} агентам",
     partialFailure: "Не удалось отправить: {{names}}",
+    noTargets: "Нет закреплённых лидеров для отправки.",
   },
   sessions: {
     title: "История",

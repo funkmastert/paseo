@@ -265,6 +265,7 @@ export const ko: TranslationResources = {
     sent_one: "{{count}}개 에이전트에 전송됨",
     sent_other: "{{count}}개 에이전트에 전송됨",
     partialFailure: "{{names}}에 전송 실패",
+    noTargets: "보낼 수 있는 고정된 리더가 없습니다.",
   },
   sessions: {
     title: "기록",

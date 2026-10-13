@@ -262,6 +262,7 @@ export const en = {
     sent_one: "Sent to {{count}} agent",
     sent_other: "Sent to {{count}} agents",
     partialFailure: "Failed to send to {{names}}",
+    noTargets: "No pinned leaders left to send to.",
   },
   sessions: {
     title: "History",

@@ -267,6 +267,7 @@ export const es: TranslationResources = {
     sent_one: "Enviado a {{count}} agente",
     sent_other: "Enviado a {{count}} agentes",
     partialFailure: "Error al enviar a {{names}}",
+    noTargets: "No quedan líderes anclados a los que enviar.",
   },
   sessions: {
     title: "Historial",
