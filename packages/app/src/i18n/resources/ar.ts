@@ -1958,6 +1958,7 @@ export const ar: TranslationResources = {
   accountAlerts: {
     title_one: "مشكلة في الحساب",
     title_other: "مشاكل في الحساب",
+    dismiss: "رفض",
     signIn: "تسجيل الدخول",
     signInPending: "جارٍ تسجيل الدخول...",
     signInRunOn: "تشغيل على {{host}}",

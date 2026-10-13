@@ -2009,6 +2009,7 @@ export const fr: TranslationResources = {
   accountAlerts: {
     title_one: "Problème de compte",
     title_other: "Problèmes de compte",
+    dismiss: "Rejeter",
     signIn: "Se connecter",
     signInPending: "Connexion en cours...",
     signInRunOn: "Exécuter sur {{host}}",

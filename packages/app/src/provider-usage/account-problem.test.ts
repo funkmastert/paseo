@@ -22,6 +22,7 @@ describe("resolveAccountProblem", () => {
       summary: "claude-backup is signed out",
       fixCommand: "CLAUDE_CONFIG_DIR=/home/u/.claude-backup claude auth login",
       canSignIn: true,
+      since: "2026-10-12T18:00:00Z",
     });
   });
 

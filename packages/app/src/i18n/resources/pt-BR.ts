@@ -1990,6 +1990,7 @@ export const ptBR: TranslationResources = {
   accountAlerts: {
     title_one: "Problema de conta",
     title_other: "Problemas de conta",
+    dismiss: "Dispensar",
     signIn: "Entrar",
     signInPending: "Entrando...",
     signInRunOn: "Executar em {{host}}",

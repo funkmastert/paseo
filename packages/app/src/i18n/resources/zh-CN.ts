@@ -1937,6 +1937,7 @@ export const zhCN: TranslationResources = {
   accountAlerts: {
     title_one: "账户问题",
     title_other: "账户问题",
+    dismiss: "关闭",
     signIn: "登录",
     signInPending: "正在登录...",
     signInRunOn: "在 {{host}} 上运行",

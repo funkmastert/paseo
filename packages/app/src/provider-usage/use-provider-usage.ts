@@ -18,6 +18,14 @@ async function fetchProviderUsage(client: ProviderUsageClient): Promise<Provider
   return client.listProviderUsage();
 }
 
+function resolveFocusRefetchMode(
+  catchUpOnFocus: boolean,
+  alwaysCatchUp: boolean,
+): boolean | "always" {
+  if (!catchUpOnFocus) return false;
+  return alwaysCatchUp ? "always" : true;
+}
+
 interface UseProviderUsageOptions {
   enabled?: boolean;
   /** Polling interval in ms. Omit to keep the default no-polling behavior. */
@@ -30,6 +38,19 @@ interface UseProviderUsageOptions {
    * the unpolled callers unchanged.
    */
   catchUpOnFocus?: boolean;
+  /**
+   * Make the catchUpOnFocus refetch ignore staleTime, so a focus/reconnect always refetches
+   * instead of only when the last fetch is already stale. Requires catchUpOnFocus. Off by
+   * default so existing catchUpOnFocus callers keep respecting staleTime.
+   */
+  alwaysCatchUp?: boolean;
+  /**
+   * Keep polling refetchInterval while the document is hidden (occluded, minimized, backgrounded,
+   * on another Space). React Query otherwise skips every tick while unfocused. Off by default.
+   */
+  refetchIntervalInBackground?: boolean;
+  /** Query network mode. Omit to keep TanStack Query's "online" default. */
+  networkMode?: "online" | "always" | "offlineFirst";
 }
 
 export function useProviderUsage(
@@ -42,6 +63,8 @@ export function useProviderUsage(
 } {
   const queryClient = useQueryClient();
   const catchUpOnFocus = options.catchUpOnFocus ?? false;
+  const alwaysCatchUp = options.alwaysCatchUp ?? false;
+  const focusRefetchMode = resolveFocusRefetchMode(catchUpOnFocus, alwaysCatchUp);
   const client = useHostRuntimeClient(serverId ?? "");
   const isConnected = useHostRuntimeIsConnected(serverId ?? "");
   const supportsProviderUsage = useSessionStore(
@@ -64,9 +87,11 @@ export function useProviderUsage(
     enabled,
     staleTime: PROVIDER_USAGE_STALE_TIME_MS,
     refetchOnMount: true,
-    refetchOnReconnect: catchUpOnFocus,
-    refetchOnWindowFocus: catchUpOnFocus,
+    refetchOnReconnect: focusRefetchMode,
+    refetchOnWindowFocus: focusRefetchMode,
+    refetchIntervalInBackground: options.refetchIntervalInBackground ?? false,
     ...(options.refetchInterval !== undefined ? { refetchInterval: options.refetchInterval } : {}),
+    ...(options.networkMode !== undefined ? { networkMode: options.networkMode } : {}),
   });
 
   const refresh = useCallback(async () => {

@@ -2004,6 +2004,7 @@ export const es: TranslationResources = {
   accountAlerts: {
     title_one: "Problema de cuenta",
     title_other: "Problemas de cuenta",
+    dismiss: "Despedir",
     signIn: "Iniciar sesión",
     signInPending: "Iniciando sesión...",
     signInRunOn: "Ejecutar en {{host}}",

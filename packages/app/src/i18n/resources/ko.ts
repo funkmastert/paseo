@@ -1968,6 +1968,7 @@ export const ko: TranslationResources = {
   accountAlerts: {
     title_one: "계정 문제",
     title_other: "계정 문제",
+    dismiss: "닫기",
     signIn: "로그인",
     signInPending: "로그인 중...",
     signInRunOn: "{{host}}에서 실행",

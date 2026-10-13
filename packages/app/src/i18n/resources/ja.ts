@@ -1977,6 +1977,7 @@ export const ja: TranslationResources = {
   accountAlerts: {
     title_one: "アカウントの問題",
     title_other: "アカウントの問題",
+    dismiss: "閉じる",
     signIn: "サインイン",
     signInPending: "サインイン中...",
     signInRunOn: "{{host}} で実行",
