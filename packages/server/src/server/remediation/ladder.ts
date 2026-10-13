@@ -19,7 +19,11 @@ import {
   type RemediationConfig,
   type ResolvedRemediationEscalationConfig,
 } from "./config.js";
-import type { RemediationObservation, RemediationSink } from "./contract.js";
+import type {
+  RemediationConditionKind,
+  RemediationObservation,
+  RemediationSink,
+} from "./contract.js";
 import {
   buildAdviceNotificationPayload,
   buildRemediationAgentTitle,
@@ -49,6 +53,28 @@ import {
 
 const MINUTE_MS = 60_000;
 const DEFAULT_POLL_INTERVAL_MS = MINUTE_MS;
+/**
+ * R1/R3: comfortably exceeds the slowest monitor's sweep plus first-sweep delay — the disk
+ * sweeper's default 10-minute sweep (its interval is a constructor option, `sweepIntervalMs`,
+ * read once at startup; bootstrap never overrides it today, so production always runs the
+ * 10-minute default), the stall sweep's 5-minute sweep, and the work-snapshot sweep's 5-minute
+ * first-sweep delay. `agents.remediation` has no existing field for a restart grace, so this
+ * is fixed rather than config-overridable.
+ */
+const RESTART_GRACE_MS = 30 * MINUTE_MS;
+/**
+ * Kinds that report once per occurrence rather than every sweep while the condition holds: a
+ * restart can't catch one of these "in the act" the way it can a sweep that would report again
+ * on its own, so the ladder never expires their episodes. A new kind defaults to being expired,
+ * matching the documented contract (report every sweep while the condition holds).
+ */
+const REPORTED_ONCE_KINDS: ReadonlySet<RemediationConditionKind> =
+  new Set<RemediationConditionKind>([
+    "token-audit",
+    // agent-work-snapshot-sweep.ts only sends `active: true` for a fresh batch, not every sweep
+    // while its on-disk `episodeOpen` holds (see its `sweep()`), so it never re-confirms a key.
+    "work-at-risk",
+  ]);
 /**
  * The ladder's own bound on a triage, past the service's 5-second deadline. The ladder is
  * serialized, so a triage that never settles must not hold every queued observation.
@@ -188,6 +214,17 @@ export class RemediationLadder implements RemediationSink {
   private pollInFlight = false;
   /** Serializes observe and poll: both read and write the same episodes. */
   private queue: Promise<void> = Promise.resolve();
+  /**
+   * KTD1: captured on the first `loadState()` of this process — the episodes open at that
+   * moment, and when. An observation for a key (R2) deletes it here, whether active or not. A
+   * key never added (opened by this process) is never expired. Nothing here is persisted: a
+   * second restart inside the grace starts the window again, which is correct because the
+   * monitors start again too.
+   */
+  private restartSnapshot: {
+    readonly startedAtMs: number;
+    readonly unconfirmedKeys: Set<string>;
+  } | null = null;
 
   constructor(options: RemediationLadderOptions) {
     this.deps = options.dependencies;
@@ -253,6 +290,12 @@ export class RemediationLadder implements RemediationSink {
   private async loadState(): Promise<LadderState> {
     if (!this.state) {
       this.state = await loadLadderState(this.statePath, this.logger);
+      this.restartSnapshot = {
+        startedAtMs: this.now(),
+        unconfirmedKeys: new Set(
+          this.state.episodes.filter((episode) => !episode.closedAt).map((episode) => episode.key),
+        ),
+      };
     }
     return this.state;
   }
@@ -293,6 +336,8 @@ export class RemediationLadder implements RemediationSink {
 
   private async handleObservation(observation: RemediationObservation): Promise<void> {
     const state = await this.loadState();
+    // R2: any observation for the key, active or not, confirms it and cancels the pending expiry.
+    this.restartSnapshot?.unconfirmedKeys.delete(observation.key);
     const config = this.readDaemonConfig().remediation;
     this.reportMode(config);
     const nowMs = this.now();
@@ -611,7 +656,11 @@ export class RemediationLadder implements RemediationSink {
   }
 
   /** Measurement only: every episode that ran an agent or was triaged gets a `closed` line. */
-  private recordClosed(episode: LadderEpisode, nowMs: number): void {
+  private recordClosed(
+    episode: LadderEpisode,
+    nowMs: number,
+    options?: { expiredAfterRestart?: boolean },
+  ): void {
     if (!episode.jevTriage && !episode.lastAgentId) return;
     const triageAt = episode.jevTriage ? Date.parse(episode.jevTriage.at) : null;
     const duringDeferral = episode.jevDeferredUntil !== undefined && nowMs < holdEndMs(episode);
@@ -628,6 +677,7 @@ export class RemediationLadder implements RemediationSink {
       clearedDuringHold: duringDeferral && episode.observation.remedy === "live" && !agentRan,
       agentRan,
       escalated: episode.escalatedAt !== undefined,
+      expiredAfterRestart: options?.expiredAfterRestart ?? false,
       ...triageJoin(episode),
     });
   }
@@ -682,6 +732,7 @@ export class RemediationLadder implements RemediationSink {
       }
       if (episode.closedAt) state.episodes = state.episodes.filter((e) => e !== episode);
     }
+    if (this.expireUnconfirmedEpisodes(state, nowMs)) changed = true;
     // A hold that lapsed while its monitor went quiet: evaluate would otherwise wait for an
     // observation that may never come, and the fix the hold delayed would never start.
     for (const episode of state.episodes) {
@@ -690,6 +741,41 @@ export class RemediationLadder implements RemediationSink {
       await this.evaluate(episode, config, nowMs);
     }
     if (changed) await this.save();
+  }
+
+  /**
+   * R1/R5/R6: an episode open when this process first loaded state, and that no observation for
+   * its key has reached by the end of the restart grace, closes here. It is not closed while its
+   * agent is still running (follows `handleObservation`'s own-agent filter) or while it is one of
+   * `REPORTED_ONCE_KINDS`. Sends no push and starts no agent.
+   */
+  private expireUnconfirmedEpisodes(state: LadderState, nowMs: number): boolean {
+    const snapshot = this.restartSnapshot;
+    if (!snapshot || snapshot.unconfirmedKeys.size === 0) return false;
+    if (nowMs < snapshot.startedAtMs + RESTART_GRACE_MS) return false;
+    let changed = false;
+    for (const key of snapshot.unconfirmedKeys) {
+      const episode = state.episodes.find((e) => e.key === key && !e.closedAt);
+      if (!episode) {
+        snapshot.unconfirmedKeys.delete(key);
+        continue;
+      }
+      if (REPORTED_ONCE_KINDS.has(episode.observation.kind as RemediationConditionKind)) {
+        snapshot.unconfirmedKeys.delete(key);
+        continue;
+      }
+      if (episode.agent) continue;
+      episode.closedAt = new Date(nowMs).toISOString();
+      this.recordClosed(episode, nowMs, { expiredAfterRestart: true });
+      state.episodes = state.episodes.filter((e) => e !== episode);
+      this.logger.info(
+        { key: episode.key, kind: episode.observation.kind, openedAt: episode.openedAt },
+        "Remediation ladder: episode expired after a restart with no confirming observation",
+      );
+      snapshot.unconfirmedKeys.delete(key);
+      changed = true;
+    }
+    return changed;
   }
 
   private async readAgentOutcome(input: {

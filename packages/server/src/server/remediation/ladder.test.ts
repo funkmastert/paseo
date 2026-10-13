@@ -1068,3 +1068,132 @@ describe("RemediationLadder JEV triage (feature 3a)", () => {
     });
   });
 });
+
+describe("RemediationLadder closes episodes a restart left unconfirmed", () => {
+  function tokenAuditObservation(): RemediationObservation {
+    return {
+      key: "token-audit:2026-09-24",
+      kind: "token-audit",
+      active: true,
+      remedy: "live",
+      title: "Token audit",
+      summary: "MEMORY total is 14.7k tokens.",
+      graceMs: 999 * MINUTE,
+    };
+  }
+
+  it("closes an episode left open by an earlier process once the grace has passed, not before", async () => {
+    const first = buildLadder();
+    await first.observe(observation({ graceMs: 999 * MINUTE }));
+    first.stop();
+
+    const second = buildLadder();
+    await second.tick();
+    nowMs += 29 * MINUTE;
+    await second.tick();
+    expect((await loadLadderState(statePath, pino({ level: "silent" }))).episodes).toHaveLength(1);
+
+    nowMs += 1 * MINUTE;
+    await second.tick();
+    expect((await loadLadderState(statePath, pino({ level: "silent" }))).episodes).toHaveLength(0);
+  });
+
+  it("keeps an episode open on an active observation inside the grace, and never pushes twice", async () => {
+    const first = buildLadder();
+    await first.observe(observation({ remedy: "disabled" }));
+    expect(alerts()).toHaveLength(1);
+    first.stop();
+
+    const second = buildLadder();
+    await second.tick();
+    nowMs += 10 * MINUTE;
+    await second.observe(observation({ remedy: "disabled" }));
+    nowMs += 30 * MINUTE;
+    await second.tick();
+    expect((await loadLadderState(statePath, pino({ level: "silent" }))).episodes).toHaveLength(1);
+    expect(alerts()).toHaveLength(1);
+  });
+
+  it("closes as today on an inactive observation inside the grace, with no double close", async () => {
+    const first = buildLadder();
+    await first.observe(observation({ remedy: "disabled" }));
+    first.stop();
+
+    const second = buildLadder();
+    await second.tick();
+    nowMs += 10 * MINUTE;
+    await second.observe(observation({ active: false }));
+    expect((await loadLadderState(statePath, pino({ level: "silent" }))).episodes).toHaveLength(0);
+
+    nowMs += 30 * MINUTE;
+    await second.tick();
+    expect((await loadLadderState(statePath, pino({ level: "silent" }))).episodes).toHaveLength(0);
+  });
+
+  it("never expires a token-audit episode left open by an earlier process", async () => {
+    const first = buildLadder();
+    await first.observe(tokenAuditObservation());
+    first.stop();
+
+    const second = buildLadder();
+    await second.tick();
+    nowMs += 60 * MINUTE;
+    await second.tick();
+    expect((await loadLadderState(statePath, pino({ level: "silent" }))).episodes).toHaveLength(1);
+  });
+
+  it("does not close an episode by expiry while its agent is still running", async () => {
+    const first = buildLadder();
+    await first.observe(observation({ graceMs: 0 }));
+    expect(fleet.created).toHaveLength(1);
+    first.stop();
+
+    const second = buildLadder();
+    await second.tick();
+    nowMs += 35 * MINUTE;
+    await second.tick();
+    const state = await loadLadderState(statePath, pino({ level: "silent" }));
+    expect(state.episodes).toHaveLength(1);
+    expect(state.episodes[0]!.closedAt).toBeUndefined();
+  });
+
+  it("never expires an episode opened by this same process, however long it waits", async () => {
+    const ladder = buildLadder();
+    await ladder.tick();
+    await ladder.observe(observation({ graceMs: 999 * MINUTE }));
+    nowMs += 60 * MINUTE;
+    await ladder.tick();
+    expect((await loadLadderState(statePath, pino({ level: "silent" }))).episodes).toHaveLength(1);
+  });
+
+  it("sends no push and starts no agent when expiring an episode", async () => {
+    const first = buildLadder();
+    await first.observe(observation({ graceMs: 999 * MINUTE }));
+    first.stop();
+    pushes = [];
+
+    const second = buildLadder();
+    await second.tick();
+    nowMs += 30 * MINUTE;
+    await second.tick();
+    expect((await loadLadderState(statePath, pino({ level: "silent" }))).episodes).toHaveLength(0);
+    expect(pushes).toHaveLength(0);
+    expect(fleet.created).toHaveLength(0);
+  });
+
+  it("lets a fresh occurrence after expiry reach rung 3 again", async () => {
+    const first = buildLadder();
+    await first.observe(observation({ remedy: "disabled" }));
+    expect(alerts()).toHaveLength(1);
+    first.stop();
+
+    const second = buildLadder();
+    await second.tick();
+    nowMs += 30 * MINUTE;
+    await second.tick();
+    expect((await loadLadderState(statePath, pino({ level: "silent" }))).episodes).toHaveLength(0);
+
+    await second.observe(observation({ remedy: "disabled" }));
+    expect(alerts()).toHaveLength(2);
+  });
+});
