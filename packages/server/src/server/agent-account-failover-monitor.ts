@@ -227,6 +227,7 @@ export class AccountFailoverMonitor {
       probe: options.accountAuthProbe ?? new AccountAuthProbe({ logger: options.logger }),
       providerUsage: options.providerUsage,
       remediationSink: options.remediationSink ?? NULL_REMEDIATION_SINK,
+      now: this.now,
     });
   }
 
@@ -272,16 +273,27 @@ export class AccountFailoverMonitor {
       this.options.logger.warn({ err: error }, "Account identity check failed");
     });
     const nowMs = this.now();
-    const agents = poolEntries.length > 0 ? this.listUnclaimedAgents() : [];
+    const allAgents =
+      poolEntries.length > 0 ? this.options.agentManager.listAgentsForAccountFailover() : [];
+    const agents = this.unclaimed(allAgents);
     const usage =
       poolEntries.length > 0
         ? await this.readUsage({ forceRefreshProviderIds: this.accountAuth.dueRereads(nowMs) })
         : null;
     // Same reasoning as identity above: whether an account can sign in is worth knowing whether
     // or not failover is enabled to act on it.
-    await this.accountAuth.observe({ accounts: poolEntries, agents, nowMs }).catch((error) => {
-      this.options.logger.warn({ err: error }, "Account auth check failed");
-    });
+    // Every agent, claimed or not: whether a turn is about to run on an account is what keeps the
+    // billed probe off it, and recovery's resumes are such turns.
+    await this.accountAuth
+      .observe({
+        accounts: poolEntries,
+        agents: allAgents,
+        isClaimedByRestartRecovery: this.options.isClaimedByRestartRecovery,
+        nowMs,
+      })
+      .catch((error) => {
+        this.options.logger.warn({ err: error }, "Account auth check failed");
+      });
     if (daemonConfig.accountFailover?.enabled === false) {
       return;
     }
@@ -508,9 +520,12 @@ export class AccountFailoverMonitor {
 
   /** Every loaded agent restart recovery has not claimed. */
   private listUnclaimedAgents(): AccountFailoverAgentSummary[] {
+    return this.unclaimed(this.options.agentManager.listAgentsForAccountFailover());
+  }
+
+  private unclaimed(agents: readonly AccountFailoverAgentSummary[]): AccountFailoverAgentSummary[] {
     const claimed = this.options.isClaimedByRestartRecovery;
-    const agents = this.options.agentManager.listAgentsForAccountFailover();
-    return claimed ? agents.filter((agent) => !claimed(agent.id)) : agents;
+    return claimed ? agents.filter((agent) => !claimed(agent.id)) : [...agents];
   }
 
   /**

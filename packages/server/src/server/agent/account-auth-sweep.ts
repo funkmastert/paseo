@@ -33,12 +33,17 @@ export interface AccountAuthSweepOptions {
   probe: AccountAuthProbe;
   providerUsage: Pick<ProviderUsageService, "getAuthReadings">;
   remediationSink: RemediationSink;
+  /** Read once, at construction: evidence from before this process started is not used. */
+  now: () => number;
 }
 
 export interface AccountAuthSweepInput {
   /** Every pool account, enabled or not: the tracker skips the disabled ones. */
   accounts: readonly PoolAccount[];
+  /** Every loaded agent, including the ones restart recovery has claimed. */
   agents: readonly AccountFailoverAgentSummary[];
+  /** An agent recovery claimed is about to start a turn, so it counts as running. */
+  isClaimedByRestartRecovery?: (agentId: string) => boolean;
   nowMs: number;
 }
 
@@ -47,6 +52,7 @@ export class AccountAuthSweep {
   private readonly probe: AccountAuthProbe;
   private readonly providerUsage: Pick<ProviderUsageService, "getAuthReadings">;
   private readonly remediationSink: RemediationSink;
+  private readonly startedAtMs: number;
   /** When each suspect or signed-out account's usage was last read past the cache. */
   private authRereadAtMs = new Map<string, number>();
   /** What the ladder was last told about each signed-out account. */
@@ -57,12 +63,20 @@ export class AccountAuthSweep {
    * usage read, and every read buys another billed probe.
    */
   private quietedReadings = new Map<string, Map<AccountAuthReading, number>>();
+  /**
+   * The accounts this process has told the ladder about at least once. The ladder keeps its
+   * episodes across a restart and this process does not, so each account's first report squares
+   * the two: an episode opened before the restart for an account that is fine now gets closed,
+   * or the account's next real sign-out would land in it and never push.
+   */
+  private reconciled = new Set<string>();
 
   constructor(options: AccountAuthSweepOptions) {
     this.tracker = options.tracker;
     this.probe = options.probe;
     this.providerUsage = options.providerUsage;
     this.remediationSink = options.remediationSink;
+    this.startedAtMs = options.now();
   }
 
   /** The accounts failover treats as dead for a sign-in failure. */
@@ -106,17 +120,14 @@ export class AccountAuthSweep {
   async observe(input: AccountAuthSweepInput): Promise<void> {
     const { accounts, agents, nowMs } = input;
     const poolProviderIds = new Set(accounts.map((account) => account.providerId));
-    const turnFailures: AccountAuthTurnFailureInput[] = agents.flatMap((agent) =>
-      poolProviderIds.has(agent.provider) && isAuthShapedError(agent.lastError)
-        ? [
-            {
-              providerId: agent.provider,
-              error: agent.lastError,
-              atMs: failureTimeMs(agent.lastTimelineAt, nowMs),
-            },
-          ]
-        : [],
-    );
+    const turnFailures: AccountAuthTurnFailureInput[] = agents.flatMap((agent) => {
+      if (!poolProviderIds.has(agent.provider) || !isAuthShapedError(agent.lastError)) return [];
+      const atMs = failureTimeMs(agent.lastTimelineAt, nowMs);
+      // An agent restored after a restart keeps its old error, and nothing in this process has
+      // seen the account since. Someone may have signed it in while the daemon was down.
+      if (atMs < this.startedAtMs) return [];
+      return [{ providerId: agent.provider, error: agent.lastError, atMs }];
+    });
     const probes = this.probe.takeFinished();
     const latestReadings = this.providerUsage.getAuthReadings();
     this.quietReadingsProbesAnswered({ probes, latestReadings, nowMs });
@@ -135,12 +146,14 @@ export class AccountAuthSweep {
       )?.configDir;
       if (!configDir) continue;
       const hasRunningAgent = agents.some(
-        (agent) => agent.provider === record.providerId && agent.lifecycle === "running",
+        (agent) =>
+          agent.provider === record.providerId &&
+          (agent.lifecycle === "running" || input.isClaimedByRestartRecovery?.(agent.id) === true),
       );
       this.probe.start({ providerId: record.providerId, configDir, hasRunningAgent, nowMs });
     }
 
-    await this.reportSignedOutAccounts();
+    await this.reportSignedOutAccounts(accounts);
   }
 
   /**
@@ -179,7 +192,7 @@ export class AccountAuthSweep {
    * The ladder hears about an episode when it opens and again only if what it would say changes,
    * and once more when the account stops being signed out (signed in, disabled, or removed).
    */
-  private async reportSignedOutAccounts(): Promise<void> {
+  private async reportSignedOutAccounts(accounts: readonly PoolAccount[]): Promise<void> {
     const standing = new Set<string>();
     for (const record of this.tracker.recordsIn("signed_out")) {
       const { providerId } = record;
@@ -203,6 +216,18 @@ export class AccountAuthSweep {
         }),
       );
       this.signedOutReported.delete(providerId);
+    }
+    for (const { providerId } of accounts) {
+      if (this.reconciled.has(providerId)) continue;
+      this.reconciled.add(providerId);
+      if (standing.has(providerId)) continue;
+      await this.remediationSink.observe(
+        signedOutObservation({
+          providerId,
+          active: false,
+          summary: `${providerId} is not signed out.`,
+        }),
+      );
     }
   }
 }

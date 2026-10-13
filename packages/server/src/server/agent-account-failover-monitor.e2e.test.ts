@@ -1366,6 +1366,19 @@ describe("AccountFailoverMonitor (e2e)", () => {
     expect(signedOut()).toEqual([]);
   }, 60_000);
 
+  test("never probes an account while a turn restart recovery resumed is running on it", async () => {
+    const resumed = await createAgent(harness, { provider: "claude-personal", title: "Resumed" });
+    await startHeldTurn(harness, resumed);
+    harness.claimedByRestartRecovery.add(resumed);
+    harness.setAuthReading("claude-personal", "rejected_expired");
+
+    await harness.sweep();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(harness.probeRuns).toEqual([]);
+    await endHeldTurn(harness, resumed);
+  }, 60_000);
+
   test("a quieted reading never hides a sign-in failure", async () => {
     const answerProbe = answerProbesByHand(harness);
     harness.setAuthReading("claude-personal", "credentials_missing");
