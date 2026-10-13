@@ -68,8 +68,7 @@ function HostAlertSource({ serverId, hostLabel }: { serverId: string; hostLabel:
   const [pollFast, setPollFast] = useState(false);
   const { view } = useProviderUsage(serverId, {
     refetchInterval: pollFast ? FAST_REFETCH_INTERVAL_MS : DEFAULT_REFETCH_INTERVAL_MS,
-    catchUpOnFocus: true,
-    alwaysCatchUp: true,
+    catchUpOnFocus: "always",
     refetchIntervalInBackground: true,
     // The daemon serves this from its own cache and reads auth state per call, over a WebSocket
     // this hook does not share with the browser's own connectivity check.
@@ -154,9 +153,14 @@ function AccountAlertEntryRow({
   // Set synchronously, so a second click before the re-render sends nothing.
   const pendingRef = useRef(false);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Dismissing the row mid-sign-in unmounts it before the in-flight promise settles, so a
+  // callback that fired after return would otherwise dispatch to a dead reducer and arm a
+  // setTimeout nothing will ever clear.
+  const unmountedRef = useRef(false);
 
   useEffect(() => {
     return () => {
+      unmountedRef.current = true;
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
     };
   }, []);
@@ -167,7 +171,7 @@ function AccountAlertEntryRow({
     if (pendingRef.current || !client) return;
     function settle(event: SignInEvent) {
       pendingRef.current = false;
-      dispatchSignIn(event);
+      if (!unmountedRef.current) dispatchSignIn(event);
     }
     pendingRef.current = true;
     dispatchSignIn({ type: "start" });
@@ -178,6 +182,7 @@ function AccountAlertEntryRow({
           settle({ type: "failed", error: response.error });
           return;
         }
+        if (unmountedRef.current) return;
         dispatchSignIn({ type: "started" });
         timeoutRef.current = setTimeout(() => settle({ type: "timed_out" }), SIGN_IN_TIMEOUT_MS);
         return;
@@ -308,8 +313,8 @@ function AccountAlertBanner() {
   }, [overflowServerId]);
 
   const handleDismiss = useCallback(() => {
-    dismiss(entries.map(accountAlertFingerprint));
-  }, [dismiss, entries]);
+    dismiss(visibleEntries.map(accountAlertFingerprint));
+  }, [dismiss, visibleEntries]);
 
   const icon = useMemo(
     () => (

@@ -112,9 +112,9 @@ describe("useProviderUsage refetchInterval", () => {
     unmount();
   });
 
-  it("escalates refetchOnWindowFocus/refetchOnReconnect to 'always' when alwaysCatchUp is set", async () => {
+  it("escalates refetchOnWindowFocus/refetchOnReconnect to 'always' when catchUpOnFocus is 'always'", async () => {
     const { result, unmount } = renderHook(
-      () => useProviderUsage("test-server", { catchUpOnFocus: true, alwaysCatchUp: true }),
+      () => useProviderUsage("test-server", { catchUpOnFocus: "always" }),
       { wrapper },
     );
     await waitFor(() => expect(result.current.view.kind).toBe("ready"));
@@ -140,7 +140,7 @@ describe("useProviderUsage focus catch-up behavior", () => {
 
   it("refetches on window focus even when the last fetch is under five minutes old", async () => {
     const { result, unmount } = renderHook(
-      () => useProviderUsage("test-server", { catchUpOnFocus: true, alwaysCatchUp: true }),
+      () => useProviderUsage("test-server", { catchUpOnFocus: "always" }),
       { wrapper },
     );
     try {
