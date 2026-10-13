@@ -430,8 +430,10 @@ the shared account stay there: moving a child back would cost a cache rebuild
 When no pooled account can run a spawn from an agent, the account hook
 **refuses** it: the hook throws, and the calling agent sees text naming every
 exhausted account and the earliest reset of a window that blocks the requested
-model. "No account can run it" is per model: a pool whose Sonnet weeks are all
-used up still takes Opus spawns.
+model. An account the daemon reports signed out is named apart, with the
+command that signs it in: it has no reset to wait for. "No account can run it"
+is per model: a pool whose Sonnet weeks are all used up still takes Opus
+spawns.
 
 Passing the request through instead puts the child on a dead account where it
 fails on its first turn, and a leader that reads that as "that one didn't

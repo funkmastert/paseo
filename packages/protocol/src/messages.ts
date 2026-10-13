@@ -7133,17 +7133,19 @@ export const ProviderUsageAccountIdentitySchema = z.object({
   fixCommand: z.string(),
 });
 
-// COMPAT(accountAuth): added in v0.8.x. A sibling field next to accountIdentity rather than a new
-// `status` value -- ProviderUsageStatusSchema is a closed enum an old client would fail to parse
-// on an unrecognized value. `state` is the literal string "signed_out" when present; its absence
-// means nothing is known to be wrong; a `suspect` account shows nothing.
+// COMPAT(accountAuth): added in v0.8.x, remove after 2027-10-12.
+// A sibling field next to accountIdentity rather than a new `status` value --
+// ProviderUsageStatusSchema is a closed enum an old client would fail to parse on an unrecognized
+// value. `state` is the literal string "signed_out" when present; its absence means nothing is
+// known to be wrong; a `suspect` account shows nothing.
 export const ProviderUsageAccountAuthSchema = z.object({
   state: z.literal("signed_out"),
   since: z.string(),
   summary: z.string(),
   fixCommand: z.string(),
   /** Whether the daemon can start this account's sign-in itself: an email to pre-fill the login
-   * page is known and a `claude` binary resolves. Without an email only `fixCommand`, run in a
+   * page is known, a `claude` binary resolves, and the email is declared or no identity problem
+   * stands (a drifted login is not signed in again). Otherwise only `fixCommand`, run in a
    * terminal, can sign it in. */
   canSignIn: z.boolean(),
 });

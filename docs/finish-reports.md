@@ -92,14 +92,14 @@ Reports are sent with `activeTurnBehavior: "steer"`, which steers only when a tu
 idle agent it starts a turn. For a report that is the intent, since the owner has to act on it,
 but it is decided explicitly by `gateDelivery` before every send:
 
-| Target                    | Gate          | Result                                      |
-| ------------------------- | ------------- | ------------------------------------------- |
-| running                   | `steer`       | joins the active turn                       |
-| idle, closed, not loaded  | `wake`        | starts a turn, loading the agent first      |
-| initializing              | `wait`        | next sweep, within the rung's time budget   |
+| Target                    | Gate          | Result                                                      |
+| ------------------------- | ------------- | ----------------------------------------------------------- |
+| running                   | `steer`       | joins the active turn                                       |
+| idle, closed, not loaded  | `wake`        | starts a turn, loading the agent first                      |
+| initializing              | `wait`        | next sweep, within the rung's time budget                   |
 | `error` on a dead account | `wait`        | account failover is about to move it (capped or signed out) |
-| other `error`             | `wake`        | a new turn is how an errored agent recovers |
-| archived or gone          | `unreachable` | owner: released; orchestrator: next rung    |
+| other `error`             | `wake`        | a new turn is how an errored agent recovers                 |
+| archived or gone          | `unreachable` | owner: released; orchestrator: next rung                    |
 
 A `wait` never waits forever: once the rung's budget runs out (3 intervals at the owner, 1 at the
 orchestrator) the report moves up.
