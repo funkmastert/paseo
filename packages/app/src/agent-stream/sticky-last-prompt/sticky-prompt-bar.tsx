@@ -122,11 +122,11 @@ export function FullPromptViewer({
 }
 
 const styles = StyleSheet.create((theme) => ({
+  // Flows in its parent's column rather than self-positioning: the caller (TopOverlay) stacks
+  // this before the jump-to-start button in flex flow, so the button lands below this bar's
+  // real rendered height (0, 1, or 2 lines) without either side measuring or guessing it.
   container: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
+    width: "100%",
     zIndex: 3,
     flexDirection: "row",
     alignItems: "flex-start",

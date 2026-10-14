@@ -12,6 +12,10 @@ import {
 export interface UseStickyLastPromptInput {
   agentId: string;
   items: readonly StreamItem[];
+  /** The actively streaming turn's not-yet-committed items (rendered as the live head), not
+   * part of `items` yet. During a long turn the reading position spends most of its time here,
+   * so visibility needs the combined list -- see use-chat-outline.ts's identical `loadedItems`. */
+  head?: readonly StreamItem[];
 }
 
 export interface UseStickyLastPromptResult {
@@ -24,6 +28,8 @@ export interface UseStickyLastPromptResult {
 
 function noopReportVisibleRowIds(_visibleRowIds: ReadonlySet<string>): void {}
 
+const EMPTY_STREAM_ITEMS: readonly StreamItem[] = [];
+
 /**
  * Derives sticky-bar visibility from the same reading-position signal the chat
  * outline already consumes, instead of adding a second scroll listener. See
@@ -33,8 +39,13 @@ function noopReportVisibleRowIds(_visibleRowIds: ReadonlySet<string>): void {}
  */
 export function useStickyLastPrompt(input: UseStickyLastPromptInput): UseStickyLastPromptResult {
   const publisher = useMemo(() => createStickyLastPromptPublisher(), []);
-  const itemsRef = useRef(input.items);
-  itemsRef.current = input.items;
+  const head = input.head ?? EMPTY_STREAM_ITEMS;
+  const combinedItems = useMemo(
+    () => (head.length > 0 ? [...input.items, ...head] : input.items),
+    [input.items, head],
+  );
+  const itemsRef = useRef(combinedItems);
+  itemsRef.current = combinedItems;
   const readingPositionRowIdRef = useRef<string | null>(null);
 
   const recomputeAndPublish = useStableEvent(() => {
@@ -67,7 +78,7 @@ export function useStickyLastPrompt(input: UseStickyLastPromptInput): UseStickyL
   // must recompute even if the reading position itself hasn't changed.
   useEffect(() => {
     recomputeAndPublish();
-  }, [input.items, recomputeAndPublish]);
+  }, [combinedItems, recomputeAndPublish]);
 
   const reportReadingPosition = useStableEvent((rowId: string | null) => {
     readingPositionRowIdRef.current = rowId;
