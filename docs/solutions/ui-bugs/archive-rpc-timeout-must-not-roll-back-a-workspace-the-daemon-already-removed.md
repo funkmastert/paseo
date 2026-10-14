@@ -141,10 +141,12 @@ the workspace before an archive cannot pin the archived record afterwards.
 records in `archiveTargetRecords` (line 212), whose registry write makes each session send its
 `workspace_update` remove, and only then
 runs the slow steps: a forced git snapshot of the main repo (lines 218-221) and worktree teardown
-and deletion in `maybeRemoveDirectory` (line 233). The response waits for all of it. The client waits 60 s
-by default (`DEFAULT_SESSION_RPC_TIMEOUT_MS`, `packages/client/src/daemon-client.ts:1024`), and
-`archiveWorkspace` sets no longer timeout. On a big worktree under load, the remove arrives in seconds
-and the request times out a minute later.
+and deletion in `maybeRemoveDirectory` (line 233). The response waits for all of it. The client
+waited the 60 s session default (`DEFAULT_SESSION_RPC_TIMEOUT_MS`) for it, so on a big worktree under
+load the remove arrived in seconds and the request timed out a minute later. `archiveWorkspace` now
+waits up to 5 minutes (`WORKSPACE_ARCHIVE_TIMEOUT_MS` in `packages/client/src/daemon-client.ts`, the
+same pattern as `PROJECT_GITHUB_CLONE_TIMEOUT_MS`), which makes the timeout rare but not impossible, so
+the rollback guard below still matters.
 
 A timeout means the client stopped waiting, not that the daemon refused. The old code treated every
 rejection as a refusal and restored a snapshot taken before the archive. The daemon had already sent
@@ -178,11 +180,12 @@ away. Nothing else touches that count.
   rejects the archive" and "still reports a refused archive when an overlapping archive of the same
   workspace failed first".
 
-- Known gaps left open: a reconnect during the archive replaces the directory from a snapshot, which
-  does not bump the count, so a failure after a reconnect still restores until the next refresh. The
-  archive RPC still uses the 60 s default although
-  [architecture.md](../../architecture.md) says genuinely long-running RPCs should not. A daemon error
-  reported after the remove landed (an unexpected failure in a later step) resolves without a toast.
+- Give a mutating RPC that waits on slow daemon work its own timeout, as
+  [architecture.md](../../architecture.md) asks of long-running RPCs.
+- Follow-up, not fixed: a reconnect during the archive replaces the directory from a snapshot, which
+  does not bump the count, so a failure after a reconnect still restores the workspace until the next
+  refresh. A daemon error reported after the remove landed (an unexpected failure in a later step)
+  resolves without a toast.
 
 ## Related Issues
 
