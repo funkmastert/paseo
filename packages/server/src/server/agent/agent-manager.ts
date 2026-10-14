@@ -18,6 +18,9 @@ import {
 } from "@getpaseo/protocol/agent-lifecycle";
 import {
   CODEX_GUARDED_LABEL,
+  COMPLETION_AT_LABEL,
+  COMPLETION_LABEL,
+  COMPLETION_NOTE_LABEL,
   getParentAgentIdFromLabels,
   hasOpenAgentTab,
   isDelegatedAgent,
@@ -1008,7 +1011,8 @@ type ActiveManagedAgent =
   | ManagedAgentError;
 
 type LiveManagedAgent = ActiveManagedAgent;
-type AgentLabelPatch = Record<string, string | null>;
+/** A label patch: a string value sets the key, `null` clears it. */
+export type AgentLabelPatch = Record<string, string | null>;
 
 function attachManagedTurnIdentity(
   agent: ActiveManagedAgent,
@@ -3877,10 +3881,36 @@ export class AgentManager {
     return true;
   }
 
-  async setLabels(agentId: string, labels: Record<string, string>): Promise<void> {
+  async setLabels(agentId: string, labels: AgentLabelPatch): Promise<void> {
     await this.runLifecycleMutation(agentId, async () => {
       const agent = this.requireAgent(agentId);
       await this.writeLabels(agent.id, labels);
+    });
+  }
+
+  /**
+   * Completion state (docs/completion-state.md) auto-clear: new work means a `set_completion_state`
+   * claim is no longer current. Called from agent-prompt.ts at the point a non-system prompt is
+   * actually dispatched to the agent (sendPromptToAgent, deliverQueuedPrompt) — not from the
+   * stream, since a live timeline event also fires for Claude Code's session-resume replay, which
+   * is not new work (docs/completion-state.md). A no-op for an agent that is not live, or when
+   * none of the three labels are set, so a prompt to an agent that never claimed a state causes no
+   * extra persist/emit.
+   */
+  async clearCompletionLabelsIfSet(agentId: string): Promise<void> {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    if (
+      !(COMPLETION_LABEL in agent.labels) &&
+      !(COMPLETION_NOTE_LABEL in agent.labels) &&
+      !(COMPLETION_AT_LABEL in agent.labels)
+    ) {
+      return;
+    }
+    await this.writeLabels(agent.id, {
+      [COMPLETION_LABEL]: null,
+      [COMPLETION_NOTE_LABEL]: null,
+      [COMPLETION_AT_LABEL]: null,
     });
   }
 
@@ -6637,6 +6667,12 @@ export class AgentManager {
     flags: StreamEventFlags;
   }): Promise<void> {
     const { agent, event, options, flags } = params;
+
+    // Completion state (docs/completion-state.md) clears at dispatch time (agent-prompt.ts's
+    // sendPromptToAgent and deliverQueuedPrompt), not here. A live timeline event is not proof of
+    // new work: Claude Code's session-resume replay pushes the whole prior transcript back
+    // through this exact stream path with no fromHistory tag, which would otherwise wipe the
+    // state off every idle agent a daemon restart resumes.
 
     if (event.item.type === "user_message" && isSystemInjectedEnvelope(event.item.text)) {
       flags.shouldDispatchEvent = false;

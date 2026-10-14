@@ -33,6 +33,8 @@ function workspace(overrides: Partial<SidebarWorkspaceEntry> = {}): SidebarWorks
     hasRunningScripts: false,
     statusEnteredAt: null,
     diskUsage: null,
+    completionState: null,
+    completionNote: null,
     ...overrides,
     archivingAt: overrides.archivingAt ?? null,
   };

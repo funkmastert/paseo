@@ -1,4 +1,10 @@
 import { describe, expect, it } from "vitest";
+import {
+  ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
+  COMPLETION_LABEL,
+  COMPLETION_NOTE_LABEL,
+} from "@getpaseo/protocol/agent-labels";
+import { pickPinnedWorkspaceAgentId } from "@/pinned-grid/resolve-pinned-agent";
 import type { Agent } from "@/stores/session-store";
 import { buildWorkspaceAgentActivityIndex } from "./workspace-agent-activity";
 
@@ -8,12 +14,14 @@ function agent(input: {
   status?: Agent["status"];
   turn?: Agent["turn"];
   updatedAt: string;
+  createdAt?: string;
   attentionTimestamp?: string | null;
   requiresAttention?: boolean;
   attentionReason?: Agent["attentionReason"];
   pendingPermissionCount?: number;
   archivedAt?: string | null;
   parentAgentId?: string | null;
+  labels?: Record<string, string>;
 }): Agent {
   return {
     serverId: "host-a",
@@ -30,7 +38,7 @@ function agent(input: {
             cancellationRequestId: null,
           }
         : { phase: "idle", cancellationRequestId: null }),
-    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    createdAt: new Date(input.createdAt ?? "2026-01-01T00:00:00.000Z"),
     updatedAt: new Date(input.updatedAt),
     lastUserMessageAt: null,
     lastActivityAt: new Date(input.updatedAt),
@@ -61,7 +69,7 @@ function agent(input: {
     attentionTimestamp: input.attentionTimestamp ? new Date(input.attentionTimestamp) : null,
     archivedAt: input.archivedAt ? new Date(input.archivedAt) : null,
     parentAgentId: input.parentAgentId ?? null,
-    labels: {},
+    labels: input.labels ?? {},
   };
 }
 
@@ -144,6 +152,8 @@ describe("workspace agent activity index", () => {
             agentId: "permission",
             status: "needs_input",
             enteredAt: new Date("2026-06-01T10:01:00.000Z"),
+            completionState: null,
+            completionNote: null,
           },
         ],
         [
@@ -152,10 +162,61 @@ describe("workspace agent activity index", () => {
             agentId: "attention",
             status: "attention",
             enteredAt: new Date("2026-06-01T10:02:00.000Z"),
+            completionState: null,
+            completionNote: null,
           },
         ],
       ]),
     );
+  });
+
+  // The pinned grid's rule: last activity, then creation. An attention time does not outrank it.
+  it("ranks a workspace's root agents by last activity, then by creation", () => {
+    const index = buildWorkspaceAgentActivityIndex(
+      new Map([
+        [
+          "unread",
+          agent({
+            id: "unread",
+            workspaceId: "workspace-a",
+            updatedAt: "2026-06-01T10:00:00.000Z",
+            attentionTimestamp: "2026-06-01T10:09:00.000Z",
+            requiresAttention: true,
+            attentionReason: "finished",
+          }),
+        ],
+        [
+          "active",
+          agent({
+            id: "active",
+            workspaceId: "workspace-a",
+            status: "running",
+            updatedAt: "2026-06-01T10:05:00.000Z",
+          }),
+        ],
+        [
+          "first",
+          agent({
+            id: "first",
+            workspaceId: "workspace-b",
+            updatedAt: "2026-06-01T10:00:00.000Z",
+            createdAt: "2026-05-01T00:00:00.000Z",
+          }),
+        ],
+        [
+          "second",
+          agent({
+            id: "second",
+            workspaceId: "workspace-b",
+            updatedAt: "2026-06-01T10:00:00.000Z",
+            createdAt: "2026-05-02T00:00:00.000Z",
+          }),
+        ],
+      ]),
+    );
+
+    expect(index.get("workspace-a")).toMatchObject({ agentId: "active", status: "running" });
+    expect(index.get("workspace-b")?.agentId).toBe("second");
   });
 
   it("does not let archived or child agents change root workspace activity", () => {
@@ -198,6 +259,8 @@ describe("workspace agent activity index", () => {
       agentId: "root",
       status: "running",
       enteredAt: new Date("2026-06-01T10:00:00.000Z"),
+      completionState: null,
+      completionNote: null,
     });
   });
 
@@ -233,6 +296,8 @@ describe("workspace agent activity index", () => {
             agentId: "parent",
             status: "done",
             enteredAt: new Date("2026-06-01T10:00:00.000Z"),
+            completionState: null,
+            completionNote: null,
           },
         ],
         [
@@ -241,6 +306,8 @@ describe("workspace agent activity index", () => {
             agentId: "child",
             status: "running",
             enteredAt: new Date("2026-06-01T10:03:00.000Z"),
+            completionState: null,
+            completionNote: null,
           },
         ],
       ]),
@@ -317,6 +384,119 @@ describe("workspace agent activity index", () => {
       agentId: "root",
       status: "needs_input",
       enteredAt: new Date("2026-06-01T10:05:00.000Z"),
+      completionState: null,
+      completionNote: null,
+    });
+  });
+
+  it("reads a completion label off the root agent once it is quiescent", () => {
+    const index = buildWorkspaceAgentActivityIndex(
+      new Map([
+        [
+          "root",
+          agent({
+            id: "root",
+            workspaceId: "workspace-a",
+            updatedAt: "2026-06-01T10:00:00.000Z",
+            labels: { [COMPLETION_LABEL]: "ready-to-merge", [COMPLETION_NOTE_LABEL]: "PR #41" },
+          }),
+        ],
+      ]),
+    );
+
+    expect(index.get("workspace-a")).toEqual({
+      agentId: "root",
+      status: "done",
+      enteredAt: new Date("2026-06-01T10:00:00.000Z"),
+      completionState: "ready-to-merge",
+      completionNote: "PR #41",
+    });
+  });
+
+  // Account failover retires a handle by pointing it at its successor without archiving it, and
+  // writing that label can leave the retired handle the more recently updated of the two.
+  describe("after account failover moved the conversation", () => {
+    function movedChain(): Map<string, Agent> {
+      return new Map([
+        [
+          "retired-1",
+          agent({
+            id: "retired-1",
+            workspaceId: "workspace-a",
+            status: "error",
+            updatedAt: "2026-06-01T10:05:00.000Z",
+            labels: {
+              [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "retired-2",
+              [COMPLETION_LABEL]: "ready-to-merge",
+              [COMPLETION_NOTE_LABEL]: "stale note",
+            },
+          }),
+        ],
+        [
+          "retired-2",
+          agent({
+            id: "retired-2",
+            workspaceId: "workspace-a",
+            status: "error",
+            updatedAt: "2026-06-01T10:06:00.000Z",
+            labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "live" },
+          }),
+        ],
+        [
+          "live",
+          agent({
+            id: "live",
+            workspaceId: "workspace-a",
+            updatedAt: "2026-06-01T10:01:00.000Z",
+            labels: { [COMPLETION_LABEL]: "done", [COMPLETION_NOTE_LABEL]: "PR #41 merged" },
+          }),
+        ],
+      ]);
+    }
+
+    it("reads status and completion off the live end of the chain, not a retired handle", () => {
+      const index = buildWorkspaceAgentActivityIndex(movedChain());
+
+      expect(index.get("workspace-a")).toEqual({
+        agentId: "live",
+        status: "done",
+        enteredAt: new Date("2026-06-01T10:01:00.000Z"),
+        completionState: "done",
+        completionNote: "PR #41 merged",
+      });
+    });
+
+    it("reports the agent the pinned grid's cell shows for the same workspace", () => {
+      const agents = movedChain();
+      agents.set(
+        "other",
+        agent({ id: "other", workspaceId: "workspace-a", updatedAt: "2026-06-01T10:03:00.000Z" }),
+      );
+
+      const index = buildWorkspaceAgentActivityIndex(agents);
+
+      expect(index.get("workspace-a")?.agentId).toBe("live");
+      expect(index.get("workspace-a")?.agentId).toBe(
+        pickPinnedWorkspaceAgentId({ agents: agents.values(), workspaceId: "workspace-a" }),
+      );
+    });
+
+    it("keeps a retired handle whose successor this host does not list", () => {
+      const index = buildWorkspaceAgentActivityIndex(
+        new Map([
+          [
+            "retired",
+            agent({
+              id: "retired",
+              workspaceId: "workspace-a",
+              updatedAt: "2026-06-01T10:05:00.000Z",
+              labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "gone" },
+            }),
+          ],
+        ]),
+      );
+
+      expect(index.get("workspace-a")?.agentId).toBe("retired");
     });
   });
 });

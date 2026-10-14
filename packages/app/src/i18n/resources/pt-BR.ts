@@ -316,6 +316,10 @@ export const ptBR: TranslationResources = {
       modelDiverged: "Modelo diferente",
     },
     tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
+    completion: {
+      readyToMerge: "Pronto para mesclar",
+      done: "Concluído — pronto para arquivar",
+    },
     archiveSheet: {
       hostOffline: "Host offline",
       runningAgent: "Este agente ainda está em execução. Arquivá-lo interromperá o agente.",

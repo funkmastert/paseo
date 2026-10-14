@@ -69,6 +69,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/artifact-janitor.md](docs/artifact-janitor.md)                 | Artifact janitor — orphaned Xcode test simulator clones, cleanup obligations, the unowned sweep, the disk guard                  |
 | [docs/account-failover.md](docs/account-failover.md)                 | Account failover — moving agents off a capped Claude account, dead-account signals, idempotency labels, config                   |
 | [docs/done-janitor.md](docs/done-janitor.md)                         | Done janitor — what counts as finished, the question and its strict parse, the worktree git gate, dry run                        |
+| [docs/completion-state.md](docs/completion-state.md)                 | Completion state — `ready-to-merge`/`done` labels, `set_completion_state`, verification, auto-clear                              |
 | [docs/restart-recovery.md](docs/restart-recovery.md)                 | Restart recovery — the mid-turn run marker, the readiness plan, leader-first resume, `paseo recover`, the finish-report seam     |
 | [docs/stalled-agents.md](docs/stalled-agents.md)                     | Stalled agents — agents stuck in running, why CPU and not only the timeline, the nudge, the handoff to failover, config          |
 | [docs/work-snapshots.md](docs/work-snapshots.md)                     | Work snapshots — what is at risk, the temporary-index snapshot, backup refs, personal push vs bundle, restoring, the judge       |

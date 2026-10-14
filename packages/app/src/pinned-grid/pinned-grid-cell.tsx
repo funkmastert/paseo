@@ -194,7 +194,10 @@ export const PinnedGridCell = memo(function PinnedGridCell({
       testID={`pinned-grid-cell-${workspaceKey}`}
     >
       <View style={[styles.header, focused && styles.headerFocused]}>
-        <PinnedGridStatusDot bucket={workspace.statusBucket} />
+        <PinnedGridStatusDot
+          bucket={workspace.statusBucket}
+          completionState={workspace.completionState}
+        />
         <View style={styles.titleColumn}>
           <Text style={styles.title} numberOfLines={1}>
             {label}

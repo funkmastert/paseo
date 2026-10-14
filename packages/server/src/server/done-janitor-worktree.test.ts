@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { GitWorktreeSnapshotter } from "./agent/worktree-snapshot.js";
 import { checkDeletionInvariant } from "./agent/workspace-sweep-detector.js";
 import {
+  checkMergedIntoRemoteBase,
   checkWorktreeDeletionSafety,
   readWorkspaceActivitySignals,
   readWorktreeCoverage,
@@ -299,6 +300,102 @@ describe("checkWorktreeDeletionSafety", () => {
       reason:
         "1 tracked file(s) git is told not to check, with --assume-unchanged or --skip-worktree (README.md)",
     });
+  });
+});
+
+describe("checkMergedIntoRemoteBase", () => {
+  test("a branch merged and pushed to the remote base is merged", async () => {
+    const worktree = addWorktree("merged-remote", "feature");
+    commit(worktree, "a.txt", "a\n");
+    git(repo, "merge", "-q", "--no-ff", "-m", "merge", "feature");
+    git(repo, "push", "-q", "origin", "main");
+
+    const result = await checkMergedIntoRemoteBase({ worktreePath: worktree, baseBranch: "main" });
+
+    expect(result).toEqual({ merged: true });
+  });
+
+  test("a branch pushed but not merged into the remote base is not merged", async () => {
+    const worktree = addWorktree("pushed-unmerged", "feature");
+    commit(worktree, "a.txt", "a\n");
+    git(worktree, "push", "-q", "origin", "feature");
+
+    const result = await checkMergedIntoRemoteBase({ worktreePath: worktree, baseBranch: "main" });
+
+    expect(result.merged).toBe(false);
+    expect(!result.merged && result.reason).toContain(
+      "not yet merged into refs/remotes/origin/main",
+    );
+  });
+
+  test("a branch merged locally but not pushed to the remote base is not merged", async () => {
+    const worktree = addWorktree("merged-local-only", "feature");
+    commit(worktree, "a.txt", "a\n");
+    git(repo, "merge", "-q", "--no-ff", "-m", "merge", "feature");
+    // origin/main still points at the pre-merge commit.
+
+    const result = await checkMergedIntoRemoteBase({ worktreePath: worktree, baseBranch: "main" });
+
+    expect(result.merged).toBe(false);
+  });
+
+  test("commits that exist nowhere remote are not merged", async () => {
+    const worktree = addWorktree("local-only-merge-check", "feature");
+    commit(worktree, "a.txt", "a\n");
+
+    const result = await checkMergedIntoRemoteBase({ worktreePath: worktree, baseBranch: "main" });
+
+    expect(result.merged).toBe(false);
+  });
+
+  test("a branch squash-merged into the remote base is merged, though never its ancestor", async () => {
+    const worktree = addWorktree("squash-merged", "feature");
+    commit(worktree, "a.txt", "a\n");
+    // What GitHub's and Gitea's default "squash and merge" does: one new commit on main whose
+    // tree matches the branch's net change, with no ancestor/descendant relationship to it.
+    git(repo, "merge", "-q", "--squash", "feature");
+    git(repo, "commit", "-q", "-m", "squash merge feature");
+    git(repo, "push", "-q", "origin", "main");
+
+    const result = await checkMergedIntoRemoteBase({ worktreePath: worktree, baseBranch: "main" });
+
+    expect(result).toEqual({ merged: true });
+  });
+
+  test("a branch rebase-merged into the remote base is merged, though its own commit never landed", async () => {
+    const worktree = addWorktree("rebase-merged", "feature");
+    commit(worktree, "a.txt", "a\n");
+    const featureHead = git(worktree, "rev-parse", "HEAD").trim();
+    // What a "rebase and merge" does: the commit is replayed onto main with a new parent, so it
+    // gets a new SHA even though the diff is identical. The worktree's own commit is never an
+    // ancestor of the result.
+    git(repo, "cherry-pick", featureHead);
+    git(repo, "push", "-q", "origin", "main");
+
+    const result = await checkMergedIntoRemoteBase({ worktreePath: worktree, baseBranch: "main" });
+
+    expect(result).toEqual({ merged: true });
+  });
+
+  test("no recorded base branch cannot tell", async () => {
+    const worktree = addWorktree("no-base-merge-check", "feature");
+    commit(worktree, "a.txt", "a\n");
+
+    const result = await checkMergedIntoRemoteBase({ worktreePath: worktree, baseBranch: null });
+
+    expect(result).toEqual({ merged: null, reason: "no base branch recorded" });
+  });
+
+  test("a base branch no remote holds cannot tell", async () => {
+    const worktree = addWorktree("no-remote-base", "feature");
+    commit(worktree, "a.txt", "a\n");
+
+    const result = await checkMergedIntoRemoteBase({
+      worktreePath: worktree,
+      baseBranch: "develop",
+    });
+
+    expect(result).toEqual({ merged: null, reason: "no remote holds a develop branch" });
   });
 });
 

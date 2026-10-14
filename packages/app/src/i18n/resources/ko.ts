@@ -314,6 +314,10 @@ export const ko: TranslationResources = {
       modelDiverged: "예상 외 모델",
     },
     tokenBurnTooltip: "{{rate}} tok/min · 총 {{total}}",
+    completion: {
+      readyToMerge: "병합 준비 완료",
+      done: "완료 — 보관 가능",
+    },
     archiveSheet: {
       hostOffline: "호스트 오프라인",
       runningAgent: "이 에이전트는 아직 실행 중입니다. 보관하면 에이전트가 중지됩니다.",

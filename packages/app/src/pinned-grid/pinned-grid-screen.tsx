@@ -276,7 +276,7 @@ const PinnedGridChip = memo(function PinnedGridChip({
       style={[styles.chip, selected && styles.chipSelected]}
       testID={`pinned-grid-chip-${entry.workspaceKey}`}
     >
-      <PinnedGridStatusDot bucket={entry.statusBucket} />
+      <PinnedGridStatusDot bucket={entry.statusBucket} completionState={entry.completionState} />
       <Text style={selected ? styles.chipTextSelected : styles.chipText} numberOfLines={1}>
         {label}
       </Text>

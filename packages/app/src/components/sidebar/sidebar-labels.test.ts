@@ -39,6 +39,8 @@ function workspace(
     scripts: [],
     hasRunningScripts: false,
     diskUsage: null,
+    completionState: null,
+    completionNote: null,
   };
 }
 

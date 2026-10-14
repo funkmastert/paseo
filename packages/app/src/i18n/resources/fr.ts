@@ -317,6 +317,10 @@ export const fr: TranslationResources = {
       modelDiverged: "Modèle inattendu",
     },
     tokenBurnTooltip: "{{rate}} tok/min · {{total}} au total",
+    completion: {
+      readyToMerge: "Prêt à fusionner",
+      done: "Terminé — prêt à archiver",
+    },
     archiveSheet: {
       hostOffline: "Hosthors ligne",
       runningAgent: "Cet agent est toujours en cours d'exécution. L’archiver arrêtera l’agent.",

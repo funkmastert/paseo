@@ -313,6 +313,10 @@ export const ar: TranslationResources = {
       modelDiverged: "نموذج غير متوقع",
     },
     tokenBurnTooltip: "{{rate}} tok/min · الإجمالي {{total}}",
+    completion: {
+      readyToMerge: "جاهز للدمج",
+      done: "تم — جاهز للأرشفة",
+    },
     archiveSheet: {
       hostOffline: "Host غير متصل",
       runningAgent: "هذا الوكيل لا يزال قيد التشغيل. ستؤدي أرشفته إلى إيقاف الوكيل.",

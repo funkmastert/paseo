@@ -316,6 +316,10 @@ export const es: TranslationResources = {
       modelDiverged: "Modelo distinto",
     },
     tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
+    completion: {
+      readyToMerge: "Listo para fusionar",
+      done: "Hecho — listo para archivar",
+    },
     archiveSheet: {
       hostOffline: "Hostfuera de línea",
       runningAgent: "Este agente todavía está ejecutándose. Archivarlo detendrá al agente.",

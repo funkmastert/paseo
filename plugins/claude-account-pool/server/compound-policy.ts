@@ -49,6 +49,7 @@ export const COMPOUND_POLICY_NOTICE = [
   "Every Paseo child brief names the CE skill that child runs (ce-work on a plan path, ce-debug, ce-code-review mode:agent, ce-compound) and says: if that skill is not in your skill list, read its SKILL.md in the compound-engineering plugin cache and follow it.",
   "On Wondergit repos (origin on git.wonderly.info) the gh-based skills (ce-commit-push-pr, ce-babysit-pr, ce-resolve-pr-feedback, lfg, ce-code-review with a PR target) cannot reach the forge: review the local branch with ce-code-review base:<ref>, commit with ce-commit, and push, open PRs and answer review comments with the wondergit and gh-fix-pr-comments skills.",
   "Rapid mode changes when these steps run, never whether. Full policy: ~/bozeo-ops/compound-policy/POLICY.md.",
+  "Call set_completion_state (ready-to-merge/done) right before your final message once there's nothing left to do -- see COMPLETION STATE (Bozeo) in your system prompt for when each state applies.",
 ].join(" ");
 
 /** Appended after the policy when the leader's account cannot invoke the CE skills. */

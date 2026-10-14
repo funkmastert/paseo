@@ -29,6 +29,9 @@ import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import {
   CODEX_GUARDED_LABEL,
+  COMPLETION_AT_LABEL,
+  COMPLETION_LABEL,
+  COMPLETION_NOTE_LABEL,
   getOpenAgentTabLabel,
   JEV_TOOLS_LABEL,
   PARENT_AGENT_ID_LABEL,
@@ -7839,6 +7842,39 @@ test("setLabels merges and persists labels", async () => {
   });
 });
 
+test("setLabels clears a label on a live agent when the patch value is null", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-set-labels-clear-live-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: {
+      codex: new TestAgentClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000135",
+  });
+
+  const snapshot = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+      title: "Label clear test",
+    },
+    undefined,
+    { workspaceId: undefined, origin: "human" },
+  );
+
+  await manager.setLabels(snapshot.id, { surface: "mobile", phase: "1a" });
+  await manager.setLabels(snapshot.id, { phase: null });
+
+  const live = manager.getAgent(snapshot.id);
+  expect(live?.labels).toEqual({ surface: "mobile" });
+
+  const persisted = await storage.get(snapshot.id);
+  expect(persisted?.labels).toEqual({ surface: "mobile" });
+});
+
 test("setLabels cannot grant the JEV tools label to a live agent", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-jev-label-live-"));
   const storagePath = join(workdir, "agents");
@@ -14277,6 +14313,77 @@ test("user_message events wrapping a paseo-system envelope are not restored duri
 
   expect(userMessages).toHaveLength(1);
   expect(userMessages[0].text).toBe("real user message");
+});
+
+test("a user_message arriving through the live stream alone does not clear completion state labels", async () => {
+  // Completion state (docs/completion-state.md) clears at dispatch time (agent-prompt.ts's
+  // sendPromptToAgent/deliverQueuedPrompt), never from a timeline event. This is what protects
+  // against Claude Code's session-resume replay: on resume, the SDK replays the agent's whole
+  // prior transcript back through this exact live stream path, with no `fromHistory` tag — the
+  // same path a fake provider's own turnItems take here. If a stream event could clear labels,
+  // every restart that resumes a Claude Code session would wipe them off an idle, "done" agent.
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-completion-no-clear-stream-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  const codex = fakeCodexEmitting({
+    turnItems: [
+      { type: "user_message", text: "plain user message" },
+      { type: "user_message", text: "echoed user message", clientMessageId: "cm-1" },
+    ],
+  });
+
+  const manager = new AgentManager({
+    clients: { codex },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-0000000005b1",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  await manager.setLabels(snapshot.id, {
+    [COMPLETION_LABEL]: "ready-to-merge",
+    [COMPLETION_NOTE_LABEL]: "PR #41 open",
+    [COMPLETION_AT_LABEL]: "2026-10-13T00:00:00.000Z",
+  });
+
+  await manager.runAgent(snapshot.id, { text: "do something" });
+
+  const live = manager.getAgent(snapshot.id);
+  expect(live?.labels[COMPLETION_LABEL]).toBe("ready-to-merge");
+  expect(live?.labels[COMPLETION_NOTE_LABEL]).toBe("PR #41 open");
+  expect(live?.labels[COMPLETION_AT_LABEL]).toBe("2026-10-13T00:00:00.000Z");
+});
+
+test("history replay does not clear completion state labels", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-completion-no-clear-history-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  const codex = fakeCodexEmitting({
+    historyItems: [
+      { type: "user_message", text: "real user message", messageId: "msg_history_real" },
+    ],
+  });
+
+  const manager = new AgentManager({
+    clients: { codex },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-0000000005b4",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  await manager.setLabels(snapshot.id, { [COMPLETION_LABEL]: "done" });
+
+  await manager.hydrateTimelineFromProvider(snapshot.id, { force: true });
+
+  const live = manager.getAgent(snapshot.id);
+  expect(live?.labels[COMPLETION_LABEL]).toBe("done");
 });
 
 test("commandMayHaveChangedExternalState matches remote-state commands", () => {

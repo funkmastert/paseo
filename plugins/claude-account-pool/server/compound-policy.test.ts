@@ -97,6 +97,11 @@ describe("compound policy router — leaders", () => {
     expect(COMPOUND_POLICY_NOTICE).toContain("Wondergit");
   });
 
+  it("points leaders at set_completion_state", () => {
+    expect(COMPOUND_POLICY_NOTICE).toContain("set_completion_state");
+    expect(COMPOUND_POLICY_NOTICE).toContain("COMPLETION STATE (Bozeo)");
+  });
+
   it("checks the profile of the account the leader was rerouted to, not the leader account", async () => {
     const probe = vi.fn(probeEnabledFor("/profiles/backup"));
     const result = await router({ probe })(create("claude-backup", { labels: { "paseo.account-rerouted": "claude" } }));

@@ -263,6 +263,103 @@ async function readReachability(
   return { safe: true, branch, head };
 }
 
+export type MergedIntoRemoteBase =
+  | { merged: true }
+  | { merged: false; reason: string }
+  /** Can't tell: no base branch recorded, or no remote holds it. The caller allows through. */
+  | { merged: null; reason: string };
+
+export interface CheckMergedIntoRemoteBaseInput {
+  worktreePath: string;
+  /** The branch the worktree was created from; null when the workspace never recorded one. */
+  baseBranch: string | null;
+  runGit?: RunGitCommand;
+}
+
+/**
+ * Whether this worktree's HEAD is merged into its *remote* base branch — stricter than
+ * {@link checkWorktreeDeletionSafety}'s reachability check, which also accepts the base's local
+ * ref or any other remote-tracking branch. Used by completion state's `done` gate
+ * (docs/completion-state.md): "pushed somewhere" is not "the PR merged".
+ *
+ * Ancestor reachability is the fast path, but it is blind to the default GitHub/Gitea "squash and
+ * merge" (and a rebase merge): both land HEAD's net changes on the base in a commit that is never
+ * a descendant of HEAD, so reachability stays permanently non-zero. When reachability fails,
+ * {@link isContentMergedIntoRemoteBase} falls back to a tree-equality check: HEAD's changes are
+ * already on the base if merging HEAD into it would produce exactly the base's own tree.
+ *
+ * `merged: null` is "can't tell" (no base branch recorded, no matching remote ref, or a git
+ * command failed) — doubt never reads as merged, but the caller treats it as allow-through, same
+ * as a non-git or local checkout.
+ */
+export async function checkMergedIntoRemoteBase(
+  input: CheckMergedIntoRemoteBaseInput,
+): Promise<MergedIntoRemoteBase> {
+  const { worktreePath, baseBranch } = input;
+  if (!baseBranch) return { merged: null, reason: "no base branch recorded" };
+  const git = createReadOnlyGit(worktreePath, input.runGit ?? runGitCommand);
+
+  const head = (await git(["rev-parse", "--verify", "--quiet", "HEAD"]))?.trim();
+  if (!head) return { merged: null, reason: "it has no commits" };
+
+  const refList = await git([
+    "for-each-ref",
+    "--format=%(refname)",
+    `refs/remotes/*/${baseBranch}`,
+  ]);
+  if (refList === null) return { merged: null, reason: "git could not list remote base refs" };
+  const candidates = refList
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (candidates.length === 0) {
+    return { merged: null, reason: `no remote holds a ${baseBranch} branch` };
+  }
+
+  const branch = (await git(["symbolic-ref", "--quiet", "--short", "HEAD"]))?.trim() || "HEAD";
+  const unreachable = await git(["rev-list", "--count", head, "--not", ...candidates]);
+  const count = unreachable === null ? Number.NaN : Number.parseInt(unreachable.trim(), 10);
+  if (!Number.isFinite(count)) {
+    return { merged: null, reason: "git could not compare it with its remote base" };
+  }
+  if (count === 0) {
+    return { merged: true };
+  }
+  if (await isContentMergedIntoRemoteBase(git, head, candidates[0])) {
+    return { merged: true };
+  }
+  return {
+    merged: false,
+    reason:
+      `${branch} has ${count} commit(s) not yet merged into ${candidates[0]}` +
+      " (this never fetches — if it was just merged, run git fetch and retry)",
+  };
+}
+
+/**
+ * Content-equality fallback for a squash or rebase merge: true when merging `head` into
+ * `remoteBaseRef` would change nothing — the result tree is exactly the base's own tree, with no
+ * conflict. That means every change HEAD carries is already present on the base, which is what
+ * "squashed and merged" looks like once the commits themselves no longer line up.
+ */
+async function isContentMergedIntoRemoteBase(
+  git: ReadOnlyGit,
+  head: string,
+  remoteBaseRef: string,
+): Promise<boolean> {
+  // Non-zero exit (a real conflict, or a failure) maps to null by createReadOnlyGit, so a
+  // conflicted merge never reads as a content match.
+  const mergeTreeOutput = await git(["merge-tree", "--write-tree", remoteBaseRef, head]);
+  if (mergeTreeOutput === null) return false;
+  const resultTree = mergeTreeOutput.split("\n")[0]?.trim();
+  if (!resultTree) return false;
+  const baseTree = (
+    await git(["rev-parse", "--verify", "--quiet", `${remoteBaseRef}^{tree}`])
+  )?.trim();
+  if (!baseTree) return false;
+  return resultTree === baseTree;
+}
+
 function isLockedWorktree(porcelain: string, worktreePath: string): boolean {
   for (const block of porcelain.split("\n\n")) {
     const lines = block.split("\n");

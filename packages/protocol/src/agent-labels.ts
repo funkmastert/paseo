@@ -62,6 +62,42 @@ export function isDelegatedAgent(agent: AgentLabelSource): boolean {
   return getParentAgentIdFromLabels(agent.labels) !== null;
 }
 
+/**
+ * Completion state (docs/completion-state.md): an agent's own claim that it is ready to merge or
+ * fully done, written by `set_completion_state`. Absent means no claim. `COMPLETION_NOTE_LABEL`
+ * is an optional human summary of at most `COMPLETION_NOTE_MAX_LENGTH` characters;
+ * `COMPLETION_AT_LABEL` is the ISO timestamp the state was set at. All three clear together the
+ * moment the agent receives new, non-system-injected work (agent-manager.ts).
+ */
+export const COMPLETION_LABEL = "paseo.completion";
+export const COMPLETION_NOTE_LABEL = "paseo.completion-note";
+export const COMPLETION_AT_LABEL = "paseo.completion-at";
+export const COMPLETION_NOTE_MAX_LENGTH = 200;
+
+export const COMPLETION_STATES = ["ready-to-merge", "done"] as const;
+export type CompletionState = (typeof COMPLETION_STATES)[number];
+
+export function getCompletionStateFromLabels(
+  labels: Record<string, unknown> | null | undefined,
+): CompletionState | null {
+  const value = labels?.[COMPLETION_LABEL];
+  return typeof value === "string" && COMPLETION_STATES.includes(value as CompletionState)
+    ? (value as CompletionState)
+    : null;
+}
+
+/** The note, trimmed and cut to the cap, which only `set_completion_state` enforces on write. */
+export function getCompletionNoteFromLabels(
+  labels: Record<string, unknown> | null | undefined,
+): string | null {
+  const value = labels?.[COMPLETION_NOTE_LABEL];
+  if (typeof value !== "string") {
+    return null;
+  }
+  const note = value.trim().slice(0, COMPLETION_NOTE_MAX_LENGTH);
+  return note.length > 0 ? note : null;
+}
+
 export function hasOpenAgentTab(labels: Record<string, unknown> | null | undefined): boolean {
   return Object.entries(labels ?? {}).some(
     ([label, value]) => isOpenAgentTabLabel(label) && value === "true",

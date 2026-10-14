@@ -315,6 +315,10 @@ export const ru: TranslationResources = {
       modelDiverged: "Другая модель",
     },
     tokenBurnTooltip: "{{rate}} tok/min · всего {{total}}",
+    completion: {
+      readyToMerge: "Готово к слиянию",
+      done: "Готово — можно архивировать",
+    },
     archiveSheet: {
       hostOffline: "Хост не в сети",
       runningAgent: "Этот агент всё ещё работает. Перемещение в архив остановит его.",
