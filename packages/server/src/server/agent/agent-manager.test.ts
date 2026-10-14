@@ -29,6 +29,9 @@ import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import {
   CODEX_GUARDED_LABEL,
+  COMPLETION_AT_LABEL,
+  COMPLETION_LABEL,
+  COMPLETION_NOTE_LABEL,
   getOpenAgentTabLabel,
   JEV_TOOLS_LABEL,
   PARENT_AGENT_ID_LABEL,
@@ -14310,6 +14313,122 @@ test("user_message events wrapping a paseo-system envelope are not restored duri
 
   expect(userMessages).toHaveLength(1);
   expect(userMessages[0].text).toBe("real user message");
+});
+
+test("a new user_message clears completion state labels", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-completion-clear-live-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  const codex = fakeCodexEmitting({
+    turnItems: [{ type: "user_message", text: "plain user message" }],
+  });
+
+  const manager = new AgentManager({
+    clients: { codex },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-0000000005b1",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  await manager.setLabels(snapshot.id, {
+    [COMPLETION_LABEL]: "ready-to-merge",
+    [COMPLETION_NOTE_LABEL]: "PR #41 open",
+    [COMPLETION_AT_LABEL]: "2026-10-13T00:00:00.000Z",
+  });
+
+  await manager.runAgent(snapshot.id, { text: "do something" });
+
+  const live = manager.getAgent(snapshot.id);
+  expect(live?.labels[COMPLETION_LABEL]).toBeUndefined();
+  expect(live?.labels[COMPLETION_NOTE_LABEL]).toBeUndefined();
+  expect(live?.labels[COMPLETION_AT_LABEL]).toBeUndefined();
+});
+
+test("a reconciled echo of a submitted prompt also clears completion state labels", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-completion-clear-echo-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  const codex = fakeCodexEmitting({
+    turnItems: [{ type: "user_message", text: "echoed user message", clientMessageId: "cm-1" }],
+  });
+
+  const manager = new AgentManager({
+    clients: { codex },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-0000000005b2",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  await manager.setLabels(snapshot.id, { [COMPLETION_LABEL]: "done" });
+
+  await manager.runAgent(snapshot.id, { text: "do something" });
+
+  const live = manager.getAgent(snapshot.id);
+  expect(live?.labels[COMPLETION_LABEL]).toBeUndefined();
+});
+
+test("a system-injected envelope message does not clear completion state labels", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-completion-no-clear-system-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  const codex = fakeCodexEmitting({
+    turnItems: [{ type: "user_message", text: formatSystemNotificationPrompt("child finished") }],
+  });
+
+  const manager = new AgentManager({
+    clients: { codex },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-0000000005b3",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  await manager.setLabels(snapshot.id, { [COMPLETION_LABEL]: "done" });
+
+  await manager.runAgent(snapshot.id, { text: "do something" });
+
+  const live = manager.getAgent(snapshot.id);
+  expect(live?.labels[COMPLETION_LABEL]).toBe("done");
+});
+
+test("history replay does not clear completion state labels", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-completion-no-clear-history-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  const codex = fakeCodexEmitting({
+    historyItems: [
+      { type: "user_message", text: "real user message", messageId: "msg_history_real" },
+    ],
+  });
+
+  const manager = new AgentManager({
+    clients: { codex },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-0000000005b4",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  await manager.setLabels(snapshot.id, { [COMPLETION_LABEL]: "done" });
+
+  await manager.hydrateTimelineFromProvider(snapshot.id, { force: true });
+
+  const live = manager.getAgent(snapshot.id);
+  expect(live?.labels[COMPLETION_LABEL]).toBe("done");
 });
 
 test("commandMayHaveChangedExternalState matches remote-state commands", () => {

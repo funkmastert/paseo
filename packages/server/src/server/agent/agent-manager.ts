@@ -18,6 +18,9 @@ import {
 } from "@getpaseo/protocol/agent-lifecycle";
 import {
   CODEX_GUARDED_LABEL,
+  COMPLETION_AT_LABEL,
+  COMPLETION_LABEL,
+  COMPLETION_NOTE_LABEL,
   getParentAgentIdFromLabels,
   hasOpenAgentTab,
   isDelegatedAgent,
@@ -3885,6 +3888,26 @@ export class AgentManager {
     });
   }
 
+  /**
+   * Completion state (docs/completion-state.md) auto-clear: new work means a `set_completion_state`
+   * claim is no longer current. A no-op when none of the three labels are set, so a prompt to an
+   * agent that never claimed a state causes no extra persist/emit.
+   */
+  private async clearCompletionLabelsIfSet(agent: LiveManagedAgent): Promise<void> {
+    if (
+      !(COMPLETION_LABEL in agent.labels) &&
+      !(COMPLETION_NOTE_LABEL in agent.labels) &&
+      !(COMPLETION_AT_LABEL in agent.labels)
+    ) {
+      return;
+    }
+    await this.writeLabels(agent.id, {
+      [COMPLETION_LABEL]: null,
+      [COMPLETION_NOTE_LABEL]: null,
+      [COMPLETION_AT_LABEL]: null,
+    });
+  }
+
   private async writeLabels(agentId: string, patch: AgentLabelPatch): Promise<WriteLabelsResult> {
     for (const key of Object.keys(patch)) {
       if (PROTECTED_LABEL_KEYS.has(key)) {
@@ -6638,6 +6661,17 @@ export class AgentManager {
     flags: StreamEventFlags;
   }): Promise<void> {
     const { agent, event, options, flags } = params;
+
+    // Completion state (docs/completion-state.md) clears on any new, non-replayed human prompt,
+    // computed up front since a reconciled echo (below) returns before the live-dispatch branch
+    // that would otherwise be the natural place for this.
+    if (
+      event.item.type === "user_message" &&
+      !options?.fromHistory &&
+      !isSystemInjectedEnvelope(event.item.text)
+    ) {
+      await this.clearCompletionLabelsIfSet(agent);
+    }
 
     if (event.item.type === "user_message" && isSystemInjectedEnvelope(event.item.text)) {
       flags.shouldDispatchEvent = false;
