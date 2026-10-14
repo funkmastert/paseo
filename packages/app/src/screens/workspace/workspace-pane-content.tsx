@@ -28,6 +28,7 @@ export interface BuildWorkspacePaneContentModelInput {
   host: PaneHost;
   fileNavigationRevision?: number;
   readOnly?: boolean;
+  compact?: boolean;
   onOpenTab: (target: WorkspaceTabDescriptor["target"]) => void;
   onOpenPreferredTarget: (
     target: WorkspaceTabDescriptor["target"],
@@ -48,6 +49,7 @@ export function buildWorkspacePaneContentModel({
   host,
   fileNavigationRevision,
   readOnly,
+  compact,
   onOpenTab,
   onOpenPreferredTarget,
   onOpenTargetToSide,
@@ -72,6 +74,7 @@ export function buildWorkspacePaneContentModel({
       state: tab.state,
       fileNavigationRevision,
       readOnly,
+      compact,
       openTab: onOpenTab,
       openPreferredTarget: onOpenPreferredTarget,
       openTargetToSide: onOpenTargetToSide,

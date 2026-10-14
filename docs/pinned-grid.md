@@ -31,7 +31,11 @@ that workspace — the same navigation as the header's explicit open button. The
 first and stop it from reaching the body's handler, and a `window.getSelection()` check skips
 navigation when the click was really the end of a text-selection drag. Hover tracking lives on the
 outer cell `View` per docs/hover.md, not on that `Pressable`, so hovering into the nested cards
-never fights it.
+never fights it. On web, the body handler also checks that the click's DOM target is inside the
+cell's own DOM subtree (via a ref on the outer `View` and `contains()`): a floating panel rendered
+through `createPortal` (docs/floating-panels.md) keeps its React-tree ancestry under the cell even
+though its DOM node lives elsewhere, so a non-`Pressable` click inside the panel would otherwise
+bubble straight into the body handler and navigate away from under it.
 
 Three things a cell does on its own account:
 

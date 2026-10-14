@@ -202,6 +202,9 @@ export const en = {
   agentStream: {
     empty: "Start chatting with this agent...",
     scrollToBottom: "Scroll to bottom",
+    stickyPromptJumpToOriginal: "Jump to original prompt",
+    stickyPromptShowFull: "Show full prompt",
+    stickyPromptViewerTitle: "Full prompt",
     historyLoadFailed: "Couldn't load agent history",
     messageCapped: "This message was capped ({{bytes}} bytes).",
     permission: {

@@ -205,6 +205,9 @@ export const ru: TranslationResources = {
   agentStream: {
     empty: "Начните общаться с этим агентом...",
     scrollToBottom: "Прокрутить вниз",
+    stickyPromptJumpToOriginal: "Перейти к исходному запросу",
+    stickyPromptShowFull: "Показать запрос полностью",
+    stickyPromptViewerTitle: "Полный запрос",
     historyLoadFailed: "Не удалось загрузить историю агента",
     messageCapped: "Это сообщение было обрезано ({{bytes}} байт).",
     permission: {

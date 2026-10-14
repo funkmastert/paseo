@@ -16,6 +16,7 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   type ViewStyle,
+  type ViewToken,
 } from "react-native";
 import { withUnistyles } from "react-native-unistyles";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
@@ -27,6 +28,11 @@ import { resolveStreamKeyboardInset } from "@/hooks/keyboard-shift-policy";
 import { useRevisedHistoryRows } from "./history-row-revision";
 import { useBottomAnchorController } from "./bottom-anchor-controller";
 import { useScrollKeyboardDismiss } from "./scroll-keyboard-dismiss/use-scroll-keyboard-dismiss";
+import {
+  offsetYToPseudoScrollTop,
+  pseudoScrollTopToOffsetY,
+} from "./native-inverted-scroll-geometry";
+import { createPromptJumpSettleController } from "./prompt-jump-settle";
 import type { StreamRenderInput, StreamStrategy, StreamViewportHandle } from "./strategy";
 import {
   createStreamStrategy,
@@ -57,6 +63,7 @@ const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 const foregroundMutedColorMapping = (theme: Theme) => ({
   color: theme.colors.foregroundMuted,
 });
+const jumpMeasureContainerStyle: ViewStyle = { flex: 1 };
 const historyStartSlotStyle: ViewStyle = {
   alignItems: "center",
   justifyContent: "center",
@@ -82,6 +89,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     routeBottomAnchorRequest,
     isAuthoritativeHistoryReady,
     onNearBottomChange,
+    onViewableRowIdsChange,
     onNearHistoryStart,
     isLoadingOlderHistory,
     hasOlderHistory,
@@ -93,6 +101,11 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
   } = props;
   const { renderHistoryMountedRow, renderLiveHeadRow, renderLiveAuxiliary } = renderers;
   const flatListRef = useRef<FlatList<StreamItem>>(null);
+  const jumpMeasureContainerRef = useRef<View>(null);
+  const jumpRowRefsRef = useRef(new Map<string, View>());
+  const jumpMeasuredContainerTopRef = useRef(0);
+  const jumpMeasuredTargetTopRef = useRef<number | null>(null);
+  const jumpUserIntentListenersRef = useRef(new Set<() => void>());
   const streamViewportMetricsRef = useRef({
     containerKey: "native-virtualized",
     contentHeight: 0,
@@ -341,6 +354,63 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     bottomAnchorController.prepareForStickyContentChange();
   }, [bottomAnchorController, historyRows, segments.liveHead]);
 
+  // Mirrors use-scroll-to-message.web.ts's `getBoundingClientRect`-based lookup: measuring the
+  // target row's and container's actual window position sidesteps reasoning about FlatList's
+  // internal inverted-list layout, at the cost of being one frame stale (async measurement).
+  const remeasureJumpTarget = useStableEvent((itemId: string) => {
+    jumpMeasureContainerRef.current?.measureInWindow((_x, y) => {
+      jumpMeasuredContainerTopRef.current = y;
+    });
+    const rowNode = jumpRowRefsRef.current.get(itemId);
+    if (!rowNode) {
+      jumpMeasuredTargetTopRef.current = null;
+      return;
+    }
+    rowNode.measureInWindow((_x, y) => {
+      jumpMeasuredTargetTopRef.current = y;
+    });
+  });
+
+  const promptJumpSettleController = useMemo(
+    () =>
+      createPromptJumpSettleController({
+        viewport: {
+          findTargetTop(itemId) {
+            remeasureJumpTarget(itemId);
+            return jumpMeasuredTargetTopRef.current;
+          },
+          getContainerTop() {
+            return jumpMeasuredContainerTopRef.current;
+          },
+          getScrollMetrics() {
+            const metrics = streamViewportMetricsRef.current;
+            return {
+              clientHeight: metrics.viewportHeight,
+              scrollHeight: metrics.contentHeight,
+              scrollTop: offsetYToPseudoScrollTop(metrics.offsetY),
+            };
+          },
+          setScrollTop(scrollTop) {
+            flatListRef.current?.scrollToOffset({
+              offset: pseudoScrollTopToOffsetY(scrollTop),
+              animated: false,
+            });
+          },
+          subscribeToUserIntent(listener) {
+            jumpUserIntentListenersRef.current.add(listener);
+            return () => {
+              jumpUserIntentListenersRef.current.delete(listener);
+            };
+          },
+        },
+        requestFrame: requestAnimationFrame,
+        cancelFrame: cancelAnimationFrame,
+      }),
+    [remeasureJumpTarget],
+  );
+
+  useEffect(() => () => promptJumpSettleController.cancel(), [promptJumpSettleController]);
+
   useEffect(() => {
     const handle: StreamViewportHandle = {
       scrollToBottom: (reason = "jump-to-bottom") => {
@@ -353,6 +423,14 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
         bottomAnchorController.prepareForStickyViewportChange();
         markNativeViewportSettling();
       },
+      scrollToMessage: (itemId: string) => {
+        const index = historyRows.findIndex((row) => row.id === itemId);
+        if (index === -1) return;
+        // Coarse positioning only -- gets the row mounted so it can be measured.
+        // promptJumpSettleController does the precise landing + retry/verification.
+        flatListRef.current?.scrollToIndex({ index, animated: true });
+        promptJumpSettleController.start(itemId);
+      },
     };
     viewportRef.current = handle;
     return () => {
@@ -360,7 +438,29 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
         viewportRef.current = null;
       }
     };
-  }, [agentId, bottomAnchorController, markNativeViewportSettling, viewportRef]);
+  }, [
+    agentId,
+    bottomAnchorController,
+    historyRows,
+    markNativeViewportSettling,
+    promptJumpSettleController,
+    viewportRef,
+  ]);
+
+  // FlatList can't resolve an index outside its currently-measured window on a dynamic-height
+  // list; jump there with an estimate first, then retry the precise scroll (RN's documented
+  // workaround for onScrollToIndexFailed).
+  const handleScrollToIndexFailed = useStableEvent(
+    (info: { index: number; averageItemLength: number }) => {
+      flatListRef.current?.scrollToOffset({
+        offset: info.averageItemLength * info.index,
+        animated: false,
+      });
+      requestAnimationFrame(() => {
+        flatListRef.current?.scrollToIndex({ index: info.index, viewPosition: 0, animated: true });
+      });
+    },
+  );
 
   const isScrollEventNearBottom = useStableEvent(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -416,6 +516,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     isUserScrollActiveRef.current = true;
     scrollKeyboardDismiss.onScrollBeginDrag(event);
     bottomAnchorController.beginUserScroll();
+    for (const listener of jumpUserIntentListenersRef.current) listener();
     const rearmed = rearmHistoryStartPagination(historyStartPaginationStateRef.current);
     if (rearmed !== historyStartPaginationStateRef.current) {
       historyStartPaginationStateRef.current = rearmed;
@@ -515,10 +616,42 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     scheduleHistoryStartSettle,
   ]);
 
+  // Cache one ref callback per row id instead of a new closure per render, so each row's
+  // identity-sensitive ref prop stays stable across re-renders.
+  const jumpRowRefCallbacksRef = useRef(new Map<string, (node: View | null) => void>());
+  const getJumpRowRefCallback = useCallback((itemId: string): ((node: View | null) => void) => {
+    let callback = jumpRowRefCallbacksRef.current.get(itemId);
+    if (!callback) {
+      callback = (node) => {
+        if (node) {
+          jumpRowRefsRef.current.set(itemId, node);
+        } else {
+          jumpRowRefsRef.current.delete(itemId);
+          jumpRowRefCallbacksRef.current.delete(itemId);
+        }
+      };
+      jumpRowRefCallbacksRef.current.set(itemId, callback);
+    }
+    return callback;
+  }, []);
+
   const renderItem = useStableEvent(
     ({ item, index }: ListRenderItemInfo<StreamItem>): ReactElement | null => {
       const rendered = renderHistoryMountedRow(item, index, historyItems);
-      return (rendered ?? null) as ReactElement | null;
+      if (rendered === null || rendered === undefined) return null;
+      return (
+        <View collapsable={false} ref={getJumpRowRefCallback(item.id)}>
+          {rendered}
+        </View>
+      );
+    },
+  );
+
+  const viewabilityConfigRef = useRef({ itemVisiblePercentThreshold: 0 });
+  const handleViewableItemsChanged = useStableEvent(
+    ({ viewableItems }: { viewableItems: ViewToken<StreamItem>[] }) => {
+      if (!onViewableRowIdsChange) return;
+      onViewableRowIdsChange(new Set(viewableItems.map((token) => token.item.id)));
     },
   );
 
@@ -568,36 +701,43 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
 
   // RN's FlatList strictMode keeps its internal renderItem wrapper stable when
   // data or the live header changes, preserving the row identities above.
+  // The wrapping View gives the prompt-jump settle controller a stable node to
+  // measure against (see jumpMeasureContainerRef / promptJumpSettleController).
   return (
-    <FlatList
-      {...listInsetProps}
-      ref={flatListRef}
-      data={historyRows}
-      renderItem={renderItem}
-      keyExtractor={keyExtractor}
-      strictMode
-      testID="agent-chat-scroll"
-      nativeID="agent-chat-scroll-native-virtualized"
-      ListHeaderComponent={liveHeaderContent ?? undefined}
-      ListFooterComponent={historyFooterContent ?? undefined}
-      contentContainerStyle={listContentContainerStyle}
-      style={listStyle}
-      onLayout={handleListLayout}
-      onScroll={handleScroll}
-      onScrollBeginDrag={handleScrollBeginDrag}
-      onScrollEndDrag={handleScrollEndDrag}
-      onMomentumScrollBegin={handleMomentumScrollBegin}
-      onMomentumScrollEnd={handleMomentumScrollEnd}
-      scrollEventThrottle={16}
-      onContentSizeChange={handleContentSizeChange}
-      maintainVisibleContentPosition={maintainVisibleContentPosition}
-      initialNumToRender={12}
-      windowSize={10}
-      removeClippedSubviews={false}
-      scrollEnabled={scrollEnabled}
-      showsVerticalScrollIndicator
-      inverted
-    />
+    <View ref={jumpMeasureContainerRef} style={jumpMeasureContainerStyle} collapsable={false}>
+      <FlatList
+        {...listInsetProps}
+        ref={flatListRef}
+        data={historyRows}
+        renderItem={renderItem}
+        keyExtractor={keyExtractor}
+        strictMode
+        testID="agent-chat-scroll"
+        nativeID="agent-chat-scroll-native-virtualized"
+        ListHeaderComponent={liveHeaderContent ?? undefined}
+        ListFooterComponent={historyFooterContent ?? undefined}
+        contentContainerStyle={listContentContainerStyle}
+        style={listStyle}
+        onLayout={handleListLayout}
+        onScroll={handleScroll}
+        onScrollBeginDrag={handleScrollBeginDrag}
+        onScrollEndDrag={handleScrollEndDrag}
+        onMomentumScrollBegin={handleMomentumScrollBegin}
+        onMomentumScrollEnd={handleMomentumScrollEnd}
+        scrollEventThrottle={16}
+        onContentSizeChange={handleContentSizeChange}
+        onViewableItemsChanged={handleViewableItemsChanged}
+        viewabilityConfig={viewabilityConfigRef.current}
+        onScrollToIndexFailed={handleScrollToIndexFailed}
+        maintainVisibleContentPosition={maintainVisibleContentPosition}
+        initialNumToRender={12}
+        windowSize={10}
+        removeClippedSubviews={false}
+        scrollEnabled={scrollEnabled}
+        showsVerticalScrollIndicator
+        inverted
+      />
+    </View>
   );
 }
 

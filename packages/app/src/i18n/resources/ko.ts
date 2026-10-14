@@ -205,6 +205,9 @@ export const ko: TranslationResources = {
   agentStream: {
     empty: "이 에이전트와 대화를 시작하세요...",
     scrollToBottom: "맨 아래로 스크롤",
+    stickyPromptJumpToOriginal: "원본 프롬프트로 이동",
+    stickyPromptShowFull: "전체 프롬프트 표시",
+    stickyPromptViewerTitle: "전체 프롬프트",
     historyLoadFailed: "에이전트 기록을 로드할 수 없습니다.",
     messageCapped: "이 메시지는 길이 제한으로 잘렸습니다({{bytes}}바이트).",
     permission: {

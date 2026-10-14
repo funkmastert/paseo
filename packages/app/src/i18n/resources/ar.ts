@@ -205,6 +205,9 @@ export const ar: TranslationResources = {
   agentStream: {
     empty: "ابدأ الدردشة مع هذا الوكيل...",
     scrollToBottom: "قم بالتمرير إلى الأسفل",
+    stickyPromptJumpToOriginal: "الانتقال إلى الطلب الأصلي",
+    stickyPromptShowFull: "إظهار الطلب الكامل",
+    stickyPromptViewerTitle: "الطلب الكامل",
     historyLoadFailed: "تعذر تحميل سجل الوكيل",
     messageCapped: "تم اقتطاع هذه الرسالة ({{bytes}} بايت).",
     permission: {
