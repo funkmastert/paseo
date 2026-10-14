@@ -673,7 +673,11 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       revealLoadedItem: revealLoadedHistory,
     });
 
-    const stickyLastPrompt = useStickyLastPrompt({ agentId, items: effectiveStreamItems });
+    const stickyLastPrompt = useStickyLastPrompt({
+      agentId,
+      items: effectiveStreamItems,
+      head: effectiveStreamHead,
+    });
     const handleJumpToStickyPrompt = useCallback(() => {
       invalidateJumpToStart();
       jumpToStickyLastPrompt(stickyLastPrompt.source, viewportRef);

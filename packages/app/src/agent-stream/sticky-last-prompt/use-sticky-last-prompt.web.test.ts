@@ -62,6 +62,17 @@ describe("useStickyLastPrompt", () => {
     expect(result.current.source.getState()).toEqual({ prompt: null, barVisible: false });
   });
 
+  it("shows the bar once the reading position moves past the prompt's row, even when that row lives in `head` (the still-streaming turn)", () => {
+    const items = [user("p1", 1), assistant("a1", 2)];
+    const head = [assistant("h1", 3)];
+    const { result } = renderHook(() => useStickyLastPrompt({ agentId: "agent-1", items, head }));
+
+    act(() => {
+      result.current.reportReadingPosition("h1");
+    });
+    expect(result.current.source.getState()).toEqual({ prompt: items[0], barVisible: true });
+  });
+
   it("resets to hidden when agentId changes even before items catch up", () => {
     // Items intentionally stay the same reference across the rerender, isolating the
     // agentId-keyed reset effect from the items-driven recompute effect: if only the reset

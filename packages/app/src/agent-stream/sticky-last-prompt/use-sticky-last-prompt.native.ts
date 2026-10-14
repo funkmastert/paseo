@@ -12,6 +12,10 @@ import {
 export interface UseStickyLastPromptInput {
   agentId: string;
   items: readonly StreamItem[];
+  /** The actively streaming turn's not-yet-committed items. Native finds `selectLastPrompt`
+   * purely from `items`, and the user's own prompt always commits to `items` before the agent
+   * starts responding, so this exists only to keep the input shape identical to web's. */
+  head?: readonly StreamItem[];
 }
 
 export interface UseStickyLastPromptResult {
