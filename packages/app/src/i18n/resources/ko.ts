@@ -208,6 +208,7 @@ export const ko: TranslationResources = {
     stickyPromptJumpToOriginal: "원본 프롬프트로 이동",
     stickyPromptShowFull: "전체 프롬프트 표시",
     stickyPromptViewerTitle: "전체 프롬프트",
+    jumpToStart: "처음으로 이동",
     historyLoadFailed: "에이전트 기록을 로드할 수 없습니다.",
     messageCapped: "이 메시지는 길이 제한으로 잘렸습니다({{bytes}}바이트).",
     permission: {

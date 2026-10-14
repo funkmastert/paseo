@@ -208,6 +208,7 @@ export const ar: TranslationResources = {
     stickyPromptJumpToOriginal: "الانتقال إلى الطلب الأصلي",
     stickyPromptShowFull: "إظهار الطلب الكامل",
     stickyPromptViewerTitle: "الطلب الكامل",
+    jumpToStart: "الانتقال إلى البداية",
     historyLoadFailed: "تعذر تحميل سجل الوكيل",
     messageCapped: "تم اقتطاع هذه الرسالة ({{bytes}} بايت).",
     permission: {

@@ -43,6 +43,7 @@ import {
   abandonHistoryStartPaginationRequest,
   createHistoryStartPaginationState,
   evaluateHistoryStartPagination,
+  HISTORY_START_THRESHOLD_PX,
   isHistoryStartLoadingOperation,
   rearmHistoryStartPagination,
   settleHistoryStartPagination,
@@ -90,6 +91,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     isAuthoritativeHistoryReady,
     onNearBottomChange,
     onViewableRowIdsChange,
+    onNearHistoryStartChange,
     onNearHistoryStart,
     isLoadingOlderHistory,
     hasOlderHistory,
@@ -179,9 +181,11 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     },
   );
   const evaluateHistoryStart = useStableEvent(() => {
+    const input = getHistoryStartPaginationInput();
+    onNearHistoryStartChange(input.distanceFromHistoryStart <= HISTORY_START_THRESHOLD_PX);
     const transition = evaluateHistoryStartPagination(
       historyStartPaginationStateRef.current,
-      getHistoryStartPaginationInput(),
+      input,
     );
     applyHistoryStartPaginationTransition(transition);
   });
@@ -411,6 +415,15 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
 
   useEffect(() => () => promptJumpSettleController.cancel(), [promptJumpSettleController]);
 
+  // Coarse positioning only -- gets the row mounted so it can be measured.
+  // promptJumpSettleController does the precise landing + retry/verification.
+  const jumpToMessage = useStableEvent((itemId: string) => {
+    const index = historyRows.findIndex((row) => row.id === itemId);
+    if (index === -1) return;
+    flatListRef.current?.scrollToIndex({ index, animated: true });
+    promptJumpSettleController.start(itemId);
+  });
+
   useEffect(() => {
     const handle: StreamViewportHandle = {
       scrollToBottom: (reason = "jump-to-bottom") => {
@@ -419,18 +432,23 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
           reason,
         });
       },
+      scrollToStart: () => {
+        // historyRows is ordered newest-first (native's inverted layout), so the
+        // earliest loaded row -- the true start once the genesis page is loaded --
+        // is the last one. Reuse the same settle controller scrollToMessage uses
+        // instead of a raw scrollToEnd, so a still-growing list retries into place.
+        const earliestRow = historyRows.at(-1);
+        if (earliestRow) {
+          jumpToMessage(earliestRow.id);
+        } else {
+          flatListRef.current?.scrollToEnd({ animated: true });
+        }
+      },
       prepareForViewportChange: () => {
         bottomAnchorController.prepareForStickyViewportChange();
         markNativeViewportSettling();
       },
-      scrollToMessage: (itemId: string) => {
-        const index = historyRows.findIndex((row) => row.id === itemId);
-        if (index === -1) return;
-        // Coarse positioning only -- gets the row mounted so it can be measured.
-        // promptJumpSettleController does the precise landing + retry/verification.
-        flatListRef.current?.scrollToIndex({ index, animated: true });
-        promptJumpSettleController.start(itemId);
-      },
+      scrollToMessage: jumpToMessage,
     };
     viewportRef.current = handle;
     return () => {
@@ -438,14 +456,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
         viewportRef.current = null;
       }
     };
-  }, [
-    agentId,
-    bottomAnchorController,
-    historyRows,
-    markNativeViewportSettling,
-    promptJumpSettleController,
-    viewportRef,
-  ]);
+  }, [agentId, bottomAnchorController, historyRows, jumpToMessage, markNativeViewportSettling, viewportRef]);
 
   // FlatList can't resolve an index outside its currently-measured window on a dynamic-height
   // list; jump there with an estimate first, then retry the precise scroll (RN's documented

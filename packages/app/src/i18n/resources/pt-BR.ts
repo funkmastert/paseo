@@ -208,6 +208,7 @@ export const ptBR: TranslationResources = {
     stickyPromptJumpToOriginal: "Ir para o prompt original",
     stickyPromptShowFull: "Mostrar prompt completo",
     stickyPromptViewerTitle: "Prompt completo",
+    jumpToStart: "Ir para o início",
     historyLoadFailed: "Não foi possível carregar o histórico do agente",
     messageCapped: "Esta mensagem foi truncada ({{bytes}} bytes).",
     permission: {

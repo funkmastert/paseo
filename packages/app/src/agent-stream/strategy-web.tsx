@@ -26,6 +26,7 @@ import {
   abandonHistoryStartPaginationRequest,
   createHistoryStartPaginationState,
   evaluateHistoryStartPagination,
+  HISTORY_START_THRESHOLD_PX,
   isHistoryStartLoadingOperation,
   rearmHistoryStartPagination,
   settleHistoryStartPagination,
@@ -290,6 +291,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
     routeBottomAnchorRequest,
     isAuthoritativeHistoryReady,
     onNearBottomChange,
+    onNearHistoryStartChange,
     onReadingPositionChange,
     onNearHistoryStart,
     isLoadingOlderHistory,
@@ -468,6 +470,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
     if (!input) {
       return;
     }
+    onNearHistoryStartChange(input.distanceFromHistoryStart <= HISTORY_START_THRESHOLD_PX);
     const transition = evaluateHistoryStartPagination(
       historyStartPaginationStateRef.current,
       input,
@@ -1116,6 +1119,18 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
         cancelPendingStickToBottom();
         forceStickToBottom();
       },
+      scrollToStart: () => {
+        const scrollContainer = scrollContainerRef.current;
+        if (!isActiveRef.current || !scrollContainer) {
+          return;
+        }
+        setFollowOutput(false);
+        cancelPendingStickToBottom();
+        scrollContainer.scrollTo({ top: 0, behavior: "auto" });
+        lastKnownScrollTopRef.current = scrollContainer.scrollTop;
+        updateScrollMetrics();
+        evaluateHistoryStart();
+      },
       prepareForViewportChange: () => {
         if (!followOutputRef.current) {
           return;
@@ -1133,9 +1148,11 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
     };
   }, [
     cancelPendingStickToBottom,
+    evaluateHistoryStart,
     forceStickToBottom,
     scheduleStickToBottom,
     scrollToMessage,
+    updateScrollMetrics,
     viewportRef,
   ]);
 
