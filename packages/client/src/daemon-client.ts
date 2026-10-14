@@ -196,6 +196,8 @@ const perfNow: () => number =
     : () => Date.now();
 
 const PROJECT_GITHUB_CLONE_TIMEOUT_MS = 5 * 60 * 1000;
+// The daemon answers an archive only after deleting the worktree, which takes minutes on a large one.
+const WORKSPACE_ARCHIVE_TIMEOUT_MS = 5 * 60 * 1000;
 
 interface ImportAgentInputBase {
   cwd?: string;
@@ -2547,6 +2549,7 @@ export class DaemonClient {
         workspaceId,
       },
       responseType: "archive_workspace_response",
+      timeout: WORKSPACE_ARCHIVE_TIMEOUT_MS,
     });
   }
 
