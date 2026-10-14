@@ -45,6 +45,9 @@ export function useBroadcastPinnedTargets(): BroadcastPinnedTargets {
     (): BroadcastPinnedWorkspace[] =>
       pinnedGroups.pinnedChats.flatMap((placement) => {
         const entry = workspaceEntriesByKey.get(placement.workspaceKey);
+        // A pin can transiently lack an entry right after creation; dropping it here (rather than
+        // falling back to the placement's own fields) just omits it from this broadcast, not from
+        // the Pinned section itself, so the fail-safe is a missed row, never a stale one.
         return entry ? [entry] : [];
       }),
     [pinnedGroups.pinnedChats, workspaceEntriesByKey],

@@ -192,6 +192,39 @@ describe("archiveWorkspaceOptimistically", () => {
     await expect(secondArchive).rejects.toThrow("refused again");
     expect(storedWorkspace(archived.id)).toEqual(archived);
   });
+
+  it("keeps a pinned workspace gone when a sibling call's fast failure cleared the pending mark before this call's daemon remove landed", async () => {
+    const archived = workspace();
+    getHostRuntimeStore().acceptWorkspaceSnapshots(SERVER_ID, [archived]);
+    const slowCall = deferred<ArchiveWorkspacePayload>();
+    const fastCall = deferred<ArchiveWorkspacePayload>();
+    const client = createClient(
+      vi.fn().mockReturnValueOnce(slowCall.promise).mockReturnValueOnce(fastCall.promise),
+    );
+
+    const slow = archiveWorkspaceOptimistically({ client, workspace: target() });
+    const fast = archiveWorkspaceOptimistically({ client, workspace: target() });
+
+    // The overlapping second call fails fast with a real (non-timeout) error while the first call
+    // is still outstanding. Its restore clears the shared pending mark.
+    fastCall.resolve(archivePayload({ workspaceId: archived.id, error: "refused" }));
+    await expect(fast).rejects.toThrow("refused");
+
+    // The daemon's remove for the first call's archive lands after the pending mark was cleared.
+    new WorkspaceDirectoryReplica(SERVER_ID).applyDelta({ kind: "remove", id: archived.id });
+
+    // The first call's own request then times out, well after the daemon already removed the
+    // workspace. Gating confirmWorkspaceArchiveRemoved only on the (now-cleared) pending mark would
+    // drop this removal, so the timeout below would resurrect an already-archived workspace.
+    slowCall.reject(new Error("Timed out waiting for archive_workspace_response"));
+    const outcome = await slow.then(
+      () => "archived",
+      () => "failed",
+    );
+
+    expect(storedWorkspace(archived.id)).toBeUndefined();
+    expect(outcome).toBe("archived");
+  });
 });
 
 describe("archiveWorkspacesOptimistically", () => {

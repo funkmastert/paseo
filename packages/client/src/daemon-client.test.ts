@@ -1383,6 +1383,41 @@ test("archiveWorkspace waits past the 60 s RPC default while the daemon deletes 
   await rejection;
 });
 
+test("archivePaseoWorktree waits past the 60 s RPC default like archiveWorkspace", async () => {
+  useHeartbeatClock();
+  const { client } = await connectJevClient();
+
+  const responsePromise = client.archivePaseoWorktree(
+    { workspaceId: "wks-1" },
+    "req-archive-worktree-1",
+  );
+  const settled = settledFlag(responsePromise);
+  const rejection = expect(responsePromise).rejects.toThrow(
+    "Timeout waiting for message (300000ms)",
+  );
+
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(settled()).toBe(false);
+  await vi.advanceTimersByTimeAsync(240_000);
+  await rejection;
+});
+
+test("removeProject waits past the 60 s RPC default while the daemon archives every workspace", async () => {
+  useHeartbeatClock();
+  const { client } = await connectJevClient();
+
+  const responsePromise = client.removeProject("proj-1", "req-remove-project-1");
+  const settled = settledFlag(responsePromise);
+  const rejection = expect(responsePromise).rejects.toThrow(
+    "Timeout waiting for message (900000ms)",
+  );
+
+  await vi.advanceTimersByTimeAsync(300_000);
+  expect(settled()).toBe(false);
+  await vi.advanceTimersByTimeAsync(600_000);
+  await rejection;
+});
+
 test("honors explicit fetchAgent timeout below the session RPC default", async () => {
   useHeartbeatClock();
   const logger = createMockLogger();

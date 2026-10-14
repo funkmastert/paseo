@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { WorkspaceDescriptor } from "@/stores/session-store";
 import {
   clearWorkspaceArchivePending,
+  confirmWorkspaceArchiveRemoved,
+  countWorkspaceArchiveRemovals,
   isWorkspaceArchivePending,
   markWorkspaceArchivePending,
   shouldSuppressWorkspaceForLocalArchive,
+  trackWorkspaceArchiveCallSettled,
+  trackWorkspaceArchiveCallStarted,
 } from "@/contexts/session-workspace-upserts";
 
 const baseWorkspace: WorkspaceDescriptor = {
@@ -112,5 +116,50 @@ describe("workspace archive pending suppression", () => {
     ).toBe(true);
 
     clearWorkspaceArchivePending({ serverId: "server-1", workspaceId: "/repo/worktree" });
+  });
+});
+
+describe("confirmWorkspaceArchiveRemoved / countWorkspaceArchiveRemovals", () => {
+  it("is a no-op for a workspace with nothing pending and no outstanding call", () => {
+    confirmWorkspaceArchiveRemoved({ serverId: "server-2", workspaceId: "/repo/worktree" });
+
+    expect(
+      countWorkspaceArchiveRemovals({ serverId: "server-2", workspaceId: "/repo/worktree" }),
+    ).toBe(0);
+  });
+
+  it("accumulates across multiple confirms for the same pending workspace", () => {
+    markWorkspaceArchivePending({ serverId: "server-2", workspaceId: "/repo/worktree" });
+    confirmWorkspaceArchiveRemoved({ serverId: "server-2", workspaceId: "/repo/worktree" });
+    expect(
+      countWorkspaceArchiveRemovals({ serverId: "server-2", workspaceId: "/repo/worktree" }),
+    ).toBe(1);
+
+    markWorkspaceArchivePending({ serverId: "server-2", workspaceId: "/repo/worktree" });
+    confirmWorkspaceArchiveRemoved({ serverId: "server-2", workspaceId: "/repo/worktree" });
+    expect(
+      countWorkspaceArchiveRemovals({ serverId: "server-2", workspaceId: "/repo/worktree" }),
+    ).toBe(2);
+  });
+
+  it("keeps the count at 0 for a workspace key that was never marked pending", () => {
+    confirmWorkspaceArchiveRemoved({ serverId: "server-2", workspaceId: "/repo/never-pending" });
+
+    expect(
+      countWorkspaceArchiveRemovals({ serverId: "server-2", workspaceId: "/repo/never-pending" }),
+    ).toBe(0);
+  });
+
+  it("still confirms when an outstanding call's own pending mark was cleared by a sibling", () => {
+    const target = { serverId: "server-2", workspaceId: "/repo/sibling-cleared" };
+    trackWorkspaceArchiveCallStarted(target);
+    markWorkspaceArchivePending(target);
+    // A sibling call's restore clears the shared pending mark while this call is still tracked.
+    clearWorkspaceArchivePending(target);
+
+    confirmWorkspaceArchiveRemoved(target);
+
+    expect(countWorkspaceArchiveRemovals(target)).toBe(1);
+    trackWorkspaceArchiveCallSettled(target);
   });
 });

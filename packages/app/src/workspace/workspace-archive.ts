@@ -3,6 +3,8 @@ import {
   clearWorkspaceArchivePending,
   countWorkspaceArchiveRemovals,
   markWorkspaceArchivePending,
+  trackWorkspaceArchiveCallSettled,
+  trackWorkspaceArchiveCallStarted,
 } from "@/contexts/session-workspace-upserts";
 import { useSessionStore, type WorkspaceDescriptor } from "@/stores/session-store";
 import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
@@ -84,26 +86,31 @@ export async function archiveWorkspaceOptimistically(input: {
   client: WorkspaceArchiveClient;
   workspace: WorkspaceArchiveTarget;
 }): Promise<void> {
-  const removalsBefore = countWorkspaceArchiveRemovals(input.workspace);
-  const snapshot = hideWorkspaceOptimistically(input.workspace);
-
+  trackWorkspaceArchiveCallStarted(input.workspace);
   try {
-    await archiveWorkspaceOrThrow({
-      client: input.client,
-      workspaceId: input.workspace.workspaceId,
-    });
-  } catch (error) {
-    // Once the daemon's remove has landed the workspace is archived, whatever this request says:
-    // the daemon answers only after deleting the worktree, which can outlast the RPC timeout, and
-    // a cleanup step can fail after the record is archived. Restoring the snapshot then would
-    // bring back a workspace the daemon no longer has, pin and all, until the next refresh.
-    if (countWorkspaceArchiveRemovals(input.workspace) !== removalsBefore) return;
-    restoreOptimisticallyHiddenWorkspace({
-      serverId: input.workspace.serverId,
-      workspaceId: input.workspace.workspaceId,
-      snapshot,
-    });
-    throw error;
+    const removalsBefore = countWorkspaceArchiveRemovals(input.workspace);
+    const snapshot = hideWorkspaceOptimistically(input.workspace);
+
+    try {
+      await archiveWorkspaceOrThrow({
+        client: input.client,
+        workspaceId: input.workspace.workspaceId,
+      });
+    } catch (error) {
+      // Once the daemon's remove has landed the workspace is archived, whatever this request says:
+      // the daemon answers only after deleting the worktree, which can outlast the RPC timeout, and
+      // a cleanup step can fail after the record is archived. Restoring the snapshot then would
+      // bring back a workspace the daemon no longer has, pin and all, until the next refresh.
+      if (countWorkspaceArchiveRemovals(input.workspace) !== removalsBefore) return;
+      restoreOptimisticallyHiddenWorkspace({
+        serverId: input.workspace.serverId,
+        workspaceId: input.workspace.workspaceId,
+        snapshot,
+      });
+      throw error;
+    }
+  } finally {
+    trackWorkspaceArchiveCallSettled(input.workspace);
   }
 }
 

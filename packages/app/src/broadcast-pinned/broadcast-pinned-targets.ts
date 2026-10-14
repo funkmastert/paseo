@@ -28,7 +28,6 @@ export interface BroadcastPinnedTarget {
   id: string;
   serverId: string;
   workspaceId: string;
-  workspaceName: string;
   label: string;
   agentTitle: string | null;
   status: AgentLifecycleStatus;
@@ -81,7 +80,6 @@ export function selectBroadcastPinnedLeaderTargets(input: {
       id: agent.id,
       serverId: agent.serverId,
       workspaceId: workspace.workspaceId,
-      workspaceName: workspace.name,
       label: resolveSidebarWorkspacePrimaryLabel({ workspace, workspaceTitleSource }),
       agentTitle: agent.title?.trim() || null,
       status: agent.status,

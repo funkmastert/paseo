@@ -198,6 +198,11 @@ const perfNow: () => number =
 const PROJECT_GITHUB_CLONE_TIMEOUT_MS = 5 * 60 * 1000;
 // The daemon answers an archive only after deleting the worktree, which takes minutes on a large one.
 const WORKSPACE_ARCHIVE_TIMEOUT_MS = 5 * 60 * 1000;
+// project.remove.request archives every active workspace in the project sequentially
+// (handleProjectRemoveRequest in session.ts), so it can take a multiple of a single
+// archive's worst case; the response carries no per-workspace progress to scale against,
+// so this is a generous fixed cap rather than WORKSPACE_ARCHIVE_TIMEOUT_MS times a count.
+const PROJECT_REMOVE_TIMEOUT_MS = 15 * 60 * 1000;
 
 interface ImportAgentInputBase {
   cwd?: string;
@@ -2927,6 +2932,7 @@ export class DaemonClient {
         type: "project.remove.request",
         projectId,
       },
+      timeout: PROJECT_REMOVE_TIMEOUT_MS,
     });
     if (!payload.accepted) {
       throw new Error(payload.error ?? "removeProject rejected");
@@ -4556,6 +4562,7 @@ export class DaemonClient {
         ...(input.scope !== undefined ? { scope: input.scope } : {}),
       },
       responseType: "paseo_worktree_archive_response",
+      timeout: WORKSPACE_ARCHIVE_TIMEOUT_MS,
     });
   }
 
