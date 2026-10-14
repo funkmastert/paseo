@@ -170,6 +170,7 @@ function BroadcastPinnedTargetRow({
   checked: boolean;
   onToggle: (id: string) => void;
 }): ReactElement {
+  const { t } = useTranslation();
   const leading = useMemo(
     () => <AgentStatusDot status={target.status} requiresAttention={null} />,
     [target.status],
@@ -178,6 +179,7 @@ function BroadcastPinnedTargetRow({
   return (
     <DropdownMenuItem
       leading={leading}
+      description={target.agentTitle ?? t("agentList.fallbackTitle")}
       selected={checked}
       closeOnSelect={false}
       onSelect={handleSelect}

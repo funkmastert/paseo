@@ -20,16 +20,16 @@ const TARGETS: BroadcastPinnedTarget[] = [
     id: RUNNING_AGENT_ID,
     serverId: SERVER_ID,
     workspaceId: "ws-running",
-    workspaceName: "Running chat",
     label: "Running leader",
+    agentTitle: null,
     status: "running",
   },
   {
     id: IDLE_AGENT_ID,
     serverId: SERVER_ID,
     workspaceId: "ws-idle",
-    workspaceName: "Idle chat",
     label: "Idle leader",
+    agentTitle: null,
     status: "idle",
   },
 ];

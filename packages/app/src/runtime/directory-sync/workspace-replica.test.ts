@@ -8,6 +8,8 @@ import {
 } from "@/stores/session-store";
 import {
   clearWorkspaceArchivePending,
+  countWorkspaceArchiveRemovals,
+  isWorkspaceArchivePending,
   markWorkspaceArchivePending,
 } from "@/contexts/session-workspace-upserts";
 import { WorkspaceDirectoryReplica } from "./workspace-replica";
@@ -227,6 +229,29 @@ it("does not restore a targeted cached workspace while its archive is pending", 
     expect(useSessionStore.getState().sessions[serverId]?.workspaces.has(workspaceId)).toBe(false);
   } finally {
     clearWorkspaceArchivePending({ serverId, workspaceId });
+    store.clearSession(serverId);
+  }
+});
+
+it("confirms a pending archive when the daemon removes the workspace or its project", () => {
+  const serverId = "daemon-remove-during-archive";
+  const store = useSessionStore.getState();
+  store.initializeSession(serverId, null as unknown as DaemonClient);
+  const replica = new WorkspaceDirectoryReplica(serverId);
+  replica.applyDelta({ kind: "upsert", workspace: workspace("removed", "kept-project") });
+  replica.applyDelta({ kind: "upsert", workspace: workspace("cascaded", "removed-project") });
+  markWorkspaceArchivePending({ serverId, workspaceId: "removed" });
+  markWorkspaceArchivePending({ serverId, workspaceId: "cascaded" });
+
+  try {
+    replica.applyDelta({ kind: "remove", id: "removed" });
+    replica.applyDelta({ kind: "remove", projectId: "removed-project" });
+
+    for (const workspaceId of ["removed", "cascaded"]) {
+      expect(isWorkspaceArchivePending({ serverId, workspaceId })).toBe(false);
+      expect(countWorkspaceArchiveRemovals({ serverId, workspaceId })).toBe(1);
+    }
+  } finally {
     store.clearSession(serverId);
   }
 });

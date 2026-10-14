@@ -9,13 +9,30 @@ import { useBroadcastPinnedTargets } from "./use-broadcast-pinned-targets";
 const SERVER_ID = "host-1";
 const AGENT_ID = "running-agent";
 
+const WORKSPACE_KEY = `${SERVER_ID}:ws-1`;
+
 vi.mock("@/components/sidebar/sidebar-model", () => ({
   useSidebarModel: () => ({
     pinnedGroups: {
-      pinnedChats: [{ serverId: SERVER_ID, workspaceId: "ws-1", name: "Pinned chat" }],
+      pinnedChats: [{ workspaceKey: WORKSPACE_KEY, serverId: SERVER_ID, workspaceId: "ws-1" }],
       unpinnedProjects: [],
     },
+    workspaceEntriesByKey: new Map([
+      [
+        WORKSPACE_KEY,
+        {
+          serverId: SERVER_ID,
+          workspaceId: "ws-1",
+          name: "Pinned chat",
+          currentBranch: null,
+        },
+      ],
+    ]),
   }),
+}));
+
+vi.mock("@/hooks/use-settings", () => ({
+  useAppSettings: () => ({ settings: { workspaceTitleSource: "title" } }),
 }));
 
 vi.mock("@/runtime/host-runtime", () => ({

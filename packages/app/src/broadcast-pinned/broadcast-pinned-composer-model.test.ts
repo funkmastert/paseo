@@ -7,8 +7,8 @@ function target(id: string): BroadcastPinnedTarget {
     id,
     serverId: "host-1",
     workspaceId: "ws-1",
-    workspaceName: "Chat",
     label: id,
+    agentTitle: null,
     status: "idle",
   };
 }

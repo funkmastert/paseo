@@ -12,7 +12,7 @@ import {
 } from "@/stores/session-store";
 import { useWorkspaceSetupStore } from "@/stores/workspace-setup-store";
 import {
-  clearWorkspaceArchivePending,
+  confirmWorkspaceArchiveRemoved,
   shouldSuppressWorkspaceForLocalArchive,
 } from "@/contexts/session-workspace-upserts";
 import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
@@ -135,6 +135,7 @@ export class WorkspaceDirectoryReplica {
       useSessionStore.getState().removeProject(this.serverId, delta.projectId);
       for (const workspaceId of this.workspaceIdsByProject.get(delta.projectId) ?? []) {
         this.deleteWorkspace(workspaceId);
+        confirmWorkspaceArchiveRemoved({ serverId: this.serverId, workspaceId });
         mutations.push({ kind: "workspace", type: "delete", id: workspaceId });
       }
       return mutations;
@@ -181,7 +182,7 @@ export class WorkspaceDirectoryReplica {
       useSessionStore.getState().removeProject(this.serverId, delta.removedProjectId);
       mutations.push({ kind: "project", type: "delete", id: delta.removedProjectId });
     }
-    clearWorkspaceArchivePending({ serverId: this.serverId, workspaceId: delta.id });
+    confirmWorkspaceArchiveRemoved({ serverId: this.serverId, workspaceId: delta.id });
     useWorkspaceSetupStore
       .getState()
       .removeWorkspace({ serverId: this.serverId, workspaceId: delta.id });

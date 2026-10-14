@@ -116,9 +116,9 @@ export function isProtectivePin(
 }
 
 /**
- * Pins `workspaceId` as `"auto"` unless it is already pinned by any means. Pinning by hand always
- * takes precedence and is never downgraded or overwritten here — this only ever moves a workspace
- * from unpinned to auto-pinned.
+ * Pins `workspaceId` as `"auto"` unless it is already pinned by any means or archived. Pinning by
+ * hand always takes precedence and is never downgraded or overwritten here — this only ever moves a
+ * workspace from unpinned to auto-pinned.
  *
  * Callers gate this on a human-attributable create (see docs/done-janitor.md#manual-pin-vs-auto-pin for the
  * signal and its known gap) and on the `agents.autoPinSessions` config flag.
@@ -134,11 +134,12 @@ export async function autoPinWorkspaceOnSessionStart(
   const now = options.now ?? (() => new Date().toISOString());
   const existing = await registry.get(workspaceId);
   if (!existing) return null;
-  if (existing.pinnedAt) return existing;
+  if (existing.pinnedAt || existing.archivedAt) return existing;
   return registry.update(
     workspaceId,
     (record) => {
-      if (record.pinnedAt) return record;
+      // Archived since the read above: a create that resolved the workspace before an archive.
+      if (record.pinnedAt || record.archivedAt) return record;
       const timestamp = now();
       return { ...record, pinnedAt: timestamp, pinSource: "auto", updatedAt: timestamp };
     },

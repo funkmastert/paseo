@@ -9,7 +9,7 @@ import {
 function workspace(
   input: Partial<BroadcastPinnedWorkspace> & { workspaceId: string },
 ): BroadcastPinnedWorkspace {
-  return { serverId: "host-1", name: "Chat", ...input };
+  return { serverId: "host-1", name: "Chat", currentBranch: null, ...input };
 }
 
 function agent(
@@ -33,9 +33,20 @@ function agent(
   };
 }
 
+function selectTargets(input: {
+  pinnedChats: readonly BroadcastPinnedWorkspace[];
+  agents: readonly BroadcastPinnedAgentCandidate[];
+  workspaceTitleSource?: "title" | "branch";
+}) {
+  return selectBroadcastPinnedLeaderTargets({
+    workspaceTitleSource: "title",
+    ...input,
+  });
+}
+
 describe("selectBroadcastPinnedLeaderTargets", () => {
   it("includes the single root agent in a pinned workspace", () => {
-    const targets = selectBroadcastPinnedLeaderTargets({
+    const targets = selectTargets({
       pinnedChats: [workspace({ workspaceId: "ws-1", name: "Pinned chat" })],
       agents: [agent({ id: "a1" })],
     });
@@ -44,15 +55,48 @@ describe("selectBroadcastPinnedLeaderTargets", () => {
         id: "a1",
         serverId: "host-1",
         workspaceId: "ws-1",
-        workspaceName: "Pinned chat",
-        label: "Leader",
+        label: "Pinned chat",
+        agentTitle: "Leader",
         status: "idle",
       },
     ]);
   });
 
+  it("labels the row with the workspace's current name, not the agent's title, after a rename", () => {
+    // Renaming a pinned workspace updates its `name` but leaves the agent's own `title`
+    // (a conversation topic set independently) untouched — the row must track the workspace.
+    const targets = selectTargets({
+      pinnedChats: [workspace({ workspaceId: "ws-1", name: "Renamed workspace" })],
+      agents: [agent({ id: "a1", title: "Original agent title" })],
+    });
+    expect(targets[0]?.label).toBe("Renamed workspace");
+    expect(targets[0]?.agentTitle).toBe("Original agent title");
+  });
+
+  it("labels the row with the branch when workspaceTitleSource is 'branch', matching the sidebar", () => {
+    const targets = selectTargets({
+      pinnedChats: [
+        workspace({ workspaceId: "ws-1", name: "Workspace name", currentBranch: "feature/x" }),
+      ],
+      agents: [agent({ id: "a1", title: "Agent title" })],
+      workspaceTitleSource: "branch",
+    });
+    expect(targets[0]?.label).toBe("feature/x");
+  });
+
+  it("falls back to the workspace name when workspaceTitleSource is 'branch' but there is no branch", () => {
+    const targets = selectTargets({
+      pinnedChats: [
+        workspace({ workspaceId: "ws-1", name: "Workspace name", currentBranch: null }),
+      ],
+      agents: [agent({ id: "a1" })],
+      workspaceTitleSource: "branch",
+    });
+    expect(targets[0]?.label).toBe("Workspace name");
+  });
+
   it("picks only the grid's chosen agent when a pinned workspace holds two root agents", () => {
-    const targets = selectBroadcastPinnedLeaderTargets({
+    const targets = selectTargets({
       pinnedChats: [workspace({ workspaceId: "ws-1" })],
       agents: [
         agent({ id: "stale", lastActivityAt: new Date(10) }),
@@ -63,7 +107,7 @@ describe("selectBroadcastPinnedLeaderTargets", () => {
   });
 
   it("targets the live successor of an agent account failover retired", () => {
-    const targets = selectBroadcastPinnedLeaderTargets({
+    const targets = selectTargets({
       pinnedChats: [workspace({ workspaceId: "ws-1" })],
       agents: [
         agent({ id: "retired", lastActivityAt: new Date(30), movedTo: "successor" }),
@@ -75,15 +119,15 @@ describe("selectBroadcastPinnedLeaderTargets", () => {
         id: "successor",
         serverId: "host-1",
         workspaceId: "ws-1",
-        workspaceName: "Chat",
-        label: "Live end",
+        label: "Chat",
+        agentTitle: "Live end",
         status: "idle",
       },
     ]);
   });
 
   it("excludes a child agent even though its workspace is pinned", () => {
-    const targets = selectBroadcastPinnedLeaderTargets({
+    const targets = selectTargets({
       pinnedChats: [workspace({ workspaceId: "ws-1" })],
       agents: [agent({ id: "child", parentAgentId: "root-1" })],
     });
@@ -91,7 +135,7 @@ describe("selectBroadcastPinnedLeaderTargets", () => {
   });
 
   it("excludes an archived root agent with no other live agent in the workspace", () => {
-    const targets = selectBroadcastPinnedLeaderTargets({
+    const targets = selectTargets({
       pinnedChats: [workspace({ workspaceId: "ws-1" })],
       agents: [agent({ id: "a1", archivedAt: new Date() })],
     });
@@ -99,7 +143,7 @@ describe("selectBroadcastPinnedLeaderTargets", () => {
   });
 
   it("still targets a closed-but-not-archived agent, matching what the grid cell shows", () => {
-    const targets = selectBroadcastPinnedLeaderTargets({
+    const targets = selectTargets({
       pinnedChats: [workspace({ workspaceId: "ws-1" })],
       agents: [agent({ id: "a1", status: "closed" })],
     });
@@ -107,7 +151,7 @@ describe("selectBroadcastPinnedLeaderTargets", () => {
   });
 
   it("excludes an agent whose workspace is not pinned", () => {
-    const targets = selectBroadcastPinnedLeaderTargets({
+    const targets = selectTargets({
       pinnedChats: [workspace({ workspaceId: "ws-other" })],
       agents: [agent({ id: "a1", workspaceId: "ws-1" })],
     });
@@ -115,7 +159,7 @@ describe("selectBroadcastPinnedLeaderTargets", () => {
   });
 
   it("returns one target per pinned workspace, scoped by server", () => {
-    const targets = selectBroadcastPinnedLeaderTargets({
+    const targets = selectTargets({
       pinnedChats: [
         workspace({ workspaceId: "ws-1", serverId: "host-1", name: "First" }),
         workspace({ workspaceId: "ws-1", serverId: "host-2", name: "Second" }),
@@ -125,18 +169,19 @@ describe("selectBroadcastPinnedLeaderTargets", () => {
     expect(targets.map((t) => t.id).sort()).toEqual(["a1", "a2"]);
   });
 
-  it("falls back to 'Untitled agent' when the agent has no title", () => {
-    const targets = selectBroadcastPinnedLeaderTargets({
+  it("reports a null agentTitle when the agent has no title", () => {
+    const targets = selectTargets({
       pinnedChats: [workspace({ workspaceId: "ws-1" })],
       agents: [agent({ id: "a1", title: null })],
     });
-    expect(targets[0]?.label).toBe("Untitled agent");
+    expect(targets[0]?.agentTitle).toBeNull();
+    expect(targets[0]?.label).toBe("Chat");
   });
 
   it("returns an empty list for empty inputs without throwing", () => {
-    expect(selectBroadcastPinnedLeaderTargets({ pinnedChats: [], agents: [] })).toEqual([]);
+    expect(selectTargets({ pinnedChats: [], agents: [] })).toEqual([]);
     expect(
-      selectBroadcastPinnedLeaderTargets({
+      selectTargets({
         pinnedChats: [workspace({ workspaceId: "ws-1" })],
         agents: [],
       }),
