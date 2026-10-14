@@ -17,6 +17,7 @@ import { createTestAgentClient } from "../test-utils/fake-agent-client.js";
 import { AgentManager } from "./agent-manager.js";
 import { AgentStorage } from "./agent-storage.js";
 import { setCodexGuardHealthState } from "./codex-guard-health.js";
+import { OmpHarness } from "./providers/omp/test-utils/omp-harness.js";
 
 // This file creates codex agents as a generic fixture for agent-prompt behavior unrelated to
 // the Codex child guard, so default guard health to green the way a real daemon reaches it once
@@ -1307,8 +1308,8 @@ describe("a prompt to a handle account failover retired", () => {
 // actually dispatched to the agent — not from the stream, which also carries Claude Code's
 // session-resume replay (agent-manager.test.ts covers that side).
 describe("completion state auto-clear on dispatch", () => {
-  async function setCompletionLabels(scenario: MovedConversationScenario, agentId: string) {
-    await scenario.agentManager.setLabels(agentId, {
+  async function setCompletionLabels(agentManager: AgentManager, agentId: string) {
+    await agentManager.setLabels(agentId, {
       [COMPLETION_LABEL]: "done",
       [COMPLETION_NOTE_LABEL]: "PR #41 merged",
       [COMPLETION_AT_LABEL]: "2026-10-13T00:00:00.000Z",
@@ -1319,7 +1320,7 @@ describe("completion state auto-clear on dispatch", () => {
     const scenario = createMovedConversationScenario();
     try {
       const agentId = await scenario.createAgent();
-      await setCompletionLabels(scenario, agentId);
+      await setCompletionLabels(scenario.agentManager, agentId);
 
       await sendPromptToAgent({
         agentManager: scenario.agentManager,
@@ -1343,7 +1344,7 @@ describe("completion state auto-clear on dispatch", () => {
     const scenario = createMovedConversationScenario();
     try {
       const agentId = await scenario.createAgent();
-      await setCompletionLabels(scenario, agentId);
+      await setCompletionLabels(scenario.agentManager, agentId);
 
       await sendPromptToAgent({
         agentManager: scenario.agentManager,
@@ -1366,7 +1367,7 @@ describe("completion state auto-clear on dispatch", () => {
     const scenario = createMovedConversationScenario();
     try {
       const agentId = await scenario.createAgent();
-      await setCompletionLabels(scenario, agentId);
+      await setCompletionLabels(scenario.agentManager, agentId);
 
       const delivery = await deliverQueuedPrompt({
         agentManager: scenario.agentManager,
@@ -1388,7 +1389,7 @@ describe("completion state auto-clear on dispatch", () => {
     const scenario = createMovedConversationScenario();
     try {
       const agentId = await scenario.createAgent();
-      await setCompletionLabels(scenario, agentId);
+      await setCompletionLabels(scenario.agentManager, agentId);
 
       const delivery = await deliverQueuedPrompt({
         agentManager: scenario.agentManager,
@@ -1409,4 +1410,51 @@ describe("completion state auto-clear on dispatch", () => {
       await scenario.cleanup();
     }
   });
+
+  // OMP takes these two out of band: the message reaches the agent, but no turn is allocated.
+  test.each([
+    { prompt: "/steer also update the docs", message: "also update the docs", via: "steer" },
+    { prompt: "/follow-up then open the PR", message: "then open the PR", via: "followUp" },
+  ] as const)(
+    "sendPromptToAgent clears the labels when OMP takes $prompt out of band",
+    async ({ prompt, message, via }) => {
+      const workdir = mkdtempSync(join(tmpdir(), "agent-prompt-omp-out-of-band-"));
+      const logger = createTestLogger();
+      const omp = new OmpHarness();
+      const agentStorage = new AgentStorage(join(workdir, "agents"), logger);
+      const agentManager = new AgentManager({
+        clients: { omp: omp.agentClient() },
+        registry: agentStorage,
+        logger,
+      });
+      try {
+        const agent = await agentManager.createAgent({ provider: "omp", cwd: workdir }, undefined, {
+          workspaceId: undefined,
+        });
+        await setCompletionLabels(agentManager, agent.id);
+
+        const result = await sendPromptToAgent({
+          agentManager,
+          agentStorage,
+          agentId: agent.id,
+          prompt,
+          logger,
+        });
+
+        expect(result.disposition).toBe("out_of_band");
+        const runtime = omp.runtime();
+        const delivered = via === "steer" ? runtime.steerRequests : runtime.followUpRequests;
+        await vi.waitFor(() => expect(delivered).toEqual([{ message, imageCount: 0 }]));
+        const live = agentManager.getAgent(agent.id);
+        expect(live?.labels[COMPLETION_LABEL]).toBeUndefined();
+        expect(live?.labels[COMPLETION_NOTE_LABEL]).toBeUndefined();
+        expect(live?.labels[COMPLETION_AT_LABEL]).toBeUndefined();
+      } finally {
+        for (const agent of agentManager.listAgents()) {
+          await agentManager.closeAgent(agent.id).catch(() => undefined);
+        }
+        rmSync(workdir, { recursive: true, force: true });
+      }
+    },
+  );
 });

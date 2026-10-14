@@ -261,14 +261,17 @@ export async function startAgentRun(
   // Out-of-band commands (e.g. /goal pause) must run WITHOUT canceling an
   // in-flight turn — replaceAgentRun would interrupt the running turn. The
   // intercept lives at this layer so it covers every prompt entrypoint.
-  if (agentManager.tryRunOutOfBand(agentId, prompt, options?.runOptions)) {
-    return { disposition: "out_of_band" };
-  }
+  const ranOutOfBand = agentManager.tryRunOutOfBand(agentId, prompt, options?.runOptions);
   // Completion state (docs/completion-state.md) auto-clear: this is the dispatch point for every
   // prompt surface (Session/WS, MCP, CLI-through-MCP, chat mentions, notify-on-finish). A
-  // system-injected envelope (chat mentions, notify-on-finish) is not new work.
+  // system-injected envelope (chat mentions, notify-on-finish) is not new work. It sits ahead of
+  // the out-of-band return because a provider can take new work there: OMP's /steer and
+  // /follow-up hand the agent a message without a turn.
   if (!isSystemInjectedPrompt(prompt)) {
     await agentManager.clearCompletionLabelsIfSet(agentId);
+  }
+  if (ranOutOfBand) {
+    return { disposition: "out_of_band" };
   }
   // Refocus rides on this prompt when one is due (agent-refocus.ts). It only ever adds to a
   // prompt that is being sent anyway, so every surface gets it without ever starting a turn.

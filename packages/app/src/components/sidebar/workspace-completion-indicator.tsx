@@ -4,7 +4,7 @@ import { CircleCheckBig, GitPullRequestArrow } from "lucide-react-native";
 import { useTranslation } from "react-i18next";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Theme } from "@/styles/theme";
-import type { CompletionState } from "@/utils/completion-state";
+import type { CompletionState } from "@getpaseo/protocol/agent-labels";
 import { STATUS_INDICATOR_ALERT_SIZE } from "@/utils/status-indicator-geometry";
 
 const readyToMergeColorMapping = (theme: Theme) => ({ color: theme.colors.accent });

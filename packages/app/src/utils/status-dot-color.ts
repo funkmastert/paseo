@@ -1,5 +1,5 @@
 import type { Theme } from "@/styles/theme";
-import type { CompletionState } from "@/utils/completion-state";
+import type { CompletionState } from "@getpaseo/protocol/agent-labels";
 import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
 
 export function getStatusDotColor(input: {

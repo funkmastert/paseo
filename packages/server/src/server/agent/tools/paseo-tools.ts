@@ -4,6 +4,7 @@ import type { Logger } from "pino";
 
 import type { AgentMode, AgentProvider, AgentSessionConfig } from "../agent-sdk-types.js";
 import type { AgentManager } from "../agent-manager.js";
+import { COMPLETION_NOTE_MAX_LENGTH } from "@getpaseo/protocol/agent-labels";
 import { AgentProfileSchema } from "@getpaseo/protocol/messages";
 import type { DaemonConfigStore } from "../../daemon-config-store.js";
 import {
@@ -2461,7 +2462,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         note: z
           .string()
           .trim()
-          .max(200)
+          .max(COMPLETION_NOTE_MAX_LENGTH)
           .optional()
           .describe("Optional one-line summary, shown in the UI tooltip."),
         agentId: z

@@ -2,7 +2,10 @@ import { describe, expect, test } from "vitest";
 import {
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
   COMPLETION_LABEL,
+  COMPLETION_NOTE_LABEL,
+  COMPLETION_NOTE_MAX_LENGTH,
   followMigratedTo,
+  getCompletionNoteFromLabels,
   getCompletionStateFromLabels,
   getMigratedToFromLabels,
   getParentAgentIdFromLabels,
@@ -98,5 +101,27 @@ describe("completion state", () => {
     expect(getCompletionStateFromLabels(undefined)).toBeNull();
     expect(getCompletionStateFromLabels({ [COMPLETION_LABEL]: "finished" })).toBeNull();
     expect(getCompletionStateFromLabels({ [COMPLETION_LABEL]: "" })).toBeNull();
+    expect(getCompletionStateFromLabels({ [COMPLETION_LABEL]: 1 })).toBeNull();
+    expect(getCompletionStateFromLabels(null)).toBeNull();
+  });
+
+  test("reads and trims the note", () => {
+    expect(getCompletionNoteFromLabels({ [COMPLETION_NOTE_LABEL]: "  PR #41 merged  " })).toBe(
+      "PR #41 merged",
+    );
+  });
+
+  test("treats an absent, blank, or non-string note as no note", () => {
+    expect(getCompletionNoteFromLabels(null)).toBeNull();
+    expect(getCompletionNoteFromLabels({})).toBeNull();
+    expect(getCompletionNoteFromLabels({ [COMPLETION_NOTE_LABEL]: "   " })).toBeNull();
+    expect(getCompletionNoteFromLabels({ [COMPLETION_NOTE_LABEL]: 42 })).toBeNull();
+  });
+
+  test("caps the note at its maximum length", () => {
+    const note = getCompletionNoteFromLabels({
+      [COMPLETION_NOTE_LABEL]: "x".repeat(COMPLETION_NOTE_MAX_LENGTH + 50),
+    });
+    expect(note).toHaveLength(COMPLETION_NOTE_MAX_LENGTH);
   });
 });

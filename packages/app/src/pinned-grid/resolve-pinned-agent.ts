@@ -27,40 +27,72 @@ export function pickPinnedWorkspaceAgentId(input: {
   for (const agent of input.agents) {
     agentsById.set(agent.id, agent);
   }
-  const isCandidate = (agent: CandidateAgent | undefined): agent is CandidateAgent => {
-    if (
-      !agent ||
-      agent.archivedAt ||
-      normalizeWorkspaceOpaqueId(agent.workspaceId) !== workspaceId
-    ) {
-      return false;
+  return pickLiveEndByWorkspaceId(agentsById, workspaceId).get(workspaceId)?.id ?? null;
+}
+
+/**
+ * The agent `pickPinnedWorkspaceAgentId` picks, for every workspace of one host in a single pass,
+ * keyed by workspace id. The sidebar row's status and completion state read this agent, so a row
+ * and the grid cell for the same workspace never show two different chats.
+ */
+export function pickPinnedWorkspaceAgents<T extends CandidateAgent>(
+  agentsById: ReadonlyMap<string, T>,
+): Map<string, T> {
+  return pickLiveEndByWorkspaceId(agentsById, null);
+}
+
+/** One conversation: its live end, and the most recent of the handles that lead to it. */
+interface ConversationGroup<T> {
+  workspaceId: string;
+  liveEnd: T;
+  recency: T;
+}
+
+function pickLiveEndByWorkspaceId<T extends CandidateAgent>(
+  agentsById: ReadonlyMap<string, T>,
+  onlyWorkspaceId: string | null,
+): Map<string, T> {
+  // The workspace an agent can be shown for, or null when it is not a candidate.
+  const shownWorkspaceIdOf = (agent: T | undefined): string | null => {
+    if (!agent || agent.archivedAt) {
+      return null;
+    }
+    const workspaceId = normalizeWorkspaceOpaqueId(agent.workspaceId);
+    const inScope = onlyWorkspaceId === null || workspaceId === onlyWorkspaceId;
+    if (!workspaceId || !inScope) {
+      return null;
     }
     const parent = agent.parentAgentId ? agentsById.get(agent.parentAgentId) : undefined;
-    return isWorkspaceRootAgent(agent, parent);
+    return isWorkspaceRootAgent(agent, parent) ? workspaceId : null;
   };
-  // Keyed by live end; the value is the group's most recent member.
-  const recencyByLiveEnd = new Map<string, CandidateAgent>();
+  const groupByLiveEndId = new Map<string, ConversationGroup<T>>();
   for (const agent of agentsById.values()) {
-    if (!isCandidate(agent)) {
+    const workspaceId = shownWorkspaceIdOf(agent);
+    if (!workspaceId) {
       continue;
     }
     const shown = resolveShownAgent(agent.id, (agentId) => agentsById.get(agentId));
-    const liveEndId = shown.kind === "moved" ? shown.agentId : agent.id;
-    if (!isCandidate(agentsById.get(liveEndId))) {
+    const liveEnd = shown.kind === "moved" ? agentsById.get(shown.agentId) : agent;
+    if (!liveEnd || shownWorkspaceIdOf(liveEnd) !== workspaceId) {
       continue;
     }
-    const current = recencyByLiveEnd.get(liveEndId);
-    if (!current || compareRecency(agent, current) > 0) {
-      recencyByLiveEnd.set(liveEndId, agent);
+    const group = groupByLiveEndId.get(liveEnd.id);
+    if (!group || compareRecency(agent, group.recency) > 0) {
+      groupByLiveEndId.set(liveEnd.id, { workspaceId, liveEnd, recency: agent });
     }
   }
-  let best: { liveEndId: string; recency: CandidateAgent } | null = null;
-  for (const [liveEndId, recency] of recencyByLiveEnd) {
-    if (!best || compareRecency(recency, best.recency) > 0) {
-      best = { liveEndId, recency };
+  const bestByWorkspaceId = new Map<string, ConversationGroup<T>>();
+  for (const group of groupByLiveEndId.values()) {
+    const best = bestByWorkspaceId.get(group.workspaceId);
+    if (!best || compareRecency(group.recency, best.recency) > 0) {
+      bestByWorkspaceId.set(group.workspaceId, group);
     }
   }
-  return best?.liveEndId ?? null;
+  const liveEndByWorkspaceId = new Map<string, T>();
+  for (const [workspaceId, best] of bestByWorkspaceId) {
+    liveEndByWorkspaceId.set(workspaceId, best.liveEnd);
+  }
+  return liveEndByWorkspaceId;
 }
 
 function compareRecency(a: CandidateAgent, b: CandidateAgent): number {

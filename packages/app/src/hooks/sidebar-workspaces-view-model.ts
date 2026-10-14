@@ -8,7 +8,7 @@ import type {
   WorkspaceStructureHostPlacement,
   WorkspaceStructureProject,
 } from "@/projects/workspace-structure";
-import type { CompletionState } from "@/utils/completion-state";
+import type { CompletionState } from "@getpaseo/protocol/agent-labels";
 import { projectDisplayNameFromProjectId } from "@/utils/project-display-name";
 import { aggregateSidebarStateBuckets } from "@/utils/sidebar-agent-state";
 import { shortenPath } from "@/utils/shorten-path";

@@ -62,6 +62,12 @@ agent — `sendPromptToAgent` and `deliverQueuedPrompt` in
 drained and delivered. A system-injected envelope (`isSystemInjectedEnvelope`) — a heartbeat, a
 finish report, the done janitor's own "are you done" question — never clears it.
 
+`startAgentRun` clears before it returns for an out-of-band command, so a slash command a provider
+handles without starting a turn clears the state too: OMP's `/steer` and `/follow-up` deliver a
+message that way. `/compact`, `/autocompact`, `/handoff` and `/goal` clear it as well, as they do on
+a provider that has no out-of-band handler and treats them as ordinary prompts. The out-of-band
+command is accepted first, so a prompt that fails there leaves the state alone.
+
 This is deliberately not a stream/timeline check. A live `user_message` timeline event is not proof
 of new work: Claude Code's session-resume replay (what a daemon restart does to resume a session)
 pushes the agent's entire prior transcript back through the same live stream path, untagged, so a

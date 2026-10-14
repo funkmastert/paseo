@@ -1,7 +1,7 @@
 import { View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { StatusRing } from "@/components/status-ring";
-import type { CompletionState } from "@/utils/completion-state";
+import type { CompletionState } from "@getpaseo/protocol/agent-labels";
 import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { getStatusDotColor } from "@/utils/status-dot-color";
 

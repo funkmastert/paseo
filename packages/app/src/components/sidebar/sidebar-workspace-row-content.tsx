@@ -18,7 +18,8 @@ import {
 } from "@/components/sidebar/workspace-trailing";
 import { useAppSettings } from "@/hooks/use-settings";
 import type { Theme } from "@/styles/theme";
-import { resolveRowCompletionIndicator, type CompletionState } from "@/utils/completion-state";
+import type { CompletionState } from "@getpaseo/protocol/agent-labels";
+import { resolveRowCompletionIndicator } from "@/utils/completion-state";
 import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { getStatusDotColor } from "@/utils/status-dot-color";
 import {
