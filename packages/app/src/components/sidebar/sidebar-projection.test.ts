@@ -51,6 +51,8 @@ function makeWorkspace(
     scripts: [],
     hasRunningScripts: false,
     diskUsage: null,
+    completionState: null,
+    completionNote: null,
     labels,
     createdBy,
   };

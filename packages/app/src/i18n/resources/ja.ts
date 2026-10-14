@@ -316,6 +316,10 @@ export const ja: TranslationResources = {
       modelDiverged: "想定外のモデル",
     },
     tokenBurnTooltip: "{{rate}} tok/min · 合計 {{total}}",
+    completion: {
+      readyToMerge: "マージ準備完了",
+      done: "完了 — アーカイブ可能",
+    },
     archiveSheet: {
       hostOffline: "ホストオフライン",
       runningAgent: "このエージェントはまだ実行中です。アーカイブするとエージェントが停止します。",

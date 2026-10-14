@@ -313,6 +313,10 @@ export const zhCN: TranslationResources = {
       modelDiverged: "模型不符",
     },
     tokenBurnTooltip: "{{rate}} tok/min · 共 {{total}}",
+    completion: {
+      readyToMerge: "可合并",
+      done: "已完成 — 可归档",
+    },
     archiveSheet: {
       hostOffline: "Host 离线",
       runningAgent: "此 Agent 仍在运行。归档会停止该 Agent。",

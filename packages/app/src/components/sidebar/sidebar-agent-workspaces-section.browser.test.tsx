@@ -138,6 +138,8 @@ function fixtureWorkspace(input: {
     scripts: [],
     hasRunningScripts: false,
     diskUsage: null,
+    completionState: null,
+    completionNote: null,
   };
 }
 

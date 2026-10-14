@@ -311,6 +311,10 @@ export const en = {
       modelDiverged: "Wrong model",
     },
     tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
+    completion: {
+      readyToMerge: "Ready to merge",
+      done: "Done — ready to archive",
+    },
     archiveSheet: {
       hostOffline: "Host offline",
       runningAgent: "This agent is still running. Archiving it will stop the agent.",

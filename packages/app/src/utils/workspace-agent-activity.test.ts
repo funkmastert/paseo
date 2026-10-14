@@ -144,6 +144,8 @@ describe("workspace agent activity index", () => {
             agentId: "permission",
             status: "needs_input",
             enteredAt: new Date("2026-06-01T10:01:00.000Z"),
+            completionState: null,
+            completionNote: null,
           },
         ],
         [
@@ -152,6 +154,8 @@ describe("workspace agent activity index", () => {
             agentId: "attention",
             status: "attention",
             enteredAt: new Date("2026-06-01T10:02:00.000Z"),
+            completionState: null,
+            completionNote: null,
           },
         ],
       ]),
@@ -198,6 +202,8 @@ describe("workspace agent activity index", () => {
       agentId: "root",
       status: "running",
       enteredAt: new Date("2026-06-01T10:00:00.000Z"),
+      completionState: null,
+      completionNote: null,
     });
   });
 
@@ -233,6 +239,8 @@ describe("workspace agent activity index", () => {
             agentId: "parent",
             status: "done",
             enteredAt: new Date("2026-06-01T10:00:00.000Z"),
+            completionState: null,
+            completionNote: null,
           },
         ],
         [
@@ -241,6 +249,8 @@ describe("workspace agent activity index", () => {
             agentId: "child",
             status: "running",
             enteredAt: new Date("2026-06-01T10:03:00.000Z"),
+            completionState: null,
+            completionNote: null,
           },
         ],
       ]),
@@ -317,6 +327,34 @@ describe("workspace agent activity index", () => {
       agentId: "root",
       status: "needs_input",
       enteredAt: new Date("2026-06-01T10:05:00.000Z"),
+      completionState: null,
+      completionNote: null,
+    });
+  });
+
+  it("reads a completion label off the root agent once it is quiescent", () => {
+    const index = buildWorkspaceAgentActivityIndex(
+      new Map([
+        [
+          "root",
+          {
+            ...agent({
+              id: "root",
+              workspaceId: "workspace-a",
+              updatedAt: "2026-06-01T10:00:00.000Z",
+            }),
+            labels: { "paseo.completion": "ready-to-merge", "paseo.completion-note": "PR #41" },
+          },
+        ],
+      ]),
+    );
+
+    expect(index.get("workspace-a")).toEqual({
+      agentId: "root",
+      status: "done",
+      enteredAt: new Date("2026-06-01T10:00:00.000Z"),
+      completionState: "ready-to-merge",
+      completionNote: "PR #41",
     });
   });
 });

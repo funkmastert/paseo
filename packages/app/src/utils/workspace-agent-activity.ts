@@ -1,11 +1,18 @@
 import type { Agent, WorkspaceDescriptor } from "@/stores/session-store";
 import { isWorkspaceRootAgent } from "@/subagents/policies";
+import {
+  getCompletionNoteFromLabels,
+  getCompletionStateFromLabels,
+  type CompletionState,
+} from "./completion-state";
 import { deriveSidebarStateBucket } from "./sidebar-agent-state";
 
 export interface WorkspaceAgentActivity {
   agentId: string;
   status: WorkspaceDescriptor["status"];
   enteredAt: Date | null;
+  completionState: CompletionState | null;
+  completionNote: string | null;
 }
 
 function workspaceAgentStatus(agent: Agent): Agent["status"] {
@@ -44,6 +51,8 @@ export function buildWorkspaceAgentActivityIndex(
       agentId: agent.id,
       status,
       enteredAt,
+      completionState: getCompletionStateFromLabels(agent.labels),
+      completionNote: getCompletionNoteFromLabels(agent.labels),
     });
   }
 
@@ -51,7 +60,9 @@ export function buildWorkspaceAgentActivityIndex(
     const previousActivity = previous?.get(workspaceId);
     if (
       previousActivity?.agentId === activity.agentId &&
-      previousActivity.status === activity.status
+      previousActivity.status === activity.status &&
+      previousActivity.completionState === activity.completionState &&
+      previousActivity.completionNote === activity.completionNote
     ) {
       activityByWorkspaceId.set(workspaceId, previousActivity);
     }

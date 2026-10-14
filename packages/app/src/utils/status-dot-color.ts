@@ -1,12 +1,14 @@
 import type { Theme } from "@/styles/theme";
+import type { CompletionState } from "@/utils/completion-state";
 import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
 
 export function getStatusDotColor(input: {
   theme: Theme;
   bucket: SidebarStateBucket;
   showDoneAsInactive?: boolean;
+  completionState?: CompletionState | null;
 }): string | null {
-  const { theme, bucket, showDoneAsInactive = false } = input;
+  const { theme, bucket, showDoneAsInactive = false, completionState = null } = input;
 
   // The one place the statusDot* band is read. Dots sit louder than the check icons and host
   // badges on the same row — see the band's note in theme.ts — so going through the status
@@ -28,6 +30,15 @@ export function getStatusDotColor(input: {
     return theme.colors.statusDotSuccess;
   }
   if (bucket === "done") {
+    // A completion label refines "done" only once the row is quiescent (see
+    // resolveRowCompletionIndicator) — same accent/success pairing the sidebar row's icon uses,
+    // so the compact strip's dot and the full row never disagree on color.
+    if (completionState === "ready-to-merge") {
+      return theme.colors.accent;
+    }
+    if (completionState === "done") {
+      return theme.colors.statusSuccess;
+    }
     return showDoneAsInactive ? theme.colors.border : null;
   }
   return null;

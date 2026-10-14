@@ -8,6 +8,7 @@ import type {
   WorkspaceStructureHostPlacement,
   WorkspaceStructureProject,
 } from "@/projects/workspace-structure";
+import type { CompletionState } from "@/utils/completion-state";
 import { projectDisplayNameFromProjectId } from "@/utils/project-display-name";
 import { aggregateSidebarStateBuckets } from "@/utils/sidebar-agent-state";
 import { shortenPath } from "@/utils/shorten-path";
@@ -57,6 +58,8 @@ export interface SidebarWorkspaceEntry extends SidebarStatusWorkspacePlacement {
   scripts: WorkspaceDescriptor["scripts"];
   hasRunningScripts: boolean;
   diskUsage: WorkspaceDiskUsage | null;
+  completionState: CompletionState | null;
+  completionNote: string | null;
 }
 
 export interface SidebarProjectEntry {
@@ -130,6 +133,8 @@ export function areSidebarWorkspaceSessionsEqual(
 interface EffectiveWorkspaceStatus {
   status: WorkspaceDescriptor["status"];
   enteredAt: Date | null;
+  completionState: CompletionState | null;
+  completionNote: string | null;
 }
 
 function projectNameForWorkspace(workspace: WorkspaceDescriptor): string {
@@ -188,6 +193,8 @@ export function createSidebarWorkspaceEntry(input: {
     scripts: input.workspace.scripts,
     hasRunningScripts: input.workspace.scripts.some((script) => script.lifecycle === "running"),
     diskUsage: input.workspace.diskUsage ?? null,
+    completionState: effectiveStatus.completionState,
+    completionNote: effectiveStatus.completionNote,
   };
 }
 
@@ -200,7 +207,12 @@ function deriveEffectiveWorkspaceStatus(input: {
   workspaceAgentActivity?: ReadonlyMap<string, WorkspaceAgentActivity>;
 }): EffectiveWorkspaceStatus {
   if (input.workspace.status !== "done") {
-    return { status: input.workspace.status, enteredAt: input.workspace.statusEnteredAt };
+    return {
+      status: input.workspace.status,
+      enteredAt: input.workspace.statusEnteredAt,
+      completionState: null,
+      completionNote: null,
+    };
   }
 
   const pendingStartedAt = getPendingInitialAgentCreateStartedAt({
@@ -209,15 +221,32 @@ function deriveEffectiveWorkspaceStatus(input: {
     pendingCreateAttempts: input.pendingCreateAttempts,
   });
   if (pendingStartedAt) {
-    return { status: "running", enteredAt: pendingStartedAt };
+    return {
+      status: "running",
+      enteredAt: pendingStartedAt,
+      completionState: null,
+      completionNote: null,
+    };
   }
 
   const rootAgentActivity = input.workspaceAgentActivity?.get(input.workspace.id);
   if (rootAgentActivity && rootAgentActivity.status !== "done") {
-    return rootAgentActivity;
+    // Not quiescent: a completion label that arrived while the agent was still busy is stale
+    // until the daemon clears it, so it never reaches the row.
+    return {
+      status: rootAgentActivity.status,
+      enteredAt: rootAgentActivity.enteredAt,
+      completionState: null,
+      completionNote: null,
+    };
   }
 
-  return { status: input.workspace.status, enteredAt: input.workspace.statusEnteredAt };
+  return {
+    status: input.workspace.status,
+    enteredAt: input.workspace.statusEnteredAt,
+    completionState: rootAgentActivity?.completionState ?? null,
+    completionNote: rootAgentActivity?.completionNote ?? null,
+  };
 }
 
 function getPendingInitialAgentCreateStartedAt(input: {

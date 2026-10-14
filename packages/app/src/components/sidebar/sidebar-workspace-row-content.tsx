@@ -8,6 +8,7 @@ import {
   WorkspaceMetaRow,
   type WorkspaceServiceSummary,
 } from "@/components/sidebar/workspace-meta-row";
+import { WorkspaceCompletionIndicator } from "@/components/sidebar/workspace-completion-indicator";
 import { WorkspaceHoverCard } from "@/components/workspace-hover-card";
 import type { HostBadgeModel } from "@/hosts/appearance";
 import type { SidebarWorkspaceEntry } from "@/hooks/use-sidebar-workspaces-list";
@@ -17,6 +18,7 @@ import {
 } from "@/components/sidebar/workspace-trailing";
 import { useAppSettings } from "@/hooks/use-settings";
 import type { Theme } from "@/styles/theme";
+import { resolveRowCompletionIndicator, type CompletionState } from "@/utils/completion-state";
 import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { getStatusDotColor } from "@/utils/status-dot-color";
 import {
@@ -157,6 +159,8 @@ export const SidebarWorkspaceRowContent = memo(function SidebarWorkspaceRowConte
             workspaceKind={workspace.workspaceKind}
             loading={isLoading}
             reserveIdleSpace={reserveIdleStatusIndicatorSpace}
+            completionState={workspace.completionState}
+            completionNote={workspace.completionNote}
           />
         )}
         <View style={styles.workspaceContentColumn}>
@@ -193,11 +197,15 @@ function WorkspaceStatusIndicator({
   workspaceKind,
   loading = false,
   reserveIdleSpace = true,
+  completionState = null,
+  completionNote = null,
 }: {
   bucket: SidebarWorkspaceEntry["statusBucket"];
   workspaceKind: SidebarWorkspaceEntry["workspaceKind"];
   loading?: boolean;
   reserveIdleSpace?: boolean;
+  completionState?: CompletionState | null;
+  completionNote?: string | null;
 }) {
   // Busy is the only status that moves, and it is the ring rather than a dot for the same
   // reason it is a dot elsewhere: every status in the sidebar sits in this one slot, so busy
@@ -236,6 +244,15 @@ function WorkspaceStatusIndicator({
   }
 
   if (bucket === "done") {
+    const completionIndicator = resolveRowCompletionIndicator({ bucket, completionState });
+    if (completionIndicator) {
+      return (
+        <WorkspaceCompletionIndicator
+          completionState={completionIndicator}
+          completionNote={completionNote}
+        />
+      );
+    }
     // An idle row still gets a dot rather than an empty slot. Nested rows are marked as
     // workspaces by indentation alone, and with nothing in the leading slot the rail has no
     // edge to read against — a workspace carrying its own glyph starts looking like a project
