@@ -208,6 +208,7 @@ export const ja: TranslationResources = {
     stickyPromptJumpToOriginal: "元のプロンプトに移動",
     stickyPromptShowFull: "プロンプト全文を表示",
     stickyPromptViewerTitle: "プロンプト全文",
+    jumpToStart: "セッションの最初に移動",
     historyLoadFailed: "エージェントの履歴を読み込めませんでした",
     messageCapped: "このメッセージは上限で切り詰められました（{{bytes}}バイト）。",
     permission: {

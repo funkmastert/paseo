@@ -26,7 +26,7 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { MAX_CONTENT_WIDTH, useIsCompactFormFactor } from "@/constants/layout";
 import { useMutation } from "@tanstack/react-query";
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
-import { Check, ChevronDown, X } from "lucide-react-native";
+import { ArrowUpToLine, Check, ChevronDown, X } from "lucide-react-native";
 import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 import { openExplorerSidebarView } from "@/workspace-tabs/explorer-sidebar";
 import {
@@ -87,6 +87,8 @@ import {
 } from "./turn-footer";
 import { resolveBottomOverlayTailInset } from "./bottom-overlay-inset";
 import { layoutStream, type StreamLayoutItem } from "./layout";
+import { useJumpToStart } from "./use-jump-to-start";
+import { shouldShowJumpToStart } from "./jump-to-start-visibility";
 import {
   type BottomAnchorLocalRequest,
   type BottomAnchorRouteRequest,
@@ -390,6 +392,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       [isMobile],
     );
     const [isNearBottom, setIsNearBottom] = useState(true);
+    const [isNearHistoryStart, setIsNearHistoryStart] = useState(true);
     const [expandedInlineToolCallIds, setExpandedInlineToolCallIds] = useState<Set<string>>(
       new Set(),
     );
@@ -458,6 +461,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
 
     useEffect(() => {
       setIsNearBottom(true);
+      setIsNearHistoryStart(true);
       setExpandedInlineToolCallIds(new Set());
       setExpandedToolCallGroupIds(new Set());
     }, [agentId]);
@@ -641,6 +645,14 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const handleTimelineHistoryLoadError = useCallback(() => {
       toast?.error(t("agentStream.historyLoadFailed"));
     }, [t, toast]);
+    const { jumpToStart, isJumpingToStart, invalidateJumpToStart } = useJumpToStart({
+      agentId,
+      serverId: resolvedServerId,
+      hasRemoteOlderHistory: remoteHasOlder,
+      revealLoadedHistory,
+      viewportRef,
+      onError: handleTimelineHistoryLoadError,
+    });
     const visibleHistoryItemIds = useMemo(
       () =>
         new Set(
@@ -663,8 +675,16 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
 
     const stickyLastPrompt = useStickyLastPrompt({ agentId, items: effectiveStreamItems });
     const handleJumpToStickyPrompt = useCallback(() => {
+      invalidateJumpToStart();
       jumpToStickyLastPrompt(stickyLastPrompt.source, viewportRef);
-    }, [stickyLastPrompt]);
+    }, [invalidateJumpToStart, stickyLastPrompt]);
+    const handleJumpToOutlinePrompt = useCallback(
+      (seq: number) => {
+        invalidateJumpToStart();
+        chatOutline.jumpToPrompt(seq);
+      },
+      [chatOutline, invalidateJumpToStart],
+    );
     const handleReadingPositionChange = useCallback(
       (rowId: string | null) => {
         chatOutline.reportReadingPosition(rowId);
@@ -677,16 +697,18 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       ref,
       () => ({
         scrollToBottom(reason = "jump-to-bottom") {
+          invalidateJumpToStart();
           viewportRef.current?.scrollToBottom(reason);
         },
         prepareForViewportChange() {
           viewportRef.current?.prepareForViewportChange();
         },
       }),
-      [],
+      [invalidateJumpToStart],
     );
 
     const scrollToBottom = useCallback(() => {
+      invalidateJumpToStart();
       if (!isTimelineDetached) {
         viewportRef.current?.scrollToBottom("jump-to-bottom");
         return;
@@ -699,7 +721,13 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         scrollToBottom: () => viewportRef.current?.scrollToBottom("jump-to-bottom"),
         onError: handleTimelineHistoryLoadError,
       });
-    }, [agentId, handleTimelineHistoryLoadError, isTimelineDetached, resolvedServerId]);
+    }, [
+      agentId,
+      handleTimelineHistoryLoadError,
+      invalidateJumpToStart,
+      isTimelineDetached,
+      resolvedServerId,
+    ]);
 
     const setInlineDetailsExpanded = useCallback(
       (itemId: string, expanded: boolean) => {
@@ -1139,6 +1167,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
               routeBottomAnchorRequest,
               isAuthoritativeHistoryReady,
               onNearBottomChange: setIsNearBottom,
+              onNearHistoryStartChange: setIsNearHistoryStart,
               onReadingPositionChange: handleReadingPositionChange,
               onViewableRowIdsChange: stickyLastPrompt.reportVisibleRowIds,
               onNearHistoryStart: loadOlder,
@@ -1154,7 +1183,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           <ChatOutlineRail
             prompts={chatOutline.prompts}
             activePrompt={chatOutline.activePrompt}
-            onJumpToPrompt={chatOutline.jumpToPrompt}
+            onJumpToPrompt={handleJumpToOutlinePrompt}
           />
           <StickyPromptOverlay
             key={agentId}
@@ -1162,26 +1191,83 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             compact={resolvedCompact}
             onJumpToOriginal={handleJumpToStickyPrompt}
           />
-          {(!isNearBottom || isTimelineDetached) && (
-            <View style={scrollToBottomContainerStyle} pointerEvents="box-none">
-              <Animated.View entering={scrollIndicatorFadeIn} exiting={scrollIndicatorFadeOut}>
-                <Pressable
-                  style={stylesheet.scrollToBottomButton}
-                  onPress={scrollToBottom}
-                  accessibilityRole="button"
-                  accessibilityLabel={t("agentStream.scrollToBottom")}
-                  testID="scroll-to-bottom-button"
-                >
-                  <ChevronDown size={24} color={stylesheet.scrollToBottomIcon.color} />
-                </Pressable>
-              </Animated.View>
-            </View>
-          )}
+          <ScrollIndicatorCluster
+            containerStyle={scrollToBottomContainerStyle}
+            fadeIn={scrollIndicatorFadeIn}
+            fadeOut={scrollIndicatorFadeOut}
+            showJumpToStart={shouldShowJumpToStart({
+              hasOlderHistory: hasOlder,
+              isNearHistoryStart,
+            })}
+            isJumpingToStart={isJumpingToStart}
+            onJumpToStart={jumpToStart}
+            showScrollToBottom={!isNearBottom || isTimelineDetached}
+            onScrollToBottom={scrollToBottom}
+          />
         </AssistantSelectionCopySurface>
       </ToolCallSheetProvider>
     );
   },
 );
+
+function ScrollIndicatorCluster({
+  containerStyle,
+  fadeIn,
+  fadeOut,
+  showJumpToStart,
+  isJumpingToStart,
+  onJumpToStart,
+  showScrollToBottom,
+  onScrollToBottom,
+}: {
+  containerStyle: StyleProp<ViewStyle>;
+  fadeIn: ComponentProps<typeof Animated.View>["entering"];
+  fadeOut: ComponentProps<typeof Animated.View>["exiting"];
+  showJumpToStart: boolean;
+  isJumpingToStart: boolean;
+  onJumpToStart: () => void;
+  showScrollToBottom: boolean;
+  onScrollToBottom: () => void;
+}) {
+  const { t } = useTranslation();
+  if (!showJumpToStart && !showScrollToBottom) {
+    return null;
+  }
+  return (
+    <View style={containerStyle} pointerEvents="box-none">
+      {showJumpToStart && (
+        <Animated.View entering={fadeIn} exiting={fadeOut}>
+          <Pressable
+            style={stylesheet.scrollToBottomButton}
+            onPress={onJumpToStart}
+            accessibilityRole="button"
+            accessibilityLabel={t("agentStream.jumpToStart")}
+            testID="jump-to-start-button"
+          >
+            {isJumpingToStart ? (
+              <ThemedLoadingSpinner size="small" uniProps={primaryColorMapping} />
+            ) : (
+              <ArrowUpToLine size={24} color={stylesheet.scrollToBottomIcon.color} />
+            )}
+          </Pressable>
+        </Animated.View>
+      )}
+      {showScrollToBottom && (
+        <Animated.View entering={fadeIn} exiting={fadeOut}>
+          <Pressable
+            style={stylesheet.scrollToBottomButton}
+            onPress={onScrollToBottom}
+            accessibilityRole="button"
+            accessibilityLabel={t("agentStream.scrollToBottom")}
+            testID="scroll-to-bottom-button"
+          >
+            <ChevronDown size={24} color={stylesheet.scrollToBottomIcon.color} />
+          </Pressable>
+        </Animated.View>
+      )}
+    </View>
+  );
+}
 
 function agentCapabilityFlagsEqual(
   left: AgentCapabilityFlags | undefined,
@@ -1712,6 +1798,9 @@ const stylesheet = StyleSheet.create((theme) => ({
     left: 0,
     right: 0,
     alignItems: "center",
+    flexDirection: "column",
+    justifyContent: "flex-end",
+    gap: theme.spacing[2],
   },
   scrollToBottomButton: {
     width: 48,
