@@ -309,6 +309,12 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
     () => ({ ...inputSegments, historyVirtualized, historyMounted }),
     [historyMounted, historyVirtualized, inputSegments],
   );
+  // Read by the viewport-handle effect's scrollToStart fallback so that effect's
+  // deps don't have to include segments, which is a new object on nearly every
+  // stream update -- that would tear down and rebuild the handle (cancelling any
+  // pending stick-to-bottom scroll) far more often than the handle actually needs to.
+  const segmentsRef = useRef(segments);
+  segmentsRef.current = segments;
   const isActive = useRetainedPanelActive();
   const isActiveRef = useRef(isActive);
   const scrollContainerRef = useRef<HTMLElement | null>(null);
@@ -321,11 +327,15 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
   }, []);
   const [followOutput, setFollowOutputr] = useState(true);
   const followOutputRef = useRef(followOutput);
-  const setFollowOutput = (value: boolean) => {
+  // Stable identity: this flows into useScrollToMessage's scrollToMessage callback,
+  // which flows into the viewport-handle effect's deps -- an unmemoized function
+  // here would make that effect (and its cancelPendingStickToBottom cleanup) run
+  // on every render regardless of what else is in its dep array.
+  const setFollowOutput = useCallback((value: boolean) => {
     followOutputRef.current = value;
     setFollowOutputr(value);
     return value;
-  };
+  }, []);
   const lastKnownScrollTopRef = useRef(0);
   const mouseScrollGestureRef = useRef<
     | { kind: "scrollbar"; pointerId: number }
@@ -780,6 +790,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
   }, [
     evaluateHistoryStart,
     isJumpSettling,
+    setFollowOutput,
     stopFollowingOutputFromUserIntent,
     updateScrollMetrics,
   ]);
@@ -833,6 +844,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
     hasRouteBottomAnchorRequest,
     isActivationReady,
     scheduleStickToBottom,
+    setFollowOutput,
   ]);
 
   // Following output is a layout invariant: rows, footer, and bottom offset must
@@ -1125,7 +1137,9 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
         // mounted yet (it was only just revealed), so a raw scrollTop write here
         // could land before the DOM reflects it.
         const targetId =
-          itemId ?? segments.historyVirtualized[0]?.id ?? segments.historyMounted[0]?.id;
+          itemId ??
+          segmentsRef.current.historyVirtualized[0]?.id ??
+          segmentsRef.current.historyMounted[0]?.id;
         if (targetId) {
           scrollToMessage(targetId);
           return;
@@ -1162,7 +1176,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
     forceStickToBottom,
     scheduleStickToBottom,
     scrollToMessage,
-    segments,
+    setFollowOutput,
     updateScrollMetrics,
     viewportRef,
   ]);

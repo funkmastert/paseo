@@ -88,6 +88,7 @@ import {
 import { resolveBottomOverlayTailInset } from "./bottom-overlay-inset";
 import { layoutStream, type StreamLayoutItem } from "./layout";
 import { useJumpToStart } from "./use-jump-to-start";
+import { shouldShowJumpToStart } from "./jump-to-start-visibility";
 import {
   type BottomAnchorLocalRequest,
   type BottomAnchorRouteRequest,
@@ -644,7 +645,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const handleTimelineHistoryLoadError = useCallback(() => {
       toast?.error(t("agentStream.historyLoadFailed"));
     }, [t, toast]);
-    const { jumpToStart, isJumpingToStart } = useJumpToStart({
+    const { jumpToStart, isJumpingToStart, invalidateJumpToStart } = useJumpToStart({
       agentId,
       serverId: resolvedServerId,
       hasRemoteOlderHistory: remoteHasOlder,
@@ -674,8 +675,16 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
 
     const stickyLastPrompt = useStickyLastPrompt({ agentId, items: effectiveStreamItems });
     const handleJumpToStickyPrompt = useCallback(() => {
+      invalidateJumpToStart();
       jumpToStickyLastPrompt(stickyLastPrompt.source, viewportRef);
-    }, [stickyLastPrompt]);
+    }, [invalidateJumpToStart, stickyLastPrompt]);
+    const handleJumpToOutlinePrompt = useCallback(
+      (seq: number) => {
+        invalidateJumpToStart();
+        chatOutline.jumpToPrompt(seq);
+      },
+      [chatOutline, invalidateJumpToStart],
+    );
     const handleReadingPositionChange = useCallback(
       (rowId: string | null) => {
         chatOutline.reportReadingPosition(rowId);
@@ -688,16 +697,18 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       ref,
       () => ({
         scrollToBottom(reason = "jump-to-bottom") {
+          invalidateJumpToStart();
           viewportRef.current?.scrollToBottom(reason);
         },
         prepareForViewportChange() {
           viewportRef.current?.prepareForViewportChange();
         },
       }),
-      [],
+      [invalidateJumpToStart],
     );
 
     const scrollToBottom = useCallback(() => {
+      invalidateJumpToStart();
       if (!isTimelineDetached) {
         viewportRef.current?.scrollToBottom("jump-to-bottom");
         return;
@@ -710,7 +721,13 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         scrollToBottom: () => viewportRef.current?.scrollToBottom("jump-to-bottom"),
         onError: handleTimelineHistoryLoadError,
       });
-    }, [agentId, handleTimelineHistoryLoadError, isTimelineDetached, resolvedServerId]);
+    }, [
+      agentId,
+      handleTimelineHistoryLoadError,
+      invalidateJumpToStart,
+      isTimelineDetached,
+      resolvedServerId,
+    ]);
 
     const setInlineDetailsExpanded = useCallback(
       (itemId: string, expanded: boolean) => {
@@ -1166,7 +1183,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           <ChatOutlineRail
             prompts={chatOutline.prompts}
             activePrompt={chatOutline.activePrompt}
-            onJumpToPrompt={chatOutline.jumpToPrompt}
+            onJumpToPrompt={handleJumpToOutlinePrompt}
           />
           <StickyPromptOverlay
             key={agentId}
@@ -1178,7 +1195,10 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             containerStyle={scrollToBottomContainerStyle}
             fadeIn={scrollIndicatorFadeIn}
             fadeOut={scrollIndicatorFadeOut}
-            showJumpToStart={hasOlder || !isNearHistoryStart}
+            showJumpToStart={shouldShowJumpToStart({
+              hasOlderHistory: hasOlder,
+              isNearHistoryStart,
+            })}
             isJumpingToStart={isJumpingToStart}
             onJumpToStart={jumpToStart}
             showScrollToBottom={!isNearBottom || isTimelineDetached}

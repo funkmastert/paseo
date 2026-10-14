@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import { planTimelineStartFetch } from "@/timeline/timeline-sync-plan";
@@ -16,6 +16,18 @@ export function useJumpToStart(input: {
   const [isJumpingToStart, setIsJumpingToStart] = useState(false);
   const pendingRef = useRef(false);
 
+  // Bumped by any navigation intent that supersedes a pending jump: a newer
+  // press of scroll-to-bottom or jump-to-message, or an agent switch. A jump
+  // in flight checks this before acting on the fetch it awaited, so a slow
+  // daemon round trip can't land after the user has already navigated away.
+  const generationRef = useRef(0);
+  const invalidateJumpToStart = useCallback(() => {
+    generationRef.current += 1;
+  }, []);
+  useEffect(() => {
+    invalidateJumpToStart();
+  }, [input.agentId, invalidateJumpToStart]);
+
   // Read by the jump once it resolves, rather than closed over at the moment
   // the user pressed the button.
   const hasRemoteOlderHistoryRef = useRef(input.hasRemoteOlderHistory);
@@ -31,6 +43,8 @@ export function useJumpToStart(input: {
     }
     pendingRef.current = true;
     setIsJumpingToStart(true);
+    const myGeneration = generationRef.current;
+    const isSuperseded = () => generationRef.current !== myGeneration;
     void jumpToTimelineStart({
       needsFetch: hasRemoteOlderHistoryRef.current,
       fetchStart: () =>
@@ -40,6 +54,9 @@ export function useJumpToStart(input: {
           planTimelineStartFetch(),
         ),
       revealEarliest: () => {
+        if (isSuperseded()) {
+          return null;
+        }
         const earliestItem = useSessionStore
           .getState()
           .sessions[input.serverId]?.agentStreamTail.get(input.agentId)?.[0];
@@ -53,7 +70,13 @@ export function useJumpToStart(input: {
       // scrollToMessage settle controller then retries if the row still isn't
       // mounted after that.
       scrollToStart: (itemId) => {
+        if (isSuperseded()) {
+          return;
+        }
         requestAnimationFrame(() => {
+          if (isSuperseded()) {
+            return;
+          }
           input.viewportRef.current?.scrollToStart(itemId);
         });
       },
@@ -64,5 +87,5 @@ export function useJumpToStart(input: {
     });
   }, [input.agentId, input.serverId, input.viewportRef]);
 
-  return { jumpToStart, isJumpingToStart };
+  return { jumpToStart, isJumpingToStart, invalidateJumpToStart };
 }

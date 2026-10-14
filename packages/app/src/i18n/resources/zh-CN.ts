@@ -208,7 +208,7 @@ export const zhCN: TranslationResources = {
     stickyPromptJumpToOriginal: "跳转到原始提示",
     stickyPromptShowFull: "显示完整提示",
     stickyPromptViewerTitle: "完整提示",
-    jumpToStart: "跳转到开头",
+    jumpToStart: "跳转到会话开头",
     historyLoadFailed: "无法加载智能体历史记录",
     messageCapped: "此消息已被截断（{{bytes}} 字节）。",
     permission: {

@@ -208,7 +208,7 @@ export const ru: TranslationResources = {
     stickyPromptJumpToOriginal: "Перейти к исходному запросу",
     stickyPromptShowFull: "Показать запрос полностью",
     stickyPromptViewerTitle: "Полный запрос",
-    jumpToStart: "Перейти к началу",
+    jumpToStart: "Перейти к началу сессии",
     historyLoadFailed: "Не удалось загрузить историю агента",
     messageCapped: "Это сообщение было обрезано ({{bytes}} байт).",
     permission: {

@@ -205,7 +205,7 @@ export const en = {
     stickyPromptJumpToOriginal: "Jump to original prompt",
     stickyPromptShowFull: "Show full prompt",
     stickyPromptViewerTitle: "Full prompt",
-    jumpToStart: "Jump to start",
+    jumpToStart: "Jump to start of session",
     historyLoadFailed: "Couldn't load agent history",
     messageCapped: "This message was capped ({{bytes}} bytes).",
     permission: {

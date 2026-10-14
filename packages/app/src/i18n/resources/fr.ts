@@ -210,7 +210,7 @@ export const fr: TranslationResources = {
     stickyPromptJumpToOriginal: "Aller à l'invite d'origine",
     stickyPromptShowFull: "Afficher l'invite complète",
     stickyPromptViewerTitle: "Invite complète",
-    jumpToStart: "Aller au début",
+    jumpToStart: "Aller au début de la séance",
     historyLoadFailed: "Impossible de charger l’historique de l’agent",
     messageCapped: "Ce message a été tronqué ({{bytes}} octets).",
     permission: {

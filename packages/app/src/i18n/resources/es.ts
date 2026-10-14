@@ -208,7 +208,7 @@ export const es: TranslationResources = {
     stickyPromptJumpToOriginal: "Ir al mensaje original",
     stickyPromptShowFull: "Mostrar mensaje completo",
     stickyPromptViewerTitle: "Mensaje completo",
-    jumpToStart: "Ir al inicio",
+    jumpToStart: "Ir al inicio de la sesión",
     historyLoadFailed: "No se pudo cargar el historial del agente",
     messageCapped: "Este mensaje fue truncado ({{bytes}} bytes).",
     permission: {
