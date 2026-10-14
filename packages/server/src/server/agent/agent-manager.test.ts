@@ -7839,6 +7839,39 @@ test("setLabels merges and persists labels", async () => {
   });
 });
 
+test("setLabels clears a label on a live agent when the patch value is null", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-set-labels-clear-live-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: {
+      codex: new TestAgentClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000135",
+  });
+
+  const snapshot = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+      title: "Label clear test",
+    },
+    undefined,
+    { workspaceId: undefined, origin: "human" },
+  );
+
+  await manager.setLabels(snapshot.id, { surface: "mobile", phase: "1a" });
+  await manager.setLabels(snapshot.id, { phase: null });
+
+  const live = manager.getAgent(snapshot.id);
+  expect(live?.labels).toEqual({ surface: "mobile" });
+
+  const persisted = await storage.get(snapshot.id);
+  expect(persisted?.labels).toEqual({ surface: "mobile" });
+});
+
 test("setLabels cannot grant the JEV tools label to a live agent", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-jev-label-live-"));
   const storagePath = join(workdir, "agents");

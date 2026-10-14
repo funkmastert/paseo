@@ -1008,7 +1008,8 @@ type ActiveManagedAgent =
   | ManagedAgentError;
 
 type LiveManagedAgent = ActiveManagedAgent;
-type AgentLabelPatch = Record<string, string | null>;
+/** A label patch: a string value sets the key, `null` clears it. */
+export type AgentLabelPatch = Record<string, string | null>;
 
 function attachManagedTurnIdentity(
   agent: ActiveManagedAgent,
@@ -3877,7 +3878,7 @@ export class AgentManager {
     return true;
   }
 
-  async setLabels(agentId: string, labels: Record<string, string>): Promise<void> {
+  async setLabels(agentId: string, labels: AgentLabelPatch): Promise<void> {
     await this.runLifecycleMutation(agentId, async () => {
       const agent = this.requireAgent(agentId);
       await this.writeLabels(agent.id, labels);
