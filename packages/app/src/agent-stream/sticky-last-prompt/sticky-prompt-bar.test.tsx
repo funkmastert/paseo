@@ -6,7 +6,7 @@ import React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserMessageItem } from "@/types/stream";
-import { StickyPromptBar } from "./sticky-prompt-bar";
+import { FullPromptViewer, StickyPromptBar } from "./sticky-prompt-bar";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -18,15 +18,22 @@ vi.mock("@/components/adaptive-modal-sheet", async () => {
     header,
     visible,
     onClose,
+    onDismiss,
     children,
     testID,
   }: {
     header: { title: string; actions?: React.ReactNode };
     visible: boolean;
     onClose: () => void;
+    onDismiss?: () => void;
     children: React.ReactNode;
     testID?: string;
   }) => {
+    // Mirrors the real component's contract: `onDismiss` fires once the (mocked-away) close
+    // transition finishes, not in the same tick as `visible` flipping false.
+    ReactModule.useEffect(() => {
+      if (!visible) onDismiss?.();
+    }, [visible, onDismiss]);
     if (!visible) return null;
     return ReactModule.createElement(
       "div",
@@ -50,18 +57,12 @@ function prompt(text = "Fix the flaky test"): UserMessageItem {
 let root: Root | null = null;
 let container: HTMLElement | null = null;
 
-function mount(props: { compact?: boolean; onJumpToOriginal: () => void; text?: string }): void {
+function render(node: React.ReactElement): void {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
-    root?.render(
-      <StickyPromptBar
-        prompt={prompt(props.text)}
-        compact={props.compact}
-        onJumpToOriginal={props.onJumpToOriginal}
-      />,
-    );
+    root?.render(node);
   });
 }
 
@@ -86,71 +87,91 @@ afterEach(() => {
 
 describe("StickyPromptBar", () => {
   it("renders two-line text by default", () => {
-    mount({ onJumpToOriginal: vi.fn() });
+    render(<StickyPromptBar prompt={prompt()} onJumpToOriginal={vi.fn()} onOpenViewer={vi.fn()} />);
     const body = query("sticky-prompt-bar-body");
     expect(body?.textContent).toContain("Fix the flaky test");
-    expect(query("sticky-prompt-viewer")).toBeNull();
   });
 
-  it("opens the full-prompt viewer with the full text when the body is tapped", () => {
-    const onJump = vi.fn();
-    mount({ onJumpToOriginal: onJump, text: "A very long prompt that keeps going" });
-    act(() => {
-      query("sticky-prompt-bar-body")?.click();
-    });
-    const viewer = query("sticky-prompt-viewer");
-    expect(viewer).not.toBeNull();
-    expect(query("sticky-prompt-viewer-text")?.textContent).toBe(
-      "A very long prompt that keeps going",
+  it("asks to open the viewer when the body is tapped, in both compact and full layout", () => {
+    const onOpenViewer = vi.fn();
+    render(
+      <StickyPromptBar
+        prompt={prompt()}
+        compact
+        onJumpToOriginal={vi.fn()}
+        onOpenViewer={onOpenViewer}
+      />,
     );
-    expect(onJump).not.toHaveBeenCalled();
-  });
-
-  it("opens the viewer when tapped in compact mode too", () => {
-    const onJump = vi.fn();
-    mount({ compact: true, onJumpToOriginal: onJump });
     act(() => {
       query("sticky-prompt-bar-body")?.click();
     });
-    expect(query("sticky-prompt-viewer")).not.toBeNull();
-    expect(onJump).not.toHaveBeenCalled();
+    expect(onOpenViewer).toHaveBeenCalledTimes(1);
   });
 
   it("calls onJumpToOriginal exactly once from the bar's own jump control without opening the viewer", () => {
     const onJump = vi.fn();
-    mount({ onJumpToOriginal: onJump });
+    const onOpenViewer = vi.fn();
+    render(
+      <StickyPromptBar prompt={prompt()} onJumpToOriginal={onJump} onOpenViewer={onOpenViewer} />,
+    );
     act(() => {
       query("sticky-prompt-bar-jump")?.click();
     });
     expect(onJump).toHaveBeenCalledTimes(1);
+    expect(onOpenViewer).not.toHaveBeenCalled();
+  });
+});
+
+describe("FullPromptViewer", () => {
+  function renderViewer(overrides: {
+    visible?: boolean;
+    text?: string;
+    onClose?: () => void;
+    onJumpToOriginal?: () => void;
+    onDismiss?: () => void;
+  }): void {
+    render(
+      <FullPromptViewer
+        visible={overrides.visible ?? true}
+        text={overrides.text ?? "A very long prompt that keeps going"}
+        onClose={overrides.onClose ?? vi.fn()}
+        onJumpToOriginal={overrides.onJumpToOriginal ?? vi.fn()}
+        onDismiss={overrides.onDismiss ?? vi.fn()}
+      />,
+    );
+  }
+
+  it("shows the full text when visible", () => {
+    renderViewer({ text: "A very long prompt that keeps going" });
+    expect(query("sticky-prompt-viewer-text")?.textContent).toBe(
+      "A very long prompt that keeps going",
+    );
+  });
+
+  it("renders nothing when not visible", () => {
+    renderViewer({ visible: false });
     expect(query("sticky-prompt-viewer")).toBeNull();
   });
 
-  it("jumping from the viewer calls onJumpToOriginal and closes the viewer", () => {
+  it("calls onClose, not onJumpToOriginal, from its own close control", () => {
+    const onClose = vi.fn();
     const onJump = vi.fn();
-    mount({ onJumpToOriginal: onJump });
+    renderViewer({ onClose, onJumpToOriginal: onJump });
     act(() => {
-      query("sticky-prompt-bar-body")?.click();
+      query("sticky-prompt-viewer-close")?.click();
     });
-    expect(query("sticky-prompt-viewer")).not.toBeNull();
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onJump).not.toHaveBeenCalled();
+  });
 
+  it("calls onJumpToOriginal from its jump action without calling onClose", () => {
+    const onClose = vi.fn();
+    const onJump = vi.fn();
+    renderViewer({ onClose, onJumpToOriginal: onJump });
     act(() => {
       query("sticky-prompt-viewer-jump")?.click();
     });
     expect(onJump).toHaveBeenCalledTimes(1);
-    expect(query("sticky-prompt-viewer")).toBeNull();
-  });
-
-  it("closes the viewer via its close control without jumping", () => {
-    const onJump = vi.fn();
-    mount({ onJumpToOriginal: onJump });
-    act(() => {
-      query("sticky-prompt-bar-body")?.click();
-    });
-    act(() => {
-      query("sticky-prompt-viewer-close")?.click();
-    });
-    expect(onJump).not.toHaveBeenCalled();
-    expect(query("sticky-prompt-viewer")).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

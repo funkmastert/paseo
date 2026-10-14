@@ -1,5 +1,5 @@
 import { ArrowUp } from "lucide-react-native";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
@@ -12,23 +12,18 @@ export interface StickyPromptBarProps {
   /** Pinned-grid cells: one line, unobtrusive; tapping the body still opens the full viewer. */
   compact?: boolean;
   onJumpToOriginal: () => void;
+  /** The full-prompt viewer lives above this bar (view.tsx's StickyPromptOverlay) so it survives
+   * the bar itself hiding; this just asks the overlay to open it. */
+  onOpenViewer: () => void;
 }
 
 export function StickyPromptBar({
   prompt,
   compact = false,
   onJumpToOriginal,
+  onOpenViewer,
 }: StickyPromptBarProps) {
   const { t } = useTranslation();
-  const [viewerOpen, setViewerOpen] = useState(false);
-
-  const handlePressBody = useCallback(() => {
-    setViewerOpen(true);
-  }, []);
-
-  const handleCloseViewer = useCallback(() => {
-    setViewerOpen(false);
-  }, []);
 
   const handlePressJump = useCallback(
     (event: { stopPropagation?: () => void }) => {
@@ -37,11 +32,6 @@ export function StickyPromptBar({
     },
     [onJumpToOriginal],
   );
-
-  const handleJumpFromViewer = useCallback(() => {
-    setViewerOpen(false);
-    onJumpToOriginal();
-  }, [onJumpToOriginal]);
 
   const bodyPressableStyle = useCallback(
     ({ pressed }: { pressed: boolean }) => [styles.body, pressed && styles.bodyPressed],
@@ -52,7 +42,7 @@ export function StickyPromptBar({
     <View style={[styles.container, compact && styles.containerCompact]} testID="sticky-prompt-bar">
       <Pressable
         style={bodyPressableStyle}
-        onPress={handlePressBody}
+        onPress={onOpenViewer}
         accessibilityRole="button"
         accessibilityLabel={t("agentStream.stickyPromptShowFull")}
         testID="sticky-prompt-bar-body"
@@ -71,28 +61,27 @@ export function StickyPromptBar({
       >
         <ArrowUp size={14} color={styles.icon.color} />
       </Pressable>
-      <FullPromptViewer
-        visible={viewerOpen}
-        text={prompt.text}
-        onClose={handleCloseViewer}
-        onJumpToOriginal={handleJumpFromViewer}
-      />
     </View>
   );
 }
 
-interface FullPromptViewerProps {
+export interface FullPromptViewerProps {
   visible: boolean;
   text: string;
   onClose: () => void;
   onJumpToOriginal: () => void;
+  /** Fires once AdaptiveModalSheet's own close transition has actually finished, on every
+   * platform — the sequencing point for "jump to message" so the scroll never races the sheet's
+   * exit animation (web fade, native bottom-sheet slide-down). */
+  onDismiss: () => void;
 }
 
-function FullPromptViewer({
+export function FullPromptViewer({
   visible,
   text,
   onClose,
   onJumpToOriginal,
+  onDismiss,
 }: FullPromptViewerProps): ReactNode {
   const { t } = useTranslation();
 
@@ -122,6 +111,7 @@ function FullPromptViewer({
       header={header}
       visible={visible}
       onClose={onClose}
+      onDismiss={onDismiss}
       testID="sticky-prompt-viewer"
     >
       <Text selectable style={styles.viewerText} testID="sticky-prompt-viewer-text">

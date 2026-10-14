@@ -3,6 +3,7 @@
  */
 import { act } from "@testing-library/react";
 import React from "react";
+import { createPortal } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { Pressable, Text } from "react-native";
 import { create } from "zustand";
@@ -56,14 +57,26 @@ vi.mock("@/runtime/host-runtime", () => ({
 const seenReadOnly: (boolean | undefined)[] = [];
 
 // Stands in for the real agent panel: reads the same pane context a real cell would, and renders
-// one nested Pressable so tests can prove clicks on it don't also open the workspace.
+// one nested Pressable so tests can prove clicks on it don't also open the workspace. It also
+// portals a plain (non-Pressable) node straight to `document.body`, standing in for
+// AdaptiveModalSheet's desktop web/Electron dialog (a real `createPortal`): the DOM node lands
+// outside the cell's own subtree while the React-tree ancestry a click bubbles through still
+// runs straight up to the cell's body Pressable, same as the real portal does.
 function ProbeAgentPanel() {
   const { readOnly } = usePaneContext();
   seenReadOnly.push(readOnly);
   return (
-    <Pressable testID="probe-card" onPress={spies.onCardPress}>
-      <Text>card</Text>
-    </Pressable>
+    <>
+      <Pressable testID="probe-card" onPress={spies.onCardPress}>
+        <Text>card</Text>
+      </Pressable>
+      {createPortal(
+        <button type="button" data-testid="probe-portal-content">
+          portalled content
+        </button>,
+        document.body,
+      )}
+    </>
   );
 }
 
@@ -192,6 +205,15 @@ describe("PinnedGridCell", () => {
       '[data-testid="pinned-grid-cell-body-server-a:workspace-a"]',
     );
     (body as HTMLElement).click();
+    expect(spies.navigateToWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("does not open the workspace when a portalled child (e.g. a modal sheet) is clicked", () => {
+    mount();
+    const portalNode = document.querySelector('[data-testid="probe-portal-content"]');
+    expect(portalNode).toBeTruthy();
+    expect(container?.contains(portalNode)).toBe(false);
+    (portalNode as HTMLElement).click();
     expect(spies.navigateToWorkspace).not.toHaveBeenCalled();
   });
 

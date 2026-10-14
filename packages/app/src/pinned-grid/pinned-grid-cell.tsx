@@ -1,7 +1,8 @@
 import { ExternalLink } from "lucide-react-native";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Pressable, Text, View } from "react-native";
+import type { GestureResponderEvent } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { AgentIdChip } from "@/components/agent-id-chip";
@@ -119,16 +120,40 @@ export const PinnedGridCell = memo(function PinnedGridCell({
   const handlePointerEnter = useCallback(() => setIsHovered(true), []);
   const handlePointerLeave = useCallback(() => setIsHovered(false), []);
 
-  const handleOpenBody = useCallback(() => {
-    // A drag that ends over the cell is a text selection, not a click — don't navigate away
-    // from under it. Nested Pressables (question cards, links) claim their own press first and
-    // never reach this handler at all.
-    const selection = isWeb ? window.getSelection() : null;
-    if (selection && !selection.isCollapsed && selection.toString().length > 0) {
-      return;
-    }
-    handleOpenWorkspace();
-  }, [handleOpenWorkspace]);
+  // A portalled child (AdaptiveModalSheet's desktop web/Electron dialog, rendered via
+  // react-dom createPortal to the overlay root) keeps its React-tree ancestry under this cell
+  // even though its DOM node lives elsewhere. That lets a click on the portal's own content
+  // bubble through the React tree into this cell's body press — this ref lets the handler tell
+  // the two apart by DOM containment instead of relying on every portal leaf being a Pressable.
+  const cellNodeRef = useRef<HTMLElement | null>(null);
+  const setCellNode = useCallback((node: unknown) => {
+    cellNodeRef.current =
+      typeof HTMLElement !== "undefined" && node instanceof HTMLElement ? node : null;
+  }, []);
+
+  const handleOpenBody = useCallback(
+    (event: GestureResponderEvent) => {
+      if (isWeb) {
+        const target = (event.nativeEvent as unknown as { target?: unknown }).target;
+        if (
+          cellNodeRef.current &&
+          target instanceof Node &&
+          !cellNodeRef.current.contains(target)
+        ) {
+          return;
+        }
+      }
+      // A drag that ends over the cell is a text selection, not a click — don't navigate away
+      // from under it. Nested Pressables (question cards, links) claim their own press first and
+      // never reach this handler at all.
+      const selection = isWeb ? window.getSelection() : null;
+      if (selection && !selection.isCollapsed && selection.toString().length > 0) {
+        return;
+      }
+      handleOpenWorkspace();
+    },
+    [handleOpenWorkspace],
+  );
 
   const content = useMemo(() => {
     if (!agentId) {
@@ -161,6 +186,7 @@ export const PinnedGridCell = memo(function PinnedGridCell({
 
   return (
     <View
+      ref={setCellNode}
       style={[styles.cell, isHovered && styles.cellHovered]}
       onStartShouldSetResponderCapture={handleCaptureResponder}
       onPointerEnter={handlePointerEnter}

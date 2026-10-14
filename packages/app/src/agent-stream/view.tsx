@@ -8,7 +8,6 @@ import React, {
   useMemo,
   useRef,
   useState,
-  useSyncExternalStore,
   type ComponentProps,
   type ReactNode,
   type RefObject,
@@ -73,7 +72,7 @@ import { resolveStreamRenderStrategy } from "./strategy-resolver";
 import { type StreamSegmentRenderers, type StreamViewportHandle } from "./strategy";
 import { ChatOutlineRail } from "@/agent-stream/chat-outline/rail";
 import { useChatOutline } from "@/agent-stream/chat-outline/use-chat-outline";
-import { StickyPromptBar } from "@/agent-stream/sticky-last-prompt/sticky-prompt-bar";
+import { StickyPromptOverlay } from "@/agent-stream/sticky-last-prompt/sticky-prompt-overlay";
 import { useStickyLastPrompt } from "@/agent-stream/sticky-last-prompt/use-sticky-last-prompt";
 import type { StickyLastPromptSource } from "@/agent-stream/sticky-last-prompt/model";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
@@ -347,25 +346,6 @@ function jumpToStickyLastPrompt(
   if (!prompt) return;
   viewportRef.current?.scrollToMessage?.(prompt.id);
 }
-
-// Subscribes to the publisher itself (mirroring ChatOutlineRail's
-// `useSyncExternalStore(activePrompt.subscribe, activePrompt.getActiveSeq)`) so a visibility
-// change re-renders only this leaf, not the whole AgentStreamView.
-const StickyPromptOverlay = memo(function StickyPromptOverlay({
-  source,
-  compact,
-  onJumpToOriginal,
-}: {
-  source: StickyLastPromptSource;
-  compact: boolean;
-  onJumpToOriginal: () => void;
-}): ReactNode {
-  const state = useSyncExternalStore(source.subscribe, source.getState);
-  if (!state.barVisible || !state.prompt) return null;
-  return (
-    <StickyPromptBar prompt={state.prompt} compact={compact} onJumpToOriginal={onJumpToOriginal} />
-  );
-});
 
 const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamViewProps>(
   function AgentStreamView(
@@ -1177,6 +1157,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             onJumpToPrompt={chatOutline.jumpToPrompt}
           />
           <StickyPromptOverlay
+            key={agentId}
             source={stickyLastPrompt.source}
             compact={resolvedCompact}
             onJumpToOriginal={handleJumpToStickyPrompt}
