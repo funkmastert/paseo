@@ -74,6 +74,7 @@ import {
   setAgentModeCommand,
   updateAgentCommand,
 } from "../lifecycle-command.js";
+import { setCompletionStateCommand } from "../completion-state-command.js";
 import type { ForgeService } from "../../../services/forge-service.js";
 import { resolveAgentNice } from "../../../utils/process-priority.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
@@ -2445,6 +2446,67 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       return {
         content: [],
         structuredContent: ensureValidJson({ success: true }),
+      };
+    },
+  );
+
+  registerTool(
+    "set_completion_state",
+    {
+      title: "Set completion state",
+      description:
+        "Mark this agent (or your own child) ready-to-merge or done, or clear the state (docs/completion-state.md). Verified before being accepted.",
+      inputSchema: {
+        state: z.enum(["ready-to-merge", "done", "clear"]),
+        note: z
+          .string()
+          .trim()
+          .max(200)
+          .optional()
+          .describe("Optional one-line summary, shown in the UI tooltip."),
+        agentId: z
+          .string()
+          .optional()
+          .describe("Target a child you created. Omit to target yourself."),
+      },
+      outputSchema: {
+        success: z.boolean(),
+        state: z.enum(["ready-to-merge", "done"]).nullable(),
+        note: z.string().nullable(),
+        completionAt: z.string().nullable(),
+        gateNote: z.string().optional(),
+      },
+    },
+    async ({ state, note, agentId }) => {
+      if (!callerAgentId) {
+        throw new Error("set_completion_state requires a caller agent");
+      }
+      const toCompletionStateAgentView = (agent: ReturnType<AgentManager["getAgent"]>) =>
+        agent && {
+          id: agent.id,
+          workspaceId: agent.workspaceId,
+          labels: agent.labels,
+          pendingPermissionCount: agent.pendingPermissions.size,
+          lifecycle: agent.lifecycle,
+        };
+      const result = await setCompletionStateCommand(
+        {
+          agentManager: {
+            getAgent: (id) => toCompletionStateAgentView(agentManager.getAgent(id)),
+            listAgents: () =>
+              agentManager
+                .listAgents()
+                .map((agent) => toCompletionStateAgentView(agent))
+                .filter((agent): agent is NonNullable<typeof agent> => agent !== null),
+            setLabels: (id, labels) => agentManager.setLabels(id, labels),
+          },
+          workspaceRegistry: options.workspaceRegistry,
+        },
+        { callerAgentId, agentId, state, note },
+      );
+      return {
+        content: [],
+        structuredContent: ensureValidJson(result),
       };
     },
   );
