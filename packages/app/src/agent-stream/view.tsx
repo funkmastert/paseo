@@ -605,13 +605,6 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const isLoadingOlder = remoteIsLoadingOlder;
     const hasOlder = hasLocalHistory || remoteHasOlder;
     const progressKey = `${remoteProgressKey ?? "local"}:${historyWindowStart}`;
-    const { jumpToStart, isJumpingToStart } = useJumpToStart({
-      agentId,
-      hasOlderHistory: hasOlder,
-      isLoadingOlderHistory: isLoadingOlder,
-      loadOlder,
-      viewportRef,
-    });
 
     const baseRenderModel = useMemo(() => {
       return buildAgentStreamRenderModel({
@@ -651,6 +644,14 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const handleTimelineHistoryLoadError = useCallback(() => {
       toast?.error(t("agentStream.historyLoadFailed"));
     }, [t, toast]);
+    const { jumpToStart, isJumpingToStart } = useJumpToStart({
+      agentId,
+      serverId: resolvedServerId,
+      hasRemoteOlderHistory: remoteHasOlder,
+      revealLoadedHistory,
+      viewportRef,
+      onError: handleTimelineHistoryLoadError,
+    });
     const visibleHistoryItemIds = useMemo(
       () =>
         new Set(

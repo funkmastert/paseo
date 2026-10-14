@@ -68,6 +68,27 @@ export function planTimelineOlderFetch(cursor: TimelineSyncCursor) {
   } as const;
 }
 
+export interface ProjectedTimelineStartFetchPlan {
+  direction: "after";
+  limit: number;
+  projection: "projected";
+  mergeWindow: true;
+}
+
+// No cursor: the server defaults an uncursored "after" fetch to baseSeq 0, so this
+// reaches the session's true earliest rows in one request instead of walking
+// backward page by page from wherever the client's window currently starts.
+// `mergeWindow` keeps whatever is already loaded near the live tail rather than
+// discarding it, matching how `planTimelinePromptJump` jumps to an older message.
+export function planTimelineStartFetch(): ProjectedTimelineStartFetchPlan {
+  return {
+    direction: "after",
+    limit: TIMELINE_FETCH_PAGE_SIZE,
+    projection: "projected",
+    mergeWindow: true,
+  } as const;
+}
+
 export function planTimelinePromptJump(target: TimelineSyncCursor) {
   const newerRows = Math.floor(TIMELINE_FETCH_PAGE_SIZE / 2);
   return {

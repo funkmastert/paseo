@@ -6,6 +6,7 @@ import {
   planTimelineOlderFetch,
   planTimelinePromptJump,
   planTimelineResumeFetch,
+  planTimelineStartFetch,
   planTimelineTailFetch,
 } from "./timeline-sync-plan";
 
@@ -47,6 +48,15 @@ describe("timeline sync planning", () => {
         epoch: "epoch-1",
         seq: 42 + Math.floor(TIMELINE_FETCH_PAGE_SIZE / 2) + 1,
       },
+      limit: TIMELINE_FETCH_PAGE_SIZE,
+      projection: "projected",
+      mergeWindow: true,
+    });
+  });
+
+  test("jumping to the start fetches one bounded page forward with no cursor", () => {
+    expect(planTimelineStartFetch()).toEqual({
+      direction: "after",
       limit: TIMELINE_FETCH_PAGE_SIZE,
       projection: "projected",
       mergeWindow: true,

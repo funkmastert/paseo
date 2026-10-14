@@ -1119,7 +1119,17 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
         cancelPendingStickToBottom();
         forceStickToBottom();
       },
-      scrollToStart: () => {
+      scrollToStart: (itemId) => {
+        // Prefer landing precisely on the earliest loaded row via the same
+        // settle-and-retry controller scrollToMessage uses: the row may not be
+        // mounted yet (it was only just revealed), so a raw scrollTop write here
+        // could land before the DOM reflects it.
+        const targetId =
+          itemId ?? segments.historyVirtualized[0]?.id ?? segments.historyMounted[0]?.id;
+        if (targetId) {
+          scrollToMessage(targetId);
+          return;
+        }
         const scrollContainer = scrollContainerRef.current;
         if (!isActiveRef.current || !scrollContainer) {
           return;
@@ -1152,6 +1162,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
     forceStickToBottom,
     scheduleStickToBottom,
     scrollToMessage,
+    segments,
     updateScrollMetrics,
     viewportRef,
   ]);
