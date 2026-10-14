@@ -30,6 +30,7 @@ export type AgentRunController = Pick<
   | "replaceAgentRun"
   | "steerIntoActiveTurn"
   | "streamAgent"
+  | "clearCompletionLabelsIfSet"
 > &
   Partial<
     Pick<AgentManager, "interceptPromptForDispatch" | "getAdmittedTurn" | "getPromptQueue">
@@ -181,9 +182,17 @@ export async function deliverQueuedPrompt(input: {
   const steerOptions = prompt.clearPendingPermissions
     ? { ...runOptions, clearPendingPermissions: true }
     : runOptions;
+  const shouldClearCompletion = !isSystemInjectedPrompt(prompt.prompt);
+  let completionCleared = false;
   for (;;) {
     if (!agentManager.getAgent(agentId)) {
       if (!input.loadAgent || !(await input.loadAgent(agentId))) return "dropped";
+    }
+    // Completion state (docs/completion-state.md) auto-clear: this message was queued behind a
+    // busy turn, so dispatch — not enqueue — is when it actually reaches the agent as new work.
+    if (shouldClearCompletion && !completionCleared) {
+      await agentManager.clearCompletionLabelsIfSet(agentId);
+      completionCleared = true;
     }
     const result = await agentManager.steerIntoActiveTurn(agentId, prompt.prompt, steerOptions);
     if (result.status === "steered") return "delivered";
@@ -254,6 +263,12 @@ export async function startAgentRun(
   // intercept lives at this layer so it covers every prompt entrypoint.
   if (agentManager.tryRunOutOfBand(agentId, prompt, options?.runOptions)) {
     return { disposition: "out_of_band" };
+  }
+  // Completion state (docs/completion-state.md) auto-clear: this is the dispatch point for every
+  // prompt surface (Session/WS, MCP, CLI-through-MCP, chat mentions, notify-on-finish). A
+  // system-injected envelope (chat mentions, notify-on-finish) is not new work.
+  if (!isSystemInjectedPrompt(prompt)) {
+    await agentManager.clearCompletionLabelsIfSet(agentId);
   }
   // Refocus rides on this prompt when one is due (agent-refocus.ts). It only ever adds to a
   // prompt that is being sent anyway, so every surface gets it without ever starting a turn.
@@ -397,6 +412,14 @@ const SYSTEM_ENVELOPE_PATTERN = /^<paseo-system>\n[\s\S]*\n<\/paseo-system>$/;
 
 export function isSystemInjectedEnvelope(text: string): boolean {
   return SYSTEM_ENVELOPE_PATTERN.test(text);
+}
+
+/**
+ * A structured prompt (content blocks) is never a system envelope — only `formatSystemNotificationPrompt`
+ * produces one, and it always returns a plain string.
+ */
+function isSystemInjectedPrompt(prompt: AgentPromptInput): boolean {
+  return typeof prompt === "string" && isSystemInjectedEnvelope(prompt);
 }
 
 /**

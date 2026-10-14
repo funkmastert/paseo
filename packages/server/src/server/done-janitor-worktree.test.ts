@@ -348,6 +348,35 @@ describe("checkMergedIntoRemoteBase", () => {
     expect(result.merged).toBe(false);
   });
 
+  test("a branch squash-merged into the remote base is merged, though never its ancestor", async () => {
+    const worktree = addWorktree("squash-merged", "feature");
+    commit(worktree, "a.txt", "a\n");
+    // What GitHub's and Gitea's default "squash and merge" does: one new commit on main whose
+    // tree matches the branch's net change, with no ancestor/descendant relationship to it.
+    git(repo, "merge", "-q", "--squash", "feature");
+    git(repo, "commit", "-q", "-m", "squash merge feature");
+    git(repo, "push", "-q", "origin", "main");
+
+    const result = await checkMergedIntoRemoteBase({ worktreePath: worktree, baseBranch: "main" });
+
+    expect(result).toEqual({ merged: true });
+  });
+
+  test("a branch rebase-merged into the remote base is merged, though its own commit never landed", async () => {
+    const worktree = addWorktree("rebase-merged", "feature");
+    commit(worktree, "a.txt", "a\n");
+    const featureHead = git(worktree, "rev-parse", "HEAD").trim();
+    // What a "rebase and merge" does: the commit is replayed onto main with a new parent, so it
+    // gets a new SHA even though the diff is identical. The worktree's own commit is never an
+    // ancestor of the result.
+    git(repo, "cherry-pick", featureHead);
+    git(repo, "push", "-q", "origin", "main");
+
+    const result = await checkMergedIntoRemoteBase({ worktreePath: worktree, baseBranch: "main" });
+
+    expect(result).toEqual({ merged: true });
+  });
+
   test("no recorded base branch cannot tell", async () => {
     const worktree = addWorktree("no-base-merge-check", "feature");
     commit(worktree, "a.txt", "a\n");

@@ -40,7 +40,14 @@ all three labels.
 
 `done` additionally requires the branch be merged into its _remote_ base branch specifically —
 `checkMergedIntoRemoteBase` in the same file, a sibling to the deletion-safety check, since "pushed
-somewhere" is not "the PR merged".
+somewhere" is not "the PR merged". Ancestor reachability (`git rev-list --count`) is the fast path,
+but it is blind to the default GitHub/Gitea "squash and merge" and to a "rebase and merge": both
+land the branch's net changes on the base in a commit that is never a descendant of the branch's
+own commits, so reachability never reads it as merged. When reachability fails,
+`isContentMergedIntoRemoteBase` falls back to a content check: `git merge-tree --write-tree
+<remoteBase> HEAD` with no conflict, whose result tree equals `<remoteBase>^{tree}` — i.e. merging
+the branch into the base would change nothing, because the base already has it. This never fetches
+(below); a refusal from this path says so and tells the agent to `git fetch` and retry.
 
 When a check can't be run — no workspace record, a non-worktree workspace (`local_checkout` or
 `directory`), or no remote holds the recorded base branch — the call is allowed through rather than
@@ -48,10 +55,20 @@ refused, and the response names why.
 
 ## Auto-clear
 
-The three labels clear the moment the agent receives a new, non-system-injected `user_message` —
-a real prompt, not a heartbeat, a finish report, or the done janitor's own "are you done" question
-(`isSystemInjectedEnvelope`, `packages/server/src/server/agent/agent-prompt.ts`). New work means the
-claim is no longer current; the agent sets it again when it finishes again.
+The three labels clear at the moment a non-system-injected prompt is actually dispatched to the
+agent — `sendPromptToAgent` and `deliverQueuedPrompt` in
+`packages/server/src/server/agent/agent-prompt.ts`, which cover every surface that sends a prompt
+(Session/WS, MCP, CLI-through-MCP) and a prompt that was queued behind a busy turn and is now being
+drained and delivered. A system-injected envelope (`isSystemInjectedEnvelope`) — a heartbeat, a
+finish report, the done janitor's own "are you done" question — never clears it.
+
+This is deliberately not a stream/timeline check. A live `user_message` timeline event is not proof
+of new work: Claude Code's session-resume replay (what a daemon restart does to resume a session)
+pushes the agent's entire prior transcript back through the same live stream path, untagged, so a
+clear keyed off that event would wipe the state off every idle, "done" agent a restart resumes. The
+explicit history-hydration path (`hydrateTimelineFromLegacyProviderHistory`, `fromHistory`) was
+already excluded before this, but the SDK's own resume replay was not — moving the clear to dispatch
+time removes the stream as a trigger entirely, closing both.
 
 ## How agents are told
 

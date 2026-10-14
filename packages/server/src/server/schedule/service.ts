@@ -260,6 +260,7 @@ type ScheduleAgentManager = Pick<
   | "replaceAgentRun"
   | "steerIntoActiveTurn"
   | "streamAgent"
+  | "clearCompletionLabelsIfSet"
 > &
   Pick<
     AgentManager,

@@ -3890,10 +3890,16 @@ export class AgentManager {
 
   /**
    * Completion state (docs/completion-state.md) auto-clear: new work means a `set_completion_state`
-   * claim is no longer current. A no-op when none of the three labels are set, so a prompt to an
-   * agent that never claimed a state causes no extra persist/emit.
+   * claim is no longer current. Called from agent-prompt.ts at the point a non-system prompt is
+   * actually dispatched to the agent (sendPromptToAgent, deliverQueuedPrompt) — not from the
+   * stream, since a live timeline event also fires for Claude Code's session-resume replay, which
+   * is not new work (docs/completion-state.md). A no-op for an agent that is not live, or when
+   * none of the three labels are set, so a prompt to an agent that never claimed a state causes no
+   * extra persist/emit.
    */
-  private async clearCompletionLabelsIfSet(agent: LiveManagedAgent): Promise<void> {
+  async clearCompletionLabelsIfSet(agentId: string): Promise<void> {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
     if (
       !(COMPLETION_LABEL in agent.labels) &&
       !(COMPLETION_NOTE_LABEL in agent.labels) &&
@@ -6662,16 +6668,11 @@ export class AgentManager {
   }): Promise<void> {
     const { agent, event, options, flags } = params;
 
-    // Completion state (docs/completion-state.md) clears on any new, non-replayed human prompt,
-    // computed up front since a reconciled echo (below) returns before the live-dispatch branch
-    // that would otherwise be the natural place for this.
-    if (
-      event.item.type === "user_message" &&
-      !options?.fromHistory &&
-      !isSystemInjectedEnvelope(event.item.text)
-    ) {
-      await this.clearCompletionLabelsIfSet(agent);
-    }
+    // Completion state (docs/completion-state.md) clears at dispatch time (agent-prompt.ts's
+    // sendPromptToAgent and deliverQueuedPrompt), not here. A live timeline event is not proof of
+    // new work: Claude Code's session-resume replay pushes the whole prior transcript back
+    // through this exact stream path with no fromHistory tag, which would otherwise wipe the
+    // state off every idle agent a daemon restart resumes.
 
     if (event.item.type === "user_message" && isSystemInjectedEnvelope(event.item.text)) {
       flags.shouldDispatchEvent = false;

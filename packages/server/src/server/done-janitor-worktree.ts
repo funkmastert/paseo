@@ -282,6 +282,12 @@ export interface CheckMergedIntoRemoteBaseInput {
  * ref or any other remote-tracking branch. Used by completion state's `done` gate
  * (docs/completion-state.md): "pushed somewhere" is not "the PR merged".
  *
+ * Ancestor reachability is the fast path, but it is blind to the default GitHub/Gitea "squash and
+ * merge" (and a rebase merge): both land HEAD's net changes on the base in a commit that is never
+ * a descendant of HEAD, so reachability stays permanently non-zero. When reachability fails,
+ * {@link isContentMergedIntoRemoteBase} falls back to a tree-equality check: HEAD's changes are
+ * already on the base if merging HEAD into it would produce exactly the base's own tree.
+ *
  * `merged: null` is "can't tell" (no base branch recorded, no matching remote ref, or a git
  * command failed) — doubt never reads as merged, but the caller treats it as allow-through, same
  * as a non-git or local checkout.
@@ -316,13 +322,42 @@ export async function checkMergedIntoRemoteBase(
   if (!Number.isFinite(count)) {
     return { merged: null, reason: "git could not compare it with its remote base" };
   }
-  if (count > 0) {
-    return {
-      merged: false,
-      reason: `${branch} has ${count} commit(s) not yet merged into ${candidates[0]}`,
-    };
+  if (count === 0) {
+    return { merged: true };
   }
-  return { merged: true };
+  if (await isContentMergedIntoRemoteBase(git, head, candidates[0])) {
+    return { merged: true };
+  }
+  return {
+    merged: false,
+    reason:
+      `${branch} has ${count} commit(s) not yet merged into ${candidates[0]}` +
+      " (this never fetches — if it was just merged, run git fetch and retry)",
+  };
+}
+
+/**
+ * Content-equality fallback for a squash or rebase merge: true when merging `head` into
+ * `remoteBaseRef` would change nothing — the result tree is exactly the base's own tree, with no
+ * conflict. That means every change HEAD carries is already present on the base, which is what
+ * "squashed and merged" looks like once the commits themselves no longer line up.
+ */
+async function isContentMergedIntoRemoteBase(
+  git: ReadOnlyGit,
+  head: string,
+  remoteBaseRef: string,
+): Promise<boolean> {
+  // Non-zero exit (a real conflict, or a failure) maps to null by createReadOnlyGit, so a
+  // conflicted merge never reads as a content match.
+  const mergeTreeOutput = await git(["merge-tree", "--write-tree", remoteBaseRef, head]);
+  if (mergeTreeOutput === null) return false;
+  const resultTree = mergeTreeOutput.split("\n")[0]?.trim();
+  if (!resultTree) return false;
+  const baseTree = (
+    await git(["rev-parse", "--verify", "--quiet", `${remoteBaseRef}^{tree}`])
+  )?.trim();
+  if (!baseTree) return false;
+  return resultTree === baseTree;
 }
 
 function isLockedWorktree(porcelain: string, worktreePath: string): boolean {

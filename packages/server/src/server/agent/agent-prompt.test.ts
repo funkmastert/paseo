@@ -7,6 +7,9 @@ import { join } from "node:path";
 
 import {
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
+  COMPLETION_AT_LABEL,
+  COMPLETION_LABEL,
+  COMPLETION_NOTE_LABEL,
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import { createTestLogger } from "../../test-utils/test-logger.js";
@@ -23,6 +26,7 @@ beforeEach(() => {
 });
 import { FinishObligationService } from "./finish-obligation-service.js";
 import {
+  deliverQueuedPrompt,
   formatSystemNotificationPrompt,
   isSystemInjectedEnvelope,
   MigratedToLoopError,
@@ -1293,6 +1297,114 @@ describe("a prompt to a handle account failover retired", () => {
 
       expect(result.agentId).toBe(retired);
       await vi.waitFor(() => expect(scenario.promptedAgentIds()).toEqual([retired]));
+    } finally {
+      await scenario.cleanup();
+    }
+  });
+});
+
+// Completion state (docs/completion-state.md) auto-clear happens here, at the point a prompt is
+// actually dispatched to the agent — not from the stream, which also carries Claude Code's
+// session-resume replay (agent-manager.test.ts covers that side).
+describe("completion state auto-clear on dispatch", () => {
+  async function setCompletionLabels(scenario: MovedConversationScenario, agentId: string) {
+    await scenario.agentManager.setLabels(agentId, {
+      [COMPLETION_LABEL]: "done",
+      [COMPLETION_NOTE_LABEL]: "PR #41 merged",
+      [COMPLETION_AT_LABEL]: "2026-10-13T00:00:00.000Z",
+    });
+  }
+
+  test("sendPromptToAgent clears the labels when it dispatches a real prompt", async () => {
+    const scenario = createMovedConversationScenario();
+    try {
+      const agentId = await scenario.createAgent();
+      await setCompletionLabels(scenario, agentId);
+
+      await sendPromptToAgent({
+        agentManager: scenario.agentManager,
+        agentStorage: scenario.agentStorage,
+        agentId,
+        prompt: "new instructions",
+        logger: createTestLogger(),
+      });
+
+      await vi.waitFor(() => expect(scenario.promptedAgentIds()).toEqual([agentId]));
+      const live = scenario.agentManager.getAgent(agentId);
+      expect(live?.labels[COMPLETION_LABEL]).toBeUndefined();
+      expect(live?.labels[COMPLETION_NOTE_LABEL]).toBeUndefined();
+      expect(live?.labels[COMPLETION_AT_LABEL]).toBeUndefined();
+    } finally {
+      await scenario.cleanup();
+    }
+  });
+
+  test("sendPromptToAgent does not clear the labels for a system-injected envelope", async () => {
+    const scenario = createMovedConversationScenario();
+    try {
+      const agentId = await scenario.createAgent();
+      await setCompletionLabels(scenario, agentId);
+
+      await sendPromptToAgent({
+        agentManager: scenario.agentManager,
+        agentStorage: scenario.agentStorage,
+        agentId,
+        prompt: formatSystemNotificationPrompt("child finished"),
+        unarchive: false,
+        logger: createTestLogger(),
+      });
+
+      await vi.waitFor(() => expect(scenario.promptedAgentIds()).toEqual([agentId]));
+      const live = scenario.agentManager.getAgent(agentId);
+      expect(live?.labels[COMPLETION_LABEL]).toBe("done");
+    } finally {
+      await scenario.cleanup();
+    }
+  });
+
+  test("deliverQueuedPrompt clears the labels when it drains and delivers a real prompt", async () => {
+    const scenario = createMovedConversationScenario();
+    try {
+      const agentId = await scenario.createAgent();
+      await setCompletionLabels(scenario, agentId);
+
+      const delivery = await deliverQueuedPrompt({
+        agentManager: scenario.agentManager,
+        agentId,
+        prompt: { id: randomUUID(), prompt: "queued work", queuedAt: new Date().toISOString() },
+        logger: createTestLogger(),
+      });
+
+      expect(delivery).toBe("delivered");
+      await vi.waitFor(() => expect(scenario.promptedAgentIds()).toEqual([agentId]));
+      const live = scenario.agentManager.getAgent(agentId);
+      expect(live?.labels[COMPLETION_LABEL]).toBeUndefined();
+    } finally {
+      await scenario.cleanup();
+    }
+  });
+
+  test("deliverQueuedPrompt does not clear the labels for a queued system-injected envelope", async () => {
+    const scenario = createMovedConversationScenario();
+    try {
+      const agentId = await scenario.createAgent();
+      await setCompletionLabels(scenario, agentId);
+
+      const delivery = await deliverQueuedPrompt({
+        agentManager: scenario.agentManager,
+        agentId,
+        prompt: {
+          id: randomUUID(),
+          prompt: formatSystemNotificationPrompt("child finished"),
+          queuedAt: new Date().toISOString(),
+        },
+        logger: createTestLogger(),
+      });
+
+      expect(delivery).toBe("delivered");
+      await vi.waitFor(() => expect(scenario.promptedAgentIds()).toEqual([agentId]));
+      const live = scenario.agentManager.getAgent(agentId);
+      expect(live?.labels[COMPLETION_LABEL]).toBe("done");
     } finally {
       await scenario.cleanup();
     }
