@@ -17,6 +17,7 @@ export const ArrowLeftToLine = StubIcon;
 export const ArrowRight = StubIcon;
 export const ArrowUp = StubIcon;
 export const ArrowUpRight = StubIcon;
+export const ArrowUpToLine = StubIcon;
 export const AudioLines = StubIcon;
 export const Blocks = StubIcon;
 export const Bookmark = StubIcon;

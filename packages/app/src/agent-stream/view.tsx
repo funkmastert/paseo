@@ -25,8 +25,8 @@ import {
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { MAX_CONTENT_WIDTH, useIsCompactFormFactor } from "@/constants/layout";
 import { useMutation } from "@tanstack/react-query";
-import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
-import { ArrowUpToLine, Check, ChevronDown, X } from "lucide-react-native";
+import Animated from "react-native-reanimated";
+import { Check, ChevronDown, X } from "lucide-react-native";
 import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 import { openExplorerSidebarView } from "@/workspace-tabs/explorer-sidebar";
 import {
@@ -72,9 +72,11 @@ import { resolveStreamRenderStrategy } from "./strategy-resolver";
 import { type StreamSegmentRenderers, type StreamViewportHandle } from "./strategy";
 import { ChatOutlineRail } from "@/agent-stream/chat-outline/rail";
 import { useChatOutline } from "@/agent-stream/chat-outline/use-chat-outline";
-import { StickyPromptOverlay } from "@/agent-stream/sticky-last-prompt/sticky-prompt-overlay";
 import { useStickyLastPrompt } from "@/agent-stream/sticky-last-prompt/use-sticky-last-prompt";
 import type { StickyLastPromptSource } from "@/agent-stream/sticky-last-prompt/model";
+import { TopOverlay } from "./top-overlay";
+import { primaryColorMapping, scrollIndicatorStyles } from "./scroll-indicator-styles";
+import { resolveScrollIndicatorFade } from "./scroll-indicator-fade";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { planTimelineTailFetch } from "@/timeline/timeline-sync-plan";
 import {
@@ -449,15 +451,6 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           loadOlder: historyPagination.onLoadOlder,
         }
       : agentHistoryPagination;
-    // Keep entry/exit animations off on Android due to RN dispatchDraw crashes
-    // tracked in react-native-reanimated#8422.
-    const shouldDisableEntryExitAnimations = Platform.OS === "android";
-    const scrollIndicatorFadeIn = shouldDisableEntryExitAnimations
-      ? undefined
-      : FadeIn.duration(200);
-    const scrollIndicatorFadeOut = shouldDisableEntryExitAnimations
-      ? undefined
-      : FadeOut.duration(200);
 
     useEffect(() => {
       setIsNearBottom(true);
@@ -1189,22 +1182,20 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             activePrompt={chatOutline.activePrompt}
             onJumpToPrompt={handleJumpToOutlinePrompt}
           />
-          <StickyPromptOverlay
-            key={agentId}
-            source={stickyLastPrompt.source}
+          <TopOverlay
+            agentId={agentId}
+            stickyPromptSource={stickyLastPrompt.source}
             compact={resolvedCompact}
-            onJumpToOriginal={handleJumpToStickyPrompt}
-          />
-          <ScrollIndicatorCluster
-            containerStyle={scrollToBottomContainerStyle}
-            fadeIn={scrollIndicatorFadeIn}
-            fadeOut={scrollIndicatorFadeOut}
+            onJumpToStickyPrompt={handleJumpToStickyPrompt}
             showJumpToStart={shouldShowJumpToStart({
               hasOlderHistory: hasOlder,
               isNearHistoryStart,
             })}
             isJumpingToStart={isJumpingToStart}
             onJumpToStart={jumpToStart}
+          />
+          <BottomScrollIndicator
+            containerStyle={scrollToBottomContainerStyle}
             showScrollToBottom={!isNearBottom || isTimelineDetached}
             onScrollToBottom={scrollToBottom}
           />
@@ -1214,61 +1205,33 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
   },
 );
 
-function ScrollIndicatorCluster({
+function BottomScrollIndicator({
   containerStyle,
-  fadeIn,
-  fadeOut,
-  showJumpToStart,
-  isJumpingToStart,
-  onJumpToStart,
   showScrollToBottom,
   onScrollToBottom,
 }: {
   containerStyle: StyleProp<ViewStyle>;
-  fadeIn: ComponentProps<typeof Animated.View>["entering"];
-  fadeOut: ComponentProps<typeof Animated.View>["exiting"];
-  showJumpToStart: boolean;
-  isJumpingToStart: boolean;
-  onJumpToStart: () => void;
   showScrollToBottom: boolean;
   onScrollToBottom: () => void;
 }) {
   const { t } = useTranslation();
-  if (!showJumpToStart && !showScrollToBottom) {
+  const { fadeIn, fadeOut } = resolveScrollIndicatorFade();
+  if (!showScrollToBottom) {
     return null;
   }
   return (
-    <View style={containerStyle} pointerEvents="box-none">
-      {showJumpToStart && (
-        <Animated.View entering={fadeIn} exiting={fadeOut}>
-          <Pressable
-            style={stylesheet.scrollToBottomButton}
-            onPress={onJumpToStart}
-            accessibilityRole="button"
-            accessibilityLabel={t("agentStream.jumpToStart")}
-            testID="jump-to-start-button"
-          >
-            {isJumpingToStart ? (
-              <ThemedLoadingSpinner size="small" uniProps={primaryColorMapping} />
-            ) : (
-              <ArrowUpToLine size={24} color={stylesheet.scrollToBottomIcon.color} />
-            )}
-          </Pressable>
-        </Animated.View>
-      )}
-      {showScrollToBottom && (
-        <Animated.View entering={fadeIn} exiting={fadeOut}>
-          <Pressable
-            style={stylesheet.scrollToBottomButton}
-            onPress={onScrollToBottom}
-            accessibilityRole="button"
-            accessibilityLabel={t("agentStream.scrollToBottom")}
-            testID="scroll-to-bottom-button"
-          >
-            <ChevronDown size={24} color={stylesheet.scrollToBottomIcon.color} />
-          </Pressable>
-        </Animated.View>
-      )}
+    <View style={containerStyle} pointerEvents="box-none" testID="agent-stream-bottom-overlay">
+      <Animated.View entering={fadeIn} exiting={fadeOut}>
+        <Pressable
+          style={scrollIndicatorStyles.button}
+          onPress={onScrollToBottom}
+          accessibilityRole="button"
+          accessibilityLabel={t("agentStream.scrollToBottom")}
+          testID="scroll-to-bottom-button"
+        >
+          <ChevronDown size={24} color={scrollIndicatorStyles.icon.color} />
+        </Pressable>
+      </Animated.View>
     </View>
   );
 }
@@ -1454,9 +1417,6 @@ const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 const ThemedCheckIcon = withUnistyles(Check);
 const ThemedXIcon = withUnistyles(X);
 
-const primaryColorMapping = (theme: Theme) => ({
-  color: theme.colors.foreground,
-});
 const mutedColorMapping = (theme: Theme) => ({
   color: theme.colors.foregroundMuted,
 });
@@ -1804,19 +1764,6 @@ const stylesheet = StyleSheet.create((theme) => ({
     alignItems: "center",
     flexDirection: "column",
     justifyContent: "flex-end",
-    gap: theme.spacing[2],
-  },
-  scrollToBottomButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: theme.colors.surface2,
-    alignItems: "center",
-    justifyContent: "center",
-    ...theme.shadow.sm,
-  },
-  scrollToBottomIcon: {
-    color: theme.colors.foreground,
   },
 }));
 
