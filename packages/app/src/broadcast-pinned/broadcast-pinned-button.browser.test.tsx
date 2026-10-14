@@ -77,6 +77,7 @@ function target(input: Partial<BroadcastPinnedTarget> & { id: string }): Broadca
     workspaceId: "ws-1",
     workspaceName: "Chat",
     label: input.id,
+    agentTitle: null,
     status: "idle",
     ...input,
   };

@@ -22,6 +22,7 @@ const TARGETS: BroadcastPinnedTarget[] = [
     workspaceId: "ws-running",
     workspaceName: "Running chat",
     label: "Running leader",
+    agentTitle: null,
     status: "running",
   },
   {
@@ -30,6 +31,7 @@ const TARGETS: BroadcastPinnedTarget[] = [
     workspaceId: "ws-idle",
     workspaceName: "Idle chat",
     label: "Idle leader",
+    agentTitle: null,
     status: "idle",
   },
 ];

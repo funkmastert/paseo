@@ -1,12 +1,14 @@
 import type { AgentLifecycleStatus } from "@getpaseo/protocol/agent-lifecycle";
 import type { Agent } from "@/stores/session-store";
+import type { SidebarWorkspaceEntry } from "@/hooks/use-sidebar-workspaces-list";
+import type { WorkspaceTitleSource } from "@/hooks/use-settings";
+import { resolveSidebarWorkspacePrimaryLabel } from "@/components/sidebar/sidebar-workspace-title";
 import { pickPinnedWorkspaceAgentId } from "@/pinned-grid/resolve-pinned-agent";
 
-export interface BroadcastPinnedWorkspace {
-  serverId: string;
-  workspaceId: string;
-  name: string;
-}
+export type BroadcastPinnedWorkspace = Pick<
+  SidebarWorkspaceEntry,
+  "serverId" | "workspaceId" | "name" | "currentBranch"
+>;
 
 export type BroadcastPinnedAgentCandidate = Pick<
   Agent,
@@ -28,6 +30,7 @@ export interface BroadcastPinnedTarget {
   workspaceId: string;
   workspaceName: string;
   label: string;
+  agentTitle: string | null;
   status: AgentLifecycleStatus;
 }
 
@@ -37,12 +40,18 @@ export interface BroadcastPinnedTarget {
  * — its most-recently-active, non-archived root agent, or the live end of that conversation when
  * account failover retired the agent Tyler was looking at. Messaging anything else would reach a
  * stale leader or an agent he can no longer see.
+ *
+ * `label` is the workspace's own display name, via `resolveSidebarWorkspacePrimaryLabel` — the
+ * same derivation the Pinned section and the pinned grid use — not the agent's title. The agent's
+ * title is a conversation topic that can lag or diverge from the workspace name (a rename updates
+ * the workspace, not the agent), so rows must not be labelled by it.
  */
 export function selectBroadcastPinnedLeaderTargets(input: {
   pinnedChats: readonly BroadcastPinnedWorkspace[];
   agents: readonly BroadcastPinnedAgentCandidate[];
+  workspaceTitleSource: WorkspaceTitleSource;
 }): BroadcastPinnedTarget[] {
-  const { pinnedChats, agents } = input;
+  const { pinnedChats, agents, workspaceTitleSource } = input;
   if (pinnedChats.length === 0 || agents.length === 0) return [];
 
   const agentsById = new Map<string, BroadcastPinnedAgentCandidate>();
@@ -73,7 +82,8 @@ export function selectBroadcastPinnedLeaderTargets(input: {
       serverId: agent.serverId,
       workspaceId: workspace.workspaceId,
       workspaceName: workspace.name,
-      label: agent.title?.trim() || "Untitled agent",
+      label: resolveSidebarWorkspacePrimaryLabel({ workspace, workspaceTitleSource }),
+      agentTitle: agent.title?.trim() || null,
       status: agent.status,
     });
   }

@@ -9,6 +9,7 @@ function target(id: string): BroadcastPinnedTarget {
     workspaceId: "ws-1",
     workspaceName: "Chat",
     label: id,
+    agentTitle: null,
     status: "idle",
   };
 }

@@ -1,12 +1,14 @@
 import { useMemo } from "react";
 import { useShallow } from "zustand/shallow";
 import { useSidebarModel } from "@/components/sidebar/sidebar-model";
+import { useAppSettings } from "@/hooks/use-settings";
 import { useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import {
   selectBroadcastPinnedLeaderTargets,
   type BroadcastPinnedAgentCandidate,
   type BroadcastPinnedTarget,
+  type BroadcastPinnedWorkspace,
 } from "./broadcast-pinned-targets";
 
 export interface BroadcastPinnedTargets {
@@ -19,6 +21,11 @@ export interface BroadcastPinnedTargets {
  * projection (`useSidebarModel`) rather than a second notion of "pinned". Requires a
  * `SidebarModelProvider` ancestor.
  *
+ * `pinnedWorkspaces` resolves each pinned placement to its full `workspaceEntriesByKey` entry —
+ * the same lookup the pinned grid uses — so `selectBroadcastPinnedLeaderTargets` can label each
+ * row with the workspace's own name (via `resolveSidebarWorkspacePrimaryLabel`, honoring
+ * `workspaceTitleSource`) instead of the agent's title.
+ *
  * The store selector only reads the per-server `agents` Map references (O(hosts) via
  * `useShallow`) — it never walks agent contents, so it stays cheap on every session-store tick,
  * including streaming ticks, per docs/coding-standards.md's hot-selector rule. `setAgents`
@@ -27,9 +34,21 @@ export interface BroadcastPinnedTargets {
  * scan happens once, in the `useMemo` below, only when a watched Map reference changes.
  */
 export function useBroadcastPinnedTargets(): BroadcastPinnedTargets {
-  const { pinnedGroups } = useSidebarModel();
+  const { pinnedGroups, workspaceEntriesByKey } = useSidebarModel();
+  const {
+    settings: { workspaceTitleSource },
+  } = useAppSettings();
   const daemons = useHosts();
   const serverIds = useMemo(() => daemons.map((daemon) => daemon.serverId), [daemons]);
+
+  const pinnedWorkspaces = useMemo(
+    (): BroadcastPinnedWorkspace[] =>
+      pinnedGroups.pinnedChats.flatMap((placement) => {
+        const entry = workspaceEntriesByKey.get(placement.workspaceKey);
+        return entry ? [entry] : [];
+      }),
+    [pinnedGroups.pinnedChats, workspaceEntriesByKey],
+  );
 
   const agentMaps = useSessionStore(
     useShallow((state) => serverIds.map((serverId) => state.sessions[serverId]?.agents)),
@@ -47,8 +66,13 @@ export function useBroadcastPinnedTargets(): BroadcastPinnedTargets {
   }, [agentMaps]);
 
   const targets = useMemo(
-    () => selectBroadcastPinnedLeaderTargets({ pinnedChats: pinnedGroups.pinnedChats, agents }),
-    [pinnedGroups.pinnedChats, agents],
+    () =>
+      selectBroadcastPinnedLeaderTargets({
+        pinnedChats: pinnedWorkspaces,
+        agents,
+        workspaceTitleSource,
+      }),
+    [pinnedWorkspaces, agents, workspaceTitleSource],
   );
 
   return { targets, hasTargets: targets.length > 0 };
