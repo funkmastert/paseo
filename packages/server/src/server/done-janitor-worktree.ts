@@ -263,6 +263,68 @@ async function readReachability(
   return { safe: true, branch, head };
 }
 
+export type MergedIntoRemoteBase =
+  | { merged: true }
+  | { merged: false; reason: string }
+  /** Can't tell: no base branch recorded, or no remote holds it. The caller allows through. */
+  | { merged: null; reason: string };
+
+export interface CheckMergedIntoRemoteBaseInput {
+  worktreePath: string;
+  /** The branch the worktree was created from; null when the workspace never recorded one. */
+  baseBranch: string | null;
+  runGit?: RunGitCommand;
+}
+
+/**
+ * Whether this worktree's HEAD is merged into its *remote* base branch — stricter than
+ * {@link checkWorktreeDeletionSafety}'s reachability check, which also accepts the base's local
+ * ref or any other remote-tracking branch. Used by completion state's `done` gate
+ * (docs/completion-state.md): "pushed somewhere" is not "the PR merged".
+ *
+ * `merged: null` is "can't tell" (no base branch recorded, no matching remote ref, or a git
+ * command failed) — doubt never reads as merged, but the caller treats it as allow-through, same
+ * as a non-git or local checkout.
+ */
+export async function checkMergedIntoRemoteBase(
+  input: CheckMergedIntoRemoteBaseInput,
+): Promise<MergedIntoRemoteBase> {
+  const { worktreePath, baseBranch } = input;
+  if (!baseBranch) return { merged: null, reason: "no base branch recorded" };
+  const git = createReadOnlyGit(worktreePath, input.runGit ?? runGitCommand);
+
+  const head = (await git(["rev-parse", "--verify", "--quiet", "HEAD"]))?.trim();
+  if (!head) return { merged: null, reason: "it has no commits" };
+
+  const refList = await git([
+    "for-each-ref",
+    "--format=%(refname)",
+    `refs/remotes/*/${baseBranch}`,
+  ]);
+  if (refList === null) return { merged: null, reason: "git could not list remote base refs" };
+  const candidates = refList
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (candidates.length === 0) {
+    return { merged: null, reason: `no remote holds a ${baseBranch} branch` };
+  }
+
+  const branch = (await git(["symbolic-ref", "--quiet", "--short", "HEAD"]))?.trim() || "HEAD";
+  const unreachable = await git(["rev-list", "--count", head, "--not", ...candidates]);
+  const count = unreachable === null ? Number.NaN : Number.parseInt(unreachable.trim(), 10);
+  if (!Number.isFinite(count)) {
+    return { merged: null, reason: "git could not compare it with its remote base" };
+  }
+  if (count > 0) {
+    return {
+      merged: false,
+      reason: `${branch} has ${count} commit(s) not yet merged into ${candidates[0]}`,
+    };
+  }
+  return { merged: true };
+}
+
 function isLockedWorktree(porcelain: string, worktreePath: string): boolean {
   for (const block of porcelain.split("\n\n")) {
     const lines = block.split("\n");

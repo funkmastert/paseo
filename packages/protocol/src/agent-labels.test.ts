@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 import {
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
+  COMPLETION_LABEL,
   followMigratedTo,
+  getCompletionStateFromLabels,
   getMigratedToFromLabels,
   getParentAgentIdFromLabels,
   getOpenAgentTabLabel,
@@ -80,5 +82,21 @@ describe("following a moved agent to its live successor", () => {
   test("blank migrated-to reads as unset", () => {
     expect(getMigratedToFromLabels({ [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: " " })).toBeNull();
     expect(getMigratedToFromLabels(undefined)).toBeNull();
+  });
+});
+
+describe("completion state", () => {
+  test("reads a recognized completion state", () => {
+    expect(getCompletionStateFromLabels({ [COMPLETION_LABEL]: "ready-to-merge" })).toBe(
+      "ready-to-merge",
+    );
+    expect(getCompletionStateFromLabels({ [COMPLETION_LABEL]: "done" })).toBe("done");
+  });
+
+  test("treats absent, empty, or unrecognized values as no claim", () => {
+    expect(getCompletionStateFromLabels({})).toBeNull();
+    expect(getCompletionStateFromLabels(undefined)).toBeNull();
+    expect(getCompletionStateFromLabels({ [COMPLETION_LABEL]: "finished" })).toBeNull();
+    expect(getCompletionStateFromLabels({ [COMPLETION_LABEL]: "" })).toBeNull();
   });
 });
