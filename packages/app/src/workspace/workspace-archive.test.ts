@@ -6,6 +6,7 @@ import {
   clearWorkspaceArchivePending,
   isWorkspaceArchivePending,
 } from "@/contexts/session-workspace-upserts";
+import { WorkspaceDirectoryReplica } from "@/runtime/directory-sync/workspace-replica";
 import { useSessionStore, type WorkspaceDescriptor } from "@/stores/session-store";
 import {
   archiveWorkspaceOptimistically,
@@ -147,6 +148,49 @@ describe("archiveWorkspaceOptimistically", () => {
         workspaceId: archived.id,
       }),
     ).toBe(false);
+  });
+
+  it("keeps a pinned workspace gone when the daemon removed it before the request timed out", async () => {
+    // The daemon marks the record archived and sends its remove within seconds, then keeps the
+    // request open while it deletes the worktree; past the client's RPC timeout the request fails
+    // although the archive already happened.
+    const archived = workspace({ pinnedAt: "2026-10-12T18:23:00.055Z" });
+    getHostRuntimeStore().acceptWorkspaceSnapshots(SERVER_ID, [archived]);
+    const releaseArchive = deferred<ArchiveWorkspacePayload>();
+    const client = createClient(vi.fn(async () => releaseArchive.promise));
+
+    const archive = archiveWorkspaceOptimistically({
+      client,
+      workspace: target(),
+    });
+    new WorkspaceDirectoryReplica(SERVER_ID).applyDelta({ kind: "remove", id: archived.id });
+    releaseArchive.reject(new Error("Timed out waiting for archive_workspace_response"));
+    const outcome = await archive.then(
+      () => "archived",
+      () => "failed",
+    );
+
+    expect(storedWorkspace(archived.id)).toBeUndefined();
+    expect(outcome).toBe("archived");
+  });
+
+  it("still reports a refused archive when an overlapping archive of the same workspace failed first", async () => {
+    const archived = workspace();
+    getHostRuntimeStore().acceptWorkspaceSnapshots(SERVER_ID, [archived]);
+    const first = deferred<ArchiveWorkspacePayload>();
+    const second = deferred<ArchiveWorkspacePayload>();
+    const client = createClient(
+      vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise),
+    );
+
+    const firstArchive = archiveWorkspaceOptimistically({ client, workspace: target() });
+    const secondArchive = archiveWorkspaceOptimistically({ client, workspace: target() });
+    first.resolve(archivePayload({ workspaceId: archived.id, error: "refused" }));
+    await expect(firstArchive).rejects.toThrow("refused");
+    second.resolve(archivePayload({ workspaceId: archived.id, error: "refused again" }));
+
+    await expect(secondArchive).rejects.toThrow("refused again");
+    expect(storedWorkspace(archived.id)).toEqual(archived);
   });
 });
 

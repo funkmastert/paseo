@@ -182,6 +182,56 @@ describe("autoPinWorkspaceOnSessionStart", () => {
     const result = await autoPinWorkspaceOnSessionStart(registry, "does-not-exist", { now });
     expect(result).toBeNull();
   });
+
+  test("never pins an archived workspace", async () => {
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-5",
+        projectId: "proj-1",
+        cwd: "/tmp/repo5",
+        kind: "worktree",
+        displayName: "feature",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        archivedAt: "2026-05-31T00:00:00.000Z",
+      }),
+    );
+
+    await autoPinWorkspaceOnSessionStart(registry, "ws-5", { now });
+
+    const stored = await registry.get("ws-5");
+    expect(stored?.pinnedAt).toBeNull();
+    expect(stored?.pinSource).toBeUndefined();
+  });
+
+  test("never pins a workspace archived between its read and the pin", async () => {
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-6",
+        projectId: "proj-1",
+        cwd: "/tmp/repo6",
+        kind: "worktree",
+        displayName: "feature",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        archivedAt: "2026-05-31T00:00:00.000Z",
+      }),
+    );
+    // The read happened before the archive; the update sees the record as it is now.
+    const readBeforeArchive = {
+      get: async (workspaceId: string) => {
+        const record = await registry.get(workspaceId);
+        return record ? { ...record, archivedAt: null } : null;
+      },
+      update: registry.update.bind(registry),
+    };
+
+    await autoPinWorkspaceOnSessionStart(readBeforeArchive, "ws-6", { now });
+
+    const stored = await registry.get("ws-6");
+    expect(stored?.pinnedAt).toBeNull();
+    expect(stored?.pinSource).toBeUndefined();
+  });
 });
 
 type TestAgent = Parameters<typeof isWorkspaceActiveForAutoPin>[0]["agents"][number];

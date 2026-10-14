@@ -48,6 +48,36 @@ export function clearWorkspaceArchivePending(input: {
   }
 }
 
+// How many times the daemon removed each workspace while an archive of it was pending. An archive
+// call compares this with the count at its start to learn whether its archive took effect: the
+// pending mark can't tell, because a failed overlapping call clears it too.
+const archiveRemovalsByKey = new Map<string, number>();
+
+function archiveRemovalKey(input: { serverId: string; workspaceId: string }): string | null {
+  const serverId = input.serverId.trim();
+  const workspaceId = normalizeWorkspaceOpaqueId(input.workspaceId);
+  return serverId && workspaceId ? pendingArchiveKey({ serverId, workspaceId }) : null;
+}
+
+/** The daemon removed this workspace; a pending archive of it took effect. */
+export function confirmWorkspaceArchiveRemoved(input: {
+  serverId: string;
+  workspaceId: string;
+}): void {
+  const key = archiveRemovalKey(input);
+  if (!key || !isWorkspaceArchivePending(input)) return;
+  archiveRemovalsByKey.set(key, (archiveRemovalsByKey.get(key) ?? 0) + 1);
+  clearWorkspaceArchivePending(input);
+}
+
+export function countWorkspaceArchiveRemovals(input: {
+  serverId: string;
+  workspaceId: string;
+}): number {
+  const key = archiveRemovalKey(input);
+  return key ? (archiveRemovalsByKey.get(key) ?? 0) : 0;
+}
+
 export function isWorkspaceArchivePending(input: {
   serverId: string;
   workspaceId?: string | null;
