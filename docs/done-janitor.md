@@ -134,6 +134,8 @@ The question path considers live root agents only when `archiveDead` is on (all 
 - **Quiet for `quietHours`**, measured from the newest activity timestamp the daemon holds. An agent with no readable timestamp is not quiet.
 - **Not pinned** ([Pinned](#pinned)).
 
+An agent's own `paseo.completion: "done"` label ([completion-state.md](completion-state.md)) is a strong hint the work is finished, but this list does not read it yet.
+
 These prove the work is saved and idle. They do not prove it is finished, which is why the agent is asked.
 
 ## Asking
