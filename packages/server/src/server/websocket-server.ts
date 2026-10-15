@@ -2743,13 +2743,14 @@ export class VoiceAssistantWebSocketServer {
     });
 
     if (plan.shouldPush) {
-      // Feature 3b (docs/jev.md): a root's finish may go out as a digest notice after JEV reads
-      // it. Detached, so the in-app messages below never wait on JEV. It never rejects; the catch
-      // stays because the daemon exits on an unhandled rejection.
+      // Every finish is already a notice (attentionPushLevel), so feature 3b's triage
+      // (docs/jev.md) never fires here now — it only ever lowered an alert. Detached, so the
+      // in-app messages below never wait on JEV. It never rejects; the catch stays because the
+      // daemon exits on an unhandled rejection.
       const jev = this.jev;
       void sendAttentionPush({
         reason: params.reason,
-        base: attentionPushLevel(params.reason, agent.labels),
+        base: attentionPushLevel(params.reason),
         agentId: params.agentId,
         finalMessage: assistantMessage,
         jev,
