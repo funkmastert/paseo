@@ -64,7 +64,7 @@ describe("findFinishVeto", () => {
   it.each([
     ["Done. Want me to open the PR?", "question-mark"],
     [
-      "Opened https://github.com/funkmastert/paseo/pull/812 for review.",
+      "Opened https://github.com/example-owner/paseo/pull/812 for review.",
       "pull-request-or-issue-url",
     ],
     ["Filed https://git.wonderly.info/x/y/issues/9.", "pull-request-or-issue-url"],

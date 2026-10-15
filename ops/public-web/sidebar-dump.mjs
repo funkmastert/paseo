@@ -1,9 +1,13 @@
 import { createRequire } from "node:module";
 import { readFileSync, rmSync } from "node:fs";
-const require = createRequire("/Users/tylerthackray/paseo-worktrees/bozeo/package.json");
+import os from "node:os";
+import path from "node:path";
+const CHECKOUT = process.env.BOZEO_CHECKOUT ?? path.join(os.homedir(), "paseo-worktrees", "bozeo");
+const require = createRequire(path.join(CHECKOUT, "package.json"));
 const { chromium } = require("playwright");
-const url = JSON.parse(readFileSync("/Users/tylerthackray/bozeo-ops/pair.json", "utf8")).url;
-rmSync("/Users/tylerthackray/bozeo-ops/pair.json");
+const pairJson = path.join(os.homedir(), "bozeo-ops", "pair.json");
+const url = JSON.parse(readFileSync(pairJson, "utf8")).url;
+rmSync(pairJson);
 const browser = await chromium.launch();
 const page = await (await browser.newContext({ viewport: { width: 1400, height: 1000 } })).newPage();
 await page.goto("https://bozeo.ngrok.app/" + url.slice(url.indexOf("#")), { waitUntil: "networkidle", timeout: 60000 });

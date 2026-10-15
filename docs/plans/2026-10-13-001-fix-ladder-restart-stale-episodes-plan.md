@@ -14,7 +14,7 @@ execution: code
 
 - **Objective:** after a daemon restart, an open remediation episode that no monitor confirms is closed by the ladder, so the next real occurrence of that condition opens a new episode and reaches rung 3 (the push) again. The fix is in the ladder, once, for every monitor.
 - **Authority:** this plan, then `docs/remediation.md`, `docs/notification-policy.md`, `docs/coding-standards.md`, `docs/testing.md`, `CLAUDE.md`.
-- **Execution profile:** one worker, serial units U1, U2, U4, then U3 (docs last), in the worktree `/Users/tylerthackray/.paseo/worktrees/3jvw4yw6/peaceful-blowfish` on branch `fix/ladder-restart-episodes`. That branch already holds a docs commit (`8fdac4c4b`); build on top of it.
+- **Execution profile:** one worker, serial units U1, U2, U4, then U3 (docs last), in the worktree `~/.paseo/worktrees/3jvw4yw6/peaceful-blowfish` on branch `fix/ladder-restart-episodes`. That branch already holds a docs commit (`8fdac4c4b`); build on top of it.
 - **Stop conditions:** stop and report if the fix would close an episode that has an in-flight remediation agent, or send a push or start an agent on close. Also stop if it would need a monitor to change what it reports while its condition holds, or if a test needs the real `claude` provider.
 - **Tail ownership:** the worker commits locally and never pushes, opens a PR, or restarts the 6767 daemon. The leader reviews, merges and stages.
 

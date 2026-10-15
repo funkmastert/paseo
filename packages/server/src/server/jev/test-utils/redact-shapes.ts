@@ -359,7 +359,7 @@ export const BENIGN_TEXTS: Omit<RedactionShape, "needle">[] = [
   { label: "model ids", text: "claude-opus-5-5 and claude-haiku-4-5-20251001" },
   {
     label: "ordinary URLs",
-    text: "see https://github.com/funkmastert/paseo/pull/12 and https://example.com/api/v1/organizations/members/permissions/settings/advanced?page=2",
+    text: "see https://github.com/example-owner/paseo/pull/12 and https://example.com/api/v1/organizations/members/permissions/settings/advanced?page=2",
   },
   {
     label: "camelCase identifiers",

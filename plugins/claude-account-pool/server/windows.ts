@@ -12,7 +12,7 @@ export const WINDOW_FIVE_HOUR = "five_hour";
 /**
  * The rolling 7-day weekly window. Matches the daemon's wire id (see
  * `UNSCOPED_WINDOWS` in
- * `/Users/tylerthackray/paseo/packages/server/src/services/quota-fetcher/providers/claude.ts`,
+ * `packages/server/src/services/quota-fetcher/providers/claude.ts`,
  * which maps `seven_day` usage to wire id `"weekly"`).
  */
 export const WINDOW_SEVEN_DAY = "weekly";
@@ -34,7 +34,7 @@ export type ModelFamily = (typeof MODEL_FAMILIES)[number];
 /**
  * Builds the weekly per-model-family window key, e.g. "weekly_model_opus".
  * Matches the shape produced by `scopedWindowId()` in
- * `/Users/tylerthackray/paseo/packages/server/src/services/quota-fetcher/providers/claude.ts`
+ * `packages/server/src/services/quota-fetcher/providers/claude.ts`
  * for model-scoped weekly limits (`` `weekly_${dimension}_${name}` `` with
  * `dimension === "model"`), which is the daemon's source of truth for wire ids.
  */

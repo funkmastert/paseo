@@ -1,9 +1,11 @@
 // Dry-run inventory of every active workspace: what it is, whether anything could be lost, and a verdict.
-import { connectToDaemon } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync, writeFileSync } from "node:fs";
 import os from "node:os";
+import path from "node:path";
 const HOME = os.homedir();
+const CHECKOUT = process.env.BOZEO_CHECKOUT ?? path.join(HOME, "paseo-worktrees", "bozeo");
+const { connectToDaemon } = await import(path.join(CHECKOUT, "packages/cli/dist/utils/client.js"));
 const IDLE_H = Number(process.env.IDLE_H ?? 72);
 const real = (p) => { try { return realpathSync(p); } catch { return p; } };
 const inside = (r, p) => p === r || p.startsWith(r + "/");

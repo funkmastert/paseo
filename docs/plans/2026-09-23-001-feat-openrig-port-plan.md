@@ -16,13 +16,13 @@ execution: code
 - **Objective:** Bring essentially every capability OpenRig ships into Bozeo (this fork of Paseo; code identifiers stay `Paseo`). The default verdict is port or adapt. An item is skipped only where Bozeo is already better, shown with file paths on both sides.
 - **Product authority:** Tyler (fork owner). His premise is that OpenRig is advanced and well proven. This plan follows that premise and records, per feature, what OpenRig's own release notes admit about reliability.
 - **Source:** OpenRig clone at `/tmp/openrig-research` (github.com/mvschwarz/openrig, Apache-2.0, HEAD `cc75efd`, v0.5.14). The earlier high-level research report was not available to this pass, so every verdict below comes from reading source and release notes directly.
-- **Already in flight, not re-planned here:** leader context compaction (`claude-compaction-enforcer.ts`), durable finish notifications (`queue-wake-ladder.ts`, `queue-stuck-sweep.ts`, `parked-query.ts`), the actual-model check (`model-divergence-monitor.ts`), and refocus. Their worktrees are `/Users/tylerthackray/.paseo/worktrees/3jvw4yw6/{leader-compaction,durable-finish,model-divergence,refocus}`. Items below that depend on them say so.
+- **Already in flight, not re-planned here:** leader context compaction (`claude-compaction-enforcer.ts`), durable finish notifications (`queue-wake-ladder.ts`, `queue-stuck-sweep.ts`, `parked-query.ts`), the actual-model check (`model-divergence-monitor.ts`), and refocus. Their worktrees are `~/.paseo/worktrees/3jvw4yw6/{leader-compaction,durable-finish,model-divergence,refocus}`. Items below that depend on them say so.
 - **Also unmerged on side branches:** `failover-return` (3 commits), `flexible-placement` (3), `workspace-titles` (5). Anything touching `account-failover-*` waits for the first two.
 - **Stop conditions:** Never restart or disturb the daemon on 6767. Every new monitor ships off by default with a `dryRun` switch, following the done-janitor and reaper pattern. If a verdict here turns out wrong in code (a Bozeo path that does not do what this plan says), stop that unit and report. Do not quietly override.
 - **Execution profile:** Bozeo defaults apply. Builds run as Paseo agents in isolated worktrees, one bounded unit each, labelled with `paseo.task-class` so the classifier picks model and account. Rapid mode applies: each wave lists the verification it defers. Run targeted vitest only, never the full suite. Run `npm run typecheck` and `npm run lint` after each change. Run `npm run build:client` after protocol edits.
 - **Platforms:** Every app surface ships on macOS desktop, Windows desktop, iOS and Android. Daemon code must run on macOS and Windows. OpenRig assumes tmux and `ps` (Linux/macOS only), so none of its transport code carries over verbatim.
 
-Path convention: OpenRig paths are written `openrig/<path>`, relative to `/tmp/openrig-research`. Bozeo paths are relative to `/Users/tylerthackray/paseo-worktrees/bozeo`.
+Path convention: OpenRig paths are written `openrig/<path>`, relative to `/tmp/openrig-research`. Bozeo paths are relative to `~/paseo-worktrees/bozeo`.
 
 ---
 

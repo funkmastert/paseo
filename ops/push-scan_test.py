@@ -79,6 +79,35 @@ class PushScan(unittest.TestCase):
         self.commit("a.txt", "maintainer i@izs.me\n", author="Upstream <up@stream.dev>")  # push-scan:allow
         self.assertAllowed()
 
+    def test_home_path_blocked_even_without_identities_file(self):
+        os.remove(os.path.join(self.home, "bozeo-ops/push-scan-identities.txt"))
+        self.commit("a.txt", f"script lives at {self.home}/bozeo-ops/tool.mjs\n")  # push-scan:allow
+        self.assertBlocked("Tyler's personal identifier")
+
+    def test_username_home_path_blocked_even_without_identities_file(self):
+        os.remove(os.path.join(self.home, "bozeo-ops/push-scan-identities.txt"))
+        self.env["USER"] = "dev"
+        self.commit("a.txt", "cache in /Users/dev/Library/Caches\n")  # push-scan:allow
+        self.assertBlocked("Tyler's personal identifier")
+
+    def test_flattened_project_dir_blocked(self):
+        self.env["USER"] = "dev"
+        self.commit("a.txt", "transcripts in ~/.claude/projects/-Users-dev-paseo/\n")  # push-scan:allow
+        self.assertBlocked("Tyler's personal identifier")
+
+    def test_short_username_does_not_match_ordinary_words(self):
+        self.env["USER"] = "dev"
+        self.commit("a.txt", "device development notes\n")
+        self.assertAllowed()
+
+    def test_identities_env_override(self):
+        alt = os.path.join(self.tmp, "alt-identities.txt")
+        with open(alt, "w") as f:
+            f.write("some-other-handle\n")
+        self.env["PUSH_SCAN_IDENTITIES"] = alt
+        self.commit("a.txt", "contact some-other-handle for details\n")  # push-scan:allow
+        self.assertBlocked("Tyler's personal identifier")
+
     def test_identity_blocked_even_from_another_author(self):
         self.commit("a.txt", "mail secret.person@gmail.com\n", author="Upstream <up@stream.dev>")  # push-scan:allow
         self.assertBlocked("Tyler's personal identifier")

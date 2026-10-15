@@ -22,15 +22,15 @@ function row(
 // Copied off Tyler's machine while two simulators were booted: the UDID lives in launchd_sim's
 // argv, and nowhere else in the 277 processes the device runs.
 const LAUNCHD_SIM_A =
-  "launchd_sim /Users/tylerthackray/Library/Developer/CoreSimulator/Devices/A0A912ED-C766-4778-957C-F9680C7309F3/data/var/run/launchd_bootstrap.plist";
+  "launchd_sim /Users/someone/Library/Developer/CoreSimulator/Devices/A0A912ED-C766-4778-957C-F9680C7309F3/data/var/run/launchd_bootstrap.plist";
 const LAUNCHD_SIM_B =
-  "launchd_sim /Users/tylerthackray/Library/Developer/CoreSimulator/Devices/1A9C8E3A-A8AC-4FAB-9286-D970E0F83945/data/var/run/launchd_bootstrap.plist";
+  "launchd_sim /Users/someone/Library/Developer/CoreSimulator/Devices/1A9C8E3A-A8AC-4FAB-9286-D970E0F83945/data/var/run/launchd_bootstrap.plist";
 const SIM_CHILD =
   "/Library/Developer/CoreSimulator/Volumes/iOS_23F77/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/Frameworks/ShazamKit.framework/shazamd";
 const EMULATOR_LAUNCHER =
-  "/Users/tylerthackray/Library/Android/sdk/emulator/emulator -avd Pixel_7_API_34 -netdelay none";
+  "/Users/someone/Library/Android/sdk/emulator/emulator -avd Pixel_7_API_34 -netdelay none";
 const EMULATOR_QEMU =
-  "/Users/tylerthackray/Library/Android/sdk/emulator/qemu/darwin-aarch64/qemu-system-aarch64 -avd Pixel_7_API_34 -netdelay none";
+  "/Users/someone/Library/Android/sdk/emulator/qemu/darwin-aarch64/qemu-system-aarch64 -avd Pixel_7_API_34 -netdelay none";
 
 describe("detectRunningDevices", () => {
   test("finds one device per booted simulator, keyed by UDID", () => {
@@ -87,13 +87,13 @@ describe("detectRunningDevices", () => {
         row({
           pid: 1,
           command:
-            "grep -r launchd_sim /Users/tylerthackray/Library/Developer/CoreSimulator/Devices/A0A912ED-C766-4778-957C-F9680C7309F3/",
+            "grep -r launchd_sim /Users/someone/Library/Developer/CoreSimulator/Devices/A0A912ED-C766-4778-957C-F9680C7309F3/",
         }),
         row({ pid: 2, command: "/usr/bin/adb -s emulator-5554 logcat" }),
         row({ pid: 3, command: "/opt/homebrew/bin/qemu-system-x86_64 -m 4096 -hda disk.img" }),
         row({
           pid: 4,
-          command: "/Users/tylerthackray/Library/Android/sdk/emulator/emulator -list-avds",
+          command: "/Users/someone/Library/Android/sdk/emulator/emulator -list-avds",
         }),
       ],
       agentTrees: [],
@@ -119,14 +119,14 @@ describe("detectRunningDevices", () => {
 // A test clone lives in a second device set. Taken from CoreSimulator's own log on Tyler's
 // machine: `…/XCTestDevices/<UDID>/data`, created as "Clone 3 of iPhone 16 Pro".
 const XCTEST_CLONE_UDID = "1C56B10C-38C1-4547-ABDA-D36412FF01CA";
-const XCTEST_CLONE_ROOT = "/Users/tylerthackray/Library/Developer/XCTestDevices";
+const XCTEST_CLONE_ROOT = "/Users/someone/Library/Developer/XCTestDevices";
 const LAUNCHD_SIM_CLONE = `launchd_sim ${XCTEST_CLONE_ROOT}/${XCTEST_CLONE_UDID}/data/var/run/launchd_bootstrap.plist`;
 
 describe("collectDeviceIdReferences", () => {
   test("reports the device set a booted simulator's data directory lives in", () => {
     const references = collectDeviceIdReferences([row({ pid: 1, command: LAUNCHD_SIM_A })]);
     expect(references.get("A0A912ED-C766-4778-957C-F9680C7309F3")).toEqual({
-      bootedInSetRoot: "/Users/tylerthackray/Library/Developer/CoreSimulator/Devices",
+      bootedInSetRoot: "/Users/someone/Library/Developer/CoreSimulator/Devices",
       pids: [1],
     });
   });

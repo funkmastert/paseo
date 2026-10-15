@@ -338,7 +338,7 @@ describe("redactJevRequest: structured data", () => {
       files: ["/Users/alex/code/app/src/index.ts", "packages/server/src/server/jev/redact.ts"],
       code: "function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}",
       commit: "commit: 65267b9a2cae4c52913b53a484ce872436b5247e",
-      link: "https://github.com/funkmastert/paseo/pull/12",
+      link: "https://github.com/example-owner/paseo/pull/12",
       owner: "alex@example.com",
       attempts: 2,
     };

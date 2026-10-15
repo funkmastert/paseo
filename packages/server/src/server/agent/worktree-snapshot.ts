@@ -494,7 +494,12 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
     // A bundle made because GitHub did not answer is not the last word on this snapshot: the next
     // sweep asks again, even when the worktree has not changed.
     let settled = true;
-    if (url && isPersonalGitHubRemote(url, config.personalOwners)) {
+    if (config.personalOwners.length === 0) {
+      this.options.logger.debug(
+        { worktreePath },
+        "Work snapshot: no personalOwners configured; bundling instead of pushing to origin",
+      );
+    } else if (url && isPersonalGitHubRemote(url, config.personalOwners)) {
       const visibility = await this.repositoryVisibility(worktreePath, url);
       settled = visibility !== "unknown";
       if (visibility === "private" && (await this.pushIsClean(worktreePath, ref, commit))) {

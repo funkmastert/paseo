@@ -159,7 +159,7 @@ describe("the reviewer's attacks now fail", () => {
         lifecycle: "running",
         busy: true,
         pendingPermissions: [
-          toolRequest("Bash", { command: "find /Users/tylerthackray/important -de''lete" }),
+          toolRequest("Bash", { command: "find /Users/someone/important -de''lete" }),
         ],
       }),
       [],

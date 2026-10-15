@@ -22,7 +22,7 @@ function emulatorRow(pid: number, ppid: number, avd: string): ProcessSampleRow {
     rssKb: 2_000_000,
     cpuPercent: 3,
     etime: "10:00",
-    command: `/Users/tylerthackray/Library/Android/sdk/emulator/emulator -avd ${avd}`,
+    command: `/Users/someone/Library/Android/sdk/emulator/emulator -avd ${avd}`,
   };
 }
 

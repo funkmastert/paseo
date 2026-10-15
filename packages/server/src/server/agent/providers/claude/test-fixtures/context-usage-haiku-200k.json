@@ -45,17 +45,17 @@
   "model": "claude-haiku-4-5-20251001",
   "memoryFiles": [
     {
-      "path": "/Users/tylerthackray/.claude-personal/CLAUDE.md",
+      "path": "/Users/someone/.claude-personal/CLAUDE.md",
       "type": "User",
       "tokens": 2893
     },
     {
-      "path": "/Users/tylerthackray/.paseo/worktrees/3jvw4yw6/context-meter/CLAUDE.md",
+      "path": "/Users/someone/.paseo/worktrees/3jvw4yw6/context-meter/CLAUDE.md",
       "type": "Project",
       "tokens": 5974
     },
     {
-      "path": "/Users/tylerthackray/.claude-personal/projects/-Users-tylerthackray-paseo/memory/MEMORY.md",
+      "path": "/Users/someone/.claude-personal/projects/-Users-someone-paseo/memory/MEMORY.md",
       "type": "AutoMem",
       "tokens": 621
     }

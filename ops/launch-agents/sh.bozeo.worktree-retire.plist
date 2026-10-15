@@ -5,8 +5,8 @@
   <key>Label</key><string>sh.bozeo.worktree-retire</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/tylerthackray/.nvm/versions/node/v24.18.0/bin/node</string>
-    <string>/Users/tylerthackray/bozeo-ops/retire-merged-paseo-worktrees.mjs</string>
+    <string>__HOME__/.nvm/versions/node/v24.18.0/bin/node</string>
+    <string>__HOME__/bozeo-ops/retire-merged-paseo-worktrees.mjs</string>
     <string>--apply</string>
   </array>
   <key>EnvironmentVariables</key>
@@ -15,7 +15,7 @@
   <key>RunAtLoad</key><false/>
   <key>LowPriorityIO</key><true/>
   <key>Nice</key><integer>10</integer>
-  <key>StandardOutPath</key><string>/Users/tylerthackray/Library/Logs/Bozeo/worktree-retire.log</string>
-  <key>StandardErrorPath</key><string>/Users/tylerthackray/Library/Logs/Bozeo/worktree-retire.log</string>
+  <key>StandardOutPath</key><string>__HOME__/Library/Logs/Bozeo/worktree-retire.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/Library/Logs/Bozeo/worktree-retire.log</string>
 </dict>
 </plist>

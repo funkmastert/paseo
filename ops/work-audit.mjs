@@ -17,7 +17,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { connectToDaemon } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js";
+const CHECKOUT = process.env.BOZEO_CHECKOUT ?? path.join(os.homedir(), "paseo-worktrees", "bozeo");
+const { connectToDaemon } = await import(path.join(CHECKOUT, "packages/cli/dist/utils/client.js"));
 
 const HOME = os.homedir();
 const DATE = new Date().toLocaleDateString("en-CA"); // local YYYY-MM-DD
@@ -34,6 +35,10 @@ if (process.argv.includes("--push")) {
 }
 const MAX_UNTRACKED_BYTES = 20 * 1024 * 1024;
 const BACKUP_DIR = path.join(HOME, "bozeo-ops", "backups");
+// Report-only label ("personal GitHub" vs. a bare remote name); no owner configured means no
+// repo gets labeled personal, matching agents.remediation.workSnapshots.personalOwners' empty
+// default -- this script never defaults to a specific GitHub handle either.
+const PERSONAL_OWNER = process.env.BOZEO_PERSONAL_GITHUB_OWNER;
 
 const git = (cwd, args, env = {}) =>
   execFileSync("git", ["--no-optional-locks", "-C", cwd, ...args], {
@@ -103,7 +108,7 @@ const report = [];
 for (const repo of repos.values()) {
   const cwd = repo.anyDir;
   const origin = tryGit(cwd, ["remote", "get-url", "origin"]) ?? "";
-  const personal = /github\.com[:/]funkmastert\//.test(origin);
+  const personal = Boolean(PERSONAL_OWNER) && new RegExp(`github\\.com[:/]${PERSONAL_OWNER}/`).test(origin);
   const hasRemotes = (tryGit(cwd, ["remote"]) ?? "") !== "";
   const repoInfo = {
     repo: repo.common.replace(/\/\.git$/, ""),

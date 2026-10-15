@@ -84,7 +84,7 @@ function harness(input: {
   const statePath = input.statePath ?? join(root, "paseo-home", "work-snapshots.json");
   const snapshotter = new GitWorktreeSnapshotter({
     readConfig: () => ({
-      personalOwners: ["funkmastert"],
+      personalOwners: ["example-owner"],
       bundleDir: join(root, "bundles"),
       maxUntrackedFileBytes: 1024 * 1024,
     }),

@@ -8,7 +8,7 @@
 # Usage: stage-bozeo.sh            (log: ~/bozeo-ops/stage-<mmdd-HHMM>.log)
 set -euo pipefail
 export PATH="$HOME/.nvm/versions/node/v24.18.0/bin:$PATH"
-B=/Users/tylerthackray/paseo-worktrees/bozeo
+B="${BOZEO_CHECKOUT:-$HOME/paseo-worktrees/bozeo}"
 HEAVY=~/bozeo-ops/cpu-policing/heavy.sh
 PREV_DIR=~/bozeo-ops/previous-build.noindex
 LSR=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister

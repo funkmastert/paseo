@@ -14,7 +14,8 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { connectToDaemon } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js";
+const CHECKOUT = process.env.BOZEO_CHECKOUT ?? path.join(os.homedir(), "paseo-worktrees", "bozeo");
+const { connectToDaemon } = await import(path.join(CHECKOUT, "packages/cli/dist/utils/client.js"));
 
 const LEAD_MIN = Number(process.env.KEEPALIVE_LEAD_MIN ?? 10);
 const HOME = os.homedir();

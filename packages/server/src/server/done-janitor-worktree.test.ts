@@ -948,12 +948,12 @@ describe("verifyWorktreeBackup", () => {
   });
 
   test("a janitor backup on a private personal origin passes the push scan first: a token is bundled, not pushed", async () => {
-    const url = "https://github.com/funkmastert/x.git";
+    const url = "https://github.com/example-owner/x.git";
     git(repo, "remote", "set-url", "origin", url);
     git(repo, "config", `url.${remote}.insteadOf`, url);
     const personal = new GitWorktreeSnapshotter({
       readConfig: () => ({
-        personalOwners: ["funkmastert"],
+        personalOwners: ["example-owner"],
         bundleDir: join(root, "bundles"),
         maxUntrackedFileBytes: 1024 * 1024,
       }),

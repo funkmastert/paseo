@@ -3,12 +3,16 @@
 // pairing survives the run.
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-const require = createRequire("/Users/tylerthackray/paseo-worktrees/bozeo/package.json");
+const HOME = os.homedir();
+const CHECKOUT = process.env.BOZEO_CHECKOUT ?? path.join(HOME, "paseo-worktrees", "bozeo");
+const require = createRequire(path.join(CHECKOUT, "package.json"));
 const { chromium, devices } = require("playwright");
 
-const OUT = "/Users/tylerthackray/bozeo-ops/public-web";
-const offerUrl = JSON.parse(readFileSync("/Users/tylerthackray/bozeo-ops/pair.json", "utf8")).url;
+const OUT = path.join(HOME, "bozeo-ops", "public-web");
+const offerUrl = JSON.parse(readFileSync(path.join(HOME, "bozeo-ops", "pair.json"), "utf8")).url;
 const fragment = offerUrl.slice(offerUrl.indexOf("#"));
 
 const browser = await chromium.launch();
