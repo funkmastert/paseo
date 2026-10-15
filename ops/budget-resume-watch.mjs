@@ -10,7 +10,9 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { connectToDaemon } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js";
+
+const CHECKOUT = process.env.BOZEO_CHECKOUT ?? path.join(os.homedir(), "paseo-worktrees", "bozeo");
+const { connectToDaemon } = await import(path.join(CHECKOUT, "packages/cli/dist/utils/client.js"));
 
 const ORCHESTRATOR = "e8e58ad7-d139-45dd-99ea-72553a62eff6";
 const ACCOUNTS = ["claude", "claude-backup", "claude-personal"];
@@ -59,7 +61,7 @@ if (previous !== "capped" || !back) process.exit(0);
 
 const why = `${back} has weekly budget again (${readings[back]}%)`;
 const prompt = `Budget watch: ${why}. Readings: ${line}. Agents the cap cut off are stranded until someone resumes them: list agents in error with a usage-limit lastError, resume them in waves (fixers and reviews before builders, at most 6 at once), then continue the work map in ~/bozeo-ops/jev-build-STATE.md.`;
-execFileSync(process.execPath, ["/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/bin/paseo", "send", "--no-wait", "--host", "127.0.0.1:6767", ORCHESTRATOR, prompt], {
+execFileSync(process.execPath, [path.join(CHECKOUT, "packages/cli/bin/paseo"), "send", "--no-wait", "--host", "127.0.0.1:6767", ORCHESTRATOR, prompt], {
   env: { ...process.env, PASEO_AGENT_ID: "" },
   stdio: "inherit",
   timeout: 60_000,

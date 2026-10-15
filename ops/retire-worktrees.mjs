@@ -1,6 +1,9 @@
 // Archive every non-running agent whose cwd is inside the given worktree dirs.
 // Exits 2 (worktree must be kept) if any agent there is still running.
-import { connectToDaemon } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js";
+import os from "node:os";
+import path from "node:path";
+const CHECKOUT = process.env.BOZEO_CHECKOUT ?? path.join(os.homedir(), "paseo-worktrees", "bozeo");
+const { connectToDaemon } = await import(path.join(CHECKOUT, "packages/cli/dist/utils/client.js"));
 const dirs = process.argv.slice(2);
 const c = await connectToDaemon({ host: "127.0.0.1:6767" });
 const r = await c.fetchAgents({});

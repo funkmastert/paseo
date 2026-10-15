@@ -9,7 +9,10 @@
 // Usage: node rehome.mjs <plan.json>   plan: [{ id, to, notBefore?: ISO, label, resume?: false }]
 // An id may appear twice (move now, move back later); entries run in order per id.
 import { readFileSync, writeFileSync } from "node:fs";
-import { connectToDaemon } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js";
+import os from "node:os";
+import path from "node:path";
+const CHECKOUT = process.env.BOZEO_CHECKOUT ?? path.join(os.homedir(), "paseo-worktrees", "bozeo");
+const { connectToDaemon } = await import(path.join(CHECKOUT, "packages/cli/dist/utils/client.js"));
 
 const planPath = process.argv[2];
 const plan = JSON.parse(readFileSync(planPath, "utf8"));

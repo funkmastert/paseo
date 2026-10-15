@@ -39,17 +39,17 @@
   "model": "claude-opus-5-5[1m]",
   "memoryFiles": [
     {
-      "path": "/Users/tylerthackray/.claude-personal/CLAUDE.md",
+      "path": "/Users/someone/.claude-personal/CLAUDE.md",
       "type": "User",
       "tokens": 3976
     },
     {
-      "path": "/Users/tylerthackray/.paseo/worktrees/3jvw4yw6/cpu-policing/CLAUDE.md",
+      "path": "/Users/someone/.paseo/worktrees/3jvw4yw6/cpu-policing/CLAUDE.md",
       "type": "Project",
       "tokens": 8580
     },
     {
-      "path": "/Users/tylerthackray/.claude-personal/projects/-Users-tylerthackray-paseo/memory/MEMORY.md",
+      "path": "/Users/someone/.claude-personal/projects/-Users-someone-paseo/memory/MEMORY.md",
       "type": "AutoMem",
       "tokens": 881
     }

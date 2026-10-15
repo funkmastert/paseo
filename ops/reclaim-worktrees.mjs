@@ -4,8 +4,11 @@
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { connectToDaemon } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js";
-import { checkWorktreeDeletionSafety } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/server/dist/server/server/done-janitor-worktree.js";
+const CHECKOUT = process.env.BOZEO_CHECKOUT ?? path.join(os.homedir(), "paseo-worktrees", "bozeo");
+const { connectToDaemon } = await import(path.join(CHECKOUT, "packages/cli/dist/utils/client.js"));
+const { checkWorktreeDeletionSafety } = await import(
+  path.join(CHECKOUT, "packages/server/dist/server/server/done-janitor-worktree.js")
+);
 
 const apply = process.argv.includes("--apply");
 const real = (p) => { try { return realpathSync(p); } catch { return p; } };

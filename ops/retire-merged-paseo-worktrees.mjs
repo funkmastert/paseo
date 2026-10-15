@@ -18,7 +18,7 @@ import { pathToFileURL } from "node:url";
 
 const apply = process.argv.includes("--apply");
 const ROOT = path.join(os.homedir(), "paseo-worktrees");
-const MAIN = path.join(ROOT, "bozeo");
+const MAIN = process.env.BOZEO_CHECKOUT ?? path.join(ROOT, "bozeo");
 const BASE = "origin/multi-account-orchestrator";
 const QUIET_MIN = 60;
 const now = Date.now();
@@ -74,7 +74,7 @@ export async function fetchAll(read) {
 }
 
 async function main() {
-  const { connectToDaemon } = await import("/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js");
+  const { connectToDaemon } = await import(path.join(MAIN, "packages/cli/dist/utils/client.js"));
 
   git(MAIN, "fetch", "-q", "origin");
   const c = await connectToDaemon({ host: "127.0.0.1:6767" });

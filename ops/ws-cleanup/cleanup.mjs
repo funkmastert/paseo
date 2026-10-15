@@ -5,11 +5,12 @@
 // gets a backup ref and untracked + ignored files (minus build dirs) are tarred to ./backup/.
 // External worktrees keep their directory, except this orchestrator's own merged tracks under
 // ~/paseo-worktrees, which are removed with `git worktree remove`.
-import { connectToDaemon } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+const CHECKOUT = process.env.BOZEO_CHECKOUT ?? path.join(os.homedir(), "paseo-worktrees", "bozeo");
+const { connectToDaemon } = await import(path.join(CHECKOUT, "packages/cli/dist/utils/client.js"));
 const APPLY = process.argv.includes("--apply");
 const HOME = os.homedir();
 const STAMP = "ws-cleanup-2026-09-29";

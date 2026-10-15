@@ -19,6 +19,7 @@ const dryRun = args.includes("--dry-run");
 const titleArg = args.includes("--title") ? args[args.indexOf("--title") + 1] : undefined;
 const QUIET_MS = 120_000;
 const STATE_DIR = path.join(os.homedir(), ".cache", "bozeo-announce");
+const CHECKOUT = process.env.BOZEO_CHECKOUT ?? path.join(os.homedir(), "paseo-worktrees", "bozeo");
 
 const TRAILING_FILLER = /^(and|or|on|in|of|for|to|the|a|an|with|at|after|from|by|into|via)$/i;
 
@@ -43,7 +44,7 @@ export function shortTitle(title) {
 async function leaderTitle() {
   const selfId = process.env.PASEO_AGENT_ID;
   if (!selfId) return undefined;
-  const { connectToDaemon } = await import("/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js");
+  const { connectToDaemon } = await import(path.join(CHECKOUT, "packages/cli/dist/utils/client.js"));
   const c = await connectToDaemon({ host: process.env.PASEO_HOST || "127.0.0.1:6767" });
   try {
     const agents = new Map((await c.fetchAgents({})).entries.map((e) => [e.agent.id, e.agent]));

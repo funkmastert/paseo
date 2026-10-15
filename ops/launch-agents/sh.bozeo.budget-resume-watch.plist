@@ -5,8 +5,8 @@
   <key>Label</key><string>sh.bozeo.budget-resume-watch</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/tylerthackray/.nvm/versions/node/v24.18.0/bin/node</string>
-    <string>/Users/tylerthackray/bozeo-ops/budget-resume-watch.mjs</string>
+    <string>__HOME__/.nvm/versions/node/v24.18.0/bin/node</string>
+    <string>__HOME__/bozeo-ops/budget-resume-watch.mjs</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
@@ -14,7 +14,7 @@
   <key>RunAtLoad</key><true/>
   <key>LowPriorityIO</key><true/>
   <key>Nice</key><integer>10</integer>
-  <key>StandardOutPath</key><string>/Users/tylerthackray/Library/Logs/Bozeo/budget-resume-watch.log</string>
-  <key>StandardErrorPath</key><string>/Users/tylerthackray/Library/Logs/Bozeo/budget-resume-watch.log</string>
+  <key>StandardOutPath</key><string>__HOME__/Library/Logs/Bozeo/budget-resume-watch.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/Library/Logs/Bozeo/budget-resume-watch.log</string>
 </dict>
 </plist>

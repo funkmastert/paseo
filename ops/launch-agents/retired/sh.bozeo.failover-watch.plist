@@ -5,13 +5,13 @@
   <key>Label</key><string>sh.bozeo.failover-watch</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/tylerthackray/.nvm/versions/node/v24.18.0/bin/node</string>
-    <string>/Users/tylerthackray/bozeo-ops/failover-watch.mjs</string>
+    <string>__HOME__/.nvm/versions/node/v24.18.0/bin/node</string>
+    <string>__HOME__/bozeo-ops/failover-watch.mjs</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>30</integer>
-  <key>StandardOutPath</key><string>/Users/tylerthackray/Library/Logs/Bozeo/failover-watch.log</string>
-  <key>StandardErrorPath</key><string>/Users/tylerthackray/Library/Logs/Bozeo/failover-watch.log</string>
+  <key>StandardOutPath</key><string>__HOME__/Library/Logs/Bozeo/failover-watch.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/Library/Logs/Bozeo/failover-watch.log</string>
 </dict>
 </plist>

@@ -61,7 +61,7 @@ The ref is pushed as the backup branch only when all three hold:
 - GitHub says the repository is private (`github-repo-visibility.ts`). The snapshotter asks `gh api repos/<owner>/<repo> --jq .private` first, since `gh` sees Tyler's private repositories. Without a definite answer from `gh`, it asks the API anonymously: a 404 means private or missing, and a 200 carries the `private` flag. A definite answer is cached per repository for five minutes. A timeout, a rate limit or any other failure is unknown. Unknown is never cached, and a snapshot bundled on an unknown answer is offered again at the next sweep, even when the worktree has not changed; every other outcome is final for that snapshot.
 - Nothing the push would send looks like a secret. The scan reads every commit of the snapshot that no remote-tracking ref reaches: the snapshot itself and HEAD's unpushed commits, merges diffed against their first parent. Every added line and every commit message is tested against the token list above, and every changed path against the name and directory rules. This covers tracked edits, committed files, a token added in one commit and removed in the next, and untracked files past the filter's 64 KB window or rewritten after the filter read them. A hit bundles instead, and the warning `possible secret in what the push would send` names each path (or `(commit message)`) and the kind of token, never the token. More than 32 MB of git output to read, or a git failure, also bundles.
 
-`funkmastert/paseo` is public, so its worktrees are bundled.
+A public repository's worktrees are always bundled. With `personalOwners` empty, the default, every worktree is bundled until you list an owner.
 
 The push uses `--no-verify` and goes to the origin URL rather than the remote name. `--no-verify` skips the repository's pre-push hook, which in these repos runs lint and tests, and with it any pre-push secret scanner, so the untracked-file filter and the scan above are the only secret checks on what is pushed. Pushing to the URL writes no remote-tracking ref, so the pushed commits still count as unpushed to the next assessment and to the done janitor's git gate.
 
@@ -119,14 +119,14 @@ or `git bundle unbundle <file>` to write only the objects.
 
 `agents.remediation.workSnapshots`, live-toggleable. `agents.remediation.remedies.enabled: false` turns the sweep off too.
 
-| Key                     | Default               | Meaning                                                         |
-| ----------------------- | --------------------- | --------------------------------------------------------------- |
-| `enabled`               | `true`                | False: the sweep does nothing. The done janitor still snapshots |
-| `dryRun`                | `false`               | Log what the sweep would snapshot; write no ref, state or batch |
-| `sweepMinutes`          | `60`                  | Time between sweeps. The first runs five minutes after start    |
-| `personalOwners`        | `["funkmastert"]`     | GitHub owners whose private repositories get the branch pushed  |
-| `bundleDir`             | `$PASEO_HOME/backups` | Where bundles go                                                |
-| `maxUntrackedFileBytes` | 20 MiB                | Untracked files larger than this are left out and named         |
-| `maxPerSweep`           | `10`                  | Worktrees at risk snapshotted per sweep                         |
+| Key                     | Default               | Meaning                                                                                                                   |
+| ----------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`               | `true`                | False: the sweep does nothing. The done janitor still snapshots                                                           |
+| `dryRun`                | `false`               | Log what the sweep would snapshot; write no ref, state or batch                                                           |
+| `sweepMinutes`          | `60`                  | Time between sweeps. The first runs five minutes after start                                                              |
+| `personalOwners`        | `[]`                  | GitHub owners whose private repositories get the branch pushed; empty means none, so every repo falls through to a bundle |
+| `bundleDir`             | `$PASEO_HOME/backups` | Where bundles go                                                                                                          |
+| `maxUntrackedFileBytes` | 20 MiB                | Untracked files larger than this are left out and named                                                                   |
+| `maxPerSweep`           | `10`                  | Worktrees at risk snapshotted per sweep                                                                                   |
 
 Grep `daemon.log` for `Work snapshot` and `Work-at-risk sweep`.

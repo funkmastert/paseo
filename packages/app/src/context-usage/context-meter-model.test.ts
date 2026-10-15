@@ -179,7 +179,7 @@ describe("buildContextBreakdownView (opus, 1M window)", () => {
     });
     expect(view.memory.files).toEqual([
       {
-        path: "/Users/tylerthackray/.paseo/worktrees/3jvw4yw6/cpu-policing/CLAUDE.md",
+        path: "/Users/someone/.paseo/worktrees/3jvw4yw6/cpu-policing/CLAUDE.md",
         shortPath: "cpu-policing/CLAUDE.md",
         tokens: 8_580,
         formattedTokens: "8.6k",

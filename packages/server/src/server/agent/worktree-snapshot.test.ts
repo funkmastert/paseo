@@ -71,7 +71,7 @@ function snapshotter(
 ): GitWorktreeSnapshotter {
   return new GitWorktreeSnapshotter({
     readConfig: () => ({
-      personalOwners: overrides.personalOwners ?? ["funkmastert"],
+      personalOwners: overrides.personalOwners ?? ["example-owner"],
       bundleDir,
       maxUntrackedFileBytes: overrides.maxUntrackedFileBytes ?? 1024 * 1024,
     }),
@@ -161,8 +161,8 @@ beforeEach(() => {
   commit(repo, "README.md", "hello\n");
   commit(repo, "gone.txt", "delete me\n");
   // A personal-GitHub origin that git rewrites to the local bare repo, so the push is real.
-  git(repo, "remote", "add", "origin", "https://github.com/funkmastert/x.git");
-  git(repo, "config", `url.${remote}.insteadOf`, "https://github.com/funkmastert/x.git");
+  git(repo, "remote", "add", "origin", "https://github.com/example-owner/x.git");
+  git(repo, "config", `url.${remote}.insteadOf`, "https://github.com/example-owner/x.git");
   git(repo, "push", "-q", "origin", "main");
   git(repo, "fetch", "-q", "origin");
 });
@@ -438,6 +438,19 @@ describe("GitWorktreeSnapshotter", () => {
     expect(existsSync(bundleDir)).toBe(false);
   });
 
+  test("an empty personalOwners (the resolver's default) bundles a would-be-personal origin instead of pushing", async () => {
+    writeFileSync(join(repo, "README.md"), "edited\n");
+
+    const result = expectSnapshotted(
+      await snapshotter({ personalOwners: [] }).snapshot({ cwd: repo, reason: "test" }),
+    );
+
+    expect(result.offsite.kind).toBe("bundled");
+    if (result.offsite.kind !== "bundled") return;
+    expect(result.offsite.path.startsWith(bundleDir)).toBe(true);
+    expect(git(remote, "for-each-ref", "--format=%(refname)")).toBe("refs/heads/main");
+  });
+
   test.each([
     ["a company forge", "https://git.wonderly.info/wonderlydotcom/x.git"],
     ["a company GitHub org", "https://github.com/wonderlydotcom/x.git"],
@@ -457,7 +470,7 @@ describe("GitWorktreeSnapshotter", () => {
   });
 
   test("a ssh personal GitHub origin is pushed", async () => {
-    const url = "git@github.com:funkmastert/x.git";
+    const url = "git@github.com:example-owner/x.git";
     git(repo, "remote", "set-url", "origin", url);
     git(repo, "config", `url.${remote}.insteadOf`, url);
     writeFileSync(join(repo, "README.md"), "edited\n");
@@ -471,7 +484,7 @@ describe("GitWorktreeSnapshotter", () => {
       repo,
       "config",
       "url.file:///nonexistent/x.git.insteadOf",
-      "https://github.com/funkmastert/x.git",
+      "https://github.com/example-owner/x.git",
     );
     writeFileSync(join(repo, "README.md"), "edited\n");
     const result = expectSnapshotted(await snapshotter().snapshot({ cwd: repo, reason: "test" }));
@@ -809,7 +822,7 @@ describe("GitWorktreeSnapshotter pushes only to a repository GitHub says is priv
       await snapshotter({ lookupRepoVisibility: lookup }).snapshot({ cwd: repo, reason: "test" }),
     );
     expect(result.offsite.kind).toBe("pushed");
-    expect(lookup).toHaveBeenCalledWith("funkmastert", "x");
+    expect(lookup).toHaveBeenCalledWith("example-owner", "x");
   });
 
   test("an unknown visibility is bundled", async () => {

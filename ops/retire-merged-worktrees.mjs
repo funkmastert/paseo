@@ -3,9 +3,13 @@
 // agents in each such worktree, then has the daemon remove it. Dry run unless --apply.
 // Usage: node retire-merged-worktrees.mjs <projectDir> [--apply]
 import { readdirSync, existsSync, realpathSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { connectToDaemon } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js";
-import { checkWorktreeDeletionSafety } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/server/dist/server/server/done-janitor-worktree.js";
+const CHECKOUT = process.env.BOZEO_CHECKOUT ?? path.join(os.homedir(), "paseo-worktrees", "bozeo");
+const { connectToDaemon } = await import(path.join(CHECKOUT, "packages/cli/dist/utils/client.js"));
+const { checkWorktreeDeletionSafety } = await import(
+  path.join(CHECKOUT, "packages/server/dist/server/server/done-janitor-worktree.js")
+);
 
 const root = process.argv[2];
 const apply = process.argv.includes("--apply");

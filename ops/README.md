@@ -5,12 +5,14 @@ Tyler's fleet-keeping-alive scripts. These are a copy of the live tooling at
 repository, sits on exactly one disk, and was unbacked-up until this copy
 existed.
 
-**Machine-specific.** Every script here hardcodes Tyler's paths (`/Users/tylerthackray/...`)
-and assumes the fork checkout at `/Users/tylerthackray/paseo-worktrees/bozeo`. They are
-not portable to another machine or checkout without editing those paths. Several
-are documented stopgaps: they exist because the daemon does not yet do the
-equivalent job itself, and get deleted once it does (each says so in its own
-header comment).
+**Machine-specific.** Every script here resolves Tyler's home directory at runtime
+(`os.homedir()` / `$HOME`) rather than hardcoding it, and assumes the fork checkout
+lives at `~/paseo-worktrees/bozeo` unless `BOZEO_CHECKOUT` points elsewhere. They
+are personal automation for this one fleet, not installer-facing: nothing here
+becomes portable to a different machine just because the path is no longer a
+literal string. Several are documented stopgaps: they exist because the daemon
+does not yet do the equivalent job itself, and get deleted once it does (each
+says so in its own header comment).
 
 **Edit `~/bozeo-ops`, then copy into `ops/` and commit.** The running
 LaunchAgents load their scripts from `~/bozeo-ops`, not from this repo, so an
@@ -19,8 +21,10 @@ until you copy it back. Replace a live file with a copy and a `mv` over it, not
 an in-place write: `heavy.sh` is bash, which reads its script while it runs.
 `ops/check-drift.sh` exits non-zero when the two disagree; run it before you
 commit here and after you change anything live. Every file in `ops/` except
-this README and `check-drift.sh` is a copy of `~/bozeo-ops/<same path>`; the
-plists map to `~/Library/LaunchAgents` (and `retired/` to
+this README, `check-drift.sh`, and `launch-agents/install.sh` is a copy of
+`~/bozeo-ops/<same path>`; `install.sh` is repo-only (it renders a plist and
+installs it, so there is nothing live to keep it in sync with). The plists
+map to `~/Library/LaunchAgents` (and `retired/` to
 `~/Library/LaunchAgents.disabled`). Scan a script with `secret-scan.py` before
 you vendor it.
 
@@ -100,14 +104,19 @@ booted out on 2026-09-29 and parked in `~/Library/LaunchAgents.disabled/`. Don't
 reinstall them: the daemon does both jobs, and failover-watch racing the daemon's
 failover moved the same agents twice.
 
-Install one. The plist goes in `~/Library/LaunchAgents`, and it points at the
-script under `~/bozeo-ops`, not at this repo — make sure the script is there
-first:
+Install one. The checked-in plists hold `__HOME__` in place of the home
+directory (launchd doesn't expand `$HOME`), so install through
+`install.sh`, which renders the real path and bootstraps the agent. The
+plist points at the script under `~/bozeo-ops`, not at this repo — make sure
+the script is there first:
 
 ```sh
-cp ops/launch-agents/sh.bozeo.disk-guard.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/sh.bozeo.disk-guard.plist
+ops/launch-agents/install.sh sh.bozeo.disk-guard.plist
 ```
+
+A retired plist (below) renders into `~/Library/LaunchAgents.disabled`
+without bootstrapping: `ops/launch-agents/install.sh --retired sh.bozeo.cpu-guard.plist`.
+`--dry-run` prints the rendered plist instead of writing it.
 
 Uninstall:
 

@@ -16,7 +16,11 @@ Three layers, over every line the pushed commits add and every commit message:
                ngrok, Codex, push tokens, daemon keypair, secret-looking config values). Read
                fresh on each push, held in memory only, never printed.
   2. identity- Tyler's personal identifiers from ~/bozeo-ops/push-scan-identities.txt (emails,
-               account handles, device serials, hostnames). That file is local only.
+               account handles, device serials, hostnames; path overridable with
+               PUSH_SCAN_IDENTITIES). That file is local only. The current user's home directory
+               and home-path shapes with their login name (/Users/<name>/, -Users-<name>-) are
+               always included, computed at run time, so a literal home path is caught even if
+               the identities file is stale or missing.
   3. pattern - secret formats, real-looking email addresses, phone numbers, Tailscale addresses,
                physical adb serials. Only on commits authored by Tyler's git identity (upstream
                commits are someone else's content). A line containing an obvious fake marker
@@ -25,10 +29,10 @@ Three layers, over every line the pushed commits add and every commit message:
 Findings print as commit, path and kind, never the value. Exit 1 blocks the push. The scan fails
 closed: if it cannot read what is being pushed, the push is blocked.
 """
-import hashlib, json, os, re, subprocess, sys
+import getpass, hashlib, json, os, re, subprocess, sys
 
 HOME = os.path.expanduser("~")
-IDENTITIES = os.path.join(HOME, "bozeo-ops", "push-scan-identities.txt")
+IDENTITIES = os.environ.get("PUSH_SCAN_IDENTITIES", os.path.join(HOME, "bozeo-ops", "push-scan-identities.txt"))
 ZERO = "0" * 40
 SKIP_REMOTE = re.compile(r"git\.wonderly\.info|github\.com[:/]wonderlydotcom/", re.I)
 SKIP_PATHS = re.compile(r"(^|/)package-lock\.json$|\.(png|jpe?g|gif|webp|ico|pdf|zip|gz)$")
@@ -150,9 +154,21 @@ def secret_values():
 
 def identities():
     try:
-        return {l.strip() for l in open(IDENTITIES) if l.strip() and not l.startswith("#")}
+        found = {l.strip() for l in open(IDENTITIES) if l.strip() and not l.startswith("#")}
     except OSError:
-        return set()
+        found = set()
+    # Always-on, computed fresh each run (not read from the identities file, which can be stale or
+    # missing): the current user's home directory, and the shapes a home path takes with their login
+    # name in it. A hardcoded home path is how 39 files got in before the 2026-10 cleanup. The bare
+    # login name is left out: a short one like "dev" would match ordinary words.
+    found.add(HOME)
+    try:
+        user = os.environ.get("USER") or os.environ.get("USERNAME") or getpass.getuser()
+    except Exception:
+        user = ""
+    if user:
+        found.update({f"/Users/{user}/", f"/home/{user}/", f"\\Users\\{user}\\", f"-Users-{user}-"})
+    return found
 
 
 def commit_ranges(remote):

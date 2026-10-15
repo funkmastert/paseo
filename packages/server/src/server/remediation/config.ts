@@ -137,7 +137,11 @@ export interface ResolvedWorkSnapshotsConfig {
   enabled: boolean;
   dryRun: boolean;
   sweepMinutes: number;
-  /** GitHub owners whose repos get the snapshot pushed as a `backup/...` branch. */
+  /**
+   * GitHub owners whose repos get the snapshot pushed as a `backup/...` branch. Empty (the
+   * default) means none: no authenticated-forge-user or daemon-checkout-owner value is reachable
+   * here without a new network call, so every repo falls through to a local bundle instead.
+   */
   personalOwners: readonly string[];
   /** Where bundles go for every other repo. Undefined: `$PASEO_HOME/backups`. */
   bundleDir: string | undefined;
@@ -153,7 +157,7 @@ export function resolveWorkSnapshotsConfig(
     enabled: (snapshots?.enabled ?? true) && isRemediesRungEnabled(config),
     dryRun: snapshots?.dryRun ?? false,
     sweepMinutes: snapshots?.sweepMinutes ?? 60,
-    personalOwners: snapshots?.personalOwners ?? ["funkmastert"],
+    personalOwners: snapshots?.personalOwners ?? [],
     bundleDir: snapshots?.bundleDir,
     maxUntrackedFileBytes: snapshots?.maxUntrackedFileBytes ?? 20 * 1024 * 1024,
     maxPerSweep: snapshots?.maxPerSweep ?? 10,

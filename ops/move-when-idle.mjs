@@ -1,7 +1,10 @@
 // Move an agent to another provider once its turn ends. The daemon refuses to move an agent
 // mid-turn, so a session cannot move itself; this waits for it instead.
 // Usage: node move-when-idle.mjs <agentId> <providerId> [maxMinutes]
-import { connectToDaemon } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js";
+import os from "node:os";
+import path from "node:path";
+const CHECKOUT = process.env.BOZEO_CHECKOUT ?? path.join(os.homedir(), "paseo-worktrees", "bozeo");
+const { connectToDaemon } = await import(path.join(CHECKOUT, "packages/cli/dist/utils/client.js"));
 const [agentId, providerId, maxMinutes = "30"] = process.argv.slice(2);
 const deadline = Date.now() + Number(maxMinutes) * 60_000;
 const log = (msg) => console.log(`${new Date().toISOString()} ${msg}`);

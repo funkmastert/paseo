@@ -42,11 +42,10 @@ describe("claudeConfigDirKeychainService", () => {
   it.skipIf(process.platform === "win32")(
     "matches the hash scheme observed in the real macOS Keychain",
     () => {
-      // Empirically verified against a live item on this machine: sha256 of the absolute
-      // path "/Users/tylerthackray/.claude-personal" (no trailing slash), first 8 hex
-      // chars, produced service "Claude Code-credentials-a30b61cd".
-      expect(claudeConfigDirKeychainService("/Users/tylerthackray/.claude-personal")).toBe(
-        "Claude Code-credentials-a30b61cd",
+      // Matches macOS's real scheme (verified against a live Keychain item): sha256 of the
+      // absolute path (no trailing slash), first 8 hex chars.
+      expect(claudeConfigDirKeychainService("/Users/someone/.claude-personal")).toBe(
+        "Claude Code-credentials-c160e579",
       );
     },
   );
