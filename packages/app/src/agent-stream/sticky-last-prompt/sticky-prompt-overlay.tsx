@@ -8,6 +8,16 @@ export interface StickyPromptOverlayProps {
   source: StickyLastPromptSource;
   compact: boolean;
   onJumpToOriginal: () => void;
+  /** The navigator's selected prompt -- defaults to the newest, steps back/forward through
+   * loaded prompts. Falls back to the sticky-last-prompt source's own prompt when absent
+   * (e.g. before the navigator has anything selected yet). */
+  selectedPrompt: UserMessageItem | null;
+  positionLabel: string | null;
+  canStepBack: boolean;
+  canStepForward: boolean;
+  onStepBack: () => void;
+  onStepForward: () => void;
+  onJumpToSelected: () => void;
 }
 
 // Subscribes to the publisher itself (mirroring ChatOutlineRail's
@@ -23,15 +33,23 @@ export const StickyPromptOverlay = memo(function StickyPromptOverlay({
   source,
   compact,
   onJumpToOriginal,
+  selectedPrompt,
+  positionLabel,
+  canStepBack,
+  canStepForward,
+  onStepBack,
+  onStepForward,
+  onJumpToSelected,
 }: StickyPromptOverlayProps): ReactNode {
   const state = useSyncExternalStore(source.subscribe, source.getState);
+  const displayedPrompt = selectedPrompt ?? state.prompt;
   const [viewerPrompt, setViewerPrompt] = useState<UserMessageItem | null>(null);
   const pendingJumpRef = useRef(false);
 
   const handleOpenViewer = useCallback(() => {
     pendingJumpRef.current = false;
-    setViewerPrompt(state.prompt);
-  }, [state.prompt]);
+    setViewerPrompt(displayedPrompt);
+  }, [displayedPrompt]);
   const handleCloseViewer = useCallback(() => {
     pendingJumpRef.current = false;
     setViewerPrompt(null);
@@ -43,16 +61,24 @@ export const StickyPromptOverlay = memo(function StickyPromptOverlay({
   const handleViewerDismissed = useCallback(() => {
     if (!pendingJumpRef.current) return;
     pendingJumpRef.current = false;
-    onJumpToOriginal();
-  }, [onJumpToOriginal]);
+    onJumpToSelected();
+  }, [onJumpToSelected]);
 
   if (!state.prompt) return null;
   return (
     <>
       {state.barVisible ? (
         <StickyPromptBar
-          prompt={state.prompt}
+          // Guaranteed non-null here: displayedPrompt falls back to state.prompt, and the guard
+          // above already returned when state.prompt was null.
+          prompt={displayedPrompt as UserMessageItem}
           compact={compact}
+          positionLabel={positionLabel}
+          canStepBack={canStepBack}
+          canStepForward={canStepForward}
+          onStepBack={onStepBack}
+          onStepForward={onStepForward}
+          onJumpToSelected={onJumpToSelected}
           onJumpToOriginal={onJumpToOriginal}
           onOpenViewer={handleOpenViewer}
         />

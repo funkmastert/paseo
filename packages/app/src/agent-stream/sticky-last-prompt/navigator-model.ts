@@ -7,7 +7,7 @@ export interface PromptNavigatorSelection {
 
 export type PromptNavigatorStepDirection = "back" | "forward";
 
-const EMPTY_SELECTION: PromptNavigatorSelection = { prompts: [], selectedIndex: -1 };
+export const EMPTY_SELECTION: PromptNavigatorSelection = { prompts: [], selectedIndex: -1 };
 
 /** Selects the newest prompt, or the empty selection when there are none. */
 export function resolveInitialSelection(prompts: UserMessageItem[]): PromptNavigatorSelection {
@@ -70,6 +70,16 @@ export function reconcileSelectionOnNewPrompts(
 
   const nextIndex = nextPrompts.findIndex((prompt) => prompt.id === selectedPrompt.id);
   if (nextIndex === -1) return resolveInitialSelection(nextPrompts);
+
+  // `combinedItems` gets a new array identity on every streaming tick even when no user
+  // message changed, so `nextPrompts` is a fresh array nearly every call. Same newest id (above),
+  // same length, and the selected prompt landing at the same index together mean nothing
+  // actually changed -- stream items are append-only, so that combination can't happen from a
+  // real edit. Returning `previous` here (not an equivalent new object) is what lets
+  // use-prompt-navigator.ts's `next !== selectionRef.current` check skip the re-render.
+  if (nextIndex === previous.selectedIndex && nextPrompts.length === previous.prompts.length) {
+    return previous;
+  }
 
   return { prompts: nextPrompts, selectedIndex: nextIndex };
 }

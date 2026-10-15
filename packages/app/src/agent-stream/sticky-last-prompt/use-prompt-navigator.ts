@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useStableEvent } from "@/hooks/use-stable-event";
-import type { StreamItem } from "@/types/stream";
+import type { StreamItem, UserMessageItem } from "@/types/stream";
 import type { StreamViewportHandle } from "../strategy";
 import { selectRecentPrompts } from "./model";
 import {
   canStepBack as canStepBackSelector,
   canStepForward as canStepForwardSelector,
+  EMPTY_SELECTION,
   reconcileSelectionOnNewPrompts,
   resolvePositionLabel,
   resolveSelectedPrompt,
@@ -27,6 +28,7 @@ export interface UsePromptNavigatorInput {
 }
 
 export interface PromptNavigator {
+  selectedPrompt: UserMessageItem | null;
   positionLabel: string | null;
   canStepBack: boolean;
   canStepForward: boolean;
@@ -37,7 +39,6 @@ export interface PromptNavigator {
 }
 
 const EMPTY_STREAM_ITEMS: readonly StreamItem[] = [];
-const EMPTY_SELECTION: PromptNavigatorSelection = { prompts: [], selectedIndex: -1 };
 
 export function usePromptNavigator(input: UsePromptNavigatorInput): PromptNavigator {
   const head = input.head ?? EMPTY_STREAM_ITEMS;
@@ -133,6 +134,7 @@ export function usePromptNavigator(input: UsePromptNavigatorInput): PromptNaviga
   });
 
   return {
+    selectedPrompt: resolveSelectedPrompt(selection),
     positionLabel: resolvePositionLabel(selection),
     canStepBack: canStepBackSelector(selection) || (input.hasOlderHistory && prompts.length > 0),
     canStepForward: canStepForwardSelector(selection),

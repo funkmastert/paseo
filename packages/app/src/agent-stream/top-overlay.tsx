@@ -9,12 +9,20 @@ import { primaryColorMapping, scrollIndicatorStyles } from "./scroll-indicator-s
 import { resolveScrollIndicatorFade } from "./scroll-indicator-fade";
 import { StickyPromptOverlay } from "./sticky-last-prompt/sticky-prompt-overlay";
 import type { StickyLastPromptSource } from "./sticky-last-prompt/model";
+import type { UserMessageItem } from "@/types/stream";
 
 export interface TopOverlayProps {
   agentId: string;
   stickyPromptSource: StickyLastPromptSource;
   compact: boolean;
   onJumpToStickyPrompt: () => void;
+  selectedPrompt: UserMessageItem | null;
+  positionLabel: string | null;
+  canStepBack: boolean;
+  canStepForward: boolean;
+  onStepBack: () => void;
+  onStepForward: () => void;
+  onJumpToSelected: () => void;
   showJumpToStart: boolean;
   isJumpingToStart: boolean;
   onJumpToStart: () => void;
@@ -31,6 +39,13 @@ export const TopOverlay = memo(function TopOverlay({
   stickyPromptSource,
   compact,
   onJumpToStickyPrompt,
+  selectedPrompt,
+  positionLabel,
+  canStepBack,
+  canStepForward,
+  onStepBack,
+  onStepForward,
+  onJumpToSelected,
   showJumpToStart,
   isJumpingToStart,
   onJumpToStart,
@@ -44,6 +59,13 @@ export const TopOverlay = memo(function TopOverlay({
         source={stickyPromptSource}
         compact={compact}
         onJumpToOriginal={onJumpToStickyPrompt}
+        selectedPrompt={selectedPrompt}
+        positionLabel={positionLabel}
+        canStepBack={canStepBack}
+        canStepForward={canStepForward}
+        onStepBack={onStepBack}
+        onStepForward={onStepForward}
+        onJumpToSelected={onJumpToSelected}
       />
       {showJumpToStart && (
         <Animated.View entering={fadeIn} exiting={fadeOut} style={styles.buttonRow}>

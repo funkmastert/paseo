@@ -125,6 +125,16 @@ describe("reconcileSelectionOnNewPrompts", () => {
     expect(reconcileSelectionOnNewPrompts(previous, prompts)).toBe(previous);
   });
 
+  it("is referentially stable even when passed a new array with the same prompts in the same order", () => {
+    // A streaming tick rebuilds the combined tail+head array (and re-filters it) on every
+    // chunk even when no user message changed -- the result must still be a no-op so the
+    // navigator hook's `next !== selectionRef.current` check can skip a re-render.
+    const original = [user("p1", 1), user("p2", 2), user("p3", 3)];
+    const previous = resolveInitialSelection(original);
+    const recomputed = [user("p1", 1), user("p2", 2), user("p3", 3)];
+    expect(reconcileSelectionOnNewPrompts(previous, recomputed)).toBe(previous);
+  });
+
   it("resets to empty when the next prompt list is empty", () => {
     const previous = resolveInitialSelection([user("p1", 1)]);
     expect(reconcileSelectionOnNewPrompts(previous, []).selectedIndex).toBe(-1);

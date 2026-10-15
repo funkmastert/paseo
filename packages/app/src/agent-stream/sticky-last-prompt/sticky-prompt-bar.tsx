@@ -1,4 +1,4 @@
-import { ArrowUp } from "lucide-react-native";
+import { ArrowUp, ChevronLeft, ChevronRight, Maximize2 } from "lucide-react-native";
 import { useCallback, useMemo } from "react";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
@@ -9,8 +9,18 @@ import type { UserMessageItem } from "@/types/stream";
 
 export interface StickyPromptBarProps {
   prompt: UserMessageItem;
-  /** Pinned-grid cells: one line, unobtrusive; tapping the body still opens the full viewer. */
+  /** Pinned-grid cells: one line, unobtrusive; the navigator controls stay present. */
   compact?: boolean;
+  /** "3/7"-style label for the selected prompt among the navigable ones. Null when there's
+   * only one prompt to navigate (nothing to count). */
+  positionLabel: string | null;
+  canStepBack: boolean;
+  canStepForward: boolean;
+  onStepBack: () => void;
+  onStepForward: () => void;
+  /** Tapping the bar body jumps to the selected prompt's row -- the full-prompt viewer moved
+   * behind the expand icon below. */
+  onJumpToSelected: () => void;
   onJumpToOriginal: () => void;
   /** The full-prompt viewer lives above this bar (view.tsx's StickyPromptOverlay) so it survives
    * the bar itself hiding; this just asks the overlay to open it. */
@@ -20,6 +30,12 @@ export interface StickyPromptBarProps {
 export function StickyPromptBar({
   prompt,
   compact = false,
+  positionLabel,
+  canStepBack,
+  canStepForward,
+  onStepBack,
+  onStepForward,
+  onJumpToSelected,
   onJumpToOriginal,
   onOpenViewer,
 }: StickyPromptBarProps) {
@@ -33,18 +49,69 @@ export function StickyPromptBar({
     [onJumpToOriginal],
   );
 
+  const handlePressExpand = useCallback(
+    (event: { stopPropagation?: () => void }) => {
+      event.stopPropagation?.();
+      onOpenViewer();
+    },
+    [onOpenViewer],
+  );
+
   const bodyPressableStyle = useCallback(
     ({ pressed }: { pressed: boolean }) => [styles.body, pressed && styles.bodyPressed],
     [],
   );
 
+  const stepBackAccessibilityState = useMemo(() => ({ disabled: !canStepBack }), [canStepBack]);
+  const stepForwardAccessibilityState = useMemo(
+    () => ({ disabled: !canStepForward }),
+    [canStepForward],
+  );
+
   return (
     <View style={[styles.container, compact && styles.containerCompact]} testID="sticky-prompt-bar">
+      <View style={styles.navigator} testID="sticky-prompt-bar-navigator">
+        <Pressable
+          style={styles.iconButton}
+          onPress={onStepBack}
+          disabled={!canStepBack}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityState={stepBackAccessibilityState}
+          accessibilityLabel={t("agentStream.stickyPromptStepBack")}
+          testID="sticky-prompt-bar-step-back"
+        >
+          <ChevronLeft
+            size={14}
+            color={canStepBack ? styles.icon.color : styles.iconDisabled.color}
+          />
+        </Pressable>
+        {positionLabel ? (
+          <Text style={styles.positionLabel} testID="sticky-prompt-bar-position">
+            {positionLabel}
+          </Text>
+        ) : null}
+        <Pressable
+          style={styles.iconButton}
+          onPress={onStepForward}
+          disabled={!canStepForward}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityState={stepForwardAccessibilityState}
+          accessibilityLabel={t("agentStream.stickyPromptStepForward")}
+          testID="sticky-prompt-bar-step-forward"
+        >
+          <ChevronRight
+            size={14}
+            color={canStepForward ? styles.icon.color : styles.iconDisabled.color}
+          />
+        </Pressable>
+      </View>
       <Pressable
         style={bodyPressableStyle}
-        onPress={onOpenViewer}
+        onPress={onJumpToSelected}
         accessibilityRole="button"
-        accessibilityLabel={t("agentStream.stickyPromptShowFull")}
+        accessibilityLabel={t("agentStream.stickyPromptJumpToSelected")}
         testID="sticky-prompt-bar-body"
       >
         <Text style={styles.text} numberOfLines={compact ? 1 : 2}>
@@ -52,7 +119,17 @@ export function StickyPromptBar({
         </Text>
       </Pressable>
       <Pressable
-        style={styles.jumpButton}
+        style={styles.iconButton}
+        onPress={handlePressExpand}
+        hitSlop={8}
+        accessibilityRole="button"
+        accessibilityLabel={t("agentStream.stickyPromptShowFull")}
+        testID="sticky-prompt-bar-expand"
+      >
+        <Maximize2 size={14} color={styles.icon.color} />
+      </Pressable>
+      <Pressable
+        style={styles.iconButton}
         onPress={handlePressJump}
         hitSlop={8}
         accessibilityRole="button"
@@ -141,6 +218,17 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.spacing[1],
     paddingHorizontal: theme.spacing[2],
   },
+  navigator: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+  },
+  positionLabel: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    minWidth: 28,
+    textAlign: "center",
+  },
   body: {
     flex: 1,
     flexDirection: "row",
@@ -156,13 +244,16 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
   },
-  jumpButton: {
+  iconButton: {
     alignItems: "center",
     justifyContent: "center",
     paddingTop: 2,
   },
   icon: {
     color: theme.colors.foregroundMuted,
+  },
+  iconDisabled: {
+    color: theme.colors.border,
   },
   viewerText: {
     color: theme.colors.foreground,

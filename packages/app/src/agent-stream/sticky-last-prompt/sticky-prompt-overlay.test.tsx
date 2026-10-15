@@ -106,10 +106,14 @@ function Harness({
   testKey,
   source,
   onJumpToOriginal,
+  onJumpToSelected,
+  selectedPrompt = null,
 }: {
   testKey: string;
   source: StickyLastPromptSource;
   onJumpToOriginal: () => void;
+  onJumpToSelected?: () => void;
+  selectedPrompt?: UserMessageItem | null;
 }) {
   return (
     <StickyPromptOverlay
@@ -117,6 +121,13 @@ function Harness({
       source={source}
       compact={false}
       onJumpToOriginal={onJumpToOriginal}
+      selectedPrompt={selectedPrompt}
+      positionLabel={null}
+      canStepBack={false}
+      canStepForward={false}
+      onStepBack={vi.fn()}
+      onStepForward={vi.fn()}
+      onJumpToSelected={onJumpToSelected ?? vi.fn()}
     />
   );
 }
@@ -128,7 +139,7 @@ describe("StickyPromptOverlay", () => {
     render(<Harness testKey="agent-1" source={publisher} onJumpToOriginal={vi.fn()} />);
 
     act(() => {
-      query("sticky-prompt-bar-body")?.click();
+      query("sticky-prompt-bar-expand")?.click();
     });
     expect(query("sticky-prompt-viewer")).not.toBeNull();
 
@@ -148,7 +159,7 @@ describe("StickyPromptOverlay", () => {
     render(<Harness testKey="agent-1" source={publisherA} onJumpToOriginal={vi.fn()} />);
 
     act(() => {
-      query("sticky-prompt-bar-body")?.click();
+      query("sticky-prompt-bar-expand")?.click();
     });
     expect(query("sticky-prompt-viewer")).not.toBeNull();
 
@@ -162,11 +173,18 @@ describe("StickyPromptOverlay", () => {
   it("sequences 'jump to message' after the sheet's own close transition finishes", () => {
     const publisher = createStickyLastPromptPublisher();
     publisher.publish({ prompt: prompt("p1"), barVisible: true });
-    const onJumpToOriginal = vi.fn();
-    render(<Harness testKey="agent-1" source={publisher} onJumpToOriginal={onJumpToOriginal} />);
+    const onJumpToSelected = vi.fn();
+    render(
+      <Harness
+        testKey="agent-1"
+        source={publisher}
+        onJumpToOriginal={vi.fn()}
+        onJumpToSelected={onJumpToSelected}
+      />,
+    );
 
     act(() => {
-      query("sticky-prompt-bar-body")?.click();
+      query("sticky-prompt-bar-expand")?.click();
     });
     act(() => {
       query("sticky-prompt-viewer-jump")?.click();
@@ -175,22 +193,29 @@ describe("StickyPromptOverlay", () => {
     // The sheet has closed, but the dismiss-complete signal hasn't fired yet — the jump must
     // not have happened yet either.
     expect(query("sticky-prompt-viewer")).toBeNull();
-    expect(onJumpToOriginal).not.toHaveBeenCalled();
+    expect(onJumpToSelected).not.toHaveBeenCalled();
 
     act(() => {
       query("sticky-prompt-viewer-simulate-dismiss-complete")?.click();
     });
-    expect(onJumpToOriginal).toHaveBeenCalledTimes(1);
+    expect(onJumpToSelected).toHaveBeenCalledTimes(1);
   });
 
   it("does not jump when the viewer is dismissed via its own close control", () => {
     const publisher = createStickyLastPromptPublisher();
     publisher.publish({ prompt: prompt("p1"), barVisible: true });
-    const onJumpToOriginal = vi.fn();
-    render(<Harness testKey="agent-1" source={publisher} onJumpToOriginal={onJumpToOriginal} />);
+    const onJumpToSelected = vi.fn();
+    render(
+      <Harness
+        testKey="agent-1"
+        source={publisher}
+        onJumpToOriginal={vi.fn()}
+        onJumpToSelected={onJumpToSelected}
+      />,
+    );
 
     act(() => {
-      query("sticky-prompt-bar-body")?.click();
+      query("sticky-prompt-bar-expand")?.click();
     });
     act(() => {
       query("sticky-prompt-viewer-close")?.click();
@@ -199,6 +224,27 @@ describe("StickyPromptOverlay", () => {
       query("sticky-prompt-viewer-simulate-dismiss-complete")?.click();
     });
 
-    expect(onJumpToOriginal).not.toHaveBeenCalled();
+    expect(onJumpToSelected).not.toHaveBeenCalled();
+  });
+
+  it("jumps to the selected prompt, not just the last one, when the body is tapped", () => {
+    const publisher = createStickyLastPromptPublisher();
+    publisher.publish({ prompt: prompt("p1", "last prompt"), barVisible: true });
+    const onJumpToSelected = vi.fn();
+    render(
+      <Harness
+        testKey="agent-1"
+        source={publisher}
+        onJumpToOriginal={vi.fn()}
+        onJumpToSelected={onJumpToSelected}
+        selectedPrompt={prompt("p0", "an older prompt")}
+      />,
+    );
+
+    expect(query("sticky-prompt-bar-body")?.textContent).toContain("an older prompt");
+    act(() => {
+      query("sticky-prompt-bar-body")?.click();
+    });
+    expect(onJumpToSelected).toHaveBeenCalledTimes(1);
   });
 });

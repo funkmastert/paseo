@@ -54,6 +54,7 @@ describe("usePromptNavigator", () => {
       initialProps: baseInput(),
     });
     expect(result.current.positionLabel).toBe("5/5");
+    expect(result.current.selectedPrompt?.id).toBe("p5");
     expect(result.current.canStepForward).toBe(false);
     expect(result.current.canStepBack).toBe(true);
   });
