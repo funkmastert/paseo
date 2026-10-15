@@ -39,12 +39,16 @@ export const FIXER_SETTLE_MS = 10 * 60_000;
 export const AGENT_DONE_SETTLE_MS = 60 * 60_000;
 
 /**
- * The regenerable allowlist, part (c) of the deletion invariant: directories a build, an install
- * or a test run recreates. An ignored path counts only when a directory on its way is one of
- * these, at the worktree root or beside a build manifest (`isBuildManifest`). Anything else
+ * The regenerable allowlist, part (c) of the deletion invariant by name: directories a build, an
+ * install or a test run recreates. An ignored path counts only when a directory on its way is one
+ * of these, at the worktree root or beside a build manifest (`isBuildManifest`). Anything else
  * ignored — `.env`, `.xcode.env.local`, `google-services.json`, evidence logs, `.data/`,
- * `results/`, a `src/build/` beside source — may exist nowhere else and keeps the worktree. Keep
- * it short: a name added here is a name whose contents the janitor may delete unread.
+ * `results/`, a `src/build/` beside source — may exist nowhere else and keeps the worktree, unless
+ * `checkDeletionInvariant` finds it byte-identical to the same path in the main checkout instead
+ * (`WorktreeCoverage.copiedFromMainCheckout`, done-janitor-worktree.ts): a worktree-setup script's
+ * copy of exactly these kinds of files, not a name this allowlist can recognize on its own. Keep
+ * this list short: a name added here is a name whose contents the janitor may delete unread
+ * wherever it sits, with no main checkout to compare against.
  */
 const REGENERABLE_DIRS: ReadonlySet<string> = new Set([
   // JavaScript and TypeScript
@@ -67,6 +71,9 @@ const REGENERABLE_DIRS: ReadonlySet<string> = new Set([
   ".gradle",
   ".cxx",
   ".kotlin",
+  // .NET
+  "bin",
+  "obj",
   // Apple
   "DerivedData",
   "Pods",
@@ -104,6 +111,8 @@ const BUILD_MANIFESTS: ReadonlySet<string> = new Set([
   "go.mod",
   "pom.xml",
 ]);
+/** .NET project files, matched by extension like an Xcode project: dotnet names them per-project. */
+const DOTNET_MANIFEST_EXTENSIONS = [".csproj", ".fsproj", ".vbproj", ".sln"] as const;
 
 /** `agents.doneJanitor.workspaceSweep`. Every key is optional; the resolver owns the defaults. */
 export interface DoneJanitorWorkspaceSweepConfig {
@@ -412,7 +421,8 @@ export type DeletionInvariant =
 
 /**
  * The deletion invariant (docs/done-janitor.md): a worktree's directory goes only when every file
- * in it is (a) tracked and pushed, (b) in a verified backup, or (c) under a regenerable directory.
+ * in it is (a) tracked and pushed, (b) in a verified backup, or (c) under a regenerable directory
+ * or byte-identical to the same path in the main checkout (`coverage.copiedFromMainCheckout`).
  * Anything else present keeps it, and so does anything that stops the listing being the whole
  * truth: a directory the delete could not read or empty, a change git is told not to look for,
  * a file whose contents Git LFS keeps outside git. The caller verifies the backup; this judges
@@ -426,7 +436,10 @@ export function checkDeletionInvariant(
   const unlisted = describeUnlisted(coverage);
   if (unlisted) return { holds: false, reason: unlisted };
   const manifestDirectories = new Set(coverage.manifestDirectories);
-  const kept = coverage.ignored.filter((entry) => !isRegenerablePath(entry, manifestDirectories));
+  const copiedFromMainCheckout = new Set(coverage.copiedFromMainCheckout);
+  const kept = coverage.ignored.filter(
+    (entry) => !isRegenerablePath(entry, manifestDirectories) && !copiedFromMainCheckout.has(entry),
+  );
   if (kept.length > 0) {
     return {
       holds: false,
@@ -555,9 +568,13 @@ export function isRegenerablePath(
   );
 }
 
-/** Whether a file (or an Xcode project directory) is a build manifest; see `BUILD_MANIFESTS`. */
+/** Whether a file (or an Xcode or .NET project) is a build manifest; see `BUILD_MANIFESTS`. */
 export function isBuildManifest(name: string): boolean {
-  return BUILD_MANIFESTS.has(name) || name.endsWith(".xcodeproj");
+  return (
+    BUILD_MANIFESTS.has(name) ||
+    name.endsWith(".xcodeproj") ||
+    DOTNET_MANIFEST_EXTENSIONS.some((extension) => name.endsWith(extension))
+  );
 }
 
 export type IdleProjectVerdict =

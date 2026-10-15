@@ -506,6 +506,7 @@ describe("readWorktreeCoverage", () => {
       unreadable: [],
       nestedRepositories: [],
       manifestDirectories: [],
+      copiedFromMainCheckout: [],
     });
   });
 
@@ -548,6 +549,7 @@ describe("readWorktreeCoverage", () => {
       unreadable: [],
       nestedRepositories: [],
       manifestDirectories: [],
+      copiedFromMainCheckout: [],
     });
   });
 
@@ -863,7 +865,7 @@ describe("the deletion invariant on real worktrees", () => {
         await readWorktreeCoverage({ worktreePath: worktree, commit: taken.commit }),
         "snapshot",
       ),
-    ).toEqual({ holds: false, reason });
+    ).toEqual({ holds: false, reason, category: "ignored-path" });
   });
 
   test("build output beside its package.json may go", async () => {
@@ -887,6 +889,107 @@ describe("the deletion invariant on real worktrees", () => {
 
     expect(await plan(worktree)).toBe(
       "keep: 1 file(s) stored with Git LFS, whose contents nothing shows are off this machine (hero.png)",
+    );
+  });
+});
+
+/**
+ * A worktree-setup script copies ignored files like `local.properties` or `google-services.json`
+ * from the main checkout (`repo`, the primary checkout every `addWorktree` branches off) into the
+ * new worktree. `mainRepoRoot` lets the deletion invariant recognize that copy instead of keeping
+ * the worktree for it forever (docs/done-janitor.md, "The deletion invariant").
+ */
+describe("the deletion invariant against the main checkout", () => {
+  function fixture(name: string): string {
+    const worktree = addWorktree(name, "feature");
+    commit(worktree, ".gitignore", "node_modules/\nlocal.properties\nconfig/\n");
+    git(worktree, "push", "-q", "origin", "feature");
+    return worktree;
+  }
+
+  async function planAgainstMain(worktree: string): Promise<string> {
+    const verdict = checkDeletionInvariant(
+      await readWorktreeCoverage({ worktreePath: worktree, commit: null, mainRepoRoot: repo }),
+      "plan",
+    );
+    return verdict.holds ? `holds: ${verdict.detail}` : `keep: ${verdict.reason}`;
+  }
+
+  test("a file byte-identical to the main checkout's copy may go", async () => {
+    const worktree = fixture("copied-file");
+    writeFileSync(join(repo, "local.properties"), "sdk.dir=/Users/someone/Android/sdk\n");
+    writeFileSync(join(worktree, "local.properties"), "sdk.dir=/Users/someone/Android/sdk\n");
+
+    expect(await planAgainstMain(worktree)).toBe(
+      "holds: holds: every file is tracked and pushed; ignored only regenerable (local.properties)",
+    );
+  });
+
+  test("a directory byte-identical to the main checkout's copy may go", async () => {
+    const worktree = fixture("copied-dir");
+    for (const base of [repo, worktree]) {
+      mkdirSync(join(base, "config", "xcshareddata"), { recursive: true });
+      writeFileSync(join(base, "config", "xcshareddata", "a.xcsettings"), "<plist/>\n");
+    }
+
+    expect(await planAgainstMain(worktree)).toBe(
+      "holds: holds: every file is tracked and pushed; ignored only regenerable (config/)",
+    );
+  });
+
+  test("a file that differs from the main checkout's copy is kept", async () => {
+    const worktree = fixture("unique-file");
+    writeFileSync(join(repo, "local.properties"), "sdk.dir=/Users/someone/Android/sdk\n");
+    writeFileSync(join(worktree, "local.properties"), "sdk.dir=/Users/someone/other-sdk\n");
+
+    expect(await planAgainstMain(worktree)).toBe(
+      "keep: 1 ignored path(s) that are not regenerable and no backup holds (local.properties)",
+    );
+  });
+
+  test("a file the main checkout does not have is kept, same as a .env edited only here", async () => {
+    const worktree = fixture("env-only-here");
+    writeFileSync(join(worktree, "local.properties"), "sdk.dir=/Users/someone/Android/sdk\n");
+
+    expect(await planAgainstMain(worktree)).toBe(
+      "keep: 1 ignored path(s) that are not regenerable and no backup holds (local.properties)",
+    );
+  });
+
+  test("a directory that differs from the main checkout's copy is kept", async () => {
+    const worktree = fixture("unique-dir");
+    mkdirSync(join(repo, "config", "xcshareddata"), { recursive: true });
+    writeFileSync(join(repo, "config", "xcshareddata", "a.xcsettings"), "<plist/>\n");
+    mkdirSync(join(worktree, "config", "xcshareddata"), { recursive: true });
+    writeFileSync(join(worktree, "config", "xcshareddata", "a.xcsettings"), "<plist edited/>\n");
+
+    expect(await planAgainstMain(worktree)).toBe(
+      "keep: 1 ignored path(s) that are not regenerable and no backup holds (config/)",
+    );
+  });
+
+  test("a file past the hashing cap is kept even when it is actually identical", async () => {
+    const worktree = fixture("over-cap");
+    const big = `${"x".repeat(1_000_001)}\n`;
+    writeFileSync(join(repo, "local.properties"), big);
+    writeFileSync(join(worktree, "local.properties"), big);
+
+    expect(await planAgainstMain(worktree)).toBe(
+      "keep: 1 ignored path(s) that are not regenerable and no backup holds (local.properties)",
+    );
+  });
+
+  test("dotnet build output beside its .csproj may go, without comparing it to the main checkout", async () => {
+    const worktree = addWorktree("dotnet", "feature");
+    mkdirSync(join(worktree, "src", "Camp.Api"), { recursive: true });
+    commit(worktree, "src/Camp.Api/Camp.Api.csproj", "<Project />\n");
+    commit(worktree, ".gitignore", "bin/\nobj/\n");
+    git(worktree, "push", "-q", "origin", "feature");
+    mkdirSync(join(worktree, "src", "Camp.Api", "bin"));
+    writeFileSync(join(worktree, "src", "Camp.Api", "bin", "Camp.Api.dll"), "binary\n");
+
+    expect(await planAgainstMain(worktree)).toBe(
+      "holds: holds: every file is tracked and pushed; ignored only regenerable (src/Camp.Api/bin/)",
     );
   });
 });
