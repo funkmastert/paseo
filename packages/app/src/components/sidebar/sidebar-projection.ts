@@ -18,8 +18,8 @@ import {
   type SidebarShortcutModel,
   type SidebarShortcutSection,
 } from "@/utils/sidebar-shortcuts";
+import { isHiddenAgentWorkspace } from "@/utils/workspace-visibility";
 import {
-  agentWorkspacesGroup,
   isSidebarWorkspaceGroupCollapsed,
   statusWorkspaceGroups,
   type SidebarWorkspaceGroup,
@@ -62,15 +62,18 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
   const unpinnedWorkspaces = Array.from(input.workspaceEntriesByKey.values()).filter(
     (workspace) => !pinnedWorkspaceKeys.has(workspace.workspaceKey),
   );
-  // Agent-made workspaces (R3, docs/done-janitor.md#manual-pin-vs-auto-pin) never show among
-  // Tyler's own, in either grouping mode, unless he pinned one himself — a manual pin already
-  // pulled it into `pinnedChats` above, so nothing here ever re-excludes it.
+  // Agent-made workspaces (docs/done-janitor.md#manual-pin-vs-auto-pin) never show among Tyler's
+  // own, in either grouping mode, unless he pinned one himself — a manual pin already pulled it
+  // into `pinnedChats` above, so nothing here ever re-excludes it.
   const personWorkspaces: SidebarWorkspaceEntry[] = [];
-  const agentWorkspaceRows: SidebarWorkspaceEntry[] = [];
+  const agentWorkspaceKeys = new Set<string>();
   for (const workspace of unpinnedWorkspaces) {
-    (workspace.createdBy === "agent" ? agentWorkspaceRows : personWorkspaces).push(workspace);
+    if (isHiddenAgentWorkspace(workspace)) {
+      agentWorkspaceKeys.add(workspace.workspaceKey);
+    } else {
+      personWorkspaces.push(workspace);
+    }
   }
-  const agentWorkspaceKeys = new Set(agentWorkspaceRows.map((row) => row.workspaceKey));
   const pinnedGroups: PinnedSidebarGroups = {
     pinnedChats: rawPinnedGroups.pinnedChats,
     unpinnedProjects: rawPinnedGroups.unpinnedProjects.map((project) =>
@@ -79,10 +82,9 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
   };
   // One switch decides both what the list groups by and what the keyboard shortcuts walk, so the
   // two cannot disagree and a new grouping mode is a compile error here rather than a silent
-  // fall-through to the project rows. The agent-workspaces group rides along in both modes.
+  // fall-through to the project rows. Agent-made workspaces never reach either: they were already
+  // filtered out of `personWorkspaces` above.
   const workspaceGroups = buildWorkspaceGroups(input, personWorkspaces);
-  const agentGroup = agentWorkspacesGroup(agentWorkspaceRows);
-  if (agentGroup) workspaceGroups.push(agentGroup);
 
   const sections: SidebarShortcutSection[] = [];
   if (!input.pinnedCollapsed) {
@@ -95,12 +97,6 @@ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarPr
         collapsed: input.collapsedProjectKeys.has(project.viewKey),
       })),
     );
-    if (agentGroup) {
-      sections.push({
-        workspaces: agentGroup.rows,
-        collapsed: isSidebarWorkspaceGroupCollapsed(agentGroup, input.collapsedWorkspaceGroupKeys),
-      });
-    }
   } else {
     sections.push(
       ...workspaceGroups.map((group) => ({

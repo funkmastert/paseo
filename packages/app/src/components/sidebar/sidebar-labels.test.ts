@@ -2,7 +2,6 @@ import { describe, expect, test } from "vitest";
 import type { SidebarWorkspaceEntry } from "@/hooks/use-sidebar-workspaces-list";
 import { SIDEBAR_UNLABELLED_LABEL_KEY } from "@/stores/sidebar-view-store";
 import {
-  agentWorkspacesGroup,
   filterWorkspacesByLabels,
   isSidebarWorkspaceGroupCollapsed,
   statusWorkspaceGroups,
@@ -76,18 +75,6 @@ describe("sidebar label filtering", () => {
   });
 });
 
-describe("agentWorkspacesGroup", () => {
-  test("returns null for no rows, so a caller can skip rendering it", () => {
-    expect(agentWorkspacesGroup([])).toBeNull();
-  });
-
-  test("labels the group with the row count", () => {
-    const group = agentWorkspacesGroup([workspace("a", []), workspace("b", [])]);
-    expect(group?.label).toBe("Agent workspaces (2)");
-    expect(group?.rows.map((row) => row.workspaceId)).toEqual(["a", "b"]);
-  });
-});
-
 describe("isSidebarWorkspaceGroupCollapsed", () => {
   test("a status group defaults expanded; the set holds an explicit collapse", () => {
     const [group] = statusWorkspaceGroups([{ bucket: "done", label: "Done", rows: [] }]);
@@ -95,13 +82,5 @@ describe("isSidebarWorkspaceGroupCollapsed", () => {
     if (!group) return;
     expect(isSidebarWorkspaceGroupCollapsed(group, new Set())).toBe(false);
     expect(isSidebarWorkspaceGroupCollapsed(group, new Set([group.key]))).toBe(true);
-  });
-
-  test("the agent group defaults collapsed; the set holds an explicit expand", () => {
-    const group = agentWorkspacesGroup([workspace("a", [])]);
-    expect(group).not.toBeNull();
-    if (!group) return;
-    expect(isSidebarWorkspaceGroupCollapsed(group, new Set())).toBe(true);
-    expect(isSidebarWorkspaceGroupCollapsed(group, new Set([group.key]))).toBe(false);
   });
 });

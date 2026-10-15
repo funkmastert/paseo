@@ -37,7 +37,6 @@ import type { Theme } from "@/styles/theme";
 import type { SidebarSurfaceBackdrop } from "@/styles/surface-backdrop";
 import { withUnistyles } from "react-native-unistyles";
 import {
-  Bot,
   ChevronDown,
   ChevronRight,
   CircleAlert,
@@ -113,7 +112,6 @@ const ThemedCircleAlert = withUnistyles(CircleAlert);
 const ThemedCircleCheck = withUnistyles(CircleCheck);
 const ThemedCircleDot = withUnistyles(CircleDot);
 const ThemedCircleX = withUnistyles(CircleX);
-const ThemedBot = withUnistyles(Bot);
 const EMPTY_SHORTCUT_INDEX = new Map<string, number>();
 
 function statusWorkspaceKeyExtractor(workspace: SidebarWorkspaceEntry): string {
@@ -457,7 +455,7 @@ function StatusGroupHeader({
         <View style={styles.statusGroupRowLeft}>
           <View style={styles.statusGroupLeadingVisualSlot}>
             <StatusGroupLeadingVisual
-              leading={group.leading}
+              bucket={group.bucket}
               collapsed={collapsed}
               showChevron={isHovered}
             />
@@ -474,20 +472,16 @@ function StatusGroupHeader({
 }
 
 function StatusGroupLeadingVisual({
-  leading,
+  bucket,
   collapsed,
   showChevron,
 }: {
-  leading: SidebarWorkspaceGroup["leading"];
+  bucket: StatusBucket;
   collapsed: boolean;
   showChevron: boolean;
 }) {
   if (!showChevron) {
-    return leading.kind === "agent" ? (
-      <AgentGroupIcon needsAttention={leading.needsAttention} />
-    ) : (
-      <StatusGroupIcon bucket={leading.bucket} />
-    );
+    return <StatusGroupIcon bucket={bucket} />;
   }
   if (collapsed) {
     return <ThemedChevronRight size={14} uniProps={foregroundMutedColorMapping} />;
@@ -508,19 +502,6 @@ function StatusGroupIcon({ bucket }: { bucket: StatusBucket }) {
     case "done":
       return <ThemedCircleCheck size={14} uniProps={foregroundMutedColorMapping} />;
   }
-}
-
-/** The agent-workspaces header's icon. The attention dot mirrors `needs_input`'s color — the
- * same thing a single workspace row's own dot would show for a pending permission or an error. */
-function AgentGroupIcon({ needsAttention }: { needsAttention: boolean }) {
-  return (
-    <View style={styles.agentGroupIconSlot}>
-      <ThemedBot size={14} uniProps={foregroundMutedColorMapping} />
-      {needsAttention ? (
-        <View style={styles.agentGroupAttentionDot} testID="sidebar-agent-group-attention-dot" />
-      ) : null}
-    </View>
-  );
 }
 
 const StatusWorkspaceRow = memo(function StatusWorkspaceRow({
@@ -1155,20 +1136,6 @@ const styles = StyleSheet.create((theme) => ({
     flexShrink: 0,
     alignItems: "center",
     justifyContent: "center",
-  },
-  agentGroupIconSlot: {
-    position: "relative",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  agentGroupAttentionDot: {
-    position: "absolute",
-    top: -2,
-    right: -2,
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: theme.colors.statusDotWarning,
   },
   statusGroupTitleGroup: {
     flexDirection: "row",

@@ -56,6 +56,7 @@ import { focusWithRetries } from "@/utils/web-focus";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { formatTimeAgo } from "@/utils/time";
 import { shortenPath } from "@/utils/shorten-path";
+import { isHiddenAgentWorkspace } from "@/utils/workspace-visibility";
 import { useCommandCenterContributions } from "./provider";
 import { filterAndRankWorkspaces } from "./workspace-search";
 import {
@@ -147,6 +148,9 @@ function useBuiltInRows(open: boolean): {
       for (const host of project.hosts) {
         for (const workspace of host.workspaces) {
           if (workspace.archivingAt) continue;
+          // Agent-made workspaces never show here either, same rule as the sidebar
+          // (docs/done-janitor.md#manual-pin-vs-auto-pin) — unless Tyler pinned one himself.
+          if (isHiddenAgentWorkspace(workspace)) continue;
           allWorkspaces.push({
             kind: "workspace",
             id: `workspace:${host.serverId}:${workspace.id}`,
