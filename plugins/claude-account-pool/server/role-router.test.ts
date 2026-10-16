@@ -3252,10 +3252,12 @@ describe("JEV's labels", () => {
       return (result?.config.providerOptions as { appendSystemPrompt?: string } | undefined)?.appendSystemPrompt;
     }
 
-    it("adds the agent-tools discovery hint for the on arm only", () => {
+    it("adds the agent-tools usage hint for the on arm only, with the concrete trigger rule", () => {
       const router = createRoleRouter(jevOptions());
 
-      expect(hintOf(router({ ...unlabelled(), jevTools: tools(0.1) }, fakeContext))).toContain("ask_jev");
+      const onHint = hintOf(router({ ...unlabelled(), jevTools: tools(0.1) }, fakeContext));
+      expect(onHint).toContain("ask_jev");
+      expect(onHint).toContain("Before reading a file over about 8,000 tokens");
       expect(hintOf(router({ ...unlabelled(), jevTools: tools(0.9) }, fakeContext))).toBeUndefined();
     });
 

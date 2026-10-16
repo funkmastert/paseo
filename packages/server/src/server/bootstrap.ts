@@ -3275,7 +3275,7 @@ export async function createPaseoDaemon(
   {
     const agentMcpRoute = "/mcp/agents";
 
-    const createAgentMcpSession = async (callerAgentId?: string) => {
+    const createAgentMcpSession = async (callerAgentId?: string, toolsScope?: "jev") => {
       await jevToolsDependencies.eligibility.primeFromRuntime({ callerAgentId }, (id) =>
         agentManager.getAgent(id),
       );
@@ -3286,6 +3286,7 @@ export async function createPaseoDaemon(
             ? agentManager.getPaseoToolPolicy(callerAgentId)
             : undefined,
         }),
+        toolsScope,
       );
 
       // Stateless mode: each HTTP request builds a fresh server + transport that is
@@ -3365,7 +3366,14 @@ export async function createPaseoDaemon(
         } else if (Array.isArray(callerAgentIdRaw) && typeof callerAgentIdRaw[0] === "string") {
           callerAgentId = callerAgentIdRaw[0];
         }
-        const { server, transport } = await createAgentMcpSession(callerAgentId);
+        // `&tools=jev` (`runtime-mcp-config.ts`'s `withRuntimeJevToolsMcpServer`): the dedicated
+        // eager-load server for the JEV file tools, same route, same auth, different catalog.
+        const toolsScopeRaw = req.query.tools;
+        const toolsScope =
+          (typeof toolsScopeRaw === "string" ? toolsScopeRaw : undefined) === "jev"
+            ? "jev"
+            : undefined;
+        const { server, transport } = await createAgentMcpSession(callerAgentId, toolsScope);
         res.on("close", () => {
           void transport.close();
           void server.close();

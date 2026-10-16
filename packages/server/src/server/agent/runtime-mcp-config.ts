@@ -70,6 +70,91 @@ function isInternalPaseoMcpServer(config: McpServerConfig): boolean {
   }
 }
 
+const PASEO_JEV_MCP_SERVER_NAME = "paseo-jev";
+
+/**
+ * The 7 `ask_jev_*` tools' own small server (docs/jev.md, Features 4-6, "Which agents get
+ * them"), served on the same `/mcp/agents` route as the main catalog but with `?tools=jev` so
+ * `createAgentMcpServer` builds the minimal catalog instead of the full one — not a second route
+ * to authenticate or register. Carries `alwaysLoad: true` so the Claude provider never defers
+ * these 7 schemas behind `ToolSearch`: setting `alwaysLoad` on the main `paseo` server instead
+ * would eager-load its entire ~100+-tool catalog for every "on"-arm agent, which is the
+ * discoverability problem's cost, not its fix.
+ */
+function isInternalJevToolsMcpServer(config: McpServerConfig): boolean {
+  if (config.type !== "http" && config.type !== "sse") {
+    return false;
+  }
+
+  try {
+    const url = new URL(config.url);
+    return url.pathname === PASEO_MCP_PATHNAME && url.searchParams.get("tools") === "jev";
+  } catch {
+    return false;
+  }
+}
+
+export function stripJevToolsMcpServer(config: AgentSessionConfig): AgentSessionConfig {
+  const mcpServers = config.mcpServers;
+  if (!mcpServers) {
+    return config;
+  }
+
+  const jevServer = mcpServers[PASEO_JEV_MCP_SERVER_NAME];
+  if (!jevServer || !isInternalJevToolsMcpServer(jevServer)) {
+    return config;
+  }
+
+  const nextMcpServers = { ...mcpServers };
+  delete nextMcpServers[PASEO_JEV_MCP_SERVER_NAME];
+
+  const next = { ...config };
+  if (Object.keys(nextMcpServers).length > 0) {
+    next.mcpServers = nextMcpServers;
+  } else {
+    delete next.mcpServers;
+  }
+  return next;
+}
+
+/**
+ * Injects the eager-load JEV tools server for an "on"-arm child only (`enabled`, the caller's
+ * `paseo.jev-tools: on` label — docs/jev.md, "Which agents get them"). A no-op, byte-identical
+ * passthrough after stripping any stale entry, for every other create: a hold-out ("control")
+ * arm, an ineligible create, or one with no `jevToolsAvailable` evaluated at all.
+ */
+export function withRuntimeJevToolsMcpServer(params: {
+  config: AgentSessionConfig;
+  agentId: string;
+  mcpBaseUrl: string | null;
+  mcpAuthToken: string | null;
+  enabled: boolean;
+}): AgentSessionConfig {
+  const storedConfig = stripJevToolsMcpServer(params.config);
+  if (
+    !params.enabled ||
+    !params.mcpBaseUrl ||
+    storedConfig.mcpServers?.[PASEO_JEV_MCP_SERVER_NAME]
+  ) {
+    return storedConfig;
+  }
+
+  return {
+    ...storedConfig,
+    mcpServers: {
+      [PASEO_JEV_MCP_SERVER_NAME]: {
+        type: "http",
+        url: `${params.mcpBaseUrl}?callerAgentId=${params.agentId}&tools=jev`,
+        alwaysLoad: true,
+        ...(params.mcpAuthToken
+          ? { headers: { Authorization: `Bearer ${params.mcpAuthToken}` } }
+          : {}),
+      },
+      ...storedConfig.mcpServers,
+    },
+  };
+}
+
 const MCP_GATEWAY_PATH_PREFIX = "/mcp/gateway/";
 
 /**

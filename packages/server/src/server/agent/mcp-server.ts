@@ -7,8 +7,11 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { addModelVisibleStructuredContent } from "./tools/paseo-tool-serialization.js";
+import { JEV_TOOL_NAMES } from "./tools/jev-tool-use-log.js";
 import { createPaseoToolCatalog, type PaseoToolHostDependencies } from "./tools/paseo-tools.js";
 import type { PaseoToolResult } from "./tools/types.js";
+
+const JEV_TOOL_NAME_SET: ReadonlySet<string> = new Set(JEV_TOOL_NAMES);
 
 export type AgentMcpServerOptions = PaseoToolHostDependencies;
 
@@ -28,14 +31,28 @@ function toMcpToolResult(result: PaseoToolResult): CallToolResult {
   };
 }
 
-export async function createAgentMcpServer(options: AgentMcpServerOptions): Promise<McpServer> {
+/**
+ * `toolsScope: "jev"` builds the dedicated eager-load server (docs/jev.md, "Which agents get
+ * them"; `runtime-mcp-config.ts`'s `withRuntimeJevToolsMcpServer`) carrying only the 7
+ * `ask_jev_*` tools, for `/mcp/agents?...&tools=jev`. Undefined builds the ordinary catalog
+ * minus those 7 — they now reach an "on"-arm agent only through the dedicated server, never
+ * both, so no tool name is ever registered under two different MCP server identities.
+ */
+export async function createAgentMcpServer(
+  options: AgentMcpServerOptions,
+  toolsScope?: "jev",
+): Promise<McpServer> {
   const catalog = await createPaseoToolCatalog(options);
   const server = new McpServer({
-    name: "agent-mcp",
+    name: toolsScope === "jev" ? "agent-mcp-jev" : "agent-mcp",
     version: "2.0.0",
   });
 
-  for (const tool of catalog.tools.values()) {
+  const tools = [...catalog.tools.values()].filter((tool) =>
+    toolsScope === "jev" ? JEV_TOOL_NAME_SET.has(tool.name) : !JEV_TOOL_NAME_SET.has(tool.name),
+  );
+
+  for (const tool of tools) {
     server.registerTool(
       tool.name,
       {

@@ -14,6 +14,7 @@ import {
 import type { JevServiceRuntime } from "../../jev/service.js";
 import { JevSavingsLedger } from "../../jev/savings.js";
 import { AgentSideProcesses } from "../agent-side-processes.js";
+import { createAgentMcpServer } from "../mcp-server.js";
 import { createPaseoToolCatalog } from "./paseo-tools.js";
 import { JevToolUseLog, type JevToolUseRecord } from "./jev-tool-use-log.js";
 import {
@@ -145,24 +146,25 @@ async function setup(options: SetupOptions = {}) {
   const launchEnv = { PASEO_AGENT_ID: AGENT_ID, PASEO_AGENT_CWD: project, ...options.launchEnv };
   const callerAgentId =
     options.callerAgentId === null ? undefined : (options.callerAgentId ?? AGENT_ID);
+  const hostDeps = {
+    agentManager: {
+      getPaseoToolPolicy: vi.fn(() => undefined),
+      getAgent,
+      getAgentLaunchEnv: vi.fn((id: string) => (id === AGENT_ID ? launchEnv : undefined)),
+    },
+    agentStorage: { get: vi.fn(async () => null) },
+    callerAgentId,
+    jevTools: deps,
+    logger: pino({ level: "silent" }),
+  } as unknown as PaseoToolHostDependencies;
   const build = async (
     runtime: { callerLabels?: Record<string, string>; callerCwd?: string } = {},
   ) => {
     await deps.eligibility.primeFromRuntime({ callerAgentId, ...runtime }, getAgent);
-    return createPaseoToolCatalog({
-      agentManager: {
-        getPaseoToolPolicy: vi.fn(() => undefined),
-        getAgent,
-        getAgentLaunchEnv: vi.fn((id: string) => (id === AGENT_ID ? launchEnv : undefined)),
-      },
-      agentStorage: { get: vi.fn(async () => null) },
-      callerAgentId,
-      jevTools: deps,
-      logger: pino({ level: "silent" }),
-    } as unknown as PaseoToolHostDependencies);
+    return createPaseoToolCatalog(hostDeps);
   };
   const catalog = await build();
-  return { jev, catalog, useLog, agent, deps, build };
+  return { jev, catalog, useLog, agent, deps, build, hostDeps };
 }
 
 function text(result: PaseoToolResult): string {
@@ -1150,5 +1152,54 @@ describe("the savings ledger (docs/jev.md, Savings)", () => {
       await savings.stop();
       rmSync(savingsDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("eager loading (docs/jev.md, Features 4-6, dedicated server)", () => {
+  async function toolNames(
+    hostDeps: PaseoToolHostDependencies,
+    toolsScope?: "jev",
+  ): Promise<string[]> {
+    const server = await createAgentMcpServer(hostDeps, toolsScope);
+    const tools: Record<string, unknown> = Reflect.get(server, "_registeredTools");
+    return Object.keys(tools);
+  }
+
+  test("the jev-scoped server carries exactly the 7 ask_jev_* tools, for an eligible 'on'-arm caller", async () => {
+    const { hostDeps } = await setup();
+
+    const names = await toolNames(hostDeps, "jev");
+
+    expect(names.sort()).toEqual([...JEV_TOOLS].sort());
+  });
+
+  test("the default (unscoped) server carries none of the 7 — they reach the agent only through the dedicated server", async () => {
+    const { hostDeps } = await setup();
+
+    const names = await toolNames(hostDeps);
+
+    for (const jevTool of JEV_TOOLS) {
+      expect(names).not.toContain(jevTool);
+    }
+    // Confirms the unscoped server still builds the rest of the catalog normally.
+    expect(names).toContain("list_agents");
+  });
+
+  test("a hold-out ('control') arm's caller gets no jev tools from the jev-scoped server either — eligibility still gates it", async () => {
+    const { hostDeps } = await setup({ labels: { "paseo.jev-tools": "control" } });
+
+    const names = await toolNames(hostDeps, "jev");
+
+    expect(names).toEqual([]);
+  });
+
+  test("an ineligible caller (Read denied) gets no jev tools from the jev-scoped server", async () => {
+    const { hostDeps } = await setup({
+      labels: { "paseo.jev-tools": "on", "paseo.tools-denied": "Read" },
+    });
+
+    const names = await toolNames(hostDeps, "jev");
+
+    expect(names).toEqual([]);
   });
 });
