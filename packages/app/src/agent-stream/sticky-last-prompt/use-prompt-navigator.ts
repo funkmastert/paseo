@@ -39,14 +39,21 @@ export interface PromptNavigator {
 }
 
 const EMPTY_STREAM_ITEMS: readonly StreamItem[] = [];
+const EMPTY_PROMPTS: UserMessageItem[] = [];
 
 export function usePromptNavigator(input: UsePromptNavigatorInput): PromptNavigator {
   const head = input.head ?? EMPTY_STREAM_ITEMS;
-  const combinedItems = useMemo(
-    () => (head.length > 0 ? [...input.items, ...head] : input.items),
-    [input.items, head],
+  // The head gets a new identity on every streaming tick, the tail rarely does. Scan them
+  // apart so a tick rescans only the head, and keep `prompts` stable while the head holds none.
+  const tailPrompts = useMemo(() => selectRecentPrompts(input.items), [input.items]);
+  const headPrompts = useMemo(() => {
+    const found = selectRecentPrompts(head);
+    return found.length > 0 ? found : EMPTY_PROMPTS;
+  }, [head]);
+  const prompts = useMemo(
+    () => (headPrompts.length > 0 ? [...tailPrompts, ...headPrompts] : tailPrompts),
+    [tailPrompts, headPrompts],
   );
-  const prompts = useMemo(() => selectRecentPrompts(combinedItems), [combinedItems]);
 
   const [selection, setSelection] = useState<PromptNavigatorSelection>(EMPTY_SELECTION);
   // The source of truth for any handler that must read the *current*

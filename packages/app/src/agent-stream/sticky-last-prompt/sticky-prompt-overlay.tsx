@@ -24,9 +24,9 @@ export interface StickyPromptOverlayProps {
 // `useSyncExternalStore(activePrompt.subscribe, activePrompt.getActiveSeq)`) so a visibility
 // change re-renders only this leaf, not the whole AgentStreamView.
 //
-// The viewer's open/snapshot state lives here, above the `barVisible` gate, so a visibility flip
-// alone (e.g. a streaming layout shift bringing the prompt back on screen) never closes an open
-// viewer — only `!state.prompt` unmounts this leaf, and the caller remounts it on an agent switch
+// The viewer's open/snapshot state lives here, so a visibility flip alone (e.g. a streaming layout
+// shift bringing the prompt back on screen) never closes an open viewer — only `!state.prompt`
+// unmounts this leaf, and the caller remounts it on an agent switch
 // via `key={agentId}` (this component's own `return null` on a momentary null prompt does not
 // reset its hooks, so the key is what actually guarantees the switch closes the viewer).
 export const StickyPromptOverlay = memo(function StickyPromptOverlay({
@@ -64,25 +64,25 @@ export const StickyPromptOverlay = memo(function StickyPromptOverlay({
     onJumpToSelected();
   }, [onJumpToSelected]);
 
+  // The bar stays pinned whenever the session has a prompt: it is the navigator, not only a
+  // reminder of a prompt that scrolled away.
   if (!state.prompt) return null;
   return (
     <>
-      {state.barVisible ? (
-        <StickyPromptBar
-          // Guaranteed non-null here: displayedPrompt falls back to state.prompt, and the guard
-          // above already returned when state.prompt was null.
-          prompt={displayedPrompt as UserMessageItem}
-          compact={compact}
-          positionLabel={positionLabel}
-          canStepBack={canStepBack}
-          canStepForward={canStepForward}
-          onStepBack={onStepBack}
-          onStepForward={onStepForward}
-          onJumpToSelected={onJumpToSelected}
-          onJumpToOriginal={onJumpToOriginal}
-          onOpenViewer={handleOpenViewer}
-        />
-      ) : null}
+      <StickyPromptBar
+        // Guaranteed non-null here: displayedPrompt falls back to state.prompt, and the guard
+        // above already returned when state.prompt was null.
+        prompt={displayedPrompt as UserMessageItem}
+        compact={compact}
+        positionLabel={positionLabel}
+        canStepBack={canStepBack}
+        canStepForward={canStepForward}
+        onStepBack={onStepBack}
+        onStepForward={onStepForward}
+        onJumpToSelected={onJumpToSelected}
+        onJumpToOriginal={onJumpToOriginal}
+        onOpenViewer={handleOpenViewer}
+      />
       <FullPromptViewer
         visible={viewerPrompt != null}
         text={viewerPrompt?.text ?? ""}

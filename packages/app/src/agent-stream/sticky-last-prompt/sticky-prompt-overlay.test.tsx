@@ -133,7 +133,7 @@ function Harness({
 }
 
 describe("StickyPromptOverlay", () => {
-  it("keeps an open viewer mounted when barVisible alone flips false", () => {
+  it("keeps the bar pinned and an open viewer mounted when barVisible flips false", () => {
     const publisher = createStickyLastPromptPublisher();
     publisher.publish({ prompt: prompt("p1"), barVisible: true });
     render(<Harness testKey="agent-1" source={publisher} onJumpToOriginal={vi.fn()} />);
@@ -143,14 +143,14 @@ describe("StickyPromptOverlay", () => {
     });
     expect(query("sticky-prompt-viewer")).not.toBeNull();
 
-    // Same prompt, bar visibility alone drops — e.g. a streaming layout shift bringing the
-    // prompt back on screen. The open viewer must survive this, not hard-unmount.
+    // Same prompt, back on screen: the bar is the prompt navigator, so it stays pinned, and the
+    // open viewer survives.
     act(() => {
       publisher.publish({ prompt: prompt("p1"), barVisible: false });
     });
 
     expect(query("sticky-prompt-viewer")).not.toBeNull();
-    expect(query("sticky-prompt-bar")).toBeNull();
+    expect(query("sticky-prompt-bar")).not.toBeNull();
   });
 
   it("closes the viewer when the active agent switches", () => {
