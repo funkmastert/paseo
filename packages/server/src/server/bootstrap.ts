@@ -3943,6 +3943,9 @@ export async function createPaseoDaemon(
                     ? [
                         {
                           focusedAgentId: activity.focusedAgentId,
+                          focusedWorkspaceId: activity.focusedAgentId
+                            ? (agentManager.getAgent(activity.focusedAgentId)?.workspaceId ?? null)
+                            : null,
                           appVisible: activity.appVisible,
                           lastActivityAtMs: activity.lastActivityAt.getTime(),
                         },

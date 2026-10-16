@@ -378,7 +378,11 @@ export class AwayReplyJob {
   }
 
   /** Why Tyler counts as present, or null. A presence read that fails counts as present. */
-  private presenceReason(agentId: string, config: ResolvedAwayReplyConfig): string | null {
+  private presenceReason(
+    agentId: string,
+    workspaceId: string | undefined,
+    config: ResolvedAwayReplyConfig,
+  ): string | null {
     let presence: AwayReplyPresence | null;
     try {
       presence = this.deps.readPresence();
@@ -389,6 +393,7 @@ export class AwayReplyJob {
     return presenceSkipReason({
       presence,
       agentId,
+      workspaceId: workspaceId ?? null,
       nowMs: this.now(),
       thresholdMinutes: config.thresholdMinutes,
     });
@@ -417,11 +422,12 @@ export class AwayReplyJob {
     if (this.state.dailyTotal() >= config.maxRepliesPerDay) {
       return { reason: "daily-cap", final: false };
     }
-    const present = this.presenceReason(agent.id, config);
+    const present = this.presenceReason(agent.id, agent.workspaceId, config);
     if (present) return { reason: present, final: false };
     if (episode.kind === "turn-ended") {
-      // Tyler opened it after it finished, and left it.
-      if (!agent.requiresAttention) return { reason: "tyler-read-thread", final: true };
+      // Tyler opened it after it finished, and left it. A glance that clears the unread flag is
+      // not a reply: defer, so a later sweep can still answer if he never comes back to it.
+      if (!agent.requiresAttention) return { reason: "tyler-read-thread", final: false };
       // Stopped, by Tyler, the spend governor or anything else: not finished, not waiting.
       if (record.lastCanceledAt !== null && record.lastCanceledAt >= latestTurnStartMs(rows)) {
         return { reason: `turn-canceled-${record.lastCancelReason ?? "unknown"}`, final: true };
