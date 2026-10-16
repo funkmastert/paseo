@@ -9,6 +9,7 @@ import {
   unlinkSync,
   utimesSync,
   writeFileSync,
+  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -950,6 +951,16 @@ describe("the deletion invariant against the main checkout", () => {
   test("a file the main checkout does not have is kept, same as a .env edited only here", async () => {
     const worktree = fixture("env-only-here");
     writeFileSync(join(worktree, "local.properties"), "sdk.dir=/Users/someone/Android/sdk\n");
+
+    expect(await planAgainstMain(worktree)).toBe(
+      "keep: 1 ignored path(s) that are not regenerable and no backup holds (local.properties)",
+    );
+  });
+
+  test("a symlink is kept even when its target matches the main checkout's copy", async () => {
+    const worktree = fixture("symlinked-file");
+    writeFileSync(join(repo, "local.properties"), "sdk.dir=/Users/someone/Android/sdk\n");
+    symlinkSync(join(repo, "local.properties"), join(worktree, "local.properties"));
 
     expect(await planAgainstMain(worktree)).toBe(
       "keep: 1 ignored path(s) that are not regenerable and no backup holds (local.properties)",

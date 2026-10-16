@@ -732,6 +732,9 @@ async function partitionCopiedFromMainCheckout(
   for (const entry of candidates) {
     const isDirectory = entry.endsWith("/");
     const relative = isDirectory ? entry.slice(0, -1) : entry;
+    // A symlink is this worktree's own entry whatever its target holds; `readdir` and `stat`
+    // would follow it and compare the target instead.
+    if (await isSymbolicLink(join(worktreePath, relative))) continue;
     const matches = isDirectory
       ? await directoriesByteIdentical(join(worktreePath, relative), join(mainRepoRoot, relative))
       : await filesByteIdentical(join(worktreePath, relative), join(mainRepoRoot, relative));
@@ -740,12 +743,20 @@ async function partitionCopiedFromMainCheckout(
   return copied;
 }
 
-/** Same size, and either small enough to compare in full or confirmed equal already. */
-async function filesByteIdentical(pathA: string, pathB: string): Promise<boolean> {
-  let statA: Awaited<ReturnType<typeof stat>>;
-  let statB: Awaited<ReturnType<typeof stat>>;
+async function isSymbolicLink(path: string): Promise<boolean> {
   try {
-    [statA, statB] = await Promise.all([stat(pathA), stat(pathB)]);
+    return (await lstat(path)).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** Two regular files (never symlinks) of the same size, small enough to compare, equal in full. */
+async function filesByteIdentical(pathA: string, pathB: string): Promise<boolean> {
+  let statA: Awaited<ReturnType<typeof lstat>>;
+  let statB: Awaited<ReturnType<typeof lstat>>;
+  try {
+    [statA, statB] = await Promise.all([lstat(pathA), lstat(pathB)]);
   } catch {
     return false;
   }
