@@ -829,6 +829,9 @@ export class Session {
   private clientActivity: {
     deviceType: "web" | "mobile";
     focusedAgentId: string | null;
+    /** The focused agent's workspace, captured at the heartbeat: the agent may be archived by
+     * the time someone reads this, and its live record gone (away-reply presence). */
+    focusedWorkspaceId: string | null;
     focusedTerminalId: string | null;
     lastActivityAt: Date;
     appVisible: boolean;
@@ -1583,6 +1586,9 @@ export class Session {
   public getClientActivity(): {
     deviceType: "web" | "mobile";
     focusedAgentId: string | null;
+    /** The focused agent's workspace, captured at the heartbeat: the agent may be archived by
+     * the time someone reads this, and its live record gone (away-reply presence). */
+    focusedWorkspaceId: string | null;
     focusedTerminalId: string | null;
     lastActivityAt: Date;
     appVisible: boolean;
@@ -4898,9 +4904,13 @@ export class Session {
     const appVisibilityChangedAt = msg.appVisibilityChangedAt
       ? new Date(msg.appVisibilityChangedAt)
       : new Date(msg.lastActivityAt);
+    const focusedWorkspaceId = msg.focusedAgentId
+      ? (this.agentManager.getAgent(msg.focusedAgentId)?.workspaceId ?? null)
+      : null;
     this.clientActivity = {
       deviceType: msg.deviceType,
       focusedAgentId: msg.focusedAgentId,
+      focusedWorkspaceId,
       focusedTerminalId,
       lastActivityAt: new Date(msg.lastActivityAt),
       appVisible: msg.appVisible,
@@ -4909,7 +4919,7 @@ export class Session {
     if (msg.appVisible && focusedTerminalId) {
       void this.clearFocusedTerminalAttention(focusedTerminalId);
     }
-    this.noteFocusedWorkspaceUsed(msg);
+    this.noteFocusedWorkspaceUsed(focusedWorkspaceId, msg);
     if (this.registeredPushToken) {
       this.pushNotifications.renew(this.registeredPushToken);
     }
@@ -4919,14 +4929,11 @@ export class Session {
    * An agent focused in a visible app is Tyler using its workspace, as of his last input on that
    * client. Keeps the workspace's auto pin alive (workspace-auto-pin.ts).
    */
-  private noteFocusedWorkspaceUsed(msg: {
-    focusedAgentId: string | null;
-    lastActivityAt: string;
-    appVisible: boolean;
-  }): void {
-    if (!this.autoPinExpiry || !msg.appVisible || !msg.focusedAgentId) return;
-    const workspaceId = this.agentManager.getAgent(msg.focusedAgentId)?.workspaceId;
-    if (!workspaceId) return;
+  private noteFocusedWorkspaceUsed(
+    workspaceId: string | null,
+    msg: { lastActivityAt: string; appVisible: boolean },
+  ): void {
+    if (!this.autoPinExpiry || !msg.appVisible || !workspaceId) return;
     this.autoPinExpiry.noteWorkspaceUsed(workspaceId, Date.parse(msg.lastActivityAt));
   }
 

@@ -944,6 +944,30 @@ test("client heartbeat clears attention for the focused terminal", async () => {
   });
 });
 
+test("client heartbeat keeps the focused agent's workspace after the agent is gone", async () => {
+  let live = true;
+  const session = createSessionForWorkspaceTests({
+    agentManager: {
+      getAgent: (agentId: string) =>
+        live && agentId === "agent-1" ? { id: agentId, workspaceId: "ws-1" } : null,
+    },
+  });
+
+  await session.handleMessage({
+    type: "client_heartbeat",
+    deviceType: "web",
+    focusedAgentId: "agent-1",
+    lastActivityAt: "2026-06-13T12:00:00.000Z",
+    appVisible: true,
+  });
+  live = false;
+
+  expect(session.getClientActivity()).toMatchObject({
+    focusedAgentId: "agent-1",
+    focusedWorkspaceId: "ws-1",
+  });
+});
+
 test("create_agent_request keeps requested child cwd when grouped under an existing parent workspace", async () => {
   const workdir = mkdtempSync(path.join(tmpdir(), "paseo-create-agent-cwd-"));
   try {
