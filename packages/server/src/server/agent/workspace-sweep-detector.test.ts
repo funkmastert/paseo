@@ -807,6 +807,16 @@ describe("isRegenerablePath", () => {
       false,
     );
   });
+
+  test("a configured pattern never matches a secret-shaped path, even when the glob reaches it", () => {
+    expect(isRegenerablePath(".eslintcache", MANIFESTS, [".e*"])).toBe(true);
+    expect(isRegenerablePath(".env", MANIFESTS, [".e*"])).toBe(false);
+    expect(isRegenerablePath("keys/id_ed25519", MANIFESTS, ["id_ed*"])).toBe(false);
+  });
+
+  test("a configured pattern never makes a directory regenerable", () => {
+    expect(isRegenerablePath("apps/mobile/flags/", MANIFESTS, ["flags"])).toBe(false);
+  });
 });
 
 describe("resolveRegenerableIgnoredPaths", () => {
@@ -846,6 +856,16 @@ describe("resolveRegenerableIgnoredPaths", () => {
       ),
     ).toEqual(["default-ff.json", "local-*.json"]);
     expect(rejected).toEqual([".env"]);
+  });
+
+  test("rejects a pattern whose last segment is only wildcards", () => {
+    const rejected: string[] = [];
+    expect(
+      resolveRegenerableIgnoredPaths(["*", "**", "", "flags/*"], (pattern) =>
+        rejected.push(pattern),
+      ),
+    ).toEqual([]);
+    expect(rejected).toEqual(["*", "**", "", "flags/*"]);
   });
 
   test("undefined or empty config is no patterns, nothing rejected", () => {

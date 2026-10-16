@@ -590,8 +590,8 @@ export function isRegenerablePath(
       return true;
     }
   }
-  if (matchesAnyPattern(entry, extraPatterns)) return true;
   if (isDirectory) return false;
+  if (matchesAnyPattern(entry, extraPatterns)) return true;
   const name = segments[segments.length - 1] ?? "";
   const parentAndName = segments.slice(-2).join("/");
   return (
@@ -606,13 +606,12 @@ export function isRegenerablePath(
  * `agents.doneJanitor.regenerableIgnoredPaths`: repo-specific ignored files that are regenerable,
  * named outside the code so a project's own generated files (feature flags, local overrides)
  * don't need a code change. Each pattern is a path suffix, or a simple glob with `*` standing for
- * any run of characters within one path segment. Validated by
- * {@link resolveRegenerableIgnoredPaths} before it ever reaches here: a pattern that could match a
- * secret is rejected at config load, never here.
+ * any run of characters within one path segment. Files only: a pattern never makes a directory
+ * regenerable. A secret-shaped path is never matched, whatever the pattern: load-time validation
+ * ({@link resolveRegenerableIgnoredPaths}) can't foresee every path a glob reaches.
  */
-function matchesAnyPattern(entry: string, patterns: readonly string[]): boolean {
-  if (patterns.length === 0) return false;
-  const path = entry.replace(/\/$/u, "");
+function matchesAnyPattern(path: string, patterns: readonly string[]): boolean {
+  if (patterns.length === 0 || isSecretShapedPath(path)) return false;
   return patterns.some((pattern) => globToRegExp(pattern, "u").test(path));
 }
 
@@ -634,7 +633,14 @@ export function resolveRegenerableIgnoredPaths(
   const accepted: string[] = [];
   for (const pattern of patterns) {
     const sample = pattern.replace(/\*/gu, "x");
-    if (isSecretShapedPath(pattern) || isSecretShapedPath(sample)) {
+    // A last segment of only wildcards (`*`, `**`, `dir/*`, or nothing) names no file: it would
+    // make every ignored file under it regenerable.
+    const lastSegment = pattern.trim().split("/").pop() ?? "";
+    if (
+      lastSegment.replace(/\*/gu, "") === "" ||
+      isSecretShapedPath(pattern) ||
+      isSecretShapedPath(sample)
+    ) {
       onRejectedPattern(pattern);
       continue;
     }
