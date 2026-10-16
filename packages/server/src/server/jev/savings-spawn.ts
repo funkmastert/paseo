@@ -138,7 +138,11 @@ export function createSpawnHintSavingsRecorder(options: {
               decision: {
                 did: `${agent.labels[TASK_CLASS_LABEL] ?? "standard"} on ${agent.model ?? "?"}`,
                 wouldBe: `${spawn.wouldClass ?? "standard"} on ${spawn.wouldModel ?? "?"}`,
-                changed: spawn.applied && spawn.move !== "none",
+                // `spawn.move` only ranks task classes: a role-driven model swap can read
+                // `move:none` while still landing on a different model, which is what the
+                // formula actually prices. Compare the models themselves so every priced
+                // swap counts, whatever moved it.
+                changed: spawn.applied && spawn.baseModel !== spawn.wouldModel,
               },
               facts: {
                 baseClass: spawn.baseClass,
