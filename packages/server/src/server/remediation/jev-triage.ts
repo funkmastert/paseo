@@ -38,9 +38,9 @@ export const REMEDIATION_TRIAGE_QUESTIONS: JevQuestions = {
       "An automatic remedy has already run for the problem in `summary` and `evidence`; `attempts` lists what it did. What should happen next?",
     criteria: {
       agent_can_fix:
-        "A coding agent with a shell on this machine could plausibly clear it by doing `agent_task`: stop leftover processes, reclaim files it can prove are safe, restart or unstick an agent",
+        "A coding agent with a shell on this machine could plausibly clear it by doing `agent_task`: stop leftover processes, reclaim files it can prove are safe, restart or unstick an agent. For `work-at-risk`, this includes the `agent_task` itself: reading each snapshot's diff and judging whether it is real unintegrated work or scratch, a duplicate, or already integrated elsewhere. A coding agent can read a diff; that is not a person-only decision",
       needs_person:
-        "Only a person can clear it: signing in again, paying, deciding about someone's work, or anything off this machine",
+        "Only a person can clear it: signing in again, paying, a decision that needs context outside the repository (whose business call it is, whether to keep paying for something), or anything off this machine. Judging a `work-at-risk` snapshot from its diff is not this — that is `agent_can_fix`",
       clearing_on_its_own:
         "The readings show it already easing or likely to clear within minutes: a spike, a burst, a job that is finishing, a value sitting right at its threshold",
       other: "None of these",

@@ -16,6 +16,7 @@ import {
   erroredTriage,
   MAX_DEFER_MS,
   MIN_DEFER_MS,
+  REMEDIATION_TRIAGE_QUESTIONS,
   remediationTriageScope,
   shouldTriage,
   willEscalationPush,
@@ -188,6 +189,15 @@ describe("shouldTriage", () => {
       false,
     );
     expect(shouldTriage(observation({ escalation: undefined }))).toBe(false);
+  });
+});
+
+describe("the route question's work-at-risk carve-out", () => {
+  it("names work-at-risk's snapshot judgment as agent_can_fix, not needs_person", () => {
+    const criteria = REMEDIATION_TRIAGE_QUESTIONS.route.criteria;
+    expect(criteria.agent_can_fix).toContain("work-at-risk");
+    expect(criteria.agent_can_fix).toMatch(/not a person-only decision/);
+    expect(criteria.needs_person).toMatch(/not this/);
   });
 });
 
