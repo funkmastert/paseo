@@ -24,7 +24,7 @@ import { createHealthTracker } from "./health";
 import type { ModelCatalog, ThinkingCatalog } from "./model-catalog";
 import { createRouter } from "./router";
 import { createRecentAgentTypes } from "./recent-agent-types";
-import { createRoleRouter, type RoleCreateRouter, type RoleRouterOptions } from "./role-router";
+import { createRoleRouter, formatJevSpawnLabel, type RoleCreateRouter, type RoleRouterOptions } from "./role-router";
 import type { JevToolsWorld } from "./classifier";
 import type { SpawnHint } from "./jev-hint";
 
@@ -3070,7 +3070,23 @@ describe("JEV's labels", () => {
     expect(result?.config.model).toBe("claude-haiku-4-5");
     expect(result?.labels).toMatchObject({ [TASK_CLASS_SOURCE_LABEL]: "jev", [JEV_CALL_LABEL]: "jev-call-7" });
     expect(result?.labels?.[JEV_SPAWN_LABEL]).toBe(
-      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=1;audit=0",
+      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=1;audit=0;clamped=0",
+    );
+  });
+
+  it("a clamped decision's label carries clamped=1, and it survives the round trip (KTD3)", () => {
+    const label = formatJevSpawnLabel({
+      status: "answered",
+      callId: "jev-call-clamp",
+      applied: true,
+      declaredAudit: false,
+      modelClamped: true,
+      wouldBe: { taskClass: "hard", model: "claude-opus-5-5", move: "up" },
+      base: { taskClass: "standard", model: "claude-sonnet-5" },
+    });
+
+    expect(label).toBe(
+      "v1;base=standard/claude-sonnet-5;would=hard/claude-opus-5-5;move=up;applied=1;audit=0;clamped=1",
     );
   });
 
@@ -3081,7 +3097,7 @@ describe("JEV's labels", () => {
     expect(result?.labels).toMatchObject({ [TASK_CLASS_SOURCE_LABEL]: "default", [JEV_CALL_LABEL]: "jev-call-7" });
     // The durable record: the model it runs without JEV, and the model the answer would run.
     expect(result?.labels?.[JEV_SPAWN_LABEL]).toBe(
-      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0;audit=0",
+      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0;audit=0;clamped=0",
     );
   });
 
@@ -3112,7 +3128,7 @@ describe("JEV's labels", () => {
     expect(result?.labels?.[TASK_CLASS_SOURCE_LABEL]).toBe("declared");
     expect(result?.labels?.[JEV_CALL_LABEL]).toBe("jev-call-audit");
     expect(result?.labels?.[JEV_SPAWN_LABEL]).toBe(
-      "v1;base=hard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0;audit=1",
+      "v1;base=hard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0;audit=1;clamped=0",
     );
   });
 
@@ -3138,7 +3154,7 @@ describe("JEV's labels", () => {
 
     const result = createRoleRouter(jevOptions())({ ...declaredHard, jevHint: roleOnlyHint }, fakeContext);
 
-    expect(result?.labels?.[JEV_SPAWN_LABEL]).toMatch(/;audit=0$/);
+    expect(result?.labels?.[JEV_SPAWN_LABEL]).toMatch(/;audit=0;clamped=0$/);
   });
 
   it("a hint that is not an answer writes nothing", () => {

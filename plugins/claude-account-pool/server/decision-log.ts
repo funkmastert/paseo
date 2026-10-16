@@ -186,6 +186,7 @@ function describeJev(jev: JevHintDecision): Record<string, unknown> {
     ...(answers?.reasoning ? { reasoning: { score: answers.reasoning.score, confidence: answers.reasoning.confidence } } : {}),
     ...(answers?.role ? { role: { choice: echoed(answers.role.choice), confidence: answers.role.confidence } } : {}),
     applied: jev.applied,
+    modelClamped: jev.modelClamped,
     ...(wouldBe
       ? {
           wouldBe: {

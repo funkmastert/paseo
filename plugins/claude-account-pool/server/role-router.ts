@@ -964,7 +964,7 @@ function applyJevLabels(
 }
 
 /**
- * `v1;base=standard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0;audit=0`.
+ * `v1;base=standard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0;audit=0;clamped=0`.
  * A missing class or model is `-`; each part is URI-encoded so a `;`, `/` or `=` in a model id
  * cannot shift the fields. Null when the decision carries no would-be.
  *
@@ -972,6 +972,9 @@ function applyJevLabels(
  * never for an ordinary ask on the same child (a role-only ask on a declared class still has
  * `base.taskClass` declared, but is not the audit). `savings-spawn.ts` reads this field rather
  * than re-deriving it from the class source, which cannot tell the two apart.
+ *
+ * `clamped` is `decision.jev.modelClamped` (docs/jev.md, Feature 2, "pays only if it moves
+ * down"): the create ran on `base`'s model, not `would`'s, because `would`'s priced higher.
  */
 export function formatJevSpawnLabel(jev: NonNullable<AgentDecision["jev"]>): string | null {
   if (!jev.wouldBe || !jev.base) {
@@ -986,6 +989,7 @@ export function formatJevSpawnLabel(jev: NonNullable<AgentDecision["jev"]>): str
     `move=${jev.wouldBe.move}`,
     `applied=${jev.applied ? 1 : 0}`,
     `audit=${jev.declaredAudit ? 1 : 0}`,
+    `clamped=${jev.modelClamped ? 1 : 0}`,
   ].join(";");
 }
 

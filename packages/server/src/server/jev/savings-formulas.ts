@@ -8,7 +8,13 @@ import type {
   JevSavingsUnit,
   JevSavingsValidation,
 } from "./contract.js";
-import { usdToOpusTokens } from "@getpaseo/protocol/jev/pricing";
+import {
+  JEV_PRICE_WEIGHTS,
+  normalizeSavingsModel,
+  priceWeight,
+  usdToOpusTokens,
+} from "@getpaseo/protocol/jev/pricing";
+export { JEV_PRICE_WEIGHTS, normalizeSavingsModel, priceWeight };
 
 /**
  * The one place facts become Opus-equivalent weighted tokens (docs/jev.md, "Formulas"). Call sites
@@ -50,37 +56,6 @@ export const JEV_FLEET_MEDIAN_CONTEXT_TOKENS = 228_000;
 
 export function extraStepTokens(contextTokens: number): number {
   return JEV_STEP_CONTEXT_WEIGHT * contextTokens + JEV_STEP_OUTPUT_TOKENS;
-}
-
-/**
- * `w(m)`, each model's price against Claude Opus 5.5. List input prices $4, $5, $2, $2 and $1 a
- * million, output five times input for each, so one weight per model matches the fleet's
- * weighting. Any other model has no weight, and a figure that needs one is null.
- */
-export const JEV_PRICE_WEIGHTS: Readonly<Record<string, number>> = {
-  "claude-opus-5-5": 1,
-  "claude-opus-5": 1.25,
-  "claude-sonnet-5-5": 0.5,
-  "claude-sonnet-5": 0.5,
-  "claude-haiku-4-5": 0.25,
-};
-
-/** `claude/claude-haiku-4-5-20251001[1m]` and `us.anthropic.claude-opus-5-5-v1:0` both name a weight. */
-export function normalizeSavingsModel(model: string | null | undefined): string | null {
-  if (typeof model !== "string") return null;
-  let id = model.trim().toLowerCase();
-  if (id.length === 0) return null;
-  id = id.replace(/\[1m\]$/, "");
-  id = id.slice(id.lastIndexOf("/") + 1);
-  id = id.replace(/^(?:[a-z]{2}\.)?anthropic\./, "");
-  id = id.replace(/-v\d+:\d+$/, "");
-  id = id.replace(/-\d{8}$/, "");
-  return id;
-}
-
-export function priceWeight(model: string | null | undefined): number | null {
-  const id = normalizeSavingsModel(model);
-  return id === null ? null : (JEV_PRICE_WEIGHTS[id] ?? null);
 }
 
 /** What each feature's answer buys. Only `tokens` is summed into tokens saved. */

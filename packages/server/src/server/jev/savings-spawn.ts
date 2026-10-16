@@ -30,6 +30,13 @@ export interface JevSpawnLabel {
    * label is never audit data.
    */
   audit: boolean;
+  /**
+   * `decision.jev.modelClamped` (docs/jev.md, Feature 2, "pays only if it moves down"): true when
+   * `applied` changed the class or role but the create ran on `baseModel`, not `wouldModel`,
+   * because `wouldModel` priced higher. Absent from a label written before this field existed —
+   * defaults to `false`, since a pre-clamp label could never have held anything back.
+   */
+  clamped: boolean;
 }
 
 function decodePart(part: string): string | null {
@@ -71,6 +78,7 @@ export function parseJevSpawnLabel(value: string | null | undefined): JevSpawnLa
     move,
     applied: fields.get("applied") === "1",
     audit: fields.get("audit") === "1",
+    clamped: fields.get("clamped") === "1",
   };
 }
 
@@ -153,6 +161,7 @@ export function createSpawnHintSavingsRecorder(options: {
                 runningModel: agent.model,
                 move: spawn.move,
                 applied: spawn.applied,
+                clamped: spawn.clamped,
                 // The declared-label audit (docs/jev.md, "Auditing a declared label"): kept out of
                 // the go-live rule's evidence counters, which read "this child's class was never
                 // declared" (savings-formulas.ts). Read off the label's own `audit` field, not the
