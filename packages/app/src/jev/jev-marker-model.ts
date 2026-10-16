@@ -60,7 +60,9 @@ function createJevMarkerItem(group: JevDecisionLine[]): JevMarkerItem {
   const last = group[group.length - 1];
   return {
     kind: "jev_marker",
-    id: `jev_marker:${last.key}:${group.length}`,
+    // Keyed on the group's first decision: a group grows by appending, so the id (the React row
+    // key) survives a new decision landing in the same gap, and an open tooltip stays open.
+    id: `jev_marker:${group[0].key}`,
     timestamp: last.at ?? new Date(0),
     lines: group,
   };

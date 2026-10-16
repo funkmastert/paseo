@@ -114,3 +114,17 @@ describe("placeJevMarkers", () => {
     expect(result[1]).toMatchObject({ kind: "jev_marker" });
   });
 });
+
+describe("marker identity", () => {
+  it("keeps its id when a later decision joins the same gap", () => {
+    const rows = [
+      { id: "r1", timestamp: new Date("2026-10-16T12:00:00.000Z") },
+      { id: "r2", timestamp: new Date("2026-10-16T12:10:00.000Z") },
+    ];
+    const first = [line({ key: "a", at: new Date("2026-10-16T12:00:01.000Z") })];
+    const grown = [...first, line({ key: "b", at: new Date("2026-10-16T12:00:02.000Z") })];
+    const markerId = (placed: Array<{ id: string }>) =>
+      placed.find((entry) => entry.id.startsWith("jev_marker:"))?.id;
+    expect(markerId(placeJevMarkers(rows, grown))).toBe(markerId(placeJevMarkers(rows, first)));
+  });
+});
