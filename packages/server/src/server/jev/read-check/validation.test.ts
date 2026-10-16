@@ -16,7 +16,11 @@ function setup() {
     now: () => T0,
     onClose: (close) => closes.push(close),
   });
-  function open(mode: "shadow" | "live", savingsId = "sv_1") {
+  function open(
+    mode: "shadow" | "live",
+    savingsId = "sv_1",
+    range: { first: number; last: number } | null = null,
+  ) {
     validation.open({
       savingsId,
       agentId: "agent-1",
@@ -25,6 +29,7 @@ function setup() {
       mode,
       openedAt: T0,
       rangeText: `short line\n  ${QUOTE}\n`,
+      range,
       after: { epoch: "e1", seq: 10 },
       turnId: "turn-1",
     });
@@ -56,7 +61,7 @@ describe("ReadCheckValidation", () => {
   test("a later read of the path is a regret in live", () => {
     const { validation, closes, open } = setup();
     open("live");
-    validation.noteRead("agent-1", "/repo/src/session.ts", T0 + 30_000);
+    validation.noteRead("agent-1", "/repo/src/session.ts", T0 + 30_000, null);
     expect(closes[0]?.validation).toEqual({
       outcome: "regret",
       signal: "reread",
@@ -67,9 +72,35 @@ describe("ReadCheckValidation", () => {
   test("another agent or another path is not a sign", () => {
     const { validation, closes, open } = setup();
     open("shadow");
-    validation.noteRead("agent-2", "/repo/src/session.ts", T0 + 1000);
+    validation.noteRead("agent-2", "/repo/src/session.ts", T0 + 1000, null);
     validation.noteEdit("agent-1", "/repo/src/other.ts", T0 + 1000);
     expect(closes).toEqual([]);
+  });
+
+  test("a reread of an overlapping range is a sign", () => {
+    const { validation, closes, open } = setup();
+    open("shadow", "sv_1", { first: 1, last: 50 });
+    validation.noteRead("agent-1", "/repo/src/session.ts", T0 + 60_000, { first: 40, last: 60 });
+    expect(closes[0]?.validation).toEqual({
+      outcome: "false-skip",
+      signal: "reread",
+      afterMinutes: 1,
+    });
+  });
+
+  test("a reread of an unrelated range in the same file is not a sign", () => {
+    const { validation, closes, open } = setup();
+    open("shadow", "sv_1", { first: 1, last: 50 });
+    validation.noteRead("agent-1", "/repo/src/session.ts", T0 + 60_000, { first: 60, last: 80 });
+    expect(closes).toEqual([]);
+    expect(validation.size).toBe(1);
+  });
+
+  test("a reread with an unresolved range still counts, the old conservative default", () => {
+    const { validation, closes, open } = setup();
+    open("shadow", "sv_1", { first: 1, last: 50 });
+    validation.noteRead("agent-1", "/repo/src/session.ts", T0 + 60_000, null);
+    expect(closes[0]?.validation.signal).toBe("reread");
   });
 
   test("a quoted line of 40 or more characters in a later message is a sign", () => {
@@ -158,7 +189,7 @@ describe("ReadCheckValidation", () => {
 describe("ReadCheckValidation: signals while JEV was answering", () => {
   test("an edit after the read's mark, before the window opened, closes it at once", () => {
     const { validation, closes } = setup();
-    validation.noteRead("agent-1", "/repo/src/session.ts", T0);
+    validation.noteRead("agent-1", "/repo/src/session.ts", T0, null);
     const mark = validation.mark();
     validation.noteEdit("agent-1", "/repo/src/session.ts", T0 + 100);
     validation.open({
@@ -170,6 +201,7 @@ describe("ReadCheckValidation: signals while JEV was answering", () => {
       openedAt: T0,
       signalsAfter: mark,
       rangeText: "",
+      range: null,
       after: null,
       turnId: null,
     });
@@ -184,7 +216,7 @@ describe("ReadCheckValidation: signals while JEV was answering", () => {
 
   test("the read itself, other paths and other agents are not replayed", () => {
     const { validation, closes } = setup();
-    validation.noteRead("agent-1", "/repo/src/session.ts", T0);
+    validation.noteRead("agent-1", "/repo/src/session.ts", T0, null);
     const mark = validation.mark();
     validation.noteEdit("agent-2", "/repo/src/session.ts", T0 + 100);
     validation.noteEdit("agent-1", "/repo/src/other.ts", T0 + 100);
@@ -197,6 +229,28 @@ describe("ReadCheckValidation: signals while JEV was answering", () => {
       openedAt: T0,
       signalsAfter: mark,
       rangeText: "",
+      range: null,
+      after: null,
+      turnId: null,
+    });
+    expect(closes).toEqual([]);
+    expect(validation.size).toBe(1);
+  });
+
+  test("a reread replayed from before the window opened still needs an overlapping range", () => {
+    const { validation, closes } = setup();
+    validation.noteRead("agent-1", "/repo/src/session.ts", T0, { first: 60, last: 80 });
+    const mark = validation.mark();
+    validation.open({
+      savingsId: "sv_1",
+      agentId: "agent-1",
+      path: "/repo/src/session.ts",
+      spellings: [],
+      mode: "shadow",
+      openedAt: T0,
+      signalsAfter: mark - 1,
+      rangeText: "",
+      range: { first: 1, last: 50 },
       after: null,
       turnId: null,
     });

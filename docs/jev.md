@@ -1598,7 +1598,7 @@ R5: `evidence.observed` also reports the same would-skips split by reader — `b
 A would-skip is a saving only if the agent did not need the file. For each `not_needed` verdict the observer (`read-check/validation.ts`) watches the agent from the read for the rest of that turn and its next two, at most 60 minutes, and records the first sign it used the file:
 
 - `edited`: an Edit, Write, MultiEdit or NotebookEdit on the path, from the hooks;
-- `reread`: a `Read` or a Bash read of the path, any range, from the hooks; in live, the retry after a deny;
+- `reread`: a `Read` or a Bash read of the path whose own line range overlaps the range the skip would have covered, from the hooks; in live, the retry after a deny. A later read of an unrelated part of the same file is not a reread of this one — a large file reopened at a different offset does not count. A range neither side can resolve (a Bash read, or a `Read` with no line accounting) falls back to the old rule and counts regardless of range;
 - `quoted`: a line of 40 or more characters from the range appears in a later assistant message or tool input. The observer keeps a hash set of the range's lines, at most 2,000, and its 60-second sweep scans the agent's later timeline rows, which also count the turns;
 - in live, an `ask_jev_file_*` call on the path is `redirected`: the deny worked as meant, and it is not a regret.
 
