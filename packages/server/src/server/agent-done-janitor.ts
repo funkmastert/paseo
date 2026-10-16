@@ -35,6 +35,7 @@ import {
   checkDeletionInvariant,
   classifyWorkspace,
   idleProjectVerdict,
+  resolveRegenerableIgnoredPaths,
   resolveWorkspaceSweepConfig,
   type DoneJanitorWorkspaceSweepConfig,
   type IdleProjectVerdict,
@@ -107,6 +108,14 @@ export interface DoneJanitorConfig {
   askFinished?: boolean;
   /** The idle-workspace sweep (docs/done-janitor.md, "Idle workspaces"). On by default. */
   workspaceSweep?: DoneJanitorWorkspaceSweepConfig;
+  /**
+   * Extra ignored paths the deletion invariant treats as regenerable, beside the janitor's own
+   * by-name rules (docs/done-janitor.md, "Idle workspaces"): a repo-specific generated file, named
+   * here instead of in code. Each entry is a path suffix or a simple glob (`*` inside one path
+   * segment). Default `[]`. A pattern that could match a secret is rejected with a warning and
+   * dropped, never applied.
+   */
+  regenerableIgnoredPaths?: string[];
 }
 
 interface ResolvedDoneJanitorConfig {
@@ -120,9 +129,11 @@ interface ResolvedDoneJanitorConfig {
   deadQuietMs: number;
   maxDeadArchivesPerSweep: number;
   askFinished: boolean;
+  /** Validated by `resolveRegenerableIgnoredPaths`; a pattern that could match a secret never lands here. */
+  regenerableIgnoredPaths: string[];
 }
 
-function resolveConfig(config: DoneJanitorConfig): ResolvedDoneJanitorConfig {
+function resolveConfig(config: DoneJanitorConfig, logger: Logger): ResolvedDoneJanitorConfig {
   return {
     dryRun: config.dryRun ?? false,
     quietMs: (config.quietHours ?? DEFAULT_QUIET_HOURS) * 60 * 60_000,
@@ -134,6 +145,14 @@ function resolveConfig(config: DoneJanitorConfig): ResolvedDoneJanitorConfig {
     deadQuietMs: (config.deadQuietHours ?? DEFAULT_DEAD_QUIET_HOURS) * 60 * 60_000,
     maxDeadArchivesPerSweep: config.maxDeadArchivesPerSweep ?? DEFAULT_MAX_DEAD_ARCHIVES_PER_SWEEP,
     askFinished: config.askFinished ?? true,
+    regenerableIgnoredPaths: resolveRegenerableIgnoredPaths(
+      config.regenerableIgnoredPaths,
+      (pattern) =>
+        logger.warn(
+          { pattern },
+          "Done janitor: agents.doneJanitor.regenerableIgnoredPaths entry could match a secret-shaped path, ignoring it",
+        ),
+    ),
   };
 }
 
@@ -478,7 +497,7 @@ export class AgentDoneJanitor {
   private async sweep(): Promise<DoneJanitorSweepReport | null> {
     const raw = this.options.readDaemonConfig().doneJanitor;
     if (raw?.enabled !== true) return null;
-    const config = resolveConfig(raw);
+    const config = resolveConfig(raw, this.options.logger);
     const nowMs = this.now();
     const report: DoneJanitorSweepReport = {
       dryRun: config.dryRun,
@@ -533,7 +552,7 @@ export class AgentDoneJanitor {
       workspaces = await this.deps.listWorkspaces();
       if (!root.workspaceId || reclaimedWorkspaceIds.has(root.workspaceId)) continue;
       const plan = await this.planWorkspace(root.workspaceId, views, workspaces, new Set(), config);
-      if (await this.reclaim(report, plan, `its agent ${root.id} answered DONE`)) {
+      if (await this.reclaim(report, plan, `its agent ${root.id} answered DONE`, config)) {
         reclaimedWorkspaceIds.add(root.workspaceId);
       }
     }
@@ -788,6 +807,7 @@ export class AgentDoneJanitor {
       plan.directory,
       `done janitor, before archiving idle workspace ${workspace.workspaceId}`,
       workspace.mainRepoRoot,
+      config.regenerableIgnoredPaths,
     );
     if (!check.ok) {
       report.entries.push(describe("kept-idle-workspace", check.reason));
@@ -938,7 +958,11 @@ export class AgentDoneJanitor {
       return { kind: "archive", deletesDirectory: false, detail: "its directory is gone" };
     }
     if (!safety.safe && !safety.atRisk) return keep(safety.reason);
-    const preview = await this.previewDeletion(path, workspace.mainRepoRoot);
+    const preview = await this.previewDeletion(
+      path,
+      workspace.mainRepoRoot,
+      config.regenerableIgnoredPaths,
+    );
     if (!preview.ok) return keep(preview.reason, preview.category);
     return {
       kind: "archive",
@@ -954,7 +978,11 @@ export class AgentDoneJanitor {
    * starts agents in it, a process inside it, and the deletion invariant read against HEAD. Both
    * a dry run and a live run plan with it, so a dry run lists every deletion a live run could make.
    */
-  private async previewDeletion(path: string, mainRepoRoot: string | null): Promise<DeletionCheck> {
+  private async previewDeletion(
+    path: string,
+    mainRepoRoot: string | null,
+    regenerableIgnoredPaths: readonly string[],
+  ): Promise<DeletionCheck> {
     const occupied = await this.occupiedReason(path);
     if (occupied) return { ok: false, reason: occupied.reason, category: occupied.category };
     const coverage = await this.deps.readWorktreeCoverage({
@@ -962,7 +990,7 @@ export class AgentDoneJanitor {
       commit: null,
       mainRepoRoot,
     });
-    const invariant = checkDeletionInvariant(coverage, "plan");
+    const invariant = checkDeletionInvariant(coverage, "plan", regenerableIgnoredPaths);
     return invariant.holds
       ? { ok: true, invariant: invariant.detail }
       : { ok: false, reason: invariant.reason, category: invariant.category };
@@ -980,6 +1008,7 @@ export class AgentDoneJanitor {
     path: string,
     reason: string,
     mainRepoRoot: string | null,
+    regenerableIgnoredPaths: readonly string[],
   ): Promise<DeletionCheck> {
     const occupied = await this.occupiedReason(path);
     if (occupied) return { ok: false, reason: occupied.reason, category: occupied.category };
@@ -996,7 +1025,7 @@ export class AgentDoneJanitor {
         commit: null,
         mainRepoRoot,
       });
-      const invariant = checkDeletionInvariant(coverage, "head");
+      const invariant = checkDeletionInvariant(coverage, "head", regenerableIgnoredPaths);
       return invariant.holds
         ? { ok: true, invariant: invariant.detail }
         : { ok: false, reason: invariant.reason, category: invariant.category };
@@ -1010,7 +1039,7 @@ export class AgentDoneJanitor {
       commit: snapshot.commit,
       mainRepoRoot,
     });
-    const invariant = checkDeletionInvariant(coverage, "snapshot");
+    const invariant = checkDeletionInvariant(coverage, "snapshot", regenerableIgnoredPaths);
     return invariant.holds
       ? {
           ok: true,
@@ -1469,7 +1498,8 @@ export class AgentDoneJanitor {
         // Spent on the attempt, as in a dry run, so a live sweep never deletes past its dry run.
         if (plan.kind === "reclaim") deletions += 1;
         if (config.dryRun) report.entries.push(this.describePlan(plan, true, why));
-        else if (await this.reclaim(report, plan, why)) deletedWorkspaceIds.add(workspaceId);
+        else if (await this.reclaim(report, plan, why, config))
+          deletedWorkspaceIds.add(workspaceId);
       }
     }
     return deletedWorkspaceIds;
@@ -1646,7 +1676,7 @@ export class AgentDoneJanitor {
         report.entries.push(this.describePlan(plan, true, reason));
         continue;
       }
-      await this.reclaim(report, plan, reason);
+      await this.reclaim(report, plan, reason, config);
     }
   }
 
@@ -1688,7 +1718,11 @@ export class AgentDoneJanitor {
       baseBranch: workspace.baseBranch,
     });
     if (!safety.safe) return keep(safety.reason);
-    const preview = await this.previewDeletion(path, workspace.mainRepoRoot);
+    const preview = await this.previewDeletion(
+      path,
+      workspace.mainRepoRoot,
+      config.regenerableIgnoredPaths,
+    );
     if (!preview.ok) return keep(preview.reason);
     return {
       kind: "reclaim",
@@ -1722,6 +1756,7 @@ export class AgentDoneJanitor {
     report: DoneJanitorSweepReport,
     plan: WorkspacePlan,
     why: string,
+    config: ResolvedDoneJanitorConfig,
   ): Promise<boolean> {
     const { logger } = this.options;
     if (plan.kind === "keep") {
@@ -1746,6 +1781,7 @@ export class AgentDoneJanitor {
       plan.path,
       `done janitor, before deleting workspace ${plan.workspace.workspaceId}`,
       plan.workspace.mainRepoRoot,
+      config.regenerableIgnoredPaths,
     );
     if (!check.ok) return kept(check.reason);
     // The plan is minutes old now. Look again here, and archive-by-scope looks again inside,

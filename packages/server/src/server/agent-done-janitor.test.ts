@@ -2924,7 +2924,7 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
         });
 
     test("a clean, pushed worktree holding a non-regenerable ignored file is kept, unsnapshotted", async () => {
-      const h = owned({ ignored: () => ["node_modules/", "apps/mobile/ios/.xcode.env.local"] });
+      const h = owned({ ignored: () => ["node_modules/", "apps/mobile/machine-config.json"] });
 
       const report = await h.janitor.tick();
 
@@ -2934,7 +2934,7 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
         expect.objectContaining({
           action: "kept-idle-workspace",
           reason:
-            "1 ignored path(s) that are not regenerable and no backup holds (apps/mobile/ios/.xcode.env.local)",
+            "1 ignored path(s) that are not regenerable and no backup holds (apps/mobile/machine-config.json)",
         }),
       );
     });
@@ -3167,7 +3167,7 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
           reads += 1;
           return coverage({
             commit: commit ?? "head",
-            ignored: reads > 1 ? ["node_modules/", "apps/mobile/ios/.xcode.env.local"] : [],
+            ignored: reads > 1 ? ["node_modules/", "apps/mobile/machine-config.json"] : [],
           });
         },
       });
@@ -3202,7 +3202,7 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
 
     test("the kept cooldown (R5): new activity in a cooled-down workspace makes it eligible again", async () => {
       const h = owned({
-        ignored: () => ["node_modules/", "apps/mobile/ios/.xcode.env.local"],
+        ignored: () => ["node_modules/", "apps/mobile/machine-config.json"],
       });
 
       await h.janitor.tick();

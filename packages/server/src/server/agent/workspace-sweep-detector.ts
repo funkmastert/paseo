@@ -10,6 +10,7 @@
 
 import type { DoneJanitorProject, DoneJanitorWorkspace } from "../agent-done-janitor.js";
 import type { WorktreeCoverage } from "../done-janitor-worktree.js";
+import { globToRegExp, isSecretShapedPath } from "../jev/secret-paths.js";
 import { isProtectivePin } from "../workspace-auto-pin.js";
 import {
   DONE_JANITOR_KEEP_LABEL,
@@ -41,14 +42,17 @@ export const AGENT_DONE_SETTLE_MS = 60 * 60_000;
 /**
  * The regenerable allowlist, part (c) of the deletion invariant by name: directories a build, an
  * install or a test run recreates. An ignored path counts only when a directory on its way is one
- * of these, at the worktree root or beside a build manifest (`isBuildManifest`). Anything else
- * ignored — `.env`, `.xcode.env.local`, `google-services.json`, evidence logs, `.data/`,
- * `results/`, a `src/build/` beside source — may exist nowhere else and keeps the worktree, unless
- * `checkDeletionInvariant` finds it byte-identical to the same path in the main checkout instead
+ * of these, at the worktree root or beside a build manifest (`isBuildManifest`) — a generic name
+ * like `build` or `bin` means too many things elsewhere to allow by name alone.
+ * `REGENERABLE_MACHINE_CONFIG_FILES`, `xcshareddata/`, and `agents.doneJanitor.regenerableIgnoredPaths`
+ * match anywhere instead: each is specific enough that it never collides with a project's own
+ * files. Anything else ignored — `.env`, evidence logs, `.data/`, `results/`, a `src/build/`
+ * beside source — may exist nowhere else and keeps the worktree, unless `checkDeletionInvariant`
+ * finds it byte-identical to the same path in the main checkout instead
  * (`WorktreeCoverage.copiedFromMainCheckout`, done-janitor-worktree.ts): a worktree-setup script's
- * copy of exactly these kinds of files, not a name this allowlist can recognize on its own. Keep
- * this list short: a name added here is a name whose contents the janitor may delete unread
- * wherever it sits, with no main checkout to compare against.
+ * copy, not a name this allowlist can recognize on its own. Keep `REGENERABLE_DIRS` short: a name
+ * added here is a name whose contents the janitor may delete unread wherever it sits, with no
+ * main checkout to compare against.
  */
 const REGENERABLE_DIRS: ReadonlySet<string> = new Set([
   // JavaScript and TypeScript
@@ -94,6 +98,23 @@ const REGENERABLE_DIRS: ReadonlySet<string> = new Set([
 const REGENERABLE_NESTED_DIRS: ReadonlySet<string> = new Set([".yarn/cache"]);
 const REGENERABLE_FILES: ReadonlySet<string> = new Set([".DS_Store", ".yarn/install-state.gz"]);
 const REGENERABLE_EXTENSIONS = [".pyc", ".pyo", ".tsbuildinfo"] as const;
+/**
+ * Per-machine config files a setup script, an IDE, or a fetch writes with a name specific enough
+ * to recognize anywhere in the tree — unlike `REGENERABLE_DIRS` these never collide with a
+ * project's own source, so they skip the root/build-manifest restriction.
+ */
+const REGENERABLE_MACHINE_CONFIG_FILES: ReadonlySet<string> = new Set([
+  // Android's local SDK path; the setup script writes a bare `sdk.dir=...` line that never
+  // matches Android Studio's own copy in the main checkout byte-for-byte.
+  "local.properties",
+  // React Native's local Xcode env override; `.local` because it is per-machine by design.
+  ".xcode.env.local",
+  // Firebase config, fetched from a secret store or the Firebase console per machine.
+  "google-services.json",
+  "GoogleService-Info.plist",
+]);
+/** Xcode's per-user scheme state, directly inside an `.xcworkspace` or `.xcodeproj`. */
+const XCODE_SHARED_DATA_PARENT_RE = /\.(?:xcworkspace|xcodeproj)$/u;
 /**
  * Files that make their directory a build's: a tool writes its output beside its manifest. An
  * Xcode project is a directory, matched by its extension.
@@ -431,6 +452,7 @@ export type DeletionInvariant =
 export function checkDeletionInvariant(
   coverage: WorktreeCoverage | null,
   basis: CoverageBasis,
+  extraRegenerablePatterns: readonly string[] = [],
 ): DeletionInvariant {
   if (coverage === null) return { holds: false, reason: "git could not list its files" };
   const unlisted = describeUnlisted(coverage);
@@ -438,7 +460,9 @@ export function checkDeletionInvariant(
   const manifestDirectories = new Set(coverage.manifestDirectories);
   const copiedFromMainCheckout = new Set(coverage.copiedFromMainCheckout);
   const kept = coverage.ignored.filter(
-    (entry) => !isRegenerablePath(entry, manifestDirectories) && !copiedFromMainCheckout.has(entry),
+    (entry) =>
+      !isRegenerablePath(entry, manifestDirectories, extraRegenerablePatterns) &&
+      !copiedFromMainCheckout.has(entry),
   );
   if (kept.length > 0) {
     return {
@@ -543,10 +567,15 @@ function describeRegenerable(ignored: readonly string[]): string {
  * directory name counts only at the worktree root or in a directory holding a build manifest
  * (`manifestDirectories`, relative, as readWorktreeCoverage lists them): a `build/` beside a
  * `package.json` is that package's output, a `src/build/` beside source is somebody's files.
+ * `REGENERABLE_MACHINE_CONFIG_FILES`, `xcshareddata/`, and `extraPatterns`
+ * (`agents.doneJanitor.regenerableIgnoredPaths`, already validated by
+ * {@link resolveRegenerableIgnoredPaths}) match anywhere: each is specific enough by name that it
+ * never collides with a project's own source.
  */
 export function isRegenerablePath(
   entry: string,
   manifestDirectories: ReadonlySet<string>,
+  extraPatterns: readonly string[] = [],
 ): boolean {
   const isDirectory = entry.endsWith("/");
   const segments = entry.split("/").filter(Boolean);
@@ -557,15 +586,67 @@ export function isRegenerablePath(
     if (REGENERABLE_DIRS.has(name) && besideManifest(index)) return true;
     const nested = index > 0 ? `${directories[index - 1]}/${name}` : null;
     if (nested && REGENERABLE_NESTED_DIRS.has(nested) && besideManifest(index - 1)) return true;
+    if (name === "xcshareddata" && XCODE_SHARED_DATA_PARENT_RE.test(directories[index - 1] ?? "")) {
+      return true;
+    }
   }
   if (isDirectory) return false;
+  if (matchesAnyPattern(entry, extraPatterns)) return true;
   const name = segments[segments.length - 1] ?? "";
   const parentAndName = segments.slice(-2).join("/");
   return (
     REGENERABLE_FILES.has(name) ||
     REGENERABLE_FILES.has(parentAndName) ||
+    REGENERABLE_MACHINE_CONFIG_FILES.has(name) ||
     REGENERABLE_EXTENSIONS.some((extension) => name.endsWith(extension))
   );
+}
+
+/**
+ * `agents.doneJanitor.regenerableIgnoredPaths`: repo-specific ignored files that are regenerable,
+ * named outside the code so a project's own generated files (feature flags, local overrides)
+ * don't need a code change. Each pattern is a path suffix, or a simple glob with `*` standing for
+ * any run of characters within one path segment. Files only: a pattern never makes a directory
+ * regenerable. A secret-shaped path is never matched, whatever the pattern: load-time validation
+ * ({@link resolveRegenerableIgnoredPaths}) can't foresee every path a glob reaches.
+ */
+function matchesAnyPattern(path: string, patterns: readonly string[]): boolean {
+  if (patterns.length === 0 || isSecretShapedPath(path)) return false;
+  return patterns.some((pattern) => globToRegExp(pattern, "u").test(path));
+}
+
+/**
+ * Resolves `agents.doneJanitor.regenerableIgnoredPaths` into the patterns `isRegenerablePath` may
+ * use, dropping any pattern that could match a secret: the janitor's own by-name rules are a
+ * closed, reviewed list, but this config key lets a pattern reach that list unreviewed, and a
+ * pattern that could match a secret would make the janitor delete its only copy unread. A pattern
+ * is rejected when it, or a copy with every `*` turned into a literal character, is itself a path
+ * `isSecretShapedPath` (jev/secret-paths.ts) would refuse to read — the same test that already
+ * covers `.env*`, `*.pem`, `*.p12`, and the rest of that list. `onRejectedPattern` is called once
+ * per rejection so the caller can log it.
+ */
+export function resolveRegenerableIgnoredPaths(
+  patterns: readonly string[] | undefined,
+  onRejectedPattern: (pattern: string) => void,
+): string[] {
+  if (!patterns || patterns.length === 0) return [];
+  const accepted: string[] = [];
+  for (const pattern of patterns) {
+    const sample = pattern.replace(/\*/gu, "x");
+    // A last segment of only wildcards (`*`, `**`, `dir/*`, or nothing) names no file: it would
+    // make every ignored file under it regenerable.
+    const lastSegment = pattern.trim().split("/").pop() ?? "";
+    if (
+      lastSegment.replace(/\*/gu, "") === "" ||
+      isSecretShapedPath(pattern) ||
+      isSecretShapedPath(sample)
+    ) {
+      onRejectedPattern(pattern);
+      continue;
+    }
+    accepted.push(pattern);
+  }
+  return accepted;
 }
 
 /** Whether a file (or an Xcode or .NET project) is a build manifest; see `BUILD_MANIFESTS`. */

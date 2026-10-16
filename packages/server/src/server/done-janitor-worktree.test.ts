@@ -895,15 +895,17 @@ describe("the deletion invariant on real worktrees", () => {
 });
 
 /**
- * A worktree-setup script copies ignored files like `local.properties` or `google-services.json`
- * from the main checkout (`repo`, the primary checkout every `addWorktree` branches off) into the
- * new worktree. `mainRepoRoot` lets the deletion invariant recognize that copy instead of keeping
- * the worktree for it forever (docs/done-janitor.md, "The deletion invariant").
+ * A worktree-setup script copies an ignored per-machine file — one without a name the deletion
+ * invariant recognizes on its own, unlike `local.properties` or `google-services.json`
+ * (`isRegenerablePath`, workspace-sweep-detector.ts) — from the main checkout (`repo`, the primary
+ * checkout every `addWorktree` branches off) into the new worktree. `mainRepoRoot` lets the
+ * deletion invariant recognize that copy instead of keeping the worktree for it forever
+ * (docs/done-janitor.md, "The deletion invariant").
  */
 describe("the deletion invariant against the main checkout", () => {
   function fixture(name: string): string {
     const worktree = addWorktree(name, "feature");
-    commit(worktree, ".gitignore", "node_modules/\nlocal.properties\nconfig/\n");
+    commit(worktree, ".gitignore", "node_modules/\nmachine-config.json\nconfig/\n");
     git(worktree, "push", "-q", "origin", "feature");
     return worktree;
   }
@@ -918,11 +920,11 @@ describe("the deletion invariant against the main checkout", () => {
 
   test("a file byte-identical to the main checkout's copy may go", async () => {
     const worktree = fixture("copied-file");
-    writeFileSync(join(repo, "local.properties"), "sdk.dir=/Users/someone/Android/sdk\n");
-    writeFileSync(join(worktree, "local.properties"), "sdk.dir=/Users/someone/Android/sdk\n");
+    writeFileSync(join(repo, "machine-config.json"), "sdk.dir=/Users/someone/Android/sdk\n");
+    writeFileSync(join(worktree, "machine-config.json"), "sdk.dir=/Users/someone/Android/sdk\n");
 
     expect(await planAgainstMain(worktree)).toBe(
-      "holds: holds: every file is tracked and pushed; ignored only regenerable (local.properties)",
+      "holds: holds: every file is tracked and pushed; ignored only regenerable (machine-config.json)",
     );
   });
 
@@ -940,30 +942,30 @@ describe("the deletion invariant against the main checkout", () => {
 
   test("a file that differs from the main checkout's copy is kept", async () => {
     const worktree = fixture("unique-file");
-    writeFileSync(join(repo, "local.properties"), "sdk.dir=/Users/someone/Android/sdk\n");
-    writeFileSync(join(worktree, "local.properties"), "sdk.dir=/Users/someone/other-sdk\n");
+    writeFileSync(join(repo, "machine-config.json"), "sdk.dir=/Users/someone/Android/sdk\n");
+    writeFileSync(join(worktree, "machine-config.json"), "sdk.dir=/Users/someone/other-sdk\n");
 
     expect(await planAgainstMain(worktree)).toBe(
-      "keep: 1 ignored path(s) that are not regenerable and no backup holds (local.properties)",
+      "keep: 1 ignored path(s) that are not regenerable and no backup holds (machine-config.json)",
     );
   });
 
   test("a file the main checkout does not have is kept, same as a .env edited only here", async () => {
     const worktree = fixture("env-only-here");
-    writeFileSync(join(worktree, "local.properties"), "sdk.dir=/Users/someone/Android/sdk\n");
+    writeFileSync(join(worktree, "machine-config.json"), "sdk.dir=/Users/someone/Android/sdk\n");
 
     expect(await planAgainstMain(worktree)).toBe(
-      "keep: 1 ignored path(s) that are not regenerable and no backup holds (local.properties)",
+      "keep: 1 ignored path(s) that are not regenerable and no backup holds (machine-config.json)",
     );
   });
 
   test("a symlink is kept even when its target matches the main checkout's copy", async () => {
     const worktree = fixture("symlinked-file");
-    writeFileSync(join(repo, "local.properties"), "sdk.dir=/Users/someone/Android/sdk\n");
-    symlinkSync(join(repo, "local.properties"), join(worktree, "local.properties"));
+    writeFileSync(join(repo, "machine-config.json"), "sdk.dir=/Users/someone/Android/sdk\n");
+    symlinkSync(join(repo, "machine-config.json"), join(worktree, "machine-config.json"));
 
     expect(await planAgainstMain(worktree)).toBe(
-      "keep: 1 ignored path(s) that are not regenerable and no backup holds (local.properties)",
+      "keep: 1 ignored path(s) that are not regenerable and no backup holds (machine-config.json)",
     );
   });
 
@@ -982,11 +984,11 @@ describe("the deletion invariant against the main checkout", () => {
   test("a file past the hashing cap is kept even when it is actually identical", async () => {
     const worktree = fixture("over-cap");
     const big = `${"x".repeat(1_000_001)}\n`;
-    writeFileSync(join(repo, "local.properties"), big);
-    writeFileSync(join(worktree, "local.properties"), big);
+    writeFileSync(join(repo, "machine-config.json"), big);
+    writeFileSync(join(worktree, "machine-config.json"), big);
 
     expect(await planAgainstMain(worktree)).toBe(
-      "keep: 1 ignored path(s) that are not regenerable and no backup holds (local.properties)",
+      "keep: 1 ignored path(s) that are not regenerable and no backup holds (machine-config.json)",
     );
   });
 

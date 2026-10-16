@@ -9,6 +9,7 @@ import {
   idleProjectVerdict,
   isBuildManifest,
   isRegenerablePath,
+  resolveRegenerableIgnoredPaths,
   resolveWorkspaceSweepConfig,
   type WorkspaceActivitySignals,
   type WorkspaceSweepFacts,
@@ -543,9 +544,7 @@ describe("checkDeletionInvariant", () => {
   test.each([
     ["an evidence log", "docs/playtest/evidence/core/run-1.log"],
     ["a data directory", "Clone/.data/"],
-    ["local Xcode settings", "apps/mobile/ios/.xcode.env.local"],
     ["an env file", ".env"],
-    ["Firebase config", "apps/mobile/android/app/google-services.json"],
     ["tool results", "Clone/tools/queen-safety/results/"],
   ])("%s that is ignored keeps the worktree, whatever else holds", (_name, entry) => {
     for (const basis of ["plan", "head", "snapshot"] as const) {
@@ -560,9 +559,28 @@ describe("checkDeletionInvariant", () => {
   });
 
   test.each([
-    ["local Xcode settings", "apps/mobile/ios/.xcode.env.local"],
-    ["Firebase config", "apps/mobile/android/app/google-services.json"],
-  ])("%s byte-identical to the main checkout's copy may go", (_name, entry) => {
+    ["Android's local SDK path", "apps/mobile/android/local.properties"],
+    ["React Native's local Xcode env", "apps/mobile/ios/.xcode.env.local"],
+    ["Firebase config (Android)", "apps/mobile/android/app/google-services.json"],
+    ["Firebase config (iOS)", "apps/mobile/ios/GoogleService-Info.plist"],
+    [
+      "Xcode's per-user scheme state",
+      "apps/mobile/ios/project.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings",
+    ],
+  ])(
+    "%s is regenerable by name, wherever it sits, with no main checkout to compare against",
+    (_name, entry) => {
+      expect(
+        checkDeletionInvariant(coverage({ ignored: ["node_modules/", entry] }), "head"),
+      ).toEqual({
+        holds: true,
+        detail: `holds: every file is tracked and pushed; ignored only regenerable (node_modules/, ${entry})`,
+      });
+    },
+  );
+
+  test("an unrecognized per-machine file byte-identical to the main checkout's copy may go", () => {
+    const entry = "apps/mobile/ios/Secrets.xcconfig";
     expect(
       checkDeletionInvariant(
         coverage({ ignored: ["node_modules/", entry], copiedFromMainCheckout: [entry] }),
@@ -577,6 +595,26 @@ describe("checkDeletionInvariant", () => {
   test("an env file that differs from the main checkout's copy still keeps the worktree", () => {
     expect(
       checkDeletionInvariant(coverage({ ignored: [".env"], copiedFromMainCheckout: [] }), "head"),
+    ).toEqual({
+      holds: false,
+      reason: "1 ignored path(s) that are not regenerable and no backup holds (.env)",
+      category: "ignored-path",
+    });
+  });
+
+  test("a configured regenerableIgnoredPaths entry makes an otherwise-unrecognized ignored file regenerable", () => {
+    const entry = "apps/mobile/embedded-feature-flags/default-ff.json";
+    expect(
+      checkDeletionInvariant(coverage({ ignored: [entry] }), "head", ["default-ff.json"]),
+    ).toEqual({
+      holds: true,
+      detail: `holds: every file is tracked and pushed; ignored only regenerable (${entry})`,
+    });
+  });
+
+  test("a unique .env still keeps the worktree even with configured regenerableIgnoredPaths set", () => {
+    expect(
+      checkDeletionInvariant(coverage({ ignored: [".env"] }), "head", ["default-ff.json"]),
     ).toEqual({
       holds: false,
       reason: "1 ignored path(s) that are not regenerable and no backup holds (.env)",
@@ -736,8 +774,107 @@ describe("isRegenerablePath", () => {
     ["config/build/hand-written.json", false],
     ["docs/notes/dist/", false],
     ["docs/.yarn/cache/", false],
+    // Per-machine config files, matched by name anywhere in the tree.
+    ["apps/mobile/android/local.properties", true],
+    ["local.properties", true],
+    ["apps/mobile/ios/.xcode.env.local", true],
+    ["apps/mobile/android/app/google-services.json", true],
+    ["apps/mobile/ios/GoogleService-Info.plist", true],
+    // xcshareddata/ only inside an .xcworkspace or .xcodeproj.
+    ["apps/mobile/ios/project.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings", true],
+    ["App.xcodeproj/xcshareddata/xcschemes/App.xcscheme", true],
+    ["apps/mobile/ios/xcshareddata/notes.txt", false],
   ])("%s → %s", (entry, expected) => {
     expect(isRegenerablePath(entry, MANIFESTS)).toBe(expected);
+  });
+
+  test("a configured extra pattern makes an otherwise-unrecognized ignored path regenerable", () => {
+    expect(
+      isRegenerablePath("apps/mobile/embedded-feature-flags/default-ff.json", MANIFESTS, [
+        "default-ff.json",
+      ]),
+    ).toBe(true);
+    expect(isRegenerablePath("apps/mobile/embedded-feature-flags/default-ff.json", MANIFESTS)).toBe(
+      false,
+    );
+  });
+
+  test("a configured glob pattern matches within one path segment, by name only", () => {
+    expect(
+      isRegenerablePath("apps/mobile/flags/local-overrides.json", MANIFESTS, ["local-*.json"]),
+    ).toBe(true);
+    expect(isRegenerablePath("apps/mobile/flags/other.json", MANIFESTS, ["local-*.json"])).toBe(
+      false,
+    );
+  });
+
+  test("a configured pattern never matches a secret-shaped path, even when the glob reaches it", () => {
+    expect(isRegenerablePath(".eslintcache", MANIFESTS, [".e*"])).toBe(true);
+    expect(isRegenerablePath(".env", MANIFESTS, [".e*"])).toBe(false);
+    expect(isRegenerablePath("keys/id_ed25519", MANIFESTS, ["id_ed*"])).toBe(false);
+  });
+
+  test("a configured pattern never makes a directory regenerable", () => {
+    expect(isRegenerablePath("apps/mobile/flags/", MANIFESTS, ["flags"])).toBe(false);
+  });
+});
+
+describe("resolveRegenerableIgnoredPaths", () => {
+  test("accepts an ordinary suffix or glob pattern", () => {
+    const rejected: string[] = [];
+    expect(
+      resolveRegenerableIgnoredPaths(["default-ff.json", "local-*.json"], (pattern) =>
+        rejected.push(pattern),
+      ),
+    ).toEqual(["default-ff.json", "local-*.json"]);
+    expect(rejected).toEqual([]);
+  });
+
+  test("rejects a pattern that would match .env", () => {
+    const rejected: string[] = [];
+    expect(resolveRegenerableIgnoredPaths([".env"], (pattern) => rejected.push(pattern))).toEqual(
+      [],
+    );
+    expect(rejected).toEqual([".env"]);
+  });
+
+  test("rejects a pattern that would match a key or secret store", () => {
+    const rejected: string[] = [];
+    expect(
+      resolveRegenerableIgnoredPaths(["*.pem", "*.p12", "id_rsa*"], (pattern) =>
+        rejected.push(pattern),
+      ),
+    ).toEqual([]);
+    expect(rejected).toEqual(["*.pem", "*.p12", "id_rsa*"]);
+  });
+
+  test("keeps the accepted patterns beside the rejected ones, in order", () => {
+    const rejected: string[] = [];
+    expect(
+      resolveRegenerableIgnoredPaths(["default-ff.json", ".env", "local-*.json"], (pattern) =>
+        rejected.push(pattern),
+      ),
+    ).toEqual(["default-ff.json", "local-*.json"]);
+    expect(rejected).toEqual([".env"]);
+  });
+
+  test("rejects a pattern whose last segment is only wildcards", () => {
+    const rejected: string[] = [];
+    expect(
+      resolveRegenerableIgnoredPaths(["*", "**", "", "flags/*"], (pattern) =>
+        rejected.push(pattern),
+      ),
+    ).toEqual([]);
+    expect(rejected).toEqual(["*", "**", "", "flags/*"]);
+  });
+
+  test("undefined or empty config is no patterns, nothing rejected", () => {
+    const rejected: string[] = [];
+    expect(resolveRegenerableIgnoredPaths(undefined, (pattern) => rejected.push(pattern))).toEqual(
+      [],
+    );
+    expect(resolveRegenerableIgnoredPaths([], (pattern) => rejected.push(pattern))).toEqual([]);
+    expect(rejected).toEqual([]);
   });
 });
 

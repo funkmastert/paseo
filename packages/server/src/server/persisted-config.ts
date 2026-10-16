@@ -547,6 +547,9 @@ const AgentDoneJanitorSchema = z
     maxDeadArchivesPerSweep: z.number().int().positive().optional(),
     askFinished: z.boolean().optional(),
     workspaceSweep: AgentDoneJanitorWorkspaceSweepSchema.optional(),
+    // Extra ignored paths the deletion invariant treats as regenerable, beside the janitor's own
+    // by-name rules. See docs/done-janitor.md, "Idle workspaces".
+    regenerableIgnoredPaths: z.array(z.string()).optional(),
   })
   .strict();
 
