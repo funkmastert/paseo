@@ -74,6 +74,68 @@ describe("SessionAuthorization", () => {
     ).toBe(false);
   });
 
+  // COMPAT(mcpStatus): mapped to daemon.read only (unlike providers_snapshot_update's
+  // ["daemon.read", "hub.execute"]) — a Hub without daemon.read shouldn't see gateway status.
+  test("mcp_status_update requires daemon.read; hub.execute alone doesn't grant it", () => {
+    expect(
+      new SessionAuthorization(["hub.execute"]).allowsOutbound(
+        outboundMessage("mcp_status_update"),
+      ),
+    ).toBe(false);
+    expect(
+      new SessionAuthorization(["daemon.read"]).allowsOutbound(
+        outboundMessage("mcp_status_update"),
+      ),
+    ).toBe(true);
+  });
+
+  // U6: same daemon.manage tier as set_daemon_config/plugin management — a Hub with only
+  // hub.execute (or daemon.read) can't start interactive auth for a brokered server.
+  test("mcp_gateway.auth.start requires daemon.manage; daemon.read and hub.execute alone don't grant it", () => {
+    expect(
+      new SessionAuthorization(["hub.execute"]).allowsInbound(
+        inboundMessage("mcp_gateway.auth.start.request"),
+      ),
+    ).toBe(false);
+    expect(
+      new SessionAuthorization(["daemon.read"]).allowsInbound(
+        inboundMessage("mcp_gateway.auth.start.request"),
+      ),
+    ).toBe(false);
+    expect(
+      new SessionAuthorization(["daemon.manage"]).allowsInbound(
+        inboundMessage("mcp_gateway.auth.start.request"),
+      ),
+    ).toBe(true);
+    expect(
+      new SessionAuthorization(["daemon.manage"]).allowsOutbound(
+        outboundMessage("mcp_gateway.auth.start.response"),
+      ),
+    ).toBe(true);
+  });
+
+  // Starting a login on the daemon's host is administration: a Hub or a read-only client can see
+  // a signed-out account but cannot sign it in.
+  test("account.claude.sign_in requires daemon.manage; daemon.read and hub.execute alone don't grant it", () => {
+    for (const permission of ["hub.execute", "daemon.read"] as const) {
+      expect(
+        new SessionAuthorization([permission]).allowsInbound(
+          inboundMessage("account.claude.sign_in.request"),
+        ),
+      ).toBe(false);
+    }
+    expect(
+      new SessionAuthorization(["daemon.manage"]).allowsInbound(
+        inboundMessage("account.claude.sign_in.request"),
+      ),
+    ).toBe(true);
+    expect(
+      new SessionAuthorization(["daemon.manage"]).allowsOutbound(
+        outboundMessage("account.claude.sign_in.response"),
+      ),
+    ).toBe(true);
+  });
+
   test("Hub can operate ordinary agents and recover workspaces without daemon administration", () => {
     const authorization = new SessionAuthorization(["hub.execute"]);
     for (const type of [

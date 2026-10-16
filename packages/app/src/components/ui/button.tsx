@@ -167,6 +167,7 @@ export function Button({
   trailing,
   style,
   textStyle,
+  hoveredTextStyle,
   disabled,
   loading = false,
   accessibilityRole,
@@ -180,6 +181,8 @@ export function Button({
     trailing?: ReactNode;
     style?: StyleProp<ViewStyle>;
     textStyle?: StyleProp<TextStyle>;
+    /** Applied over the ghost hover colour, for a ghost button on a coloured surface. */
+    hoveredTextStyle?: StyleProp<TextStyle>;
     loading?: boolean;
   }
 >) {
@@ -235,8 +238,9 @@ export function Button({
       variant === "ghost" ? styles.textGhost : null,
       textStyle,
       isGhostHovered ? styles.textGhostHovered : null,
+      isGhostHovered ? hoveredTextStyle : null,
     ],
-    [size, variant, textStyle, isGhostHovered],
+    [size, variant, textStyle, isGhostHovered, hoveredTextStyle],
   );
 
   const accessibilityState = useMemo(

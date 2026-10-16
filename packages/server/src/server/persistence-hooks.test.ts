@@ -34,6 +34,7 @@ describe("persistence hooks", () => {
         modeId: "default",
         model: "gpt-5.4-mini",
         thinkingOptionId: "minimal",
+        outputStyle: "Concise",
         providerOptions: {
           sandbox_mode: "workspace-write",
           sandbox_workspace_write: { writable_roots: ["/tmp/shared"] },
@@ -57,6 +58,7 @@ describe("persistence hooks", () => {
       modeId: "default",
       model: "gpt-5.4-mini",
       thinkingOptionId: "minimal",
+      outputStyle: "Concise",
       providerOptions: {
         sandbox_mode: "workspace-write",
         sandbox_workspace_write: { writable_roots: ["/tmp/shared"] },

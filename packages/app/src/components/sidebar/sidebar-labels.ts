@@ -7,7 +7,7 @@ export interface SidebarWorkspaceGroup {
   key: string;
   label: string;
   rows: SidebarWorkspaceEntry[];
-  leading: { kind: "status"; bucket: StatusBucket };
+  bucket: StatusBucket;
 }
 
 export function statusWorkspaceGroups(groups: readonly StatusGroup[]): SidebarWorkspaceGroup[] {
@@ -15,8 +15,20 @@ export function statusWorkspaceGroups(groups: readonly StatusGroup[]): SidebarWo
     key: group.bucket,
     label: group.label,
     rows: group.rows,
-    leading: { kind: "status", bucket: group.bucket },
+    bucket: group.bucket,
   }));
+}
+
+/**
+ * Whether `group`'s header should render collapsed, from the one persisted
+ * `collapsedWorkspaceGroupKeys` set every workspace group shares: absence means expanded, and
+ * the set holds the keys a person collapsed by hand.
+ */
+export function isSidebarWorkspaceGroupCollapsed(
+  group: SidebarWorkspaceGroup,
+  collapsedWorkspaceGroupKeys: ReadonlySet<string>,
+): boolean {
+  return collapsedWorkspaceGroupKeys.has(group.key);
 }
 
 /**

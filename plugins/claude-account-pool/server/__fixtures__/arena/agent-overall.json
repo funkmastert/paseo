@@ -1,0 +1,184 @@
+{
+  "rows": [
+    {
+      "row": {
+        "model_name": "Claude Opus 5.5 (High)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.14331280058415052,
+        "score_ci_lower": 0.12150663912969831,
+        "score_ci_upper": 0.16511896203860274,
+        "observation_count": 940970,
+        "session_count": 6103,
+        "rank": 1,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "GPT 6 Astra (Max)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": 0.1309471353899725,
+        "score_ci_lower": 0.1072922508624028,
+        "score_ci_upper": 0.1546020199175422,
+        "observation_count": 915013,
+        "session_count": 12029,
+        "rank": 2,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "Claude Fable 5.1 (Max)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.12661695476095366,
+        "score_ci_lower": 0.10606997586270217,
+        "score_ci_upper": 0.14716393365920516,
+        "observation_count": 1734508,
+        "session_count": 15534,
+        "rank": 3,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "Claude Sonnet 5.5 (Max)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.11953683338118964,
+        "score_ci_lower": 0.08640551733564551,
+        "score_ci_upper": 0.1526681494267338,
+        "observation_count": 712588,
+        "session_count": 6780,
+        "rank": 4,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "GPT 6.1 Sol (Max)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": 0.11723957550247327,
+        "score_ci_lower": 0.08678622927304146,
+        "score_ci_upper": 0.1476929217319051,
+        "observation_count": 548776,
+        "session_count": 8201,
+        "rank": 5,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "GPT 6 Sol (Max)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": 0.09921903066609106,
+        "score_ci_lower": 0.07543553203934758,
+        "score_ci_upper": 0.12300252929283453,
+        "observation_count": 995954,
+        "session_count": 6100,
+        "rank": 6,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "Gemini 4 Argon (High)",
+        "organization": "google",
+        "license": "Proprietary",
+        "score": 0.09259907522117392,
+        "score_ci_lower": 0.06901646686726487,
+        "score_ci_upper": 0.11618168357508296,
+        "observation_count": 1152355,
+        "session_count": 17963,
+        "rank": 7,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "Claude Fable 5 (High)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.08937936055727591,
+        "score_ci_lower": 0.0766906485538394,
+        "score_ci_upper": 0.10206807256071242,
+        "observation_count": 2631384,
+        "session_count": 41908,
+        "rank": 8,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "Claude Opus 5 (Max)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.0811710076417993,
+        "score_ci_lower": 0.06643837389921972,
+        "score_ci_upper": 0.09590364138437887,
+        "observation_count": 3034726,
+        "session_count": 22818,
+        "rank": 9,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "Claude Opus 5 (High)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.07953516801058089,
+        "score_ci_lower": 0.06562176555410033,
+        "score_ci_upper": 0.09344857046706144,
+        "observation_count": 3564909,
+        "session_count": 27553,
+        "rank": 10,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "Claude Opus 4.8 (High)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.07131379676560229,
+        "score_ci_lower": 0.057582161537160656,
+        "score_ci_upper": 0.08504543199404392,
+        "observation_count": 2362086,
+        "session_count": 40308,
+        "rank": 11,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "GPT 5.6 Sol (xHigh)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": 0.062316649466403244,
+        "score_ci_lower": 0.04947922065533354,
+        "score_ci_upper": 0.07515407827747295,
+        "observation_count": 4382657,
+        "session_count": 35768,
+        "rank": 12,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    }
+  ]
+}

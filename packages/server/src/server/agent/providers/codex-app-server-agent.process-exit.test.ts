@@ -70,7 +70,7 @@ test("unexpected Codex app-server exit fails the active run and agent", async ()
     const agent = await manager.createAgent(
       { provider: "codex", cwd: workdir, modeId: "auto", model: "gpt-5.4" },
       undefined,
-      { workspaceId: undefined },
+      { workspaceId: undefined, origin: "human" },
     );
     agentId = agent.id;
     const run = manager.runAgent(agent.id, "keep working");
@@ -128,7 +128,7 @@ test("replacement self-heals when Codex reports that the tracked turn is already
     const agent = await manager.createAgent(
       { provider: "codex", cwd: workdir, modeId: "auto", model: "gpt-5.4" },
       undefined,
-      { workspaceId: undefined },
+      { workspaceId: undefined, origin: "human" },
     );
     agentId = agent.id;
     const firstRun = manager.runAgent(agent.id, "keep working");
@@ -181,7 +181,7 @@ test("intentional agent close stays clean while a Codex turn is active", async (
     const agent = await manager.createAgent(
       { provider: "codex", cwd: workdir, modeId: "auto", model: "gpt-5.4" },
       undefined,
-      { workspaceId: undefined },
+      { workspaceId: undefined, origin: "human" },
     );
     const run = manager.streamAgent(agent.id, "keep working");
     const drainRun = (async () => {
@@ -233,7 +233,7 @@ test("idle Codex app-server exit reconnects without publishing a failed turn", a
     const agent = await manager.createAgent(
       { provider: "codex", cwd: workdir, modeId: "auto", model: "gpt-5.4" },
       undefined,
-      { workspaceId: undefined },
+      { workspaceId: undefined, origin: "human" },
     );
     agentId = agent.id;
 
@@ -284,7 +284,7 @@ test("failed reconnect preserves manager events for a later successful run", asy
     const agent = await manager.createAgent(
       { provider: "codex", cwd: workdir, modeId: "auto", model: "gpt-5.4" },
       undefined,
-      { workspaceId: undefined },
+      { workspaceId: undefined, origin: "human" },
     );
     agentId = agent.id;
     exitedAppServer.child.emit("exit", 17, null);
@@ -324,7 +324,7 @@ test("unexpected exit fails an autonomous Codex turn", async () => {
     const agent = await manager.createAgent(
       { provider: "codex", cwd: workdir, modeId: "auto", model: "gpt-5.4" },
       undefined,
-      { workspaceId: undefined },
+      { workspaceId: undefined, origin: "human" },
     );
     agentId = agent.id;
     appServer.startsTurn({ threadId: "thread-1", turnId: "autonomous-turn" });
@@ -365,7 +365,7 @@ test("provider permissions do not survive an unexpected exit and reconnect", asy
     const agent = await manager.createAgent(
       { provider: "codex", cwd: workdir, modeId: "auto", model: "gpt-5.4" },
       undefined,
-      { workspaceId: undefined },
+      { workspaceId: undefined, origin: "human" },
     );
     agentId = agent.id;
 
@@ -447,7 +447,7 @@ test("idle provider exit preserves a synthetic plan approval across reconnect", 
         featureValues: { plan_mode: true },
       },
       undefined,
-      { workspaceId: undefined },
+      { workspaceId: undefined, origin: "human" },
     );
     agentId = agent.id;
 

@@ -29,6 +29,10 @@ export interface NavigateToWorkspaceInput {
   target?: WorkspaceTabTarget;
   pin?: boolean;
   placement?: WorkspaceTabPlacement;
+  /** True when this call replays a navigation-history entry (Back/Forward).
+   * Read only by the `navigateToWorkspace` wrapper in `./index`, which skips
+   * `recordNavigationHistory` for it so replays don't re-record themselves. */
+  fromHistoryReplay?: boolean;
 }
 
 export interface NavigateToWorkspaceDeps extends PrepareWorkspaceTabDeps {

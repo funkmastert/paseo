@@ -12,19 +12,31 @@ export type ProviderIconName =
 
 const BUILTIN_PROVIDER_IDS = new Set(BUILTIN_PROVIDER_ICON_NAMES);
 const KNOWN_PROVIDER_IDS = new Set(KNOWN_PROVIDER_ICON_NAMES);
-const providerSnapshotIconSvgsByServer = new Map<string, ReadonlyMap<string, string>>();
+
+interface ProviderSnapshotIconInfo {
+  iconSvg?: string;
+  derivedFromProviderId?: string | null;
+}
+
+const providerSnapshotIconsByServer = new Map<
+  string,
+  ReadonlyMap<string, ProviderSnapshotIconInfo>
+>();
 
 export function replaceProviderSnapshotIcons(
   serverId: string,
-  entries: readonly Pick<ProviderSnapshotEntry, "provider" | "iconSvg">[],
+  entries: readonly Pick<ProviderSnapshotEntry, "provider" | "iconSvg" | "derivedFromProviderId">[],
 ): void {
-  const icons = new Map<string, string>();
+  const icons = new Map<string, ProviderSnapshotIconInfo>();
   for (const entry of entries) {
-    if (entry.iconSvg) {
-      icons.set(entry.provider, entry.iconSvg);
+    if (entry.iconSvg || entry.derivedFromProviderId) {
+      icons.set(entry.provider, {
+        iconSvg: entry.iconSvg,
+        derivedFromProviderId: entry.derivedFromProviderId,
+      });
     }
   }
-  providerSnapshotIconSvgsByServer.set(serverId, icons);
+  providerSnapshotIconsByServer.set(serverId, icons);
 }
 
 export function resolveProviderIconName(
@@ -34,14 +46,22 @@ export function resolveProviderIconName(
   if (BUILTIN_PROVIDER_IDS.has(provider)) {
     return { kind: "builtin", id: provider };
   }
-  const iconSvg = serverId
-    ? providerSnapshotIconSvgsByServer.get(serverId)?.get(provider)
-    : undefined;
-  if (iconSvg) {
-    return { kind: "svg", svg: iconSvg };
+  const info = serverId ? providerSnapshotIconsByServer.get(serverId)?.get(provider) : undefined;
+  if (info?.iconSvg) {
+    return { kind: "svg", svg: info.iconSvg };
   }
   if (KNOWN_PROVIDER_IDS.has(provider)) {
     return { kind: "catalog", id: provider };
+  }
+  // A custom entry that extends a known provider (e.g. a claude-account-pool
+  // entry extending "claude") renders the base provider's icon rather than
+  // falling back to the generic bot icon.
+  const derivedFromProviderId = info?.derivedFromProviderId;
+  if (derivedFromProviderId && BUILTIN_PROVIDER_IDS.has(derivedFromProviderId)) {
+    return { kind: "builtin", id: derivedFromProviderId };
+  }
+  if (derivedFromProviderId && KNOWN_PROVIDER_IDS.has(derivedFromProviderId)) {
+    return { kind: "catalog", id: derivedFromProviderId };
   }
   return { kind: "bot" };
 }

@@ -182,12 +182,17 @@ export class WorkspaceAutoName {
   ): Promise<void> {
     await this.workspaceRegistry.update(workspaceId, (current) => {
       let title = current.title;
+      // Only claim provenance when this path actually wrote the title: a title
+      // the requester typed between create and here stays theirs.
+      let titleSource = current.titleSource;
       if (!title || (input.promptTitle && title === input.promptTitle)) {
         title = input.title;
+        titleSource = "auto";
       }
       return {
         ...current,
         title,
+        ...(titleSource ? { titleSource } : {}),
         ...(input.branch ? { branch: input.branch } : {}),
         updatedAt: new Date().toISOString(),
       };

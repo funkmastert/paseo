@@ -798,6 +798,59 @@ test("importProviderSession rejects a provider session with an active stored own
   expect(harness.freshImports).toEqual([]);
 });
 
+test("importProviderSession refuses a session another provider's agent is running a turn on", async () => {
+  // Every account reads one shared transcript store, so a record on another provider is the same
+  // conversation. Importing it while that agent's turn runs would put two writers on it.
+  const harness = await ProviderImportHarness.create({ sessionId: "thread-running" });
+  const holderId = "00000000-0000-4000-8000-000000000999";
+  const stored = makeStoredProviderSession({
+    id: holderId,
+    cwd: harness.snapshot.cwd,
+    sessionId: "thread-running",
+    archivedAt: null,
+  });
+  await harness.seed({
+    ...stored,
+    provider: "claude",
+    persistence: stored.persistence ? { ...stored.persistence, provider: "claude" } : null,
+  });
+  harness.activeAgent = {
+    ...makeManagedAgent({
+      id: holderId,
+      provider: "claude",
+      cwd: harness.snapshot.cwd,
+      sessionId: "thread-running",
+    }),
+    lifecycle: "running",
+  } as ManagedAgent;
+
+  await expect(
+    harness.import({ providerHandleId: "thread-running", cwd: harness.snapshot.cwd }),
+  ).rejects.toThrow(`Provider session thread-running is running in agent ${holderId}`);
+  expect(harness.freshImports).toEqual([]);
+});
+
+test("importProviderSession imports a session another provider's agent holds between turns", async () => {
+  // The manual handoff: import onto a healthy account, then retire the idle original.
+  const harness = await ProviderImportHarness.create({ sessionId: "thread-idle" });
+  const holderId = "00000000-0000-4000-8000-000000000998";
+  const stored = makeStoredProviderSession({
+    id: holderId,
+    cwd: harness.snapshot.cwd,
+    sessionId: "thread-idle",
+    archivedAt: null,
+  });
+  await harness.seed({
+    ...stored,
+    provider: "claude",
+    persistence: stored.persistence ? { ...stored.persistence, provider: "claude" } : null,
+  });
+
+  await harness.import({ providerHandleId: "thread-idle", cwd: harness.snapshot.cwd });
+
+  expect(harness.freshImports).toHaveLength(1);
+});
+
 test("importProviderSession restores an archived session as the same standalone agent", async () => {
   const harness = await ProviderImportHarness.create({ sessionId: "thread-archived" });
   harness.timeline = [{ type: "user_message", text: "restored" }];

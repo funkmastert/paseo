@@ -247,6 +247,7 @@ function BadgePreview({
         hostBadge={hostBadge}
         prHint={null}
         serviceSummary={null}
+        diskUsage={null}
       />
     </View>
   );

@@ -1,0 +1,401 @@
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { JevLaneLimits } from "./lanes.js";
+import { JevCircuit, JevLanes } from "./lanes.js";
+
+function settledFlag<T>(promise: Promise<T>): { get settled(): boolean } {
+  const flag = { settled: false };
+  void track();
+  return flag;
+
+  async function track(): Promise<void> {
+    try {
+      await promise;
+    } catch {
+      // Only settlement is tracked here; the value or rejection reason is asserted separately.
+    } finally {
+      flag.settled = true;
+    }
+  }
+}
+
+describe("JevCircuit", () => {
+  test("starts closed", () => {
+    const circuit = new JevCircuit();
+    expect(circuit.state(0)).toBe("closed");
+    expect(circuit.tryPass(0)).toBe("pass");
+  });
+
+  test("opens after 5 consecutive failures", () => {
+    const circuit = new JevCircuit();
+    for (let i = 0; i < 4; i++) circuit.recordFailure(0);
+    expect(circuit.state(0)).toBe("closed");
+    circuit.recordFailure(0);
+    expect(circuit.state(0)).toBe("open");
+    expect(circuit.tryPass(0)).toBe("refused");
+  });
+
+  test("a success in between resets the failure count", () => {
+    const circuit = new JevCircuit();
+    for (let i = 0; i < 4; i++) circuit.recordFailure(0);
+    circuit.recordSuccess();
+    for (let i = 0; i < 4; i++) circuit.recordFailure(0);
+    expect(circuit.state(0)).toBe("closed");
+  });
+
+  test("goes half-open after openMs, lets exactly one probe through, and success closes it", () => {
+    const circuit = new JevCircuit({ openMs: 60_000 });
+    for (let i = 0; i < 5; i++) circuit.recordFailure(0);
+    expect(circuit.state(59_999)).toBe("open");
+    expect(circuit.state(60_000)).toBe("half-open");
+
+    expect(circuit.tryPass(60_000)).toBe("probe");
+    expect(circuit.tryPass(60_000)).toBe("refused");
+
+    circuit.recordSuccess();
+    expect(circuit.state(60_000)).toBe("closed");
+    expect(circuit.tryPass(60_000)).toBe("pass");
+  });
+
+  test("a failed probe reopens the circuit for another openMs", () => {
+    const circuit = new JevCircuit({ openMs: 60_000 });
+    for (let i = 0; i < 5; i++) circuit.recordFailure(0);
+    expect(circuit.tryPass(60_000)).toBe("probe");
+    circuit.recordFailure(60_000, { probe: true });
+    expect(circuit.state(60_000)).toBe("open");
+    expect(circuit.state(119_999)).toBe("open");
+    expect(circuit.state(120_000)).toBe("half-open");
+  });
+
+  test("each failed probe doubles the open window, up to maxOpenMs, and a success resets it", () => {
+    const circuit = new JevCircuit({ openMs: 60_000, maxOpenMs: 600_000 });
+    for (let i = 0; i < 5; i++) circuit.recordFailure(0);
+    let at = 0;
+    const windows: number[] = [];
+    for (let probe = 0; probe < 6; probe += 1) {
+      let opensAt = at;
+      while (circuit.state(opensAt) !== "half-open") opensAt += 1_000;
+      windows.push(opensAt - at);
+      at = opensAt;
+      expect(circuit.tryPass(at)).toBe("probe");
+      circuit.recordFailure(at, { probe: true });
+    }
+    expect(windows).toEqual([60_000, 60_000, 120_000, 240_000, 480_000, 600_000]);
+
+    at += 600_000;
+    expect(circuit.tryPass(at)).toBe("probe");
+    circuit.recordSuccess();
+    for (let i = 0; i < 5; i++) circuit.recordFailure(at);
+    expect(circuit.state(at + 59_999)).toBe("open");
+    expect(circuit.state(at + 60_000)).toBe("half-open");
+  });
+
+  test("a probe that never reports is replaced once its open window passes", () => {
+    const circuit = new JevCircuit({ openMs: 60_000 });
+    for (let i = 0; i < 5; i++) circuit.recordFailure(0);
+    expect(circuit.tryPass(60_000)).toBe("probe");
+    expect(circuit.tryPass(119_999)).toBe("refused");
+    expect(circuit.tryPass(120_000)).toBe("probe");
+  });
+
+  test("a failure from a call that was not the probe does not settle the probe", () => {
+    const circuit = new JevCircuit({ openMs: 60_000 });
+    for (let i = 0; i < 5; i++) circuit.recordFailure(0);
+    expect(circuit.tryPass(60_000)).toBe("probe");
+    circuit.recordFailure(60_001);
+    expect(circuit.state(60_001)).toBe("half-open");
+    expect(circuit.tryPass(60_002)).toBe("refused");
+    circuit.recordSuccess();
+    expect(circuit.state(60_002)).toBe("closed");
+  });
+});
+
+describe("JevLanes", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const limits: JevLaneLimits = {
+    control: 4,
+    agentTools: 1,
+    interactive: 1,
+    reads: 1,
+    perGroup: 2,
+    requestsPerSecond: 10,
+  };
+
+  test("a full control lane leaves an interactive acquisition immediate", async () => {
+    const lanes = new JevLanes();
+    const oneEach: JevLaneLimits = { ...limits, control: 1, interactive: 1 };
+
+    const held = await lanes.acquireSlot("control", { deadlineAt: 100_000, limits: oneEach });
+    expect(held.ok).toBe(true);
+
+    const asked = await lanes.acquireSlot("interactive", { deadlineAt: 100_000, limits: oneEach });
+    expect(asked.ok).toBe(true);
+    expect(lanes.inFlight("interactive")).toBe(1);
+    expect(lanes.circuits.interactive.state(Date.now())).toBe("closed");
+  });
+
+  test("a full agentTools lane leaves control acquisitions immediate", async () => {
+    const lanes = new JevLanes();
+
+    const held = await lanes.acquireSlot("agentTools", { deadlineAt: 100_000, limits });
+    expect(held.ok).toBe(true);
+
+    const controlResult = await lanes.acquireSlot("control", { deadlineAt: 100_000, limits });
+    expect(controlResult.ok).toBe(true);
+  });
+
+  test("per-group limit 2 with lane limit 4 lets two groups run 2 each", async () => {
+    const lanes = new JevLanes();
+    const groupLimits: JevLaneLimits = {
+      control: 4,
+      agentTools: 4,
+      interactive: 4,
+      reads: 1,
+      perGroup: 2,
+      requestsPerSecond: 10,
+    };
+
+    const a1 = await lanes.acquireSlot("agentTools", {
+      deadlineAt: 100_000,
+      group: "a",
+      limits: groupLimits,
+    });
+    const a2 = await lanes.acquireSlot("agentTools", {
+      deadlineAt: 100_000,
+      group: "a",
+      limits: groupLimits,
+    });
+    expect(a1.ok).toBe(true);
+    expect(a2.ok).toBe(true);
+
+    const a3Promise = lanes.acquireSlot("agentTools", {
+      deadlineAt: 100_000,
+      group: "a",
+      limits: groupLimits,
+    });
+    const a3Flag = settledFlag(a3Promise);
+    await Promise.resolve();
+    expect(a3Flag.settled).toBe(false);
+
+    const b1 = await lanes.acquireSlot("agentTools", {
+      deadlineAt: 100_000,
+      group: "b",
+      limits: groupLimits,
+    });
+    const b2 = await lanes.acquireSlot("agentTools", {
+      deadlineAt: 100_000,
+      group: "b",
+      limits: groupLimits,
+    });
+    expect(b1.ok).toBe(true);
+    expect(b2.ok).toBe(true);
+
+    if (a1.ok) a1.release();
+    const a3 = await a3Promise;
+    expect(a3.ok).toBe(true);
+  });
+
+  test("a deadline passing in the queue answers saturated and never touches the circuit", async () => {
+    const lanes = new JevLanes();
+    const tightLimits: JevLaneLimits = {
+      control: 1,
+      agentTools: 1,
+      interactive: 1,
+      reads: 1,
+      perGroup: 1,
+      requestsPerSecond: 10,
+    };
+
+    const first = await lanes.acquireSlot("control", { deadlineAt: 100_000, limits: tightLimits });
+    expect(first.ok).toBe(true);
+
+    const secondPromise = lanes.acquireSlot("control", { deadlineAt: 5_000, limits: tightLimits });
+    await vi.advanceTimersByTimeAsync(5_001);
+    const second = await secondPromise;
+
+    expect(second).toEqual({ ok: false, reason: "saturated" });
+    expect(lanes.circuits.control.state(Date.now())).toBe("closed");
+  });
+
+  test("takeRateToken serves waiting control requests before waiting agentTools ones", async () => {
+    const lanes = new JevLanes();
+    const rateLimits: JevLaneLimits = {
+      control: 4,
+      agentTools: 4,
+      interactive: 4,
+      reads: 1,
+      perGroup: 4,
+      requestsPerSecond: 1,
+    };
+
+    const initial = await lanes.takeRateToken("control", {
+      deadlineAt: 100_000,
+      limits: rateLimits,
+    });
+    expect(initial.ok).toBe(true);
+
+    const toolPromise = lanes.takeRateToken("agentTools", {
+      deadlineAt: 100_000,
+      limits: rateLimits,
+    });
+    const toolFlag = settledFlag(toolPromise);
+    await Promise.resolve();
+
+    const controlPromise = lanes.takeRateToken("control", {
+      deadlineAt: 100_000,
+      limits: rateLimits,
+    });
+    const controlFlag = settledFlag(controlPromise);
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(controlFlag.settled).toBe(true);
+    expect(toolFlag.settled).toBe(false);
+    expect(await controlPromise).toEqual({ ok: true });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await toolPromise).toEqual({ ok: true });
+  });
+
+  test("takeRateToken serves a waiting reads request only once no other lane waits", async () => {
+    const lanes = new JevLanes();
+    const rateLimits: JevLaneLimits = {
+      control: 4,
+      agentTools: 4,
+      interactive: 4,
+      reads: 4,
+      perGroup: 4,
+      requestsPerSecond: 1,
+    };
+    expect(
+      (await lanes.takeRateToken("control", { deadlineAt: 100_000, limits: rateLimits })).ok,
+    ).toBe(true);
+
+    const readsPromise = lanes.takeRateToken("reads", { deadlineAt: 100_000, limits: rateLimits });
+    const readsFlag = settledFlag(readsPromise);
+    await Promise.resolve();
+    const toolPromise = lanes.takeRateToken("agentTools", {
+      deadlineAt: 100_000,
+      limits: rateLimits,
+    });
+    const toolFlag = settledFlag(toolPromise);
+    await Promise.resolve();
+
+    // The reads waiter came first, and still waits behind agent tools.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(toolFlag.settled).toBe(true);
+    expect(readsFlag.settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await readsPromise).toEqual({ ok: true });
+  });
+
+  test("the reads lane has its own slots and circuit", async () => {
+    const lanes = new JevLanes();
+    const oneEach: JevLaneLimits = { ...limits, control: 1, reads: 1 };
+    await lanes.acquireSlot("control", { deadlineAt: 100_000, limits: oneEach });
+    const read = await lanes.acquireSlot("reads", { deadlineAt: 100_000, limits: oneEach });
+    expect(read.ok).toBe(true);
+    expect(lanes.inFlight("reads")).toBe(1);
+    expect(lanes.circuits.reads.state(Date.now())).toBe("closed");
+  });
+
+  test("takeRateToken serves a waiting interactive request before a waiting agentTools one", async () => {
+    const lanes = new JevLanes();
+    const rateLimits: JevLaneLimits = {
+      control: 4,
+      agentTools: 4,
+      interactive: 4,
+      reads: 1,
+      perGroup: 4,
+      requestsPerSecond: 1,
+    };
+
+    const initial = await lanes.takeRateToken("control", {
+      deadlineAt: 100_000,
+      limits: rateLimits,
+    });
+    expect(initial.ok).toBe(true);
+
+    const toolPromise = lanes.takeRateToken("agentTools", {
+      deadlineAt: 100_000,
+      limits: rateLimits,
+    });
+    const toolFlag = settledFlag(toolPromise);
+    await Promise.resolve();
+
+    const askPromise = lanes.takeRateToken("interactive", {
+      deadlineAt: 100_000,
+      limits: rateLimits,
+    });
+    const askFlag = settledFlag(askPromise);
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(askFlag.settled).toBe(true);
+    expect(toolFlag.settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await toolPromise).toEqual({ ok: true });
+  });
+
+  test("aborting a queued acquireSlot resolves it as aborted", async () => {
+    const lanes = new JevLanes();
+    const tightLimits: JevLaneLimits = {
+      control: 1,
+      agentTools: 1,
+      interactive: 1,
+      reads: 1,
+      perGroup: 1,
+      requestsPerSecond: 10,
+    };
+    const first = await lanes.acquireSlot("control", { deadlineAt: 100_000, limits: tightLimits });
+    expect(first.ok).toBe(true);
+
+    const controller = new AbortController();
+    const secondPromise = lanes.acquireSlot("control", {
+      deadlineAt: 100_000,
+      limits: tightLimits,
+      signal: controller.signal,
+    });
+    controller.abort();
+    expect(await secondPromise).toEqual({ ok: false, reason: "aborted" });
+  });
+
+  test("release is idempotent", async () => {
+    const lanes = new JevLanes();
+    const tightLimits: JevLaneLimits = {
+      control: 1,
+      agentTools: 1,
+      interactive: 1,
+      reads: 1,
+      perGroup: 1,
+      requestsPerSecond: 10,
+    };
+    const first = await lanes.acquireSlot("control", { deadlineAt: 100_000, limits: tightLimits });
+    if (!first.ok) throw new Error("expected ok");
+
+    first.release();
+    first.release();
+
+    expect(lanes.inFlight("control")).toBe(0);
+    const second = await lanes.acquireSlot("control", { deadlineAt: 100_000, limits: tightLimits });
+    expect(second.ok).toBe(true);
+  });
+
+  test("inFlight reports the current lane occupancy", async () => {
+    const lanes = new JevLanes();
+    expect(lanes.inFlight("control")).toBe(0);
+    const first = await lanes.acquireSlot("control", { deadlineAt: 100_000, limits });
+    expect(lanes.inFlight("control")).toBe(1);
+    if (first.ok) first.release();
+    expect(lanes.inFlight("control")).toBe(0);
+  });
+});

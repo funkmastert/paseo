@@ -1,7 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { execSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { experimental_createMCPClient } from "ai";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -143,7 +142,6 @@ let topLevelClient: McpClient;
 let agentScopedClient: McpClient;
 let parentAgentId: string;
 let parentAgentCwd: string;
-let worktreeRepoCwd: string;
 let launchConfigsByProvider: Record<AgentProvider, AgentSessionConfig[]>;
 
 const seededAgentProfile = {
@@ -267,32 +265,9 @@ async function killTerminalIfPresent(terminalId: string | null | undefined): Pro
   }
 }
 
-async function archiveWorktreeIfPresent(params: {
-  cwd: string;
-  worktreePath?: string | null;
-  worktreeSlug?: string | null;
-}): Promise<void> {
-  if (!params.worktreePath && !params.worktreeSlug) {
-    return;
-  }
-  try {
-    await topLevelClient.callTool({
-      name: "archive_worktree",
-      args: {
-        cwd: params.cwd,
-        ...(params.worktreePath ? { worktreePath: params.worktreePath } : {}),
-        ...(params.worktreeSlug ? { worktreeSlug: params.worktreeSlug } : {}),
-      },
-    });
-  } catch {
-    // ignore cleanup errors
-  }
-}
-
 beforeAll(async () => {
   tempRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-parity-e2e-"));
   parentAgentCwd = await makeCwd("parent-agent-cwd");
-  worktreeRepoCwd = await makeCwd("worktree-repo");
 
   daemonHandle = await createTestPaseoDaemon({
     agentClients: createRecordingAgentClients(),
@@ -314,16 +289,6 @@ beforeAll(async () => {
   agentScopedClient = await createMcpClient(
     `http://127.0.0.1:${daemonHandle.port}/mcp/agents?callerAgentId=${parentAgentId}`,
   );
-
-  execSync("git init -b main", { cwd: worktreeRepoCwd, stdio: "pipe" });
-  execSync("git config user.email 'test@example.com'", { cwd: worktreeRepoCwd, stdio: "pipe" });
-  execSync("git config user.name 'Test User'", { cwd: worktreeRepoCwd, stdio: "pipe" });
-  await writeFile(path.join(worktreeRepoCwd, "README.md"), "# repo\n", "utf8");
-  execSync("git add README.md", { cwd: worktreeRepoCwd, stdio: "pipe" });
-  execSync("git -c commit.gpgsign=false commit -m 'init'", {
-    cwd: worktreeRepoCwd,
-    stdio: "pipe",
-  });
 }, 30_000);
 
 afterAll(async () => {
@@ -842,120 +807,5 @@ describe("Suite D: Provider Tools", () => {
     const payload = await callToolStructured(topLevelClient, "list_profiles");
     const profiles = recordArr(payload.profiles);
     expect(profiles).toEqual([seededAgentProfile]);
-  });
-});
-
-describe("Suite E: Worktree Tools", () => {
-  test("list_worktrees on empty repo", async () => {
-    const payload = await callToolStructured(topLevelClient, "list_worktrees", {
-      cwd: worktreeRepoCwd,
-    });
-    expect(payload.worktrees).toEqual([]);
-  });
-
-  test("create_worktree and list_worktrees", async () => {
-    let worktreePath: string | null = null;
-    const branchName = `parity-create-${Date.now()}`;
-    try {
-      const created = await callToolStructured(topLevelClient, "create_worktree", {
-        cwd: worktreeRepoCwd,
-        target: {
-          kind: "branch-off",
-          worktreeSlug: branchName,
-          baseBranch: "main",
-        },
-      });
-      worktreePath = str(created.worktreePath);
-
-      const listed = await callToolStructured(topLevelClient, "list_worktrees", {
-        cwd: worktreeRepoCwd,
-      });
-      const worktrees = recordArr(listed.worktrees);
-      expect(worktrees).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            path: worktreePath,
-            branchName,
-          }),
-        ]),
-      );
-    } finally {
-      await archiveWorktreeIfPresent({ cwd: worktreeRepoCwd, worktreePath });
-    }
-  });
-
-  test("archive_worktree removes worktree", async () => {
-    let worktreePath: string | null = null;
-    const branchName = `parity-archive-${Date.now()}`;
-    try {
-      const created = await callToolStructured(topLevelClient, "create_worktree", {
-        cwd: worktreeRepoCwd,
-        target: {
-          kind: "branch-off",
-          worktreeSlug: branchName,
-          baseBranch: "main",
-        },
-      });
-      worktreePath = str(created.worktreePath);
-
-      await callToolStructured(topLevelClient, "archive_worktree", {
-        cwd: worktreeRepoCwd,
-        worktreePath,
-      });
-      worktreePath = null;
-
-      const listed = await callToolStructured(topLevelClient, "list_worktrees", {
-        cwd: worktreeRepoCwd,
-      });
-      const worktrees = recordArr(listed.worktrees);
-      expect(worktrees.some((worktree) => worktree.path === created.worktreePath)).toBe(false);
-    } finally {
-      await archiveWorktreeIfPresent({ cwd: worktreeRepoCwd, worktreePath });
-    }
-  });
-
-  test("archive_worktree succeeds when caller cwd is inside the archived worktree", async () => {
-    let worktreePath: string | null = null;
-    let worktreeAgentId: string | null = null;
-    let worktreeScopedClient: McpClient | null = null;
-    const branchName = `parity-archive-self-cwd-${Date.now()}`;
-
-    try {
-      const created = await callToolStructured(topLevelClient, "create_worktree", {
-        cwd: worktreeRepoCwd,
-        target: {
-          kind: "branch-off",
-          worktreeSlug: branchName,
-          baseBranch: "main",
-        },
-      });
-      worktreePath = str(created.worktreePath);
-      worktreeAgentId = await createTopLevelAgent({
-        cwd: worktreePath,
-        title: "Worktree scoped parity agent",
-      });
-      worktreeScopedClient = await createMcpClient(
-        `http://127.0.0.1:${daemonHandle.port}/mcp/agents?callerAgentId=${encodeURIComponent(
-          worktreeAgentId,
-        )}`,
-      );
-
-      const archived = await callToolStructured(worktreeScopedClient, "archive_worktree", {
-        worktreePath,
-      });
-      expect(archived).toEqual({ success: true });
-      worktreePath = null;
-      worktreeAgentId = null;
-
-      const listed = await callToolStructured(topLevelClient, "list_worktrees", {
-        cwd: worktreeRepoCwd,
-      });
-      const worktrees = recordArr(listed.worktrees);
-      expect(worktrees.map((worktree) => worktree.path)).not.toContain(created.worktreePath);
-    } finally {
-      await worktreeScopedClient?.close();
-      await archiveAgentIfPresent(worktreeAgentId);
-      await archiveWorktreeIfPresent({ cwd: worktreeRepoCwd, worktreePath });
-    }
   });
 });

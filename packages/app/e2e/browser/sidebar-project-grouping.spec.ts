@@ -1,6 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { test as base } from "../support/fixtures";
+import { expect, test as base } from "../support/fixtures";
 import {
   beginWorkspaceFromProject,
   createWorkspaceWithoutAgent,
@@ -19,7 +19,11 @@ import {
   type IsolatedHostDaemon,
   startIsolatedHostDaemon,
 } from "../support/helpers/isolated-host-daemon";
-import { connectSeedClient, type SeedDaemonClient } from "../support/helpers/seed-client";
+import {
+  connectSeedClient,
+  settleAutoPin,
+  type SeedDaemonClient,
+} from "../support/helpers/seed-client";
 import { getServerId } from "../support/helpers/server-id";
 import { createTempGitRepo } from "../support/helpers/workspace";
 
@@ -63,10 +67,40 @@ async function createProject(
   if (!created.workspace) {
     throw new Error(created.error ?? `Failed to create project on ${input.serverId}`);
   }
+  // These grouping assertions read workspaces still grouped under their project — settle the
+  // session-start auto pin so the row isn't hoisted into Pinned instead.
+  await settleAutoPin(client, created.workspace.id);
   if (input.projectName) {
     await client.renameProject(created.workspace.projectId, input.projectName);
   }
   return { projectId: created.workspace.projectId };
+}
+
+/**
+ * Settles every auto pin under a project so its grouped-workspace count reads correctly. Polls
+ * for `expectedCount` entries first: this runs right after a UI-driven create whose workspace may
+ * not have reached the daemon yet.
+ */
+async function settleProjectAutoPins(
+  client: SeedDaemonClient,
+  projectDisplayName: string,
+  expectedCount: number,
+) {
+  await expect
+    .poll(
+      async () => {
+        const { entries } = await client.fetchWorkspaces();
+        return entries.filter((entry) => entry.projectDisplayName === projectDisplayName).length;
+      },
+      { timeout: 30_000 },
+    )
+    .toBeGreaterThanOrEqual(expectedCount);
+  const { entries } = await client.fetchWorkspaces();
+  for (const entry of entries) {
+    if (entry.projectDisplayName === projectDisplayName) {
+      await settleAutoPin(client, entry.id);
+    }
+  }
 }
 
 async function removePersistedProjectKeys(host: IsolatedHostDaemon): Promise<void> {
@@ -412,6 +446,18 @@ test.describe("Sidebar project grouping", () => {
     await beginWorkspaceFromProject(page, GROUPED_PROJECT_NAME);
     await selectWorkspaceHost(page, SECONDARY_HOST_LABEL);
     await createWorkspaceWithoutAgent(page);
+
+    // The UI-driven create above auto-pins its workspace, same as any session start. Settle it
+    // (and its sibling) so the grouped-count assertion reads workspaces under the project again.
+    const secondaryHost = crossHostProject.hosts[0];
+    if (!secondaryHost) throw new Error("Expected a secondary host");
+    const secondaryClient = await connectSeedClient({ port: secondaryHost.port });
+    try {
+      await settleProjectAutoPins(secondaryClient, GROUPED_PROJECT_NAME, 2);
+    } finally {
+      await secondaryClient.close();
+    }
+
     await expectProjectWorkspaceCountForHost(page, {
       projectName: GROUPED_PROJECT_NAME,
       hostName: SECONDARY_HOST_LABEL,

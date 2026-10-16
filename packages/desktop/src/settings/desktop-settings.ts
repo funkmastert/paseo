@@ -5,6 +5,7 @@ import path from "node:path";
 import { z } from "zod";
 
 import type { AppReleaseChannel } from "../features/auto-updater.js";
+import type { KeepDisplayAwake } from "../system/keep-awake.js";
 
 export interface DesktopSettings {
   releaseChannel: AppReleaseChannel;
@@ -15,18 +16,24 @@ export interface DesktopSettings {
     manageBuiltInDaemon: boolean;
     keepRunningAfterQuit: boolean;
   };
+  power: {
+    keepAwake: boolean;
+    keepDisplayAwake: KeepDisplayAwake;
+  };
 }
 
 interface DesktopSettingsPatch {
   releaseChannel?: AppReleaseChannel;
   notifications?: Partial<DesktopSettings["notifications"]>;
   daemon?: Partial<DesktopSettings["daemon"]>;
+  power?: Partial<DesktopSettings["power"]>;
 }
 
 export interface DesktopSettingsStore {
   get(): Promise<DesktopSettings>;
   patch(patch: unknown): Promise<DesktopSettings>;
   migrateLegacyRendererSettings(legacySettings: unknown): Promise<DesktopSettings>;
+  subscribe(listener: (settings: DesktopSettings) => void): () => void;
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
@@ -37,6 +44,10 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   daemon: {
     manageBuiltInDaemon: true,
     keepRunningAfterQuit: false,
+  },
+  power: {
+    keepAwake: true,
+    keepDisplayAwake: "always",
   },
 };
 
@@ -57,11 +68,21 @@ const DaemonSchema = z
   })
   .catch(() => ({ ...DEFAULT_DESKTOP_SETTINGS.daemon }));
 
+const KeepDisplayAwakeSchema = z.enum(["always", "on-power-adapter", "never"]);
+
+const PowerSchema = z
+  .looseObject({
+    keepAwake: z.boolean().catch(DEFAULT_DESKTOP_SETTINGS.power.keepAwake),
+    keepDisplayAwake: KeepDisplayAwakeSchema.catch(DEFAULT_DESKTOP_SETTINGS.power.keepDisplayAwake),
+  })
+  .catch(() => ({ ...DEFAULT_DESKTOP_SETTINGS.power }));
+
 const DesktopSettingsSchema = z
   .looseObject({
     releaseChannel: ReleaseChannelSchema.catch(DEFAULT_DESKTOP_SETTINGS.releaseChannel),
     notifications: NotificationsSchema,
     daemon: DaemonSchema,
+    power: PowerSchema,
   })
   .catch(() => buildDefaultSettings());
 
@@ -108,6 +129,7 @@ function buildDefaultSettings(): StoredDesktopSettings {
     releaseChannel: DEFAULT_DESKTOP_SETTINGS.releaseChannel,
     notifications: { ...DEFAULT_DESKTOP_SETTINGS.notifications },
     daemon: { ...DEFAULT_DESKTOP_SETTINGS.daemon },
+    power: { ...DEFAULT_DESKTOP_SETTINGS.power },
   };
 }
 
@@ -129,6 +151,10 @@ function toDesktopSettings(stored: StoredDesktopSettings): DesktopSettings {
     daemon: {
       manageBuiltInDaemon: stored.daemon.manageBuiltInDaemon,
       keepRunningAfterQuit: stored.daemon.keepRunningAfterQuit,
+    },
+    power: {
+      keepAwake: stored.power.keepAwake,
+      keepDisplayAwake: stored.power.keepDisplayAwake,
     },
   };
 }
@@ -166,6 +192,21 @@ function coerceDesktopSettingsPatch(input: unknown): DesktopSettingsPatch {
     }
   }
 
+  if (isRecord(input.power)) {
+    const powerPatch: Partial<DesktopSettings["power"]> = {};
+    const keepAwake = coerceBoolean(input.power.keepAwake);
+    if (keepAwake !== null) {
+      powerPatch.keepAwake = keepAwake;
+    }
+    const keepDisplayAwake = KeepDisplayAwakeSchema.safeParse(input.power.keepDisplayAwake);
+    if (keepDisplayAwake.success) {
+      powerPatch.keepDisplayAwake = keepDisplayAwake.data;
+    }
+    if (Object.keys(powerPatch).length > 0) {
+      patch.power = powerPatch;
+    }
+  }
+
   return patch;
 }
 
@@ -199,6 +240,7 @@ function mergeDesktopSettings(
     releaseChannel: patch.releaseChannel ?? current.releaseChannel,
     notifications: { ...current.notifications, ...patch.notifications },
     daemon: { ...current.daemon, ...patch.daemon },
+    power: { ...current.power, ...patch.power },
   };
 }
 
@@ -233,6 +275,13 @@ export function createDesktopSettingsStore({
   const filePath = path.join(userDataPath, DESKTOP_SETTINGS_FILENAME);
   let cachedDocument: PersistedDesktopSettingsDocument | null = null;
   let persistQueue: Promise<void> = Promise.resolve();
+  const listeners = new Set<(settings: DesktopSettings) => void>();
+
+  function notify(settings: DesktopSettings): void {
+    for (const listener of listeners) {
+      listener(settings);
+    }
+  }
 
   async function persistDocument(document: PersistedDesktopSettingsDocument): Promise<void> {
     const write = async () => {
@@ -298,7 +347,9 @@ export function createDesktopSettingsStore({
             hasLegacyRendererOwnedPatch(coercedPatch),
         },
       });
-      return toDesktopSettings(next);
+      const settings = toDesktopSettings(next);
+      notify(settings);
+      return settings;
     },
 
     async migrateLegacyRendererSettings(legacySettings: unknown): Promise<DesktopSettings> {
@@ -319,7 +370,16 @@ export function createDesktopSettingsStore({
           legacyRendererSettingsImported: true,
         },
       });
-      return toDesktopSettings(next);
+      const settings = toDesktopSettings(next);
+      notify(settings);
+      return settings;
+    },
+
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
     },
   };
 }

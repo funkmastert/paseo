@@ -60,6 +60,13 @@ async function writeOmpHistory(history: OmpResumeHistory): Promise<string> {
   return sessionFile;
 }
 
+/** The fake runtime stands in for the binary, so the launch check has nothing to find. */
+class InstalledOmpAgentClient extends OmpAgentClient {
+  override async isAvailable(): Promise<boolean> {
+    return true;
+  }
+}
+
 export class OmpHarness {
   private readonly omp = new FakeOmp();
   private readonly client: OmpAgentClient;
@@ -73,13 +80,18 @@ export class OmpHarness {
       usagePollScheduler?: OmpUsagePollScheduler;
     } = {},
   ) {
-    this.client = new OmpAgentClient({
+    this.client = new InstalledOmpAgentClient({
       logger: pino({ level: "silent" }),
       runtime: this.omp,
       providerIdleScheduler: options.providerIdleScheduler,
       noTurnScheduler: options.noTurnScheduler,
       usagePollScheduler: options.usagePollScheduler,
     });
+  }
+
+  /** The client itself, for a test that runs OMP inside a real AgentManager. */
+  agentClient(): OmpAgentClient {
+    return this.client;
   }
 
   queueCommands(commands: OmpRpcSlashCommand[]): void {

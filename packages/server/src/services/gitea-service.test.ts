@@ -429,6 +429,48 @@ function giteaMergeStatus(
   };
 }
 
+describe("createGiteaService concurrent polls of one repository", () => {
+  it("shares one open-PR list between worktrees of the same remote instead of one tea process each", async () => {
+    let releaseList: (() => void) | undefined;
+    const listGate = new Promise<void>((resolve) => {
+      releaseList = resolve;
+    });
+    const { service, calls } = makeService(async (args) => {
+      if (args[0] === "pr" && args[1] === "list") {
+        await listGate;
+        return ok(JSON.stringify([OPEN_PR]));
+      }
+      if (args[0] === "pr" && args[1] === "5") return ok(JSON.stringify(STATUS_PR_VIEW));
+      if (args[0] === "api") return ok(JSON.stringify(SAMPLE_COMBINED_STATUS));
+      throw new Error(`unexpected call: ${args.join(" ")}`);
+    });
+
+    const polls = ["/repo-a", "/repo-b", "/repo-c"].map((cwd) =>
+      service.getCurrentPullRequestStatus({ cwd, headRef: "feat/sample-change" }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    releaseList?.();
+    const statuses = await Promise.all(polls);
+
+    expect(statuses.map((status) => status?.number)).toEqual([5, 5, 5]);
+    expect(calls.filter((args) => args[0] === "pr" && args[1] === "list")).toHaveLength(1);
+  });
+
+  it("does not reuse a finished list, so a later poll sees new PRs", async () => {
+    const { service, calls } = makeService((args) => {
+      if (args[0] === "pr" && args[1] === "list") return ok(JSON.stringify([OPEN_PR]));
+      if (args[0] === "pr" && args[1] === "5") return ok(JSON.stringify(STATUS_PR_VIEW));
+      if (args[0] === "api") return ok(JSON.stringify(SAMPLE_COMBINED_STATUS));
+      throw new Error(`unexpected call: ${args.join(" ")}`);
+    });
+
+    await service.getCurrentPullRequestStatus({ cwd: "/repo-a", headRef: "feat/sample-change" });
+    await service.getCurrentPullRequestStatus({ cwd: "/repo-a", headRef: "feat/sample-change" });
+
+    expect(calls.filter((args) => args[0] === "pr" && args[1] === "list")).toHaveLength(2);
+  });
+});
+
 describe("createGiteaService", () => {
   it("maps a tea pr list item to the neutral current PR status by head branch", async () => {
     const { service, calls } = makeService((args) => {

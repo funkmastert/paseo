@@ -1,4 +1,5 @@
 import type { AgentAttentionReason } from "@getpaseo/protocol/agent-attention-notification";
+import type { NotifyLevel } from "./notify-policy/levels.js";
 
 export const PRESENCE_THRESHOLD_MS = 180_000;
 
@@ -77,4 +78,15 @@ export function computeNotificationPlan({
 
 export function isPushEligibleAttentionReason(reason: AgentAttentionReason): boolean {
   return reason !== "error";
+}
+
+/**
+ * How urgent an agent's attention push is. A permission request blocks the agent on a person, so
+ * it is an alert. Every finish, root agents included, is a notice: nothing a finish reports needs
+ * interrupting Tyler for, and anything he must actually answer arrives as a permission request
+ * instead. A child whose finish never reaches its parent is escalated separately
+ * (docs/finish-reports.md).
+ */
+export function attentionPushLevel(reason: AgentAttentionReason): NotifyLevel {
+  return reason === "finished" ? "notice" : "alert";
 }

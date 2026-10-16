@@ -1,3 +1,4 @@
+import type { WorkspaceDiskUsage } from "@getpaseo/protocol/messages";
 import type { PrHint } from "@/git/pr-hint";
 import { selectPrHintFromStatus } from "@/git/pr-hint";
 import { type HostProjectListItem } from "@/projects/host-project-model";
@@ -7,6 +8,7 @@ import type {
   WorkspaceStructureHostPlacement,
   WorkspaceStructureProject,
 } from "@/projects/workspace-structure";
+import type { CompletionState } from "@getpaseo/protocol/agent-labels";
 import { projectDisplayNameFromProjectId } from "@/utils/project-display-name";
 import { aggregateSidebarStateBuckets } from "@/utils/sidebar-agent-state";
 import { shortenPath } from "@/utils/shorten-path";
@@ -43,6 +45,9 @@ export interface SidebarWorkspaceEntry extends SidebarStatusWorkspacePlacement {
   title: string | null;
   pinnedAt?: string | null;
   labels?: string[];
+  // COMPAT(workspaceCreatedBy): absent (an older daemon, or a record predating this field) reads
+  // as "person" — see resolveSidebarWorkspaceCreator.
+  createdBy?: "person" | "agent";
   // Checkout branch (null when not a git checkout or detached HEAD).
   currentBranch: string | null;
   archivingAt: string | null;
@@ -52,6 +57,9 @@ export interface SidebarWorkspaceEntry extends SidebarStatusWorkspacePlacement {
   archiveUnpushedCommitCount: number | null;
   scripts: WorkspaceDescriptor["scripts"];
   hasRunningScripts: boolean;
+  diskUsage: WorkspaceDiskUsage | null;
+  completionState: CompletionState | null;
+  completionNote: string | null;
 }
 
 export interface SidebarProjectEntry {
@@ -125,6 +133,8 @@ export function areSidebarWorkspaceSessionsEqual(
 interface EffectiveWorkspaceStatus {
   status: WorkspaceDescriptor["status"];
   enteredAt: Date | null;
+  completionState: CompletionState | null;
+  completionNote: string | null;
 }
 
 function projectNameForWorkspace(workspace: WorkspaceDescriptor): string {
@@ -168,6 +178,7 @@ export function createSidebarWorkspaceEntry(input: {
     title: input.workspace.title ?? null,
     pinnedAt: input.workspace.pinnedAt,
     labels: input.workspace.labels ?? EMPTY_WORKSPACE_LABELS,
+    createdBy: input.workspace.createdBy,
     currentBranch: normalizeCurrentBranch(input.workspace.gitRuntime?.currentBranch),
     statusBucket: effectiveStatus.status,
     statusEnteredAt: effectiveStatus.enteredAt,
@@ -181,6 +192,9 @@ export function createSidebarWorkspaceEntry(input: {
     archiveUnpushedCommitCount: input.workspace.gitRuntime?.aheadOfOrigin ?? null,
     scripts: input.workspace.scripts,
     hasRunningScripts: input.workspace.scripts.some((script) => script.lifecycle === "running"),
+    diskUsage: input.workspace.diskUsage ?? null,
+    completionState: effectiveStatus.completionState,
+    completionNote: effectiveStatus.completionNote,
   };
 }
 
@@ -193,7 +207,12 @@ function deriveEffectiveWorkspaceStatus(input: {
   workspaceAgentActivity?: ReadonlyMap<string, WorkspaceAgentActivity>;
 }): EffectiveWorkspaceStatus {
   if (input.workspace.status !== "done") {
-    return { status: input.workspace.status, enteredAt: input.workspace.statusEnteredAt };
+    return {
+      status: input.workspace.status,
+      enteredAt: input.workspace.statusEnteredAt,
+      completionState: null,
+      completionNote: null,
+    };
   }
 
   const pendingStartedAt = getPendingInitialAgentCreateStartedAt({
@@ -202,15 +221,32 @@ function deriveEffectiveWorkspaceStatus(input: {
     pendingCreateAttempts: input.pendingCreateAttempts,
   });
   if (pendingStartedAt) {
-    return { status: "running", enteredAt: pendingStartedAt };
+    return {
+      status: "running",
+      enteredAt: pendingStartedAt,
+      completionState: null,
+      completionNote: null,
+    };
   }
 
   const rootAgentActivity = input.workspaceAgentActivity?.get(input.workspace.id);
   if (rootAgentActivity && rootAgentActivity.status !== "done") {
-    return rootAgentActivity;
+    // Not quiescent: a completion label that arrived while the agent was still busy is stale
+    // until the daemon clears it, so it never reaches the row.
+    return {
+      status: rootAgentActivity.status,
+      enteredAt: rootAgentActivity.enteredAt,
+      completionState: null,
+      completionNote: null,
+    };
   }
 
-  return { status: input.workspace.status, enteredAt: input.workspace.statusEnteredAt };
+  return {
+    status: input.workspace.status,
+    enteredAt: input.workspace.statusEnteredAt,
+    completionState: rootAgentActivity?.completionState ?? null,
+    completionNote: rootAgentActivity?.completionNote ?? null,
+  };
 }
 
 function getPendingInitialAgentCreateStartedAt(input: {

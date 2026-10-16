@@ -124,6 +124,8 @@ export async function ensureAgentLoaded(
         labels: record.labels,
         workspaceId: record.workspaceId,
         owner: record.owner,
+        // Reconstructing a stored record's session is a daemon job, not a fresh human/agent ask.
+        origin: "daemon",
       });
       deps.logger.info({ agentId, provider: record.provider }, "Agent created from stored config");
     }

@@ -3,6 +3,7 @@ import { formatShortcut } from "@/utils/format-shortcut";
 import {
   buildKeyboardShortcutHelpSections,
   buildEffectiveBindings,
+  DEFAULT_BINDINGS,
   getBindingIdForAction,
   getDefaultKeysForAction,
   getWorkspaceIndexJumpModifierKey,
@@ -221,6 +222,30 @@ describe("keyboard-shortcuts", () => {
       event: { key: "}", code: "BracketRight", altKey: true, shiftKey: true },
       action: "workspace.tab.navigate.relative",
       payload: { delta: 1 },
+    },
+    {
+      name: "matches Cmd+Shift+[ to navigation history back on macOS",
+      event: { key: "{", code: "BracketLeft", metaKey: true, shiftKey: true },
+      context: { isMac: true },
+      action: "navigation.history.back",
+    },
+    {
+      name: "matches Cmd+Shift+] to navigation history forward on macOS",
+      event: { key: "}", code: "BracketRight", metaKey: true, shiftKey: true },
+      context: { isMac: true },
+      action: "navigation.history.forward",
+    },
+    {
+      name: "matches Ctrl+Shift+[ to navigation history back on non-mac desktop",
+      event: { key: "{", code: "BracketLeft", ctrlKey: true, shiftKey: true },
+      context: { isMac: false, isDesktop: true },
+      action: "navigation.history.back",
+    },
+    {
+      name: "matches Ctrl+Shift+] to navigation history forward on non-mac web",
+      event: { key: "}", code: "BracketRight", ctrlKey: true, shiftKey: true },
+      context: { isMac: false, isDesktop: false },
+      action: "navigation.history.forward",
     },
     {
       name: "matches Mod+T to open new tab",
@@ -1194,5 +1219,63 @@ describe("direct new-tab target shortcuts", () => {
     expect(
       resolveShortcutKeysForAction("workspace-tab-target-agent", overrides, desktopNonMac),
     ).toEqual([["ctrl", "shift", "H"]]);
+  });
+});
+
+// Regression guard: the navigation-history Shift+bracket bindings must not
+// shadow the pre-existing bare-bracket (workspace cycling) or Alt+Shift-bracket
+// (tab cycling) bindings they sit alongside in SHORTCUT_BINDINGS.
+describe("navigation history back/forward shortcuts don't collide with bracket cycling", () => {
+  it("still resolves bare Cmd+[ to the previous-workspace binding on macOS", () => {
+    expectShortcutResolution({
+      event: { key: "[", code: "BracketLeft", metaKey: true },
+      context: { isMac: true, isDesktop: true },
+      action: "workspace.navigate.relative",
+      payload: { delta: -1 },
+    });
+  });
+
+  it("still resolves bare Ctrl+] to the next-workspace binding on non-mac desktop", () => {
+    expectShortcutResolution({
+      event: { key: "]", code: "BracketRight", ctrlKey: true },
+      context: { isMac: false, isDesktop: true },
+      action: "workspace.navigate.relative",
+      payload: { delta: 1 },
+    });
+  });
+
+  it("still resolves Alt+Shift+[ to the previous-tab binding, unshadowed by Cmd/Ctrl+Shift+[", () => {
+    expectShortcutResolution({
+      event: { key: "{", code: "BracketLeft", altKey: true, shiftKey: true },
+      action: "workspace.tab.navigate.relative",
+      payload: { delta: -1 },
+    });
+  });
+
+  it("does not resolve Cmd+Shift+[ on non-mac (Ctrl+Shift+[ is the non-mac binding instead)", () => {
+    expectNoShortcutResolution({
+      event: { key: "{", code: "BracketLeft", metaKey: true, shiftKey: true },
+      context: { isMac: false },
+    });
+  });
+
+  it("does not resolve Ctrl+Shift+[ on macOS (Cmd+Shift+[ is the mac binding instead)", () => {
+    expectNoShortcutResolution({
+      event: { key: "{", code: "BracketLeft", ctrlKey: true, shiftKey: true },
+      context: { isMac: true },
+    });
+  });
+
+  it("history back/forward and workspace/tab cycling all have distinct binding ids", () => {
+    const bracketBindingIds = DEFAULT_BINDINGS.filter((binding) =>
+      [
+        "navigation.history.back",
+        "navigation.history.forward",
+        "workspace.navigate.relative",
+        "workspace.tab.navigate.relative",
+      ].includes(binding.action),
+    ).map((binding) => binding.id);
+
+    expect(new Set(bracketBindingIds).size).toBe(bracketBindingIds.length);
   });
 });

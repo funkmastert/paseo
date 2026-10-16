@@ -427,6 +427,7 @@ describe("daemon E2E (real codex) - send message during tool call", () => {
 
       await client.sendAgentMessage(agent.id, "Reply with exactly: INTERRUPT_RECEIVED", {
         messageId: generateClientMessageId(),
+        activeTurnBehavior: "interrupt",
       });
 
       const finish = await client.waitForFinish(agent.id, 120_000);
@@ -504,6 +505,7 @@ describe("daemon E2E (real codex) - send message during tool call", () => {
 
       await client.sendAgentMessage(agent.id, "Reply with exactly: QUICK_FOLLOW_UP_RECEIVED", {
         messageId: generateClientMessageId(),
+        activeTurnBehavior: "interrupt",
       });
 
       const finish = await client.waitForFinish(agent.id, 120_000);

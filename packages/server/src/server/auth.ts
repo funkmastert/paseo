@@ -121,8 +121,18 @@ export function createRequireBearerMiddleware(
 
 const SELF_AUTHENTICATING_ROUTES = new Set(["/api/files/download", "/mcp/agents"]);
 
+// Dynamic per-server routes (`/mcp/gateway/<name>`) and the OAuth callback
+// (`/mcp/gateway/oauth/callback`) can't be enumerated in the exact-match set above, so they're
+// matched by prefix instead. Both self-authenticate: the proxy route checks its own distinct
+// gateway capability token, and the callback route checks the single-use `state` value (it's a
+// browser redirect target, which can't carry a bearer header). See mcp-gateway/routes.ts.
+const SELF_AUTHENTICATING_ROUTE_PREFIXES = ["/mcp/gateway/"];
+
 function isBearerFreeRoute(path: string): boolean {
-  return path === "/api/health" || SELF_AUTHENTICATING_ROUTES.has(path);
+  if (path === "/api/health" || SELF_AUTHENTICATING_ROUTES.has(path)) {
+    return true;
+  }
+  return SELF_AUTHENTICATING_ROUTE_PREFIXES.some((prefix) => path.startsWith(prefix));
 }
 
 export function shouldBypassBearerAuth(method: string, path: string): boolean {

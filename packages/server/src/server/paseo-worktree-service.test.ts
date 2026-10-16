@@ -33,6 +33,26 @@ afterEach(() => {
   }
 });
 
+test("a title an agent supplied is recorded as the agent's, so the tracker may refresh it", async () => {
+  const { repoDir, tempDir } = createGitRepo();
+  cleanupPaths.push(tempDir);
+  const deps = createDeps({ events: [] });
+
+  const result = await createPaseoWorktree(
+    {
+      cwd: repoDir,
+      worktreeSlug: "agent-named",
+      title: "Polish the thing",
+      titleSource: "auto",
+      runSetup: false,
+      paseoHome: path.join(tempDir, ".paseo"),
+    },
+    deps,
+  );
+
+  expect(result.workspace).toMatchObject({ title: "Polish the thing", titleSource: "auto" });
+});
+
 test("creates a worktree and registers it in the source workspace project without git snapshot lookup", async () => {
   const { repoDir, tempDir } = createGitRepo();
   cleanupPaths.push(tempDir);
@@ -73,6 +93,8 @@ test("creates a worktree and registers it in the source workspace project withou
   expect(result.workspace.displayName).toBe("feature-one");
   expect(result.workspace.baseBranch).toBe("main");
   expect(result.workspace.title).toBe("Feature One");
+  // A title with no named source is a person's, so the title tracker leaves it alone.
+  expect(result.workspace.titleSource).toBe("manual");
   expect(deps.workspaceGitService.getSnapshot).not.toHaveBeenCalled();
   expect(deps.projects.get(sourceProject.projectId)).toEqual({
     ...sourceProject,

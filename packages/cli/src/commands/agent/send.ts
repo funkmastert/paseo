@@ -138,9 +138,15 @@ async function resolvePromptInput(options: {
   }
 }
 
-type SendWaitState = Awaited<
-  ReturnType<Awaited<ReturnType<typeof connectToDaemon>>["waitForFinish"]>
+/** The two daemon calls a send makes. */
+export type AgentSendClient = Pick<
+  Awaited<ReturnType<typeof connectToDaemon>>,
+  "sendAgentMessage" | "waitForFinish"
 >;
+
+type SendWaitState = Awaited<ReturnType<AgentSendClient["waitForFinish"]>>;
+
+const SEND_WAIT_TIMEOUT_MS = 600_000;
 
 function buildSendResult(agentIdArg: string, state: SendWaitState): AgentSendResult {
   const agentId = state.final?.id ?? agentIdArg;
@@ -158,6 +164,39 @@ function buildSendResult(agentIdArg: string, state: SendWaitState): AgentSendRes
     };
   }
   return { agentId, status: "completed", message: "Agent completed processing the message" };
+}
+
+/**
+ * Send, then wait unless told not to. A message to an agent account failover moved is delivered
+ * where its conversation lives now; the wait follows it there, and the result names it.
+ */
+export async function sendAndMaybeWait(
+  client: AgentSendClient,
+  agentIdArg: string,
+  prompt: string,
+  options: { wait: boolean; images?: Array<{ data: string; mimeType: string }> },
+): Promise<AgentSendResult> {
+  const sent = await client.sendAgentMessage(agentIdArg, prompt, { images: options.images });
+  const movedTo = sent.deliveredToAgentId;
+  if (!options.wait) {
+    return movedTo
+      ? {
+          agentId: movedTo,
+          status: "sent",
+          message: `Delivered to ${movedTo} (moved), not waiting for completion`,
+        }
+      : {
+          agentId: agentIdArg,
+          status: "sent",
+          message: "Message sent, not waiting for completion",
+        };
+  }
+
+  const state = await client.waitForFinish(movedTo ?? agentIdArg, SEND_WAIT_TIMEOUT_MS);
+  const result = buildSendResult(movedTo ?? agentIdArg, state);
+  return movedTo
+    ? { ...result, message: `Delivered to ${movedTo} (moved). ${result.message}` }
+    : result;
 }
 
 export async function runSendCommand(
@@ -202,32 +241,13 @@ export async function runSendCommand(
     const images =
       options.image && options.image.length > 0 ? await readImageFiles(options.image) : undefined;
 
-    // Send the message
-    await client.sendAgentMessage(agentIdArg, promptInput, { images });
-
-    // If --no-wait, return immediately
-    if (options.wait === false) {
-      await client.close();
-
-      return {
-        type: "single",
-        data: {
-          agentId: agentIdArg,
-          status: "sent",
-          message: "Message sent, not waiting for completion",
-        },
-        schema: agentSendSchema,
-      };
-    }
-
-    const state = await client.waitForFinish(agentIdArg, 600000); // 10 minute timeout
+    const data = await sendAndMaybeWait(client, agentIdArg, promptInput, {
+      wait: options.wait !== false,
+      images,
+    });
     await client.close();
 
-    return {
-      type: "single",
-      data: buildSendResult(agentIdArg, state),
-      schema: agentSendSchema,
-    };
+    return { type: "single", data, schema: agentSendSchema };
   } catch (err) {
     await client.close().catch(() => {});
 

@@ -428,6 +428,32 @@ export function buildSchedulesRoute() {
   return "/schedules" as const;
 }
 
+export function buildAskJevRoute() {
+  return "/ask-jev" as const;
+}
+
+export function buildTokenUsageRoute() {
+  return "/tokens" as const;
+}
+
+/** JEV belongs to a host, not a workspace (docs/jev.md, "The JEV dashboard"). */
+export function buildJevDashboardRoute(serverId?: string, agentId?: string) {
+  const params = new URLSearchParams();
+  const normalizedServerId = trimNonEmpty(serverId);
+  if (normalizedServerId) params.set("host", normalizedServerId);
+  const normalizedAgentId = trimNonEmpty(agentId);
+  if (normalizedAgentId) params.set("agent", normalizedAgentId);
+  const query = params.toString();
+  if (!query) {
+    return "/jev" as const;
+  }
+  return `/jev?${query}` as const;
+}
+
+export function buildPinnedGridRoute() {
+  return "/pinned-grid" as const;
+}
+
 export function buildOpenProjectRoute() {
   return "/open-project" as const;
 }

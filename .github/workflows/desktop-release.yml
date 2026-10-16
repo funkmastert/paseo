@@ -154,18 +154,48 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EP_GH_IGNORE_TIME: true
-          CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
-          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Read under their own names. electron-builder gets CSC_LINK and the
+          # notarization variables only when the full set exists.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
           PASEO_DESKTOP_SMOKE: "1"
           PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
         run: |
           set -euo pipefail
           build_args=(-- --publish never --mac --${{ matrix.electron_arch }})
+          # The installed app polls this feed for updates, so it must be the
+          # repo the assets are uploaded to, never upstream from a fork.
+          build_args+=("-c.publish.owner=${GITHUB_REPOSITORY%%/*}" "-c.publish.repo=${GITHUB_REPOSITORY#*/}")
           build_args+=("-c.publish.releaseType=$RELEASE_TYPE")
           build_args+=("-c.publish.channel=$RELEASE_CHANNEL")
+
+          # Sign and notarize with all five Apple secrets, sign ad-hoc with none,
+          # and refuse a partial set rather than ship a half-signed app.
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID_SECRET APPLE_PASSWORD APPLE_TEAM_ID_SECRET; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} == 0 )); then
+            echo "::notice::macOS ${{ matrix.electron_arch }}: signing with Developer ID and notarizing"
+            export CSC_LINK="$APPLE_CERTIFICATE"
+            export CSC_KEY_PASSWORD="$APPLE_CERTIFICATE_PASSWORD"
+            export APPLE_ID="$APPLE_ID_SECRET"
+            export APPLE_APP_SPECIFIC_PASSWORD="$APPLE_PASSWORD"
+            export APPLE_TEAM_ID="$APPLE_TEAM_ID_SECRET"
+          elif (( ${#missing[@]} == 5 )); then
+            # An ad-hoc signature is valid, so Gatekeeper offers "Open Anyway".
+            # Skipping signing leaves Electron's broken linker signature, which
+            # Gatekeeper reports as "damaged". Hardened runtime only serves
+            # notarization, so it stays off here.
+            echo "::warning::macOS ${{ matrix.electron_arch }}: no Apple signing secrets, building an ad-hoc signed app that is not notarized"
+            build_args+=("-c.mac.identity=-" "-c.mac.hardenedRuntime=false" "-c.mac.notarize=false")
+          else
+            echo "::error::Apple signing secrets are partly set. Missing: ${missing[*]}"
+            exit 1
+          fi
           npm run build:desktop "${build_args[@]}"
 
       - name: Upload packaged smoke diagnostics
@@ -273,6 +303,7 @@ jobs:
         run: |
           set -euo pipefail
           build_args=(-- --publish never --linux --x64)
+          build_args+=("-c.publish.owner=${GITHUB_REPOSITORY%%/*}" "-c.publish.repo=${GITHUB_REPOSITORY#*/}")
           build_args+=("-c.publish.releaseType=$RELEASE_TYPE")
           build_args+=("-c.publish.channel=$RELEASE_CHANNEL")
           npm run build:desktop "${build_args[@]}"
@@ -374,13 +405,58 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EP_GH_IGNORE_TIME: true
+          # Azure Artifact Signing. The last four are not sensitive but live
+          # beside the credentials so one list of secrets turns signing on.
+          AZURE_TENANT_ID_SECRET: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID_SECRET: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          AZURE_SIGNING_PUBLISHER: ${{ secrets.AZURE_SIGNING_PUBLISHER }}
           PASEO_DESKTOP_SMOKE: "1"
           PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
         run: |
           set -euo pipefail
           build_args=(-- --publish never --win --x64 --arm64)
+          build_args+=("-c.publish.owner=${GITHUB_REPOSITORY%%/*}" "-c.publish.repo=${GITHUB_REPOSITORY#*/}")
           build_args+=("-c.publish.releaseType=$RELEASE_TYPE")
           build_args+=("-c.publish.channel=$RELEASE_CHANNEL")
+
+          # Sign with all seven Artifact Signing secrets, build unsigned with
+          # none, and refuse a partial set.
+          missing=()
+          for name in AZURE_TENANT_ID_SECRET AZURE_CLIENT_ID_SECRET AZURE_CLIENT_SECRET_SECRET AZURE_SIGNING_ENDPOINT AZURE_SIGNING_ACCOUNT AZURE_SIGNING_PROFILE AZURE_SIGNING_PUBLISHER; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} == 0 )); then
+            echo "::notice::Windows: signing with Azure Artifact Signing"
+            export AZURE_TENANT_ID="$AZURE_TENANT_ID_SECRET"
+            export AZURE_CLIENT_ID="$AZURE_CLIENT_ID_SECRET"
+            export AZURE_CLIENT_SECRET="$AZURE_CLIENT_SECRET_SECRET"
+            # Written into the config, not passed as -c flags: the publisher
+            # name has spaces and would cross two npm hops through cmd.exe.
+            node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const yaml = require('js-yaml');
+
+          const configPath = path.join(process.env.DESKTOP_PACKAGE_PATH, 'electron-builder.yml');
+          const config = yaml.load(fs.readFileSync(configPath, 'utf8'));
+          config.win.azureSignOptions = {
+            endpoint: process.env.AZURE_SIGNING_ENDPOINT,
+            codeSigningAccountName: process.env.AZURE_SIGNING_ACCOUNT,
+            certificateProfileName: process.env.AZURE_SIGNING_PROFILE,
+            publisherName: process.env.AZURE_SIGNING_PUBLISHER,
+          };
+          fs.writeFileSync(configPath, yaml.dump(config));
+          NODE
+          elif (( ${#missing[@]} == 7 )); then
+            echo "::warning::Windows: no code signing secrets, building unsigned installers"
+          else
+            echo "::error::Azure Artifact Signing secrets are partly set. Missing: ${missing[*]}"
+            exit 1
+          fi
           npm run build:desktop "${build_args[@]}"
 
       - name: Upload packaged smoke diagnostics
@@ -444,6 +520,7 @@ jobs:
             package.json
             package-lock.json
             scripts
+            .github/release-notes
           ref: ${{ env.CHECKOUT_REF }}
 
       - name: Resolve release tag
@@ -489,6 +566,10 @@ jobs:
         if: env.IS_SMOKE_TAG != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Booleans only; the build jobs fail on a partial secret set, so one
+          # secret per platform tells whether it was signed.
+          MAC_SIGNED: ${{ secrets.APPLE_CERTIFICATE != '' }}
+          WIN_SIGNED: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -570,6 +651,29 @@ jobs:
             echo "::error::Missing updater manifests: ${missing_manifests[*]}; the release remains a draft"
             exit 1
           fi
+
+          # A downloader reads the release page, so unsigned builds carry their
+          # install steps there. Rewritten in place on reruns, and removed once
+          # both platforms are signed.
+          marker="<!-- unsigned-install-steps -->"
+          unsigned_notes=()
+          [[ "$MAC_SIGNED" == "true" ]] || unsigned_notes+=("../.github/release-notes/unsigned-macos.md")
+          [[ "$WIN_SIGNED" == "true" ]] || unsigned_notes+=("../.github/release-notes/unsigned-windows.md")
+          body="$(gh release view "$release_lookup" --repo "${{ github.repository }}" --json body --jq '.body')"
+          body="${body%%"$marker"*}"
+          while [[ "$body" == *$'\n' || "$body" == *' ' ]]; do body="${body%?}"; done
+          body_file="$RUNNER_TEMP/release-body.md"
+          {
+            [[ -z "$body" ]] || printf '%s\n\n' "$body"
+            if (( ${#unsigned_notes[@]} > 0 )); then
+              printf '%s\n' "$marker"
+              for notes in "${unsigned_notes[@]}"; do
+                printf '\n'
+                cat "$notes"
+              done
+            fi
+          } > "$body_file"
+          gh release edit "$release_lookup" --repo "${{ github.repository }}" --notes-file "$body_file"
 
           publish_args=(release edit "$release_lookup" --tag "$RELEASE_TAG" --draft=false --repo "${{ github.repository }}")
           if [[ "$IS_PRERELEASE" == "true" ]]; then

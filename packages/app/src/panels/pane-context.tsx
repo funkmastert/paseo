@@ -14,6 +14,10 @@ export interface PaneContextValue {
   target: WorkspaceTabTarget;
   state?: JsonValue;
   fileNavigationRevision?: number;
+  /** A glance surface (the pinned grid): no composer, no forking, questions still answer in place. */
+  readOnly?: boolean;
+  /** The pinned grid specifically: render dense, space-constrained chrome (e.g. a one-line sticky prompt bar). */
+  compact?: boolean;
   openTab: (target: WorkspaceTabTarget) => void;
   openPreferredTarget: (target: WorkspaceTabTarget, source: OpenInSidePaneSource) => void;
   openTargetToSide?: (target: WorkspaceTabTarget) => void;

@@ -173,7 +173,7 @@ Codex MultiAgentV2 real tests use local Codex authentication rather than the Ope
 ### Test setup
 
 - Server: `packages/server/src/test-utils/vitest-setup.ts` loads `.env.test`, sets `PASEO_SUPERVISED=0`, and disables Git/SSH prompts. Add new global env shims here, not in individual tests.
-- App: `packages/app/vitest.setup.ts` provides `expo`/`__DEV__` shims and stubs a few native-only modules (`react-native-unistyles`, `react-native-svg`, `expo-linking`, `@xterm/addon-ligatures`). Stubbing here is for modules that have no meaningful Node behavior — not a license to mock app code.
+- App: `packages/app/vitest.setup.ts` provides `expo`/`__DEV__` shims, and native-only packages are swapped for stubs in `packages/app/test-stubs/`, aliased in `packages/app/vitest.config.ts`. Stubbing is for modules that have no meaningful Node or browser behavior — not a license to mock app code. The browser project pre-bundles the import graph of every `*.browser.test.tsx` with esbuild before any test runs, and `vi.mock` cannot stop it, so one package anywhere in any graph that ships untranspiled JSX or needs `TurboModuleRegistry` off the real react-native aborts collection for the whole project, unrelated files included. Alias such a package to a stub that exports every name the app imports from it, because a missing export fails collection the same way, and find the import that pulls it in by resolving the graph with esbuild rather than guessing.
 
 ## Running tests locally
 

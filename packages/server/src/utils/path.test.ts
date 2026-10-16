@@ -1,10 +1,11 @@
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
 import {
   areEquivalentPaths,
+  canonicalizePath,
   createPathEquivalenceMatcher,
   getRealpathAwareRelativePath,
   isPathInsideRoot,
@@ -67,4 +68,37 @@ describe("path equivalence", () => {
       }
     },
   );
+});
+
+describe.skipIf(process.platform === "win32")("canonicalizePath", () => {
+  function aliasedTree(): { tempDir: string; realRoot: string; aliasRoot: string } {
+    const tempDir = mkdtempSync(join(tmpdir(), "paseo-canonical-"));
+    const realRoot = join(realpathSync(tempDir), "real-root");
+    const aliasRoot = join(tempDir, "root-alias");
+    mkdirSync(join(realRoot, "worktree"), { recursive: true });
+    symlinkSync(realRoot, aliasRoot, "dir");
+    return { tempDir, realRoot, aliasRoot };
+  }
+
+  test("spells an existing directory by its realpath, whatever spelling it was given", () => {
+    const { tempDir, realRoot, aliasRoot } = aliasedTree();
+    try {
+      expect(canonicalizePath(join(aliasRoot, "worktree"))).toBe(join(realRoot, "worktree"));
+      expect(canonicalizePath(join(realRoot, "worktree", "."))).toBe(join(realRoot, "worktree"));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("spells a missing path by its deepest existing ancestor's realpath and the rest", () => {
+    const { tempDir, realRoot, aliasRoot } = aliasedTree();
+    try {
+      expect(canonicalizePath(join(aliasRoot, "worktree", "packages", "app"))).toBe(
+        join(realRoot, "worktree", "packages", "app"),
+      );
+      expect(canonicalizePath("/no-such-root/a/b")).toBe("/no-such-root/a/b");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

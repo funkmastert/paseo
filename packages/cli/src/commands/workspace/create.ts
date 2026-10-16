@@ -144,9 +144,12 @@ export async function runCreateCommand(
   });
 
   try {
+    const callerAgentId = process.env.PASEO_AGENT_ID?.trim();
     const payload = await client.createWorkspace({
       source: buildWorkspaceSource(options),
       ...(options.title ? { title: options.title } : {}),
+      // Run by an agent: its title may be refreshed later, unlike one a person typed.
+      ...(callerAgentId ? { callerAgentId } : {}),
     });
     if (!payload.workspace) {
       throw new Error(payload.error ?? "Workspace creation failed");

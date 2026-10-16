@@ -2,6 +2,8 @@
 
 The daemon authorizes principals with semantic permissions. RPC names and protocol namespaces are not authority.
 
+This is about who may ask the daemon for what. Whether a running agent may execute a particular tool call is a different subject that belongs to the provider: see [gating a tool call](providers.md#gating-a-tool-call).
+
 ## Model
 
 ```text

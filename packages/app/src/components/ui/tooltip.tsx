@@ -28,6 +28,7 @@ import { FadeIn, FadeOut } from "react-native-reanimated";
 import { StyleSheet } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { FloatingSurface } from "@/components/ui/floating";
+import { BORDER_WIDTH, SPACING } from "@/styles/theme";
 import { isWeb } from "@/constants/platform";
 import { getOverlayRoot, OVERLAY_Z } from "@/lib/overlay-root";
 
@@ -437,6 +438,7 @@ export function TooltipContent({
   style,
   testID,
   maxWidth = 280,
+  interactive = false,
 }: PropsWithChildren<{
   side?: Side;
   align?: Align;
@@ -444,6 +446,12 @@ export function TooltipContent({
   style?: StyleProp<ViewStyle>;
   testID?: string;
   maxWidth?: number;
+  /**
+   * Native only: let touches reach the content so it can scroll. Tooltips are otherwise
+   * non-interactive. On web the content stays out of hit-testing, since it closes on hover-out
+   * and pointer events on it would feed back into the trigger's hover.
+   */
+  interactive?: boolean;
 }>): ReactElement | null {
   const ctx = useTooltipContext("TooltipContent");
   const [triggerRect, setTriggerRect] = useState<Rect | null>(null);
@@ -544,7 +552,7 @@ export function TooltipContent({
     >
       <Pressable style={styles.overlay} onPress={handleDismiss}>
         <FloatingSurface
-          pointerEvents="none"
+          pointerEvents={interactive ? "auto" : "none"}
           entering={FadeIn.duration(80)}
           exiting={FadeOut.duration(80)}
           collapsable={false}
@@ -559,6 +567,15 @@ export function TooltipContent({
     </Modal>
   );
 }
+
+/**
+ * `content`'s horizontal padding and border, both sides — the frame outside the text a caller
+ * sizing a tooltip by its text width (e.g. `context-window-meter.tsx`'s `maxWidth`) must add back.
+ * `spacing` and `borderWidth` are static (color-scheme only touches tokens like `colors`), so this
+ * is a literal derived once, not a theme read (docs/unistyles.md, "Hard-coded constants for
+ * genuinely static values") — change `content`'s padding or border below and this stays correct.
+ */
+export const TOOLTIP_CONTENT_FRAME_X = 2 * (SPACING[2] + BORDER_WIDTH[1]);
 
 const styles = StyleSheet.create((theme) => ({
   overlay: { flex: 1 },

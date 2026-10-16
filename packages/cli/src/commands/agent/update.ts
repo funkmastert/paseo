@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import { AgentProviderMoveRejection } from "@getpaseo/client/internal/daemon-client";
 import type { AgentProviderNotice } from "@getpaseo/protocol/agent-types";
 import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
@@ -13,6 +14,7 @@ import type {
 export interface AgentUpdateResult {
   agentId: string;
   name: string | null;
+  provider: string;
   labels: string;
   thinkingOptionId: string | null;
   noticeType: AgentProviderNotice["type"] | null;
@@ -25,6 +27,7 @@ export const updateSchema: OutputSchema<AgentUpdateResult> = {
   columns: [
     { header: "AGENT ID", field: "agentId" },
     { header: "NAME", field: "name" },
+    { header: "PROVIDER", field: "provider" },
     { header: "LABELS", field: "labels" },
     { header: "THINKING", field: "thinkingOptionId" },
     { header: "NOTICE", field: "notice" },
@@ -35,6 +38,7 @@ export interface AgentUpdateOptions extends CommandOptions {
   name?: string;
   label?: string[];
   thinking?: string;
+  provider?: string;
   host?: string;
 }
 
@@ -46,7 +50,7 @@ export interface AgentMetadataChanges {
 }
 
 interface AgentUpdateServerInfo {
-  features?: { agentThinkingUpdate?: boolean };
+  features?: { agentThinkingUpdate?: boolean; agentProviderMove?: boolean };
 }
 
 export interface AgentUpdateClient {
@@ -56,23 +60,29 @@ export interface AgentUpdateClient {
     agentId: string,
     thinkingOptionId: string,
   ): Promise<AgentProviderNotice | null>;
+  moveAgentToProvider(agentId: string, providerId: string): Promise<void>;
 }
 
 export type AgentChanges =
   | { type: "metadata"; updates: AgentMetadataChanges }
-  | { type: "thinking"; thinkingOptionId: string };
+  | { type: "thinking"; thinkingOptionId: string }
+  | { type: "provider"; providerId: string };
 
 export interface AppliedAgentChanges {
   notice: AgentProviderNotice | null;
 }
 
 export function toAgentUpdateResult(
-  agent: Pick<AgentSnapshotPayload, "id" | "title" | "labels" | "effectiveThinkingOptionId">,
+  agent: Pick<
+    AgentSnapshotPayload,
+    "id" | "title" | "provider" | "labels" | "effectiveThinkingOptionId"
+  >,
   appliedChanges: AppliedAgentChanges,
 ): AgentUpdateResult {
   return {
     agentId: agent.id,
     name: agent.title,
+    provider: agent.provider,
     labels: formatLabels(agent.labels),
     thinkingOptionId: agent.effectiveThinkingOptionId ?? null,
     noticeType: appliedChanges.notice?.type ?? null,
@@ -85,6 +95,17 @@ export async function applyAgentChanges(
   agentId: string,
   changes: AgentChanges,
 ): Promise<AppliedAgentChanges> {
+  if (changes.type === "provider") {
+    // COMPAT(agentProviderMove): added in v0.8.0, remove gate after 2027-09-18.
+    if (client.getLastServerInfoMessage()?.features?.agentProviderMove !== true) {
+      throw {
+        code: "DAEMON_UPDATE_REQUIRED",
+        message: "Update the host to move an agent to another provider.",
+      } satisfies CommandError;
+    }
+    await moveAgentProvider(client, agentId, changes.providerId);
+    return { notice: null };
+  }
   if (changes.type === "thinking") {
     // COMPAT(agentThinkingUpdate): added in v0.2.4, remove gate after 2027-01-28.
     if (client.getLastServerInfoMessage()?.features?.agentThinkingUpdate !== true) {
@@ -98,6 +119,26 @@ export async function applyAgentChanges(
   }
   await client.updateAgent(agentId, changes.updates);
   return { notice: null };
+}
+
+/** The daemon's refusal is the actionable part; the CLI passes its code and message through. */
+async function moveAgentProvider(
+  client: AgentUpdateClient,
+  agentId: string,
+  providerId: string,
+): Promise<void> {
+  try {
+    await client.moveAgentToProvider(agentId, providerId);
+  } catch (error) {
+    if (!(error instanceof AgentProviderMoveRejection)) {
+      throw error;
+    }
+    throw {
+      code: error.code.toUpperCase(),
+      message: error.message,
+      details: `Agent ${agentId} is still on its previous provider.`,
+    } satisfies CommandError;
+  }
 }
 
 function parseLabelOptions(labels: string[] | undefined): Record<string, string> {
@@ -149,7 +190,7 @@ function formatLabels(labels: Record<string, string>): string {
   return entries.map(([key, value]) => `${key}=${value}`).join(",");
 }
 
-function parseAgentChanges(options: AgentUpdateOptions): AgentChanges {
+export function parseAgentChanges(options: AgentUpdateOptions): AgentChanges {
   const name = options.name?.trim();
   if (options.name !== undefined && !name) {
     throw {
@@ -169,23 +210,44 @@ function parseAgentChanges(options: AgentUpdateOptions): AgentChanges {
         'Provide a thinking option ID. Use "paseo provider models <provider> --thinking" to list valid IDs.',
     } satisfies CommandError;
   }
+  const providerId = options.provider?.trim();
+  if (options.provider !== undefined && !providerId) {
+    throw {
+      code: "INVALID_PROVIDER",
+      message: "--provider cannot be empty",
+      details: 'Provide a provider ID. Use "paseo provider ls" to list the configured ones.',
+    } satisfies CommandError;
+  }
 
   const hasMetadataUpdates = Boolean(name) || Object.keys(labels).length > 0;
-  if (hasMetadataUpdates && thinkingOptionId) {
+  const runtimeChangeCount = [thinkingOptionId, providerId].filter(Boolean).length;
+  if (hasMetadataUpdates && runtimeChangeCount > 0) {
     throw {
       code: "INVALID_OPTIONS",
-      message: "--thinking cannot be combined with --name or --label",
+      message: "--thinking and --provider cannot be combined with --name or --label",
       details: "Run separate agent update commands for runtime settings and metadata.",
     } satisfies CommandError;
   }
-  if (!hasMetadataUpdates && !thinkingOptionId) {
+  if (runtimeChangeCount > 1) {
+    throw {
+      code: "INVALID_OPTIONS",
+      message: "--thinking cannot be combined with --provider",
+      details:
+        "Moving an agent re-opens its session; set the thinking option after the move lands.",
+    } satisfies CommandError;
+  }
+  if (!hasMetadataUpdates && runtimeChangeCount === 0) {
     throw {
       code: "NO_CHANGES_PROVIDED",
       message: "Nothing to update",
-      details: "Provide at least one of: --name <name>, --label <key=value>, --thinking <id>",
+      details:
+        "Provide at least one of: --name <name>, --label <key=value>, --thinking <id>, --provider <id>",
     } satisfies CommandError;
   }
 
+  if (providerId) {
+    return { type: "provider", providerId };
+  }
   if (thinkingOptionId) {
     return { type: "thinking", thinkingOptionId };
   }

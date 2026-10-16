@@ -5,6 +5,10 @@ import type {
 } from "./agent-sdk-types.js";
 import type { StructuredGenerationProvider } from "./agent-response-loop.js";
 import type { ProviderSnapshotManager } from "./provider-snapshot-manager.js";
+import { CLAUDE_ULTRACODE_THINKING_OPTION_ID } from "./providers/claude/model-manifest.js";
+
+/** The effort Ultra Code runs at: what a non-leader gets in its place. */
+const ULTRACODE_EFFORT_OPTION_ID = "xhigh";
 
 export interface StructuredGenerationDaemonConfig {
   metadataGeneration?: {
@@ -13,6 +17,12 @@ export interface StructuredGenerationDaemonConfig {
       model?: string;
       thinkingOptionId?: string;
     }>;
+    titleTracking?: { enabled?: boolean; refreshIntervalMinutes?: number };
+    workspaceTitleTracking?: {
+      enabled?: boolean;
+      refreshIntervalMinutes?: number;
+      activityWindowMinutes?: number;
+    };
   };
 }
 
@@ -269,6 +279,14 @@ function resolveThinkingOptionId(
     model.thinkingOptions?.some((option) => option.id === preferredThinkingOptionId)
   ) {
     return preferredThinkingOptionId;
+  }
+  // No manifest entry preselects Ultra Code, but a provider's catalog could. A one-shot metadata
+  // generation never orchestrates, so it gets the effort Ultra Code implies, without the
+  // orchestration, or the provider's own level when that isn't offered.
+  if (model.defaultThinkingOptionId === CLAUDE_ULTRACODE_THINKING_OPTION_ID) {
+    return model.thinkingOptions?.some((option) => option.id === ULTRACODE_EFFORT_OPTION_ID)
+      ? ULTRACODE_EFFORT_OPTION_ID
+      : undefined;
   }
   return model.defaultThinkingOptionId;
 }

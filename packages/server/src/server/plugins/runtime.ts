@@ -1,5 +1,9 @@
 import type { PluginBeforeRequests, PluginLifecycleEvents } from "@getpaseo/plugin/server";
-import { validateBeforeRequest, validateBeforeResult } from "./lifecycle/index.js";
+import {
+  PluginUnresponsiveError,
+  validateBeforeRequest,
+  validateBeforeResult,
+} from "./lifecycle/index.js";
 import { fork } from "node:child_process";
 import { stat } from "node:fs/promises";
 import path from "node:path";
@@ -17,6 +21,7 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import type { PluginLogEntry } from "@getpaseo/protocol/messages";
 import { compilePlugin } from "./compiler.js";
+import { createPaseoInternalEnv } from "../paseo-env.js";
 import { readPluginManifest } from "./manifest.js";
 import type { PluginRequirements } from "@getpaseo/protocol/messages";
 import { assertPluginCompatibility } from "@getpaseo/protocol/plugin-requirements";
@@ -204,11 +209,24 @@ function resolveWorkerExecArgv(): string[] {
   ];
 }
 
+// `createExternalProcessEnv` (docs/jev.md's documented choice) also strips
+// ELECTRON_RUN_AS_NODE, PASEO_NODE_ENV and ESBUILD_BINARY_PATH. Under the desktop app
+// `process.execPath` is the Electron binary and this daemon process itself runs with
+// ELECTRON_RUN_AS_NODE=1 (packages/desktop/src/daemon/node-entrypoint-launcher.ts:32); a
+// fork() with that key dropped launches a full Electron app instead of a node worker.
+// `createPaseoInternalEnv` keeps it and every other runtime-control variable, and still
+// drops the JEV key. Exported, and the base env overridable, so a test can check it with a
+// fake env object instead of forking a real subprocess or setting the real process env.
+export function pluginChildEnv(baseEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return createPaseoInternalEnv(baseEnv);
+}
+
 function spawnPluginChild(): PluginChild {
   return fork(fileURLToPath(resolveWorkerUrl()), [], {
     execArgv: resolveWorkerExecArgv(),
     serialization: "advanced",
     stdio: ["ignore", "pipe", "pipe", "ipc"],
+    env: pluginChildEnv(),
   }) as PluginChild;
 }
 
@@ -275,6 +293,7 @@ export class PluginRuntime {
   private readonly spawnChild: () => PluginChild;
   private sessionHost: PluginPaseoSessionHost | null;
   private readonly listeners = new Set<(pluginId: string, error?: string) => void>();
+  private readonly sessionDropListeners = new Set<(pluginId: string) => void>();
 
   constructor(
     logger: pino.Logger,
@@ -297,6 +316,17 @@ export class PluginRuntime {
     return () => this.listeners.delete(listener);
   }
 
+  // Fires when a plugin's own daemon session (its PaseoApi/DaemonClient) is torn
+  // down while the plugin process is still alive and connected — e.g. the daemon
+  // force-closed the session's virtual socket for an expired application lease.
+  // Plugin sessions never resume (see docs/plugins.md), so the only recovery is a
+  // full restart. This is distinct from `subscribe`, which reports the process
+  // itself exiting or failing to load.
+  subscribeSessionDrop(listener: (pluginId: string) => void): () => void {
+    this.sessionDropListeners.add(listener);
+    return () => this.sessionDropListeners.delete(listener);
+  }
+
   async startPlugin(
     pluginId: string,
     configuredPath: string,
@@ -314,6 +344,26 @@ export class PluginRuntime {
     }
     this.plugins.set(pluginId, loaded);
     this.appendLog(pluginId, "stdout", "[paseo] Plugin ready");
+    this.watchSessionHealth(pluginId, loaded);
+  }
+
+  private watchSessionHealth(pluginId: string, loaded: LoadedPlugin): void {
+    const sessionClosed = loaded.sessionClosed;
+    if (!sessionClosed) return;
+    void sessionClosed.then(() => {
+      // Superseded by a stop/reload/remove that already published a different
+      // (or no) instance for this ID; not our concern.
+      if (this.plugins.get(pluginId) !== loaded) return;
+      // The process exited too, so `handleChildClose` already owns reporting
+      // this; avoid double-reporting the same event two different ways.
+      if (!loaded.child?.connected) return;
+      this.logger.error(
+        { pluginId },
+        "Plugin daemon session closed unexpectedly while the process is still running",
+      );
+      for (const listener of this.sessionDropListeners) listener(pluginId);
+      return undefined;
+    });
   }
 
   async validatePlugin(configuredPath: string): Promise<void> {
@@ -337,6 +387,13 @@ export class PluginRuntime {
     return [...this.plugins.values()]
       .map(({ id, clientBundle, requirements }) => ({ id, clientBundle, requirements }))
       .sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  // A client-only plugin has no session to lose, so it counts as connected while loaded.
+  isSessionConnected(pluginId: string): boolean {
+    const loaded = this.plugins.get(pluginId);
+    if (!loaded) return false;
+    return loaded.sessionSocket === null || loaded.sessionSocket.readyState === 1;
   }
 
   getProviderRegistrations(pluginId: string): readonly PluginProviderMetadata[] {
@@ -512,13 +569,14 @@ export class PluginRuntime {
         if (message.type === "hook") {
           void send(child, { type: "hook.cancel", requestId }).catch(() => {});
         }
-        reject(new Error(`Plugin RPC timed out: ${pluginId}.${message.type}`));
+        reject(new PluginUnresponsiveError(`Plugin RPC timed out: ${pluginId}.${message.type}`));
       }, REQUEST_TIMEOUT_MS);
       loaded.pending.set(requestId, { resolve, reject, timeout });
       void send(child, message).catch((error) => {
         clearTimeout(timeout);
         loaded.pending.delete(requestId);
-        reject(error);
+        // The request never reached the plugin (its IPC channel is closed), so it did not answer.
+        reject(new PluginUnresponsiveError(describeError(error), { cause: error }));
       });
     });
   }
@@ -1035,7 +1093,7 @@ export class PluginRuntime {
   private rejectPending(loaded: LoadedPlugin, message: string): void {
     for (const invocation of loaded.pending.values()) {
       clearTimeout(invocation.timeout);
-      invocation.reject(new Error(message));
+      invocation.reject(new PluginUnresponsiveError(message));
     }
     loaded.pending.clear();
   }

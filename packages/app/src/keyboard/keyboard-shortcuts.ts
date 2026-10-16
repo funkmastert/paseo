@@ -156,6 +156,8 @@ export const SHORTCUT_HELP_ROW_ORDER: Record<ShortcutSectionId, readonly string[
   general: [
     "toggle-command-center",
     "search-files",
+    "history-back",
+    "history-forward",
     "show-shortcuts",
     "toggle-settings",
     "cycle-theme",
@@ -233,6 +235,8 @@ const SHORTCUT_HELP_LABEL_KEYS: Record<string, string> = {
   "workspace-pane-close": "settings.shortcuts.help.closePane",
   "workspace-terminal-new": "settings.shortcuts.help.newTerminal",
   "search-files": "settings.shortcuts.help.searchFiles",
+  "history-back": "settings.shortcuts.help.historyBack",
+  "history-forward": "settings.shortcuts.help.historyForward",
   "toggle-command-center": "settings.shortcuts.help.toggleCommandCenter",
   "show-shortcuts": "settings.shortcuts.help.showKeyboardShortcuts",
   "toggle-left-sidebar": "settings.shortcuts.help.toggleLeftSidebar",
@@ -684,6 +688,55 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "workspace-next",
       section: "workspaces",
       label: "Next workspace",
+    },
+  },
+
+  // --- Navigation history back/forward ---
+  // Bare Cmd/Ctrl+[ and +] already cycle workspaces (above); Shift disambiguates.
+  // Alt+Shift+[/] is also taken (tab cycling, below), so non-mac gets Ctrl+Shift
+  // on both desktop and web -- no separate Alt-based web variant here.
+  {
+    id: "navigation-history-back-cmd-shift-left-bracket-mac",
+    action: "navigation.history.back",
+    combo: "Cmd+Shift+[",
+    when: { mac: true, commandCenter: false },
+    help: {
+      id: "history-back",
+      section: "general",
+      label: "Go back",
+    },
+  },
+  {
+    id: "navigation-history-back-ctrl-shift-left-bracket-non-mac",
+    action: "navigation.history.back",
+    combo: "Ctrl+Shift+[",
+    when: { mac: false, commandCenter: false, terminal: false },
+    help: {
+      id: "history-back",
+      section: "general",
+      label: "Go back",
+    },
+  },
+  {
+    id: "navigation-history-forward-cmd-shift-right-bracket-mac",
+    action: "navigation.history.forward",
+    combo: "Cmd+Shift+]",
+    when: { mac: true, commandCenter: false },
+    help: {
+      id: "history-forward",
+      section: "general",
+      label: "Go forward",
+    },
+  },
+  {
+    id: "navigation-history-forward-ctrl-shift-right-bracket-non-mac",
+    action: "navigation.history.forward",
+    combo: "Ctrl+Shift+]",
+    when: { mac: false, commandCenter: false, terminal: false },
+    help: {
+      id: "history-forward",
+      section: "general",
+      label: "Go forward",
     },
   },
 

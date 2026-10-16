@@ -513,6 +513,10 @@ export interface RunWorkspaceLookupClient {
   }>;
 }
 
+export interface RunWorkspaceCreateClient {
+  createWorkspace: ConnectedDaemonClient["createWorkspace"];
+}
+
 export async function resolveExistingRunWorkspace(
   client: RunWorkspaceLookupClient,
   workspaceId: string,
@@ -538,8 +542,8 @@ export async function resolveExistingRunWorkspace(
 //   3. $PASEO_WORKSPACE_ID         -> exported by workspace terminals
 //   4. --new-workspace <kind>      -> mint a new workspace explicitly
 //   5. bare run                    -> mint a new local-backed workspace for cwd
-async function resolveRunWorkspace(
-  client: ConnectedDaemonClient,
+export async function resolveRunWorkspace(
+  client: RunWorkspaceLookupClient & RunWorkspaceCreateClient,
   options: AgentRunOptions,
   cwd: string,
 ): Promise<RunWorkspace> {
@@ -563,7 +567,11 @@ async function resolveRunWorkspace(
   // TODO: thread the run `prompt` as firstAgentContext so workspace-level
   // title/branch generation picks up the task description (U8/U6 deferred).
   const source = buildRunWorkspaceSource(options, cwd);
-  const result = await client.createWorkspace({ source });
+  const callerAgentId = resolveRunCallerAgentId();
+  const result = await client.createWorkspace({
+    source,
+    ...(callerAgentId ? { callerAgentId } : {}),
+  });
 
   if (!result.workspace) {
     throw {

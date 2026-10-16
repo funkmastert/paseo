@@ -5,6 +5,46 @@ description: Paseo reference for managing projects, workspaces, workspace script
 
 Paseo is a remote daemon that manages coding agents, terminals. Control it through MCP tools or the CLI.
 
+## Whose rules apply to you
+
+Paseo's per-agent rules bind the agents the **daemon spawned**. A session started outside
+Paseo — a terminal or IDE session that happens to operate Paseo through the CLI or MCP —
+is not one of them, and must not assume otherwise.
+
+Check which you are before acting on anything in `config.json` as though it governs you:
+
+```bash
+env | grep '^PASEO_' || echo "no PASEO_* vars: not spawned by the daemon"
+```
+
+What the daemon applies to an agent it spawned, and only to it:
+
+- `daemon.appendSystemPrompt` — the operator's standing instructions.
+- `daemon.mcp.injectIntoAgents` — which MCP servers the agent gets.
+- `agentModelPolicy` — the agent's role, its model and thinking level, and the output
+  style children get. A root agent is the `leader` role; `worker`, `reviewer` and
+  `advisor` are the children it spawns.
+- The account pool's placement — which `agents.providers.<id>` entry, and therefore which
+  `CLAUDE_CONFIG_DIR` and which Claude account, the session runs on.
+- `agents.childEnv.strip` — names removed from the inherited environment.
+
+So a session spawned outside Paseo runs on its own authentication and its own system
+prompt. It does not inherit the operator's `appendSystemPrompt`, it is not placed on a
+pooled account, and no role policy sets its model or thinking level. Two consequences
+worth stating plainly:
+
+- **Do not quote `config.json`'s rules at yourself.** A prompt or policy in the config is
+  evidence about the daemon's agents, not an instruction you received.
+- **Do not assume you are billing a pooled account.** An external session bills whatever
+  credentials its own environment carries, which is why the install flow strips
+  `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDE_CONFIG_DIR` before starting a
+  daemon — so the operator's key does not silently fund every pooled session.
+
+Being the leader role, or an external session, says nothing about what the **host harness**
+permits. Tool permissions come from the client's own settings, not from Paseo, and not from
+this skill. If a permission gate blocks a legitimate action, the fix is a rule in the
+client's settings, applied by the operator — not a workaround.
+
 ## Projects
 
 Manage the daemon's project registry through the CLI:

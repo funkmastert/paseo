@@ -359,6 +359,9 @@ export async function generateStructuredAgentResponse<T>(
   const agent = await manager.createAgent(agentConfig, agentId, {
     persistSession,
     workspaceId: undefined,
+    // Every caller (workspace-title-tracker, worktree-branch-name-generator,
+    // git-metadata-generator) is a daemon job generating structured output, not a human or agent ask.
+    origin: "daemon",
   });
   try {
     const caller: AgentCaller = async (nextPrompt) => {

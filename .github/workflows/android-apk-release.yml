@@ -21,6 +21,9 @@ env:
 
 jobs:
   ensure-release:
+    # Builds on upstream's EAS project with upstream's EXPO_TOKEN. Forks skip
+    # it; publish-android-apk needs this job, so it skips too.
+    if: github.repository == 'getpaseo/paseo'
     permissions:
       contents: write
     runs-on: ubuntu-latest

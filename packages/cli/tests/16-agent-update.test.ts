@@ -123,7 +123,7 @@ try {
     assert.notStrictEqual(result.exitCode, 0, "should reject a combined update");
     const output = result.stdout + result.stderr;
     assert(
-      output.includes("--thinking cannot be combined with --name or --label"),
+      output.includes("--thinking and --provider cannot be combined with --name or --label"),
       "should explain that thinking and metadata updates are separate operations",
     );
     console.log("✓ thinking cannot be combined with metadata updates\n");

@@ -18,7 +18,7 @@ import type {
   WorkspaceArchiveContext,
   WorkspaceRegistry,
 } from "./workspace-registry.js";
-import { createRealpathAwarePathMatcher } from "../utils/path.js";
+import { canonicalizePath, createRealpathAwarePathMatcher } from "../utils/path.js";
 import { runWithGitCommandPriority } from "../utils/run-git-command.js";
 import { WorkspaceAutomationBlockedError } from "./workspace-automation-gate.js";
 
@@ -49,6 +49,8 @@ export interface ArchiveDependencies {
   emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds: Iterable<string>) => Promise<void>;
   markWorkspaceArchiving: (workspaceIds: Iterable<string>, archivingAt: string) => void;
   clearWorkspaceArchiving: (workspaceIds: Iterable<string>) => void;
+  /** Fire-and-forget: asks the WorktreeDiskMonitor to sample a workspace's backing directory. */
+  requestDiskUsageSample?: (workspaceId: string, cwd: string) => void;
   killTerminalsForWorkspace: (workspaceId: string) => Promise<void>;
   stopWorkspaceSetup?: (workspaceId: string) => Promise<void>;
   assertWorkspaceAutomationAllowed?: (workspaceId: string) => Promise<void>;
@@ -69,11 +71,61 @@ export interface ArchiveResult {
   archivedAgentIds: string[];
   archivedWorkspaceIds: string[];
   removedDirectory: boolean;
+  /** The directory it deleted, canonical (`canonicalizePath`); null when it deleted none. */
+  deletedDirectory: string | null;
+  /** Why the caller's `recheck` kept the directory after the records were archived. */
+  keptDirectoryReason?: string;
 }
+
+/** The step a `recheck` runs right before: archiving the records, or deleting the directory. */
+export type ArchiveRecheckStage = "archive" | "delete";
+
+/** Why the archive must not take its next step now; null to go ahead. */
+export type ArchiveRecheck = (stage: ArchiveRecheckStage) => Promise<string | null>;
 
 export interface ArchiveByScopeRequest {
   scope: ArchiveScope;
   requestId: string;
+  /**
+   * Archive the records only: agents, terminals and workspaces go, and no directory is torn down
+   * or deleted, whatever the records say. The done janitor's record-only archive.
+   */
+  keepDirectory?: boolean;
+  /**
+   * The directory the caller checked, as `resolveArchiveDirectory` named it. When the archive
+   * would delete another directory, or none, it throws `ArchiveDirectoryMismatchError` before it
+   * touches anything. Ignored with `keepDirectory`, which deletes nothing.
+   */
+  expectedDirectory?: string;
+  /**
+   * The caller's last look, on state read at that moment: once after the target resolves and
+   * before anything is touched, and once right before the directory is deleted. A reason refuses
+   * the step. Before the records it throws `ArchiveRefusedError` having touched nothing; before
+   * the directory the records stay archived and the directory stays, with the reason in the
+   * result. The done janitor's plan is minutes old by the time it archives
+   * (docs/done-janitor.md, "Reclaiming the worktree").
+   */
+  recheck?: ArchiveRecheck;
+}
+
+/** The caller's `recheck` refused the archive before it touched anything. */
+export class ArchiveRefusedError extends Error {
+  constructor(public readonly reason: string) {
+    super(reason);
+    this.name = "ArchiveRefusedError";
+  }
+}
+
+export class ArchiveDirectoryMismatchError extends Error {
+  constructor(
+    public readonly expectedDirectory: string,
+    public readonly resolvedDirectory: string | null,
+  ) {
+    super(
+      `the archive would delete ${resolvedDirectory ?? "no directory"}, not the checked ${expectedDirectory}`,
+    );
+    this.name = "ArchiveDirectoryMismatchError";
+  }
 }
 
 export async function requireActiveWorkspaceForArchive(
@@ -132,6 +184,15 @@ async function archiveByScopeWithPriority(
   request: ArchiveByScopeRequest,
 ): Promise<ArchiveResult> {
   const target = await resolveArchiveTarget(dependencies, request.scope);
+  if (request.expectedDirectory !== undefined && !request.keepDirectory) {
+    const directory = target.backing?.isPaseoOwnedWorktree ? target.backing.path : null;
+    if (directory !== request.expectedDirectory) {
+      throw new ArchiveDirectoryMismatchError(request.expectedDirectory, directory);
+    }
+  }
+  // Last, before the first step with an effect: every await after it widens the window.
+  const refused = await request.recheck?.("archive");
+  if (refused) throw new ArchiveRefusedError(refused);
   const targetWorkspaceIds = target.workspaceIds;
 
   await stopWorkspaceSetups(dependencies, target.setupWorkspaceIds, request.requestId);
@@ -140,7 +201,8 @@ async function archiveByScopeWithPriority(
     dependencies.markWorkspaceArchiving(targetWorkspaceIds, new Date().toISOString());
   }
 
-  let removedDirectory = false;
+  let deletedDirectory: string | null = null;
+  let keptDirectoryReason: string | undefined;
 
   try {
     if (targetWorkspaceIds.length > 0) {
@@ -167,19 +229,21 @@ async function archiveByScopeWithPriority(
       }
     }
 
-    if (target.backing !== null) {
-      removedDirectory = await maybeRemoveDirectory(
+    if (target.backing !== null && !request.keepDirectory) {
+      ({ deletedDirectory, keptDirectoryReason } = await maybeRemoveDirectory(
         dependencies,
         request,
         target,
         archivedWorkspaceIds,
-      );
+      ));
     }
 
     return {
       archivedAgentIds: Array.from(archivedAgents),
       archivedWorkspaceIds,
-      removedDirectory,
+      removedDirectory: deletedDirectory !== null,
+      deletedDirectory,
+      ...(keptDirectoryReason ? { keptDirectoryReason } : {}),
     };
   } finally {
     if (targetWorkspaceIds.length > 0) {
@@ -267,13 +331,29 @@ async function stopWorkspaceSetups(
   }
 }
 
+/**
+ * The directory archiving this workspace deletes, resolved the way archive-by-scope resolves it;
+ * null when it deletes none. For an older worktree record without the ownership flag that is the
+ * worktree root above its cwd, whether or not the cwd exists. The done janitor checks this
+ * directory, not the record's own, before it archives, and passes it back as `expectedDirectory`.
+ * Canonical (`canonicalizePath`), like every path archive-by-scope resolves and deletes, so it
+ * equals the directory the archive deletes as a string.
+ */
+export async function resolveArchiveDirectory(
+  workspace: ActiveWorkspaceRef,
+  dependencies: Pick<ArchiveDependencies, "paseoHome" | "paseoWorktreesBaseRoot">,
+): Promise<string | null> {
+  const backing = await resolveWorkspaceBackingDirectory(workspace, dependencies);
+  return backing.isPaseoOwnedWorktree ? backing.path : null;
+}
+
 async function resolveWorkspaceBackingDirectory(
   workspace: ActiveWorkspaceRef,
   dependencies: Pick<ArchiveDependencies, "paseoHome" | "paseoWorktreesBaseRoot">,
 ): Promise<BackingDirectory> {
   if (workspace.isPaseoOwnedWorktree && workspace.worktreeRoot && workspace.mainRepoRoot) {
     return {
-      path: resolve(workspace.worktreeRoot),
+      path: canonicalizePath(workspace.worktreeRoot),
       isPaseoOwnedWorktree: true,
       mainRepoRoot: workspace.mainRepoRoot,
       paseoWorktreesRoot: null,
@@ -281,7 +361,7 @@ async function resolveWorkspaceBackingDirectory(
   }
   if (workspace.kind !== "worktree") {
     return {
-      path: resolve(workspace.cwd),
+      path: canonicalizePath(workspace.cwd),
       isPaseoOwnedWorktree: false,
       mainRepoRoot: workspace.mainRepoRoot ?? null,
       paseoWorktreesRoot: null,
@@ -307,7 +387,9 @@ async function resolveBackingDirectory(
   };
   const ownership = await isPaseoOwnedWorktreeCwd(cwd, options);
   return {
-    path: resolve(ownership.allowed && ownership.worktreePath ? ownership.worktreePath : cwd),
+    path: canonicalizePath(
+      ownership.allowed && ownership.worktreePath ? ownership.worktreePath : cwd,
+    ),
     isPaseoOwnedWorktree: ownership.allowed,
     mainRepoRoot: ownership.repoRoot ?? null,
     paseoWorktreesRoot: ownership.worktreeRoot ?? null,
@@ -349,13 +431,23 @@ async function archiveTargetRecords(
 
 async function maybeRemoveDirectory(
   dependencies: ArchiveDependencies,
-  request: Pick<ArchiveByScopeRequest, "requestId">,
+  request: Pick<ArchiveByScopeRequest, "requestId" | "recheck">,
   target: ArchiveTarget,
   archivedWorkspaceIds: string[],
-): Promise<boolean> {
+): Promise<{ deletedDirectory: string | null; keptDirectoryReason?: string }> {
+  const kept = { deletedDirectory: null };
   const backing = target.backing;
   if (!backing?.isPaseoOwnedWorktree) {
-    return false;
+    return kept;
+  }
+
+  // Archive-time sample: freshens the disk-usage indicator right as the workspace goes idle,
+  // before teardown/delete below might remove or shrink it — most successful deletes below make
+  // this moot immediately, but it matters for the failure/skip paths this function returns
+  // `false` from, where the directory lingers and the sweeper (worktree-disk-monitor.ts) only
+  // catches up to it later.
+  for (const workspaceId of archivedWorkspaceIds) {
+    dependencies.requestDiskUsageSample?.(workspaceId, backing.path);
   }
 
   const archivedWorkspaceIdSet = new Set(archivedWorkspaceIds);
@@ -382,7 +474,7 @@ async function maybeRemoveDirectory(
         { err: error, targetPath: backing.path, requestId: request.requestId },
         "Worktree teardown failed during archive; workspace already archived",
       );
-      return false;
+      return kept;
     }
     throw error;
   }
@@ -396,11 +488,21 @@ async function maybeRemoveDirectory(
       dependencies,
     ))
   ) {
-    return false;
+    return kept;
+  }
+
+  // Right before the one step nothing undoes.
+  const keptDirectoryReason = await request.recheck?.("delete");
+  if (keptDirectoryReason) {
+    dependencies.sessionLogger?.info(
+      { targetPath: backing.path, requestId: request.requestId, reason: keptDirectoryReason },
+      "Archive kept the worktree directory: the caller's recheck refused the delete",
+    );
+    return { deletedDirectory: null, keptDirectoryReason };
   }
 
   try {
-    await deletePaseoWorktree({
+    const deleted = await deletePaseoWorktree({
       cwd: backing.mainRepoRoot,
       worktreePath: backing.path,
       teardownCwds: [],
@@ -409,13 +511,13 @@ async function maybeRemoveDirectory(
       worktreesBaseRoot: dependencies.paseoWorktreesBaseRoot,
     });
     dependencies.github.invalidate({ cwd: backing.path });
-    return true;
+    return { deletedDirectory: deleted };
   } catch (error) {
     dependencies.sessionLogger?.warn(
       { err: error, targetPath: backing.path, requestId: request.requestId },
       "Worktree disk removal failed during archive; workspace already archived",
     );
-    return false;
+    return kept;
   }
 }
 

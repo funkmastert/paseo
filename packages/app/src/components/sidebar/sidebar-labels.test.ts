@@ -1,7 +1,11 @@
 import { describe, expect, test } from "vitest";
 import type { SidebarWorkspaceEntry } from "@/hooks/use-sidebar-workspaces-list";
 import { SIDEBAR_UNLABELLED_LABEL_KEY } from "@/stores/sidebar-view-store";
-import { filterWorkspacesByLabels } from "./sidebar-labels";
+import {
+  filterWorkspacesByLabels,
+  isSidebarWorkspaceGroupCollapsed,
+  statusWorkspaceGroups,
+} from "./sidebar-labels";
 
 function workspace(
   workspaceId: string,
@@ -33,6 +37,9 @@ function workspace(
     archiveUnpushedCommitCount: null,
     scripts: [],
     hasRunningScripts: false,
+    diskUsage: null,
+    completionState: null,
+    completionNote: null,
   };
 }
 
@@ -65,5 +72,15 @@ describe("sidebar label filtering", () => {
         labels: [SIDEBAR_UNLABELLED_LABEL_KEY],
       }).map((entry) => entry.workspaceId),
     ).toEqual(["blank"]);
+  });
+});
+
+describe("isSidebarWorkspaceGroupCollapsed", () => {
+  test("a status group defaults expanded; the set holds an explicit collapse", () => {
+    const [group] = statusWorkspaceGroups([{ bucket: "done", label: "Done", rows: [] }]);
+    expect(group).toBeDefined();
+    if (!group) return;
+    expect(isSidebarWorkspaceGroupCollapsed(group, new Set())).toBe(false);
+    expect(isSidebarWorkspaceGroupCollapsed(group, new Set([group.key]))).toBe(true);
   });
 });

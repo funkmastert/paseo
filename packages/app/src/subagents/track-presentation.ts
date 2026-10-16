@@ -29,8 +29,10 @@ export function buildSubagentRowPresentationData(row: SubagentRow): SubagentRowP
   const description = resolveRowLabel(row.description);
   const title = resolveRowLabel(row.title);
   const label = description ?? title;
-  const providerSubtitle = row.kind === "provider" ? resolveRowLabel(row.subtitle) : null;
-  const subtitle = providerSubtitle ?? (description ? title : null);
+  // Paseo rows carry the agent's live activity summary in `subtitle`; provider rows carry their
+  // own compact context there. Either way it wins over the title-as-subtitle fallback below.
+  const rowSubtitle = resolveRowLabel(row.subtitle);
+  const subtitle = rowSubtitle ?? (description ? title : null);
   const status = presentationStatus(row);
   return {
     key: `${row.kind}_subagent_${row.id}`,
@@ -40,7 +42,7 @@ export function buildSubagentRowPresentationData(row: SubagentRow): SubagentRowP
     titleState: label ? "ready" : "loading",
     statusBucket: deriveSidebarStateBucket({
       status,
-      requiresAttention: false,
+      requiresAttention: row.requiresAttention,
     }),
   };
 }
@@ -72,9 +74,10 @@ export interface SubagentPillPresentation {
  * "1 failed" over a child that is still working says the fan-out has stopped. Every state present
  * gets its own mark and its own count, in the order the sidebar's status groups list them.
  *
- * It stays one line because subagent rows only ever reach three states — see
- * `buildSubagentRowPresentationData`, which reports no attention of its own — so the pill is two
- * segments at worst, and falls back to naming what it opens once nothing is happening.
+ * It stays one line because subagent rows only ever reach three non-done states in practice
+ * (failed, attention, running — `needs_input` needs a pending-permission count the row doesn't
+ * carry), so the pill is three segments at worst, and falls back to naming what it opens once
+ * nothing is happening.
  */
 export function buildSubagentPillPresentation(
   t: TFunction,
@@ -127,6 +130,22 @@ function summarizeSubagentStatus(rows: readonly SubagentRow[]): SubagentStatusCo
 
 export function countFinishedSubagents(rows: readonly SubagentRow[]): number {
   return rows.filter(isFinishedSubagent).length;
+}
+
+/**
+ * The rows the panel actually lists under the pill — the same population `buildSubagentPillPresentation`
+ * counted, so a pill reading "2 failed" opens on exactly the 2 rows it named instead of every
+ * sibling in the fan-out. Mirrors `summarizeSubagentStatus`: while anything is active, the pill
+ * names only the active states, so the list underneath drops the done ones it never mentioned —
+ * they still have a way out via the archive-finished action, not a seat in this list. Once every
+ * child is done, the pill falls back to naming the whole fan-out (`totalLabel`), and the list
+ * shows all of it to match.
+ */
+export function selectVisibleSubagentRows(rows: readonly SubagentRow[]): readonly SubagentRow[] {
+  const active = rows.filter(
+    (row) => buildSubagentRowPresentationData(row).statusBucket !== "done",
+  );
+  return active.length > 0 ? active : rows;
 }
 
 export function resolveRowLabel(title: string | null | undefined): string | null {

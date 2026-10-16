@@ -1,0 +1,229 @@
+{
+  "rows": [
+    {
+      "row": {
+        "model_name": "gemini-4-argon-high",
+        "organization": "google",
+        "license": "Proprietary",
+        "rating": 1561.9299093981008,
+        "rating_lower": 1544.7426629683582,
+        "rating_upper": 1579.1171558278436,
+        "variance": 76.8982445536996,
+        "vote_count": 1233,
+        "rank": 1,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "claude-fable-5-high",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1551.425823030785,
+        "rating_lower": 1544.7163534445447,
+        "rating_upper": 1558.1352926170257,
+        "variance": 11.718720473112324,
+        "vote_count": 10404,
+        "rank": 2,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "claude-opus-4-7-high",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1550.3230726168606,
+        "rating_lower": 1544.4727036078975,
+        "rating_upper": 1556.1734416258237,
+        "variance": 8.909848872166398,
+        "vote_count": 18591,
+        "rank": 3,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "claude-opus-4-6-high",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1549.6895555813016,
+        "rating_lower": 1544.1865147212352,
+        "rating_upper": 1555.192596441368,
+        "variance": 7.883322487910627,
+        "vote_count": 20617,
+        "rank": 4,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "claude-opus-5.5-high",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1549.524059993232,
+        "rating_lower": 1533.7816691868843,
+        "rating_upper": 1565.2664507995794,
+        "variance": 64.5126968340109,
+        "vote_count": 1444,
+        "rank": 5,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "claude-opus-4-6",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1548.1157702355051,
+        "rating_lower": 1542.8546651783179,
+        "rating_upper": 1553.3768752926924,
+        "variance": 7.205394542732546,
+        "vote_count": 23351,
+        "rank": 6,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "claude-opus-4-7",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1546.463349673215,
+        "rating_lower": 1540.656271302884,
+        "rating_upper": 1552.2704280435457,
+        "variance": 8.778477337177511,
+        "vote_count": 18816,
+        "rank": 7,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "gpt-6.1-sol-max",
+        "organization": "openai",
+        "license": "Proprietary",
+        "rating": 1545.2632719606536,
+        "rating_lower": 1525.4480793679938,
+        "rating_upper": 1565.0784645533133,
+        "variance": 102.21165338777463,
+        "vote_count": 911,
+        "rank": 8,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "gpt-6-astra-max",
+        "organization": "openai",
+        "license": "Proprietary",
+        "rating": 1541.571194686814,
+        "rating_lower": 1529.338812087219,
+        "rating_upper": 1553.8035772864089,
+        "variance": 38.95165640115756,
+        "vote_count": 2424,
+        "rank": 9,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "kimi-k3-max",
+        "organization": "moonshot",
+        "license": "Kimi K3 license",
+        "rating": 1539.562743426549,
+        "rating_lower": 1532.1216210250986,
+        "rating_upper": 1547.0038658279996,
+        "variance": 14.413873785418366,
+        "vote_count": 7775,
+        "rank": 10,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "mimo-v2.6-pro",
+        "organization": "xiaomi",
+        "license": "MIT",
+        "rating": 1538.8445613360916,
+        "rating_lower": 1521.1350354585782,
+        "rating_upper": 1556.554087213605,
+        "variance": 81.64276162919965,
+        "vote_count": 1107,
+        "rank": 11,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "muse-spark-1.3-max",
+        "organization": "meta",
+        "license": "Proprietary",
+        "rating": 1538.2679415344376,
+        "rating_lower": 1528.3341085376187,
+        "rating_upper": 1548.2017745312564,
+        "variance": 25.688427916261375,
+        "vote_count": 3855,
+        "rank": 12,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "gpt-5.6-sol-xhigh",
+        "organization": "openai",
+        "license": "Proprietary",
+        "rating": 1534.9098456715096,
+        "rating_lower": 1528.0793866107604,
+        "rating_upper": 1541.740304732259,
+        "variance": 12.145170144539462,
+        "vote_count": 10395,
+        "rank": 13,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "claude-opus-5-high",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1533.9672847445345,
+        "rating_lower": 1527.7831162351333,
+        "rating_upper": 1540.1514532539359,
+        "variance": 9.95557727877967,
+        "vote_count": 16352,
+        "rank": 14,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    },
+    {
+      "row": {
+        "model_name": "claude-fable-5.1-max",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1533.9503691670566,
+        "rating_lower": 1521.9753114217965,
+        "rating_upper": 1545.9254269123167,
+        "variance": 37.3300911700006,
+        "vote_count": 2601,
+        "rank": 15,
+        "category": "coding",
+        "leaderboard_publish_date": "2026-10-08"
+      }
+    }
+  ]
+}

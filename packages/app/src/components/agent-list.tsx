@@ -14,6 +14,7 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { useIsCompactFormFactor } from "@/constants/layout";
+import { AgentIdChip } from "@/components/agent-id-chip";
 import { formatTimeAgo } from "@/utils/time";
 import { type AggregatedAgent } from "@/hooks/use-aggregated-agents";
 import { useSessionStore } from "@/stores/session-store";
@@ -291,6 +292,7 @@ function SessionRow({
             style={sessionTitleStyle}
             numberOfLines={1}
           />
+          <AgentIdChip agentId={agent.id} testID={`agent-id-chip-${agent.serverId}-${agent.id}`} />
           <SessionRowBadges
             agent={agent}
             archivedIcon={archivedIcon}

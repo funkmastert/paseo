@@ -6,16 +6,35 @@ export const MAX_PHYSICAL_SOCKET_BUFFERED_BYTES = 64 * 1024 * 1024;
 // lease without making an abandoned application socket linger for minutes.
 export const APPLICATION_SOCKET_LEASE_MS = 45_000;
 export const APPLICATION_SOCKET_LEASE_CHECK_INTERVAL_MS = 10_000;
+// A sweep this late means the daemon itself was not running (macOS suspends the
+// app, including through dark wakes), so peers had no chance to be heard. Their
+// pings are still queued behind this timer; expiring them here evicted every
+// socket after each suspension.
+export const APPLICATION_SOCKET_LEASE_STALL_MS = APPLICATION_SOCKET_LEASE_CHECK_INTERVAL_MS * 2;
 
 type Clock = () => number;
 
+interface ApplicationSocketLeaseOptions {
+  leaseMs?: number;
+  stallMs?: number;
+}
+
 export class ApplicationSocketLease<TSocket extends object> {
   private readonly deadlines = new Map<TSocket, number>();
+  private readonly leaseMs: number;
+  private readonly stallMs: number;
+  private lastSweepAt: number | null = null;
 
-  constructor(private readonly clock: Clock = Date.now) {}
+  constructor(
+    private readonly clock: Clock = Date.now,
+    options: ApplicationSocketLeaseOptions = {},
+  ) {
+    this.leaseMs = options.leaseMs ?? APPLICATION_SOCKET_LEASE_MS;
+    this.stallMs = options.stallMs ?? APPLICATION_SOCKET_LEASE_STALL_MS;
+  }
 
   claim(socket: TSocket): void {
-    this.deadlines.set(socket, this.clock() + APPLICATION_SOCKET_LEASE_MS);
+    this.deadlines.set(socket, this.clock() + this.leaseMs);
   }
 
   renew(socket: TSocket): void {
@@ -30,6 +49,14 @@ export class ApplicationSocketLease<TSocket extends object> {
 
   listExpired(): TSocket[] {
     const now = this.clock();
+    const previousSweepAt = this.lastSweepAt;
+    this.lastSweepAt = now;
+    if (previousSweepAt !== null && now - previousSweepAt > this.stallMs) {
+      for (const socket of this.deadlines.keys()) {
+        this.deadlines.set(socket, now + this.leaseMs);
+      }
+      return [];
+    }
     const expired: TSocket[] = [];
     for (const [socket, deadline] of this.deadlines) {
       if (deadline > now) continue;

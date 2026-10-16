@@ -195,6 +195,7 @@ export function buildLegacyWorkspaces(
       pendingPermissionCount: entry.agent.pendingPermissions.length,
       requiresAttention: entry.agent.requiresAttention,
       attentionReason: entry.agent.attentionReason,
+      tokenBurnAlert: entry.agent.tokenBurnAlert !== undefined,
     });
     const statusEnteredAt = parseLegacyAgentTimestamp(entry);
     const existing = workspaces.get(workspaceId);

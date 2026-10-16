@@ -1,7 +1,14 @@
 import { describe, expect, test } from "vitest";
 
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
-import { withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
+import {
+  MCP_SCOPE_LABEL,
+  claudeAiConnectorsInScope,
+  scopeMcpGatewayServerNames,
+  stripMcpGatewayServers,
+  withRuntimeMcpGatewayServers,
+  withRuntimePaseoMcpServer,
+} from "./runtime-mcp-config.js";
 
 const BASE_CONFIG: AgentSessionConfig = {
   provider: "claude",
@@ -47,5 +54,214 @@ describe("withRuntimePaseoMcpServer", () => {
     });
 
     expect(result.mcpServers).toBeUndefined();
+  });
+});
+
+describe("withRuntimeMcpGatewayServers", () => {
+  test("injects brokered entries with a bearer header and flips the gateway-enabled flag", () => {
+    const result = withRuntimeMcpGatewayServers({
+      config: BASE_CONFIG,
+      enabled: true,
+      gatewayBaseUrl: "http://127.0.0.1:6767",
+      serverNames: ["github", "zeeq"],
+      gatewayAuthToken: "gw-token",
+    });
+
+    expect(result.mcpGatewayEnabled).toBe(true);
+    // Overlay is the default mode — see docs/mcp-gateway.md "Session injection".
+    expect(result.mcpGatewaySessionMode).toBe("overlay");
+    expect(result.mcpServers).toEqual({
+      github: {
+        type: "http",
+        url: "http://127.0.0.1:6767/mcp/gateway/github",
+        headers: { Authorization: "Bearer gw-token" },
+      },
+      zeeq: {
+        type: "http",
+        url: "http://127.0.0.1:6767/mcp/gateway/zeeq",
+        headers: { Authorization: "Bearer gw-token" },
+      },
+    });
+  });
+
+  test("passes an explicit strict session mode through to the launch config", () => {
+    const result = withRuntimeMcpGatewayServers({
+      config: BASE_CONFIG,
+      enabled: true,
+      gatewayBaseUrl: "http://127.0.0.1:6767",
+      serverNames: ["github"],
+      gatewayAuthToken: "gw-token",
+      sessionMode: "strict",
+    });
+
+    expect(result.mcpGatewaySessionMode).toBe("strict");
+  });
+
+  test("omits the header when no gateway token is available", () => {
+    const result = withRuntimeMcpGatewayServers({
+      config: BASE_CONFIG,
+      enabled: true,
+      gatewayBaseUrl: "http://127.0.0.1:6767",
+      serverNames: ["github"],
+      gatewayAuthToken: null,
+    });
+
+    expect(result.mcpServers?.github).toEqual({
+      type: "http",
+      url: "http://127.0.0.1:6767/mcp/gateway/github",
+    });
+  });
+
+  test("does not inject and does not flip the flag when disabled (R10 byte-identical)", () => {
+    const result = withRuntimeMcpGatewayServers({
+      config: BASE_CONFIG,
+      enabled: false,
+      gatewayBaseUrl: "http://127.0.0.1:6767",
+      serverNames: ["github"],
+      gatewayAuthToken: "gw-token",
+    });
+
+    expect(result).toEqual(BASE_CONFIG);
+  });
+
+  test("does not inject when the gateway's base URL isn't known yet", () => {
+    const result = withRuntimeMcpGatewayServers({
+      config: BASE_CONFIG,
+      enabled: true,
+      gatewayBaseUrl: null,
+      serverNames: ["github"],
+      gatewayAuthToken: "gw-token",
+    });
+
+    expect(result).toEqual(BASE_CONFIG);
+  });
+
+  test("stored config wins on name collision with a brokered entry", () => {
+    const configWithOverride: AgentSessionConfig = {
+      ...BASE_CONFIG,
+      mcpServers: {
+        github: { type: "stdio", command: "my-local-github-shim" },
+      },
+    };
+
+    const result = withRuntimeMcpGatewayServers({
+      config: configWithOverride,
+      enabled: true,
+      gatewayBaseUrl: "http://127.0.0.1:6767",
+      serverNames: ["github"],
+      gatewayAuthToken: "gw-token",
+    });
+
+    expect(result.mcpServers?.github).toEqual({
+      type: "stdio",
+      command: "my-local-github-shim",
+    });
+  });
+
+  test("strips a previously-injected brokered entry from the input before re-injecting", () => {
+    const configWithStaleEntry: AgentSessionConfig = {
+      ...BASE_CONFIG,
+      mcpServers: {
+        stale: {
+          type: "http",
+          url: "http://127.0.0.1:6767/mcp/gateway/stale",
+          headers: { Authorization: "Bearer old-token" },
+        },
+      },
+    };
+
+    const result = withRuntimeMcpGatewayServers({
+      config: configWithStaleEntry,
+      enabled: true,
+      gatewayBaseUrl: "http://127.0.0.1:6767",
+      serverNames: ["github"],
+      gatewayAuthToken: "gw-token",
+    });
+
+    expect(result.mcpServers?.stale).toBeUndefined();
+    expect(result.mcpServers?.github).toBeDefined();
+  });
+});
+
+describe("stripMcpGatewayServers", () => {
+  test("removes brokered http entries and the gateway-enabled flag", () => {
+    const config: AgentSessionConfig = {
+      ...BASE_CONFIG,
+      mcpGatewayEnabled: true,
+      mcpGatewaySessionMode: "strict",
+      mcpServers: {
+        github: {
+          type: "http",
+          url: "http://127.0.0.1:6767/mcp/gateway/github",
+          headers: { Authorization: "Bearer gw-token" },
+        },
+        keep: { type: "stdio", command: "local-tool" },
+      },
+    };
+
+    const result = stripMcpGatewayServers(config);
+
+    expect(result.mcpGatewayEnabled).toBeUndefined();
+    expect(result.mcpGatewaySessionMode).toBeUndefined();
+    expect(result.mcpServers).toEqual({ keep: { type: "stdio", command: "local-tool" } });
+  });
+
+  test("drops mcpServers entirely when nothing remains", () => {
+    const config: AgentSessionConfig = {
+      ...BASE_CONFIG,
+      mcpServers: {
+        github: { type: "http", url: "http://127.0.0.1:6767/mcp/gateway/github" },
+      },
+    };
+
+    const result = stripMcpGatewayServers(config);
+
+    expect(result.mcpServers).toBeUndefined();
+  });
+
+  test("leaves a config with no gateway entries untouched", () => {
+    const config: AgentSessionConfig = {
+      ...BASE_CONFIG,
+      mcpServers: { keep: { type: "stdio", command: "local-tool" } },
+    };
+
+    expect(stripMcpGatewayServers(config)).toEqual(config);
+  });
+});
+
+describe("scopeMcpGatewayServerNames", () => {
+  const names = ["zeeq", "github", "linear", "agent-gateway"];
+
+  test("keeps every server when the agent carries no scope, as agents spawned before scoping do", () => {
+    expect(scopeMcpGatewayServerNames(names, undefined)).toEqual(names);
+    expect(scopeMcpGatewayServerNames(names, { other: "x" })).toEqual(names);
+  });
+
+  test("keeps only the recorded servers, in gateway order", () => {
+    expect(
+      scopeMcpGatewayServerNames(names, { [MCP_SCOPE_LABEL]: "linear, zeeq,claude.ai" }),
+    ).toEqual(["zeeq", "linear"]);
+  });
+
+  test("keeps none for an empty scope", () => {
+    expect(scopeMcpGatewayServerNames(names, { [MCP_SCOPE_LABEL]: "none" })).toEqual([]);
+  });
+});
+
+describe("claudeAiConnectorsInScope", () => {
+  test("keeps the connectors without a scope, and when the scope names claude.ai", () => {
+    expect(claudeAiConnectorsInScope(undefined)).toBe(true);
+    expect(claudeAiConnectorsInScope({ [MCP_SCOPE_LABEL]: "zeeq, claude.ai" })).toBe(true);
+  });
+
+  test("drops them for a scope that leaves them out", () => {
+    expect(claudeAiConnectorsInScope({ [MCP_SCOPE_LABEL]: "zeeq" })).toBe(false);
+    expect(claudeAiConnectorsInScope({ [MCP_SCOPE_LABEL]: "none" })).toBe(false);
+  });
+
+  test("the runtime-only connector switch is stripped before storage", () => {
+    expect(
+      stripMcpGatewayServers({ ...BASE_CONFIG, claudeAiConnectorsDisabled: true }),
+    ).not.toHaveProperty("claudeAiConnectorsDisabled");
   });
 });

@@ -41,6 +41,12 @@ async function resolveToken(serverId: string): Promise<string | null> {
       name: "default",
       importance: Notifications.AndroidImportance.DEFAULT,
     });
+    // Notices, digests and anything sent while focus or away is on. The daemon names this channel
+    // (server push/push-service.ts QUIET_CHANNEL_ID) so they post without a sound.
+    await Notifications.setNotificationChannelAsync("quiet", {
+      name: "Quiet",
+      importance: Notifications.AndroidImportance.LOW,
+    });
   }
 
   const projectId = getExpoProjectId();

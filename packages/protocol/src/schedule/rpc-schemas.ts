@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ScheduleConditionSchema } from "./condition.js";
 import {
   ScheduleCadenceSchema,
   ScheduleRunSchema,
@@ -34,6 +35,10 @@ export const ScheduleCreateRequestSchema = z.object({
   maxRuns: z.number().int().positive().optional(),
   expiresAt: z.string().optional(),
   runOnCreate: z.boolean().optional(),
+  condition: ScheduleConditionSchema.optional(),
+  /** Set by a CLI run under `PASEO_AGENT_ID`, mirroring `create_agent_request.callerAgentId`.
+   * Absent for the app/desktop client, which has no agent identity of its own. */
+  callerAgentId: z.string().optional(),
 });
 
 export const ScheduleListRequestSchema = z.object({
@@ -97,6 +102,10 @@ export const ScheduleUpdateRequestSchema = z.object({
   newAgentConfig: ScheduleUpdateNewAgentConfigSchema.optional(),
   maxRuns: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().nullable().optional(),
+  condition: ScheduleConditionSchema.nullable().optional(),
+  /** Set by a CLI run under `PASEO_AGENT_ID`, mirroring `schedule/create`'s own `callerAgentId`.
+   * Absent for the app/desktop client, which has no agent identity of its own. */
+  callerAgentId: z.string().optional(),
 });
 
 export const ScheduleCreateResponseSchema = z.object({

@@ -718,6 +718,16 @@ The built-in `claude` provider appends concrete model IDs from `~/.claude/settin
 
 This lets users who already configured Claude Code for Bedrock, OpenRouter, ollama, Z.AI, or another Anthropic-compatible gateway select the exact model ID in Paseo. Explicit model IDs are passed unchanged to Claude Code, even when the same string is a compatibility alias for a built-in model. When `agents.providers.claude.models` is set it **replaces** both the hardcoded first-party Claude list and any settings.json-discovered entries; use `agents.providers.claude.additionalModels` to keep the first-party list and append curated entries on top.
 
+### Claude `params`: shared system-prompt cache
+
+| Key                      | Default | Effect                                                                                                                                                                                                                            |
+| ------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `excludeDynamicSections` | `true`  | Passes the SDK's `excludeDynamicSections` on the `claude_code` preset. Working directory, platform, shell and git status leave the system prompt and arrive in the first user message, so agents in different worktrees share it. |
+
+`params` is read once when the provider client is built. A malformed value is logged and the default applies; the launch is not blocked. Other keys in the same object (the account pool's `accountPool`) are left alone. A derived provider (`extends: "claude"`) with its own `params` replaces the base provider's `params`, so it needs its own `excludeDynamicSections` if it should differ from the default.
+
+Sharing needs more than the flag. The cache is ordered tools, then system, then messages, so two agents share a system-prompt prefix only when their tool lists match, and only while nothing per-agent sits in `append` (the agent's `systemPrompt`, `daemon.appendSystemPrompt`, the tool-profile notice). The model still knows its directory; it reads it from the first user message, slightly less authoritative than from the system prompt. Measured numbers are in [token-audit.md](token-audit.md#shared-system-prompt-cache).
+
 ### Gotcha: `extends: "claude"` with third-party endpoints
 
 When a custom provider extends `"claude"` but points `ANTHROPIC_BASE_URL` at a non-Anthropic API (Z.AI, Alibaba/Qwen, proxies), the Claude Agent SDK may try to use Anthropic-only server-side tools like `WebSearch`. Third-party APIs don't support these tools, causing errors.

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { buildNotificationRoute, resolveNotificationTarget } from "./notification-routing";
+import {
+  buildNotificationRoute,
+  resolveNotificationTapAction,
+  resolveNotificationTarget,
+} from "./notification-routing";
 
 describe("resolveNotificationTarget", () => {
   it("extracts non-empty server and agent ids", () => {
@@ -100,5 +104,61 @@ describe("buildNotificationRoute", () => {
         agentId: "agent with space",
       }),
     ).toBe("/h/srv%2Fwith%2Fslash/workspace/workspace-1?open=agent%3Aagent%20with%20space");
+  });
+});
+
+describe("resolveNotificationTapAction", () => {
+  const sharedBuild = {
+    serverId: "srv-1",
+    agentId: "agent-1",
+    workspaceId: "ws-main",
+    externalUrl: "https://shares.example.com/b/AAAAAAAAAAAAAAAAAAAAAA/app-debug.apk",
+  };
+
+  it("opens an https externalUrl outside the app instead of routing", () => {
+    expect(resolveNotificationTapAction(sharedBuild)).toEqual({
+      kind: "open-external",
+      url: "https://shares.example.com/b/AAAAAAAAAAAAAAAAAAAAAA/app-debug.apk",
+    });
+  });
+
+  it("ignores an externalUrl that isn't https and routes as before", () => {
+    for (const externalUrl of [
+      "http://shares.example.com/app.apk",
+      "itms-services://?action=download-manifest&url=x",
+      "javascript:alert(1)",
+      "not a url",
+      42,
+    ]) {
+      expect(resolveNotificationTapAction({ ...sharedBuild, externalUrl })).toEqual({
+        kind: "open-agent",
+        serverId: "srv-1",
+        workspaceId: "ws-main",
+        agentId: "agent-1",
+      });
+    }
+  });
+
+  it("opens the agent for an agent notification", () => {
+    expect(
+      resolveNotificationTapAction({
+        serverId: "srv-1",
+        agentId: "agent-1",
+        workspaceId: "ws-main",
+      }),
+    ).toEqual({
+      kind: "open-agent",
+      serverId: "srv-1",
+      workspaceId: "ws-main",
+      agentId: "agent-1",
+    });
+  });
+
+  it("navigates to the notification route otherwise", () => {
+    expect(resolveNotificationTapAction({ serverId: "srv-only" })).toEqual({
+      kind: "navigate",
+      route: "/h/srv-only",
+    });
+    expect(resolveNotificationTapAction(undefined)).toEqual({ kind: "navigate", route: "/" });
   });
 });

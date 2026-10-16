@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  attentionPushLevel,
   computeNotificationPlan,
   isPushEligibleAttentionReason,
   type ClientPresenceState,
@@ -230,5 +231,15 @@ describe("isPushEligibleAttentionReason", () => {
     expect(isPushEligibleAttentionReason("finished")).toBe(true);
     expect(isPushEligibleAttentionReason("permission")).toBe(true);
     expect(isPushEligibleAttentionReason("error")).toBe(false);
+  });
+});
+
+describe("attentionPushLevel", () => {
+  it("makes every finish a notice, root agents included", () => {
+    expect(attentionPushLevel("finished")).toBe("notice");
+  });
+
+  it("keeps a permission request an alert", () => {
+    expect(attentionPushLevel("permission")).toBe("alert");
   });
 });

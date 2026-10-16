@@ -102,6 +102,10 @@ export function createAgentCommand(): Command {
       .option("--name <name>", "Update the agent's display name")
       .option("--thinking <id>", "Update the agent's thinking option ID")
       .option(
+        "--provider <id>",
+        "Move the agent onto another provider, keeping its id and conversation",
+      )
+      .option(
         "--label <label>",
         "Add/set label(s) on the agent (can be used multiple times or comma-separated)",
         collectMultiple,

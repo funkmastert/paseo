@@ -123,7 +123,10 @@ reads directory rows for that host and establishes its live subscription when co
 cached rows satisfy the same consumer-readiness projection as network rows. Host registry startup and
 host connection do not create directory demand or install replicas. The directory owner retains
 declared surface demand and re-establishes network reconciliation after reconnect; React does not
-track connection generations. Late cache reads cannot replace state already advanced by live or
+track connection generations. A surface that reads directory rows therefore has to declare its own
+demand: the daemon streams updates only to a session that subscribed, and a reconnect with no
+declared holder leaves the new session with no subscription, so the surface renders its
+pre-disconnect replica indefinitely and silently. Late cache reads cannot replace state already advanced by live or
 authoritative network data. Owners explicitly persist accepted commits; directory rows and their
 checkpoint share one storage transaction. See
 [data-model.md](data-model.md#replica-row-store)

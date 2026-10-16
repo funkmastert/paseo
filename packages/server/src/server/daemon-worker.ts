@@ -1,4 +1,5 @@
 import { appendFileSync, mkdirSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createPaseoDaemon } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
@@ -6,6 +7,12 @@ import { resolvePaseoHome } from "./paseo-home.js";
 import { createRootLogger } from "./logger.js";
 import type { DaemonLifecycleIntent } from "./bootstrap.js";
 import { getProcessDiagnostics } from "./process-diagnostics.js";
+import {
+  consumePreviousShutdownReceipt,
+  ShutdownRecorder,
+} from "./daemon-vitals/shutdown-receipt.js";
+import { readDaemonVitals } from "./daemon-vitals/vitals-file.js";
+import { describePreviousShutdown } from "./daemon-vitals/shutdown-reason.js";
 
 process.title = "Paseo Daemon";
 
@@ -135,6 +142,58 @@ async function main() {
 
   applyCliFlagOverrides(config);
 
+  // On unless config says otherwise, and read before the daemon exists: the receipt is the one
+  // thing that must still be written when the daemon object never came up. See
+  // docs/daemon-vitals.md.
+  const receiptEnabled = config.daemonVitals?.shutdownReceipt !== false;
+  let shutdownRecorder: ShutdownRecorder | null = null;
+  // Read before daemon vitals starts and overwrites the heartbeat file: it is the only cheap way
+  // to tell "no receipt because the Mac rebooted" from "no receipt because it crashed hard".
+  let previousShutdownInfo = describePreviousShutdown({
+    previous: { status: "none" },
+    systemBootAt: null,
+    lastHeartbeatAt: null,
+  });
+  if (receiptEnabled) {
+    const previous = consumePreviousShutdownReceipt(paseoHome);
+    if (previous.status === "receipt") {
+      logger.info(
+        {
+          outcome: previous.receipt.outcome,
+          reason: previous.receipt.reason,
+          phase: previous.receipt.phase,
+          previousPid: previous.receipt.pid,
+          completedAt: previous.receipt.completedAt,
+        },
+        "Previous daemon run left a shutdown receipt",
+      );
+    } else if (previous.status === "unreadable") {
+      logger.warn({ error: previous.error }, "Previous daemon shutdown receipt was unreadable");
+    } else {
+      logger.info(
+        {},
+        "Previous daemon run left no shutdown receipt (killed, crashed hard, or first run)",
+      );
+    }
+    const vitals = readDaemonVitals(paseoHome);
+    previousShutdownInfo = describePreviousShutdown({
+      previous,
+      systemBootAt: new Date(Date.now() - os.uptime() * 1000),
+      lastHeartbeatAt: vitals.status === "ok" ? new Date(vitals.file.updatedAtMs) : null,
+    });
+  }
+
+  const writeReceipt = (
+    recorder: ShutdownRecorder,
+    outcome: "clean" | "failed" | "timed-out" | "crashed",
+    exitCode: number,
+  ) => {
+    const { writeError } = recorder.finish({ outcome, exitCode });
+    if (writeError) {
+      logger.error({ err: writeError }, "Could not write the daemon shutdown receipt");
+    }
+  };
+
   const installExitHook = () => {
     if (exitHookInstalled || !shutdownPromise) {
       return;
@@ -159,28 +218,45 @@ async function main() {
         `${signal} received, shutting down gracefully...`,
       );
 
+      const recorder = receiptEnabled ? new ShutdownRecorder({ paseoHome, reason, signal }) : null;
+      shutdownRecorder = recorder;
       shutdownPromise = (async () => {
         const forceExit = setTimeout(() => {
           logger.warn(
             { signal, reason, ...getProcessDiagnostics() },
             "Forcing shutdown - HTTP server didn't close in time",
           );
+          if (recorder) {
+            recorder.fail(new Error(`shutdown budget of ${recorder.budgetMs}ms exhausted`));
+            writeReceipt(recorder, "timed-out", 1);
+          }
           process.exit(1);
-        }, 10000);
+        }, recorder?.budgetMs ?? 10000);
 
         try {
           if (!daemon) {
             logger.error("Shutdown requested before daemon initialization completed");
             clearTimeout(forceExit);
+            if (recorder) {
+              recorder.fail(new Error("shutdown requested before daemon initialization completed"));
+              writeReceipt(recorder, "failed", 1);
+            }
             return 1;
           }
+          recorder?.enter("daemon-stop");
           await daemon.stop();
           clearTimeout(forceExit);
           logger.info("Server closed");
-          return options?.successExitCode ?? 0;
+          const exitCode = options?.successExitCode ?? 0;
+          if (recorder) writeReceipt(recorder, "clean", exitCode);
+          return exitCode;
         } catch (err) {
           clearTimeout(forceExit);
           logger.error({ err }, "Shutdown failed");
+          if (recorder) {
+            recorder.fail(err);
+            writeReceipt(recorder, "failed", 1);
+          }
           return 1;
         }
       })();
@@ -311,6 +387,7 @@ async function main() {
     daemon = await createPaseoDaemon(
       {
         ...config,
+        previousShutdownInfo,
         onLifecycleIntent: handleLifecycleIntent,
       },
       logger,
@@ -339,13 +416,25 @@ async function main() {
   process.on("SIGTERM", () => beginShutdown("SIGTERM"));
   process.on("SIGINT", () => beginShutdown("SIGINT"));
 
+  // A crash is a different receipt from a stop. If a shutdown already decided its outcome the
+  // recorder ignores this one, so a fault during shutdown cannot rewrite it.
+  const writeCrashReceipt = (reason: string, err: unknown) => {
+    if (!receiptEnabled) return;
+    const recorder = shutdownRecorder ?? new ShutdownRecorder({ paseoHome, reason, signal: null });
+    recorder.enter("running");
+    recorder.fail(err);
+    writeReceipt(recorder, "crashed", 1);
+  };
+
   process.on("uncaughtException", (err) => {
     logger.fatal({ err }, "Uncaught exception — daemon crashing");
+    writeCrashReceipt("uncaught_exception", err);
     exitAfterPinoFlush();
   });
 
   process.on("unhandledRejection", (reason) => {
     logger.fatal({ err: reason }, "Unhandled promise rejection — daemon crashing");
+    writeCrashReceipt("unhandled_rejection", reason);
     exitAfterPinoFlush();
   });
 }

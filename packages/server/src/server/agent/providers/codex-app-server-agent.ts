@@ -38,6 +38,7 @@ import {
   type ProviderRefreshContext,
   type ResolveAgentDefaultModeInput,
 } from "../agent-sdk-types.js";
+import { weighTokenUsage } from "../token-rate-tracker.js";
 import { importSessionFromPersistence } from "../provider-session-import.js";
 import { runProviderRefreshActivity } from "../provider-refresh-deadline.js";
 import type { Logger } from "pino";
@@ -49,6 +50,21 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import {
+  evaluateDeviceLaunchApproval,
+  explainDeviceLaunchRefusal,
+} from "../device-launch-approval.js";
+import type { DeviceLaunchGate } from "../device-lease-manager.js";
+import {
+  decideCodexGuardedCommand,
+  describeGuardedSensitiveFileChangePath,
+  resolveGuardedFileChangePath,
+} from "../codex-guard.js";
+import {
+  getCodexGuardHealthState,
+  recheckCodexGuardCommandItem,
+  setCodexGuardHealthState,
+} from "../codex-guard-health.js";
 import { renderPromptAttachmentAsText } from "../prompt-attachments.js";
 import { composeSystemPromptParts } from "../system-prompt.js";
 import { curateAgentActivity } from "../activity-curator.js";
@@ -210,6 +226,11 @@ function formatOutOfBandStatusMessage(text: string): string {
   return `${text.replace(/\n+$/u, "")}\n\n`;
 }
 
+/** Backstop cap on guardedFileChangePathsByItemId (review finding #6): eviction on completion
+ * keeps this bounded in the normal case, but a completion notification that never arrives for
+ * some entry must not grow the map for a session's whole lifetime either. */
+const MAX_GUARDED_FILE_CHANGE_PATHS_ENTRIES = 500;
+
 const CODEX_APP_SERVER_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
   supportsSessionPersistence: true,
@@ -254,6 +275,13 @@ interface CodexAppServerClientLike {
 
 interface CodexAppServerAgentDeps {
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
+  /**
+   * The device cap's launch gate (docs/device-leases.md). Codex has no hook, so the strongest
+   * thing available is its own command-approval request — which Full Access never sends.
+   */
+  deviceLaunchGate?: DeviceLaunchGate;
+  /** Guarded mode's kill switch (docs/catastrophe-gate.md, "Turning it off"). Defaults to on. */
+  isCatastropheGateEnabled?: () => boolean;
   customProvider?: {
     id: string;
     label: string;
@@ -270,13 +298,13 @@ interface CodexAppServerAgentDeps {
   ) => Promise<{ commandName: string; args?: string } | null>;
 }
 
-interface CodexModePreset {
+export interface CodexModePreset {
   approvalPolicy: string;
   sandbox: string;
-  approvalsReviewer?: "auto_review";
+  approvalsReviewer?: "auto_review" | "user";
 }
 
-const MODE_PRESETS: Record<string, CodexModePreset> = {
+export const MODE_PRESETS: Record<string, CodexModePreset> = {
   "read-only": {
     approvalPolicy: "on-request",
     sandbox: "read-only",
@@ -284,6 +312,21 @@ const MODE_PRESETS: Record<string, CodexModePreset> = {
   auto: {
     approvalPolicy: "on-request",
     sandbox: "workspace-write",
+  },
+  // Daemon-launched Codex children only (never offered in CODEX_MODES). Same values as `auto` --
+  // `danger-full-access` never needs escalation so nothing is ever asked, and `untrusted` was
+  // removed in Codex 0.160 ("no longer supported"). `workspace-write` + `on-request` is the one
+  // combination proven to still raise item/commandExecution/requestApproval, which the guarded
+  // approval handler answers in-process instead of surfacing it to a person (docs/codex-workers.md).
+  // `approvalsReviewer: "user"` (review finding #2, confirmed against codex-cli 0.160.0's own
+  // `app-server generate-json-schema` output: `ApprovalsReviewer` accepts "user" on both
+  // ThreadStartParams and TurnStartParams, default "user") is sent explicitly rather than relying
+  // on that default, so a host whose own `~/.codex/config.toml` sets `auto_review` globally
+  // doesn't silently route a guarded session's approvals through it.
+  guarded: {
+    approvalPolicy: "on-request",
+    sandbox: "workspace-write",
+    approvalsReviewer: "user",
   },
   "auto-review": {
     approvalPolicy: "on-request",
@@ -508,9 +551,35 @@ export async function findCodexMicrosoftStoreBinary(): Promise<string | null> {
   return null;
 }
 
+export function codexChatGptBundleCandidates(): string[] {
+  const candidates: string[] = [];
+
+  if (process.platform === "darwin") {
+    const binaryPath = "Contents/Resources/codex-cli/bin/codex";
+    candidates.push(path.join("/Applications", "ChatGPT.app", binaryPath));
+    candidates.push(path.join(os.homedir(), "Applications", "ChatGPT.app", binaryPath));
+  }
+
+  return candidates;
+}
+
+export async function findCodexChatGptBundleBinary(): Promise<string | null> {
+  for (const candidate of codexChatGptBundleCandidates()) {
+    if (await probeExecutable(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 export async function findDefaultCodexBinary(): Promise<string | null> {
   const pathBinary = await findExecutable("codex");
   if (pathBinary) return pathBinary;
+
+  const bundleBinary = await findCodexChatGptBundleBinary();
+  if (bundleBinary) return bundleBinary;
+
   return await findCodexMicrosoftStoreBinary();
 }
 
@@ -521,8 +590,14 @@ async function resolveCodexLaunchPrefix(runtimeSettings?: ProviderRuntimeSetting
   const launch = await resolveCodexLaunch(runtimeSettings);
   const availability = await checkCodexLaunchAvailable(launch);
   if (!availability.available) {
+    const locations = [
+      "your shell PATH",
+      "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+      "~/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+      "Microsoft Store (Windows only)",
+    ];
     throw new Error(
-      "Codex binary not found. Install the Codex CLI (https://github.com/openai/codex) and ensure it is available in your shell PATH.",
+      `Codex binary not found. Searched: ${locations.join("; ")}. Configure agents.providers.codex.command in your config or install the ChatGPT app.`,
     );
   }
   return {
@@ -931,6 +1006,30 @@ function filterCodexThreadsByCwd(
   );
 }
 
+/**
+ * Per-turn token delta for the burn-rate tracker (input + output + cached-read). Codex's
+ * `thread/tokenUsage/updated` notification carries `last` — the last exchange's own usage, not
+ * a session-cumulative total (unlike OpenCode/ACP) — so this just sums the fields already
+ * extracted by `toAgentUsage`, mirroring the Claude adapter's `buildTurnTokenDelta`.
+ */
+export function buildCodexTurnTokenDelta(usage: AgentUsage | undefined): number | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  // Codex reports `cachedInputTokens` as a SUBSET of `inputTokens` (codex-rs's
+  // TokenUsage::non_cached_input is input − cached; total_tokens = input + output), unlike
+  // Anthropic, where cache reads sit outside input_tokens. Split before weighting, or every
+  // cached token counts once at full price and again at the cache rate.
+  const inputTokens = usage.inputTokens ?? 0;
+  const cachedInputTokens = Math.min(usage.cachedInputTokens ?? 0, inputTokens);
+  const total = weighTokenUsage({
+    inputTokens: inputTokens - cachedInputTokens,
+    cacheReadInputTokens: cachedInputTokens,
+    outputTokens: usage.outputTokens,
+  });
+  return total > 0 ? total : undefined;
+}
+
 export function toAgentUsage(tokenUsage: unknown): AgentUsage | undefined {
   const usage = toObjectRecord(tokenUsage);
   if (!usage) return undefined;
@@ -1256,6 +1355,11 @@ interface CodexPatchFileChange {
   path: string;
   kind?: string;
   content?: string;
+  /** A rename/move's destination (review finding #2, round 3): the real Codex app-server
+   * protocol reports a rename's `kind` as an object, `{type: "update", move_path: "<dest>"}`,
+   * not a bare string -- moving notes.md into .git/hooks/post-checkout is otherwise checked
+   * against notes.md's own (harmless) path, never against where it actually lands. */
+  movePath?: string;
 }
 
 function extractPatchLikeText(value: unknown): string | undefined {
@@ -1351,6 +1455,55 @@ function normalizeCodexCommandValue(value: unknown): string | string[] | null {
   return parts;
 }
 
+/**
+ * `record.kind` is either a bare string (`"add"`/`"delete"`/...), or -- for a rename, per the
+ * real app-server protocol -- an object `{type: "update", move_path: "<dest>" | null}`. Only the
+ * object form carries a destination at all; a bare-string `kind` (or none) never does.
+ */
+function extractMovePath(record: Record<string, unknown>): string | undefined {
+  const raw = record.move_path ?? record.movePath;
+  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : undefined;
+}
+
+/**
+ * A rename's destination shows up in at least four different shapes across the two notification
+ * channels (review finding #2 round 3, finding #1 round 4):
+ *  - `kind: {type: "update", move_path: "<dest>"}` -- the object-shaped `kind` the modern
+ *    item/started array/single-record change forms use.
+ *  - `kind: "update"` (bare string) with no move info -- the common non-rename case.
+ *  - `{type: "update", move_path: "<dest>"}` -- move_path as a sibling of `type` at the TOP
+ *    level, not nested under `kind` at all. This is the real shape of an entry's VALUE in the
+ *    legacy patch_apply_begin channel's path-keyed map.
+ *  - `{update: {move_path: "<dest>"}}` -- an older form of the same map-entry value, where the
+ *    type name is itself the key wrapping an object that carries move_path, with no "type" or
+ *    "kind" field anywhere else on the entry.
+ * Checked in that order; the first shape that resolves wins.
+ */
+function resolveKindAndMovePath(record: Record<string, unknown>): {
+  kind: string | undefined;
+  movePath: string | undefined;
+} {
+  const kindRecord = toObjectRecord(record.kind);
+  if (kindRecord) {
+    const kind = typeof kindRecord.type === "string" ? kindRecord.type : undefined;
+    return { kind, movePath: extractMovePath(kindRecord) ?? extractMovePath(record) };
+  }
+  if (typeof record.kind === "string") {
+    return { kind: record.kind, movePath: extractMovePath(record) };
+  }
+  if (typeof record.type === "string") {
+    return { kind: record.type, movePath: extractMovePath(record) };
+  }
+  for (const [key, value] of Object.entries(record)) {
+    const nested = toObjectRecord(value);
+    const movePath = nested ? extractMovePath(nested) : undefined;
+    if (movePath) {
+      return { kind: key, movePath };
+    }
+  }
+  return { kind: undefined, movePath: undefined };
+}
+
 function parseCodexPatchChanges(changes: unknown): CodexPatchFileChange[] {
   const resolvePathFromRecord = (record: Record<string, unknown>): string => {
     const directPath =
@@ -1381,14 +1534,8 @@ function parseCodexPatchChanges(changes: unknown): CodexPatchFileChange[] {
         if (!pathValue) {
           return null;
         }
-        return {
-          path: pathValue,
-          kind:
-            (typeof record.kind === "string" && record.kind) ||
-            (typeof record.type === "string" && record.type) ||
-            undefined,
-          content: extractPatchLikeText(record),
-        };
+        const { kind, movePath } = resolveKindAndMovePath(record);
+        return { path: pathValue, kind, movePath, content: extractPatchLikeText(record) };
       })
       .filter((entry): entry is CodexPatchFileChange => entry !== null);
   }
@@ -1399,15 +1546,9 @@ function parseCodexPatchChanges(changes: unknown): CodexPatchFileChange[] {
   }
   const directPathValue = resolvePathFromRecord(recordChanges);
   if (directPathValue) {
+    const { kind, movePath } = resolveKindAndMovePath(recordChanges);
     return [
-      {
-        path: directPathValue,
-        kind:
-          (typeof recordChanges.kind === "string" && recordChanges.kind) ||
-          (typeof recordChanges.type === "string" && recordChanges.type) ||
-          undefined,
-        content: extractPatchLikeText(recordChanges),
-      },
+      { path: directPathValue, kind, movePath, content: extractPatchLikeText(recordChanges) },
     ];
   }
 
@@ -1417,16 +1558,11 @@ function parseCodexPatchChanges(changes: unknown): CodexPatchFileChange[] {
       if (!normalizedPath) {
         return null;
       }
-      return {
-        path: normalizedPath,
-        kind:
-          value &&
-          typeof value === "object" &&
-          typeof (value as { type?: unknown }).type === "string"
-            ? ((value as { type?: string }).type ?? undefined)
-            : undefined,
-        content: extractPatchLikeText(value),
-      };
+      const valueRecord = toObjectRecord(value);
+      const { kind, movePath } = valueRecord
+        ? resolveKindAndMovePath(valueRecord)
+        : { kind: undefined, movePath: undefined };
+      return { path: normalizedPath, kind, movePath, content: extractPatchLikeText(value) };
     })
     .filter((entry): entry is CodexPatchFileChange => entry !== null);
 }
@@ -3303,6 +3439,11 @@ export class CodexAppServerAgentSession implements AgentSession {
   private currentMode: string;
   private hasWorkflowModeOverride: boolean;
   private readonly providerOptions: CodexProviderOptions;
+  /** Logged once per session, not once per call site, when guardedProviderOptions() strips something. */
+  private loggedGuardedProviderOptionsOverride = false;
+  /** Logged once per session (review finding #1), when a guarded turn's sandboxPolicy would
+   * otherwise have carried the host's own networkAccess: true through to Codex. */
+  private loggedGuardedNetworkAccessOverride = false;
   private resolvedWorkspaceWrite: NonNullable<
     CodexProviderOptions["sandbox_workspace_write"]
   > | null = null;
@@ -3349,6 +3490,18 @@ export class CodexAppServerAgentSession implements AgentSession {
   private emittedTerminalInteractionKeys = new Set<string>();
   private emittedExecCommandStartedCallIds = new Set<string>();
   private emittedExecCommandCompletedCallIds = new Set<string>();
+  /** Guard health's live detection (docs/catastrophe-gate.md, KTD-6): item ids that raised
+   * item/commandExecution/requestApproval in guarded mode, so a completed item with none can be
+   * told apart from one the real-time gate already answered. */
+  private guardedApprovalSeenItemIds = new Set<string>();
+  /** The `item/fileChange/requestApproval` request carries no path info of its own (confirmed
+   * against the real app-server protocol) -- the touched paths arrive earlier, on the
+   * `item/started` notification for the same item id. Guarded mode needs them at approval time
+   * to decline a write to a sensitive path (docs/catastrophe-gate.md's git-alias blind spot).
+   * Most entries are written and never read back, since an in-workspace write never raises an
+   * approval request at all -- evicted on the item's completion (or once its approval resolves)
+   * and capped (review finding #6) rather than left to grow for a session's whole lifetime. */
+  private guardedFileChangePathsByItemId = new Map<string, string[]>();
   private emittedItemStartedIds = new Set<string>();
   private emittedItemCompletedIds = new Set<string>();
   private emittedProviderSubagentUserMessageKeys = new Set<string>();
@@ -3359,6 +3512,14 @@ export class CodexAppServerAgentSession implements AgentSession {
   private warnedInvalidNotificationPayloads = new Set<string>();
   private warnedIncompleteEditToolCallIds = new Set<string>();
   private latestUsage: AgentUsage | undefined;
+  /**
+   * The most recent `thread/tokenUsage/updated` usage, consumed exactly once by the next
+   * `turn_completed` to feed the token-rate tracker. `usage.last` is already scoped to the last
+   * exchange (not a session-cumulative total), so no diffing is needed here, unlike OpenCode/ACP
+   * — but unlike `latestUsage` it must be cleared after each turn so a turn with no new usage
+   * notification doesn't re-report the previous turn's tokens as its own.
+   */
+  private pendingTurnTokenUsage: AgentUsage | undefined;
   private latestPlanResult: { callId: string; text: string; turnId: string | null } | null = null;
   private readonly userMessageTurnIndexes = new Map<string, number>();
   private readonly userMessageTurnIds: string[] = [];
@@ -4059,32 +4220,115 @@ export class CodexAppServerAgentSession implements AgentSession {
     };
   }
 
+  /**
+   * `this.providerOptions` with `approval_policy`/`sandbox_mode`/`sandbox_workspace_write`
+   * stripped whenever this session is in guarded mode (docs/catastrophe-gate.md, KTD-5): the
+   * daemon's preset is the one invariant a caller must never be able to override. Unguarded,
+   * those three fields leak straight through to Codex -- `approval_policy: "never"` or
+   * `sandbox_mode: "danger-full-access"` would mean Codex never raises a single approval
+   * request, so `checkCatastrophe` and the device gate never run at all. Every read of these
+   * three fields for a policy decision goes through this, never `this.providerOptions` directly.
+   * Checked dynamically (not sanitized once at construction) because `setMode("guarded")` can
+   * switch a session into guarded mode after it was created.
+   */
+  private guardedProviderOptions(): CodexProviderOptions {
+    if (this.currentMode !== "guarded") {
+      return this.providerOptions;
+    }
+    const { approval_policy, sandbox_mode, sandbox_workspace_write, ...safe } =
+      this.providerOptions;
+    if (
+      (approval_policy !== undefined ||
+        sandbox_mode !== undefined ||
+        sandbox_workspace_write !== undefined) &&
+      !this.loggedGuardedProviderOptionsOverride
+    ) {
+      this.loggedGuardedProviderOptionsOverride = true;
+      this.logger.warn(
+        { approval_policy, sandbox_mode, sandbox_workspace_write },
+        "Guarded Codex session ignored a caller-supplied approval_policy/sandbox_mode/sandbox_workspace_write override",
+      );
+    }
+    return safe;
+  }
+
   private applyTurnWorkflowPolicy(
     params: Record<string, unknown>,
     preset: CodexModePreset,
   ): { approvalPolicy?: string; sandboxPolicyType?: string } {
+    const providerOptions = this.guardedProviderOptions();
     const approvalPolicy = this.hasWorkflowModeOverride ? preset.approvalPolicy : undefined;
     const sandboxPolicyType =
-      this.providerOptions.sandbox_mode ??
-      (this.hasWorkflowModeOverride ? preset.sandbox : undefined);
-    if (approvalPolicy && this.providerOptions.approval_policy === undefined) {
+      providerOptions.sandbox_mode ?? (this.hasWorkflowModeOverride ? preset.sandbox : undefined);
+    if (approvalPolicy && providerOptions.approval_policy === undefined) {
       params.approvalPolicy = approvalPolicy;
     }
     if (sandboxPolicyType) {
       const nativeType = toCodexSandboxPolicyType(sandboxPolicyType);
       const workspaceWrite = {
         ...this.resolvedWorkspaceWrite,
-        ...this.providerOptions.sandbox_workspace_write,
+        ...providerOptions.sandbox_workspace_write,
       };
-      params.sandboxPolicy =
+      const policy =
         this.resolvedSandboxPolicy?.type === nativeType
           ? this.resolvedSandboxPolicy
           : toSandboxPolicy(sandboxPolicyType, workspaceWrite);
+      params.sandboxPolicy = this.pinGuardedNetworkAccess(policy, nativeType);
     }
     if (this.hasWorkflowModeOverride) {
       applyApprovalsReviewerParam(params, preset);
     }
     return { approvalPolicy, sandboxPolicyType };
+  }
+
+  /**
+   * Guarded turns always send `networkAccess: false` (review finding #1), whatever the host's
+   * own Codex config or a prior turn's resolved policy says -- the catastrophe/device gates
+   * assume a network action (a push, `adb` over `localhost:5037`) must escalate, which only holds
+   * when the sandbox itself never lets one through unescalated. Logged once per session (the same
+   * pattern as `guardedProviderOptionsOverride` above) so a host whose own config enables network
+   * access for guarded turns is still visible, without spamming `daemon.log` on every turn.
+   *
+   * Also updates `resolvedSandboxPolicy` to the pinned policy actually being sent, for guarded
+   * workspaceWrite turns: unlike `thread/start`, `turn/start`'s own response is never run through
+   * `rememberResolvedSandboxPolicy`, so without this the live re-check (which reads
+   * `resolvedSandboxPolicy` to decide whether this session's sandbox is containing) would keep
+   * seeing the pre-pin, thread-start-time snapshot -- stale the moment this pins the policy that
+   * is actually in effect for this and every later turn.
+   */
+  private pinGuardedNetworkAccess(
+    policy: Record<string, unknown>,
+    nativeType: string,
+  ): Record<string, unknown> {
+    if (this.currentMode !== "guarded" || nativeType !== "workspaceWrite") {
+      return policy;
+    }
+    if (policy.networkAccess === true && !this.loggedGuardedNetworkAccessOverride) {
+      this.loggedGuardedNetworkAccessOverride = true;
+      this.logger.warn(
+        {},
+        "Guarded Codex session pinned a turn's networkAccess to false; the host's own Codex config had it enabled",
+      );
+    }
+    const pinned = { ...policy, networkAccess: false };
+    this.resolvedSandboxPolicy = pinned;
+    return pinned;
+  }
+
+  /**
+   * Whether this session's actual, most-recently-resolved sandbox policy (review finding #1) is
+   * a containing `workspaceWrite`: network access off, and no writable roots beyond the
+   * sandbox's own defaults. Only under this configuration can the live re-check assume a
+   * non-zero exit means the sandbox itself stopped the command, rather than the command simply
+   * failing for an unrelated reason while still able to reach outside the sandbox.
+   */
+  private isGuardedSandboxContaining(): boolean {
+    const policy = this.resolvedSandboxPolicy;
+    if (!policy || policy.type !== "workspaceWrite" || policy.networkAccess !== false) {
+      return false;
+    }
+    const writableRoots = policy.writableRoots;
+    return !Array.isArray(writableRoots) || writableRoots.length === 0;
   }
 
   private logTurnStartSummary({
@@ -5094,11 +5338,29 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     const responseApprovalsReviewer =
       typeof response?.approvalsReviewer === "string" ? response.approvalsReviewer : undefined;
-    if (
+    const threadStartProviderOptions = this.guardedProviderOptions();
+    if (this.currentMode === "guarded") {
+      // Review finding #2: a guarded session must never be promoted to auto-review -- that would
+      // turn off the network pin and the live re-check, silently losing both gates. If the
+      // app-server reports an auto-review/guardian reviewer anyway (most likely because the
+      // host's own Codex config forces auto_review globally, overriding what guarded mode asked
+      // for), approvals for this thread would be routed through that reviewer instead of the
+      // daemon's own gates -- fail closed rather than let the session proceed ungated.
+      if (isAutoReviewReviewer(responseApprovalsReviewer)) {
+        const reason =
+          "Codex app-server returned an auto-review reviewer for a guarded thread; the host's " +
+          "own Codex config may force auto-review, which would bypass the guard's gates.";
+        setCodexGuardHealthState(
+          { status: "red", reason, codexVersion: getCodexGuardHealthState().codexVersion },
+          this.logger,
+        );
+        throw new Error(reason);
+      }
+    } else if (
       shouldPromoteThreadResponseToAutoReview({
         approvalsReviewer: responseApprovalsReviewer,
-        approvalPolicy: approvalPolicy ?? String(this.providerOptions.approval_policy ?? ""),
-        sandbox: sandbox ?? this.providerOptions.sandbox_mode ?? "",
+        approvalPolicy: approvalPolicy ?? String(threadStartProviderOptions.approval_policy ?? ""),
+        sandbox: sandbox ?? threadStartProviderOptions.sandbox_mode ?? "",
       })
     ) {
       this.currentMode = "auto-review";
@@ -5113,6 +5375,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     sandbox?: string;
   } {
     const preset = MODE_PRESETS[this.currentMode] ?? MODE_PRESETS[DEFAULT_CODEX_MODE_ID];
+    const providerOptions = this.guardedProviderOptions();
     const approvalPolicy = this.hasWorkflowModeOverride ? preset.approvalPolicy : undefined;
     const sandbox = this.hasWorkflowModeOverride ? preset.sandbox : undefined;
     const innerConfig = this.buildCodexInnerConfig();
@@ -5123,10 +5386,10 @@ export class CodexAppServerAgentSession implements AgentSession {
     const params: Record<string, unknown> = {
       model,
       cwd: this.config.cwd ?? null,
-      ...(approvalPolicy && this.providerOptions.approval_policy === undefined
+      ...(approvalPolicy && providerOptions.approval_policy === undefined
         ? { approvalPolicy }
         : {}),
-      ...(sandbox && this.providerOptions.sandbox_mode === undefined ? { sandbox } : {}),
+      ...(sandbox && providerOptions.sandbox_mode === undefined ? { sandbox } : {}),
       ...(developerInstructions ? { developerInstructions } : {}),
       ...(innerConfig ? { config: innerConfig } : {}),
       ...(this.ephemeral ? { ephemeral: true } : {}),
@@ -5139,7 +5402,7 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   private buildCodexInnerConfig(): Record<string, unknown> | null {
     const innerConfig: Record<string, unknown> = {};
-    Object.assign(innerConfig, this.providerOptions);
+    Object.assign(innerConfig, this.guardedProviderOptions());
     if (this.deps.customCodexConfig) {
       Object.assign(innerConfig, this.deps.customCodexConfig);
     }
@@ -5952,10 +6215,13 @@ export class CodexAppServerAgentSession implements AgentSession {
       if (this.planModeEnabled && this.latestPlanResult?.text) {
         this.emitSyntheticPlanApprovalRequest(this.latestPlanResult.text);
       }
+      const turnTokenDelta = buildCodexTurnTokenDelta(this.pendingTurnTokenUsage);
+      this.pendingTurnTokenUsage = undefined;
       this.emitEvent({
         type: "turn_completed",
         provider: CODEX_PROVIDER,
         usage: this.latestUsage,
+        ...(turnTokenDelta !== undefined ? { turnTokenDelta } : {}),
       });
     }
     this.activeForegroundTurnId = null;
@@ -5968,6 +6234,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private resetTurnTrackingState(): void {
+    this.pendingTurnTokenUsage = undefined;
     this.latestPlanResult = null;
     this.emittedItemStartedIds.clear();
     this.emittedItemCompletedIds.clear();
@@ -6019,6 +6286,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   ): void {
     this.latestUsage = toAgentUsage(parsed.tokenUsage);
     if (this.latestUsage) {
+      this.pendingTurnTokenUsage = this.latestUsage;
       this.notifySubscribers({
         type: "usage_updated",
         provider: CODEX_PROVIDER,
@@ -6186,6 +6454,14 @@ export class CodexAppServerAgentSession implements AgentSession {
     parsed: Extract<ParsedCodexNotification, { kind: "exec_command_completed" }>,
     subAgentCallId: string | null = null,
   ): void {
+    if (this.currentMode === "guarded" && !subAgentCallId && typeof parsed.command === "string") {
+      void this.recheckGuardedCommandCompletion(
+        parsed.callId,
+        parsed.command,
+        parsed.cwd ?? null,
+        parsed.exitCode ?? null,
+      );
+    }
     const outputDeltas = subAgentCallId
       ? this.subAgentCallsByCallId.get(subAgentCallId)?.pendingCommandOutputDeltas
       : this.pendingCommandOutputDeltas;
@@ -6212,6 +6488,97 @@ export class CodexAppServerAgentSession implements AgentSession {
         this.emittedExecCommandCompletedCallIds.add(timelineItem.callId);
       }
       this.emitCodexToolTimelineItem(timelineItem, subAgentCallId, parsed.threadId);
+    }
+  }
+
+  /** Guard health's live detection, for a completed item from the canonical `item/*` channel. */
+  private maybeRecheckGuardedShellItem(
+    timelineItem: AgentTimelineItem,
+    itemId: string | undefined,
+  ): void {
+    if (
+      this.currentMode === "guarded" &&
+      timelineItem.type === "tool_call" &&
+      timelineItem.detail.type === "shell"
+    ) {
+      void this.recheckGuardedCommandCompletion(
+        itemId ?? null,
+        timelineItem.detail.command,
+        timelineItem.detail.cwd ?? null,
+        timelineItem.detail.exitCode ?? null,
+      );
+    }
+  }
+
+  /**
+   * Guard health's live detection (docs/catastrophe-gate.md, KTD-6): re-checks a completed
+   * top-level command item against the real gates. A command a gate would have refused that ran
+   * with no approval request turns health red and cancels the turn -- the one case the real-time
+   * gate above never had a chance to answer.
+   */
+  /**
+   * The one sequence every guarded-mode fail-closed path ends in: turn health red, tell the
+   * agent why over the timeline, and stop the turn. Shared by the live re-check's violation
+   * branch and its catch block (review finding #7) so the two can't drift out of sync the way
+   * they did when the catch block was added for finding #4.
+   */
+  private async failGuardedModeClosed(reason: string, timelineText: string): Promise<void> {
+    setCodexGuardHealthState(
+      {
+        status: "red",
+        reason,
+        codexVersion: getCodexGuardHealthState().codexVersion,
+      },
+      this.logger,
+    );
+    this.emitEvent({
+      type: "timeline",
+      provider: CODEX_PROVIDER,
+      item: { type: "assistant_message", text: formatOutOfBandStatusMessage(timelineText) },
+    });
+    await this.interrupt();
+  }
+
+  private async recheckGuardedCommandCompletion(
+    callId: string | null,
+    command: string,
+    cwd: string | null,
+    exitCode: number | null,
+  ): Promise<void> {
+    // A completion with no callId can't be looked up in guardedApprovalSeenItemIds, so there is
+    // no way to confirm an approval request was ever seen for it -- treat it as unmatched rather
+    // than skipping the recheck outright (review finding #3). approvalRequestSeen defaults to
+    // false in that case, so the command is still re-judged against the real gates below; it only
+    // turns health red if a gate would actually have refused it.
+    const approvalRequestSeen = callId !== null && this.guardedApprovalSeenItemIds.has(callId);
+    try {
+      const result = await recheckCodexGuardCommandItem(
+        {
+          command,
+          cwd: cwd ?? this.config.cwd ?? process.cwd(),
+          agentId: this.agentId,
+          deviceLaunchGate: this.deps.deviceLaunchGate,
+          isCatastropheGateEnabled: this.deps.isCatastropheGateEnabled,
+          approvalRequestSeen,
+          exitCode,
+          sandboxIsContaining: this.isGuardedSandboxContaining(),
+        },
+        this.logger,
+      );
+      if (!result.violation) return;
+      await this.failGuardedModeClosed(
+        result.reason ?? "A guarded command ran without an approval request.",
+        "Paseo guard health just turned red: a command ran with no approval request. Stopping this turn.",
+      );
+    } catch (error) {
+      // Fail closed (review finding #4): a crash in the recheck itself must not look like a
+      // healthy guard. The opposite of the fail-open comment this mirrors in Claude's hook --
+      // guarded mode has no other layer, so an unprovable command stays unproven, not approved.
+      this.logger.warn({ err: error }, "Codex guard live re-check failed");
+      await this.failGuardedModeClosed(
+        `Codex guard live re-check failed: ${error instanceof Error ? error.message : String(error)}`,
+        "Paseo guard health just turned red: the live re-check failed. Stopping this turn.",
+      );
     }
   }
 
@@ -6254,6 +6621,11 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (parsed.callId) {
       outputDeltas.delete(parsed.callId);
     }
+    // Review finding #4: this legacy codex/event/patch_apply_begin channel is still parsed and
+    // still dispatched, but never fed guardedFileChangePathsByItemId -- a guarded child on this
+    // channel left the approval check with nothing tracked for the item, which fell through to
+    // an accept. Both notification channels now populate the map identically.
+    this.trackGuardedFileChangePaths("fileChange", parsed.callId ?? undefined, parsed.changes);
     const timelineItem = mapCodexPatchNotificationToToolCall({
       callId: parsed.callId,
       changes: parsed.changes,
@@ -6280,6 +6652,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       return;
     }
     const bufferedOutput = this.consumeOutputDelta(outputDeltas, parsed.callId);
+    this.evictGuardedFileChangePaths("fileChange", parsed.callId ?? undefined);
     const timelineItem = mapCodexPatchNotificationToToolCall({
       callId: parsed.callId,
       changes: parsed.changes,
@@ -6383,6 +6756,8 @@ export class CodexAppServerAgentSession implements AgentSession {
       typeof parsed.item.type === "string" ? parsed.item.type : undefined,
     );
     const itemId = parsed.item.id;
+    this.evictGuardedFileChangePaths(normalizedItemType, itemId);
+    this.maybeRecheckGuardedShellItem(timelineItem, itemId);
     if (this.shouldSkipCompletedThreadItem(timelineItem, normalizedItemType, itemId)) {
       this.replayPendingSubAgentNotifications(registeredChildThreadIds);
       return;
@@ -6557,6 +6932,11 @@ export class CodexAppServerAgentSession implements AgentSession {
         return;
       }
     }
+    this.trackGuardedFileChangePaths(
+      normalizedItemType,
+      itemId,
+      (parsed.item as { changes?: unknown }).changes,
+    );
     if (itemId && this.emittedItemStartedIds.has(itemId)) {
       return;
     }
@@ -6568,6 +6948,45 @@ export class CodexAppServerAgentSession implements AgentSession {
       this.pendingFileChangeOutputDeltas.delete(itemId);
     }
     this.replayPendingSubAgentNotifications(registeredChildThreadIds);
+  }
+
+  private trackGuardedFileChangePaths(
+    normalizedItemType: string | undefined,
+    itemId: string | undefined,
+    changes: unknown,
+  ): void {
+    if (this.currentMode !== "guarded" || normalizedItemType !== "fileChange" || !itemId) {
+      return;
+    }
+    // Review finding #2 (round 3): a rename's destination carries its own risk independent of
+    // its source -- moving notes.md into .git/hooks/post-checkout must be checked against where
+    // it lands, not just where it came from -- so both are tracked.
+    const changedPaths = parseCodexPatchChanges(changes).flatMap((file) =>
+      file.movePath ? [file.path, file.movePath] : [file.path],
+    );
+    if (changedPaths.length === 0) {
+      return;
+    }
+    // Review finding #6: eviction on completion keeps this bounded in the normal case, but a cap
+    // is the backstop against a completion notification that never arrives for some entry.
+    if (this.guardedFileChangePathsByItemId.size >= MAX_GUARDED_FILE_CHANGE_PATHS_ENTRIES) {
+      const oldestItemId = this.guardedFileChangePathsByItemId.keys().next().value;
+      if (oldestItemId !== undefined) {
+        this.guardedFileChangePathsByItemId.delete(oldestItemId);
+      }
+    }
+    this.guardedFileChangePathsByItemId.set(itemId, changedPaths);
+  }
+
+  /** Review finding #6: a completed (or approval-resolved) file-change item never needs its
+   * tracked paths again. */
+  private evictGuardedFileChangePaths(
+    normalizedItemType: string | undefined,
+    itemId: string | undefined,
+  ): void {
+    if (normalizedItemType === "fileChange" && itemId) {
+      this.guardedFileChangePathsByItemId.delete(itemId);
+    }
   }
 
   private handleUserMessageItem(
@@ -6751,7 +7170,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     );
   }
 
-  private handleCommandApprovalRequest(params: unknown): Promise<unknown> {
+  private async handleCommandApprovalRequest(params: unknown): Promise<unknown> {
     const parsed = z
       .object({
         itemId: z.string(),
@@ -6762,6 +7181,64 @@ export class CodexAppServerAgentSession implements AgentSession {
         reason: z.string().nullable().optional(),
       })
       .parse(params);
+
+    // Guarded mode (docs/catastrophe-gate.md, KTD-5): the daemon decides every approval itself,
+    // with no person and no pending permission. Catastrophe gate first, then the device gate;
+    // any uncertainty declines, the opposite of the fail-open check below.
+    if (this.currentMode === "guarded") {
+      this.guardedApprovalSeenItemIds.add(parsed.itemId);
+      const cwd = parsed.cwd ?? this.config.cwd ?? process.cwd();
+      const guardDecision =
+        typeof parsed.command === "string"
+          ? await decideCodexGuardedCommand({
+              command: parsed.command,
+              cwd,
+              agentId: this.agentId,
+              deviceLaunchGate: this.deps.deviceLaunchGate,
+              isCatastropheGateEnabled: this.deps.isCatastropheGateEnabled,
+              logger: this.logger,
+            })
+          : { decision: "decline" as const, reason: "Paseo guard saw no command to evaluate." };
+      if (guardDecision.decision === "decline") {
+        this.emitEvent({
+          type: "timeline",
+          provider: CODEX_PROVIDER,
+          item: {
+            type: "assistant_message",
+            text: formatOutOfBandStatusMessage(
+              guardDecision.reason ?? "Blocked by the Paseo guard.",
+            ),
+          },
+        });
+      }
+      return { decision: guardDecision.decision };
+    }
+
+    // The device cap's only say over Codex. It answers before the request reaches a person or
+    // an auto-approver, so a device launch with no slot is declined rather than queued behind
+    // Tyler's attention (docs/device-leases.md).
+    const refusal = await evaluateDeviceLaunchApproval({
+      gate: this.deps.deviceLaunchGate,
+      agentId: this.agentId,
+      command: parsed.command,
+      logger: this.logger,
+    });
+    if (refusal) {
+      this.emitEvent({
+        type: "timeline",
+        provider: CODEX_PROVIDER,
+        item: { type: "assistant_message", text: formatOutOfBandStatusMessage(refusal) },
+      });
+      // Codex's approval response is a bare decision, so the reason travels separately.
+      explainDeviceLaunchRefusal({
+        gate: this.deps.deviceLaunchGate,
+        agentId: this.agentId,
+        message: refusal,
+        logger: this.logger,
+      });
+      return { decision: "decline" };
+    }
+
     const commandPreview = mapCodexExecNotificationToToolCall({
       callId: parsed.itemId,
       command: parsed.command,
@@ -6802,6 +7279,16 @@ export class CodexAppServerAgentSession implements AgentSession {
     });
   }
 
+  private declineUntrackedGuardedFileChange(itemId: string): Promise<unknown> {
+    const reason = `Blocked by the Paseo guard: no file-change paths were ever tracked for item ${itemId}, so it cannot be proven safe.`;
+    this.emitEvent({
+      type: "timeline",
+      provider: CODEX_PROVIDER,
+      item: { type: "assistant_message", text: formatOutOfBandStatusMessage(reason) },
+    });
+    return Promise.resolve({ decision: "decline" });
+  }
+
   private handleFileChangeApprovalRequest(params: unknown): Promise<unknown> {
     const parsed = z
       .object({
@@ -6811,6 +7298,53 @@ export class CodexAppServerAgentSession implements AgentSession {
         reason: z.string().nullable().optional(),
       })
       .parse(params);
+
+    // Guarded mode approves most file changes, matching Claude: the catastrophe gate covers
+    // shell commands only (docs/catastrophe-gate.md). The exception is a path through which a
+    // pure file write can later weaponize an otherwise-innocuous shell command -- a `.git/config`
+    // alias, a hook, a `.gitattributes` filter driver, a `.ssh/` file, or a shell rc file (review
+    // finding #2, re-review findings #2-4). The approval request itself carries no path info
+    // (confirmed against the real app-server protocol); the touched paths were captured off the
+    // `item/started`/legacy `patch_apply_started` notification for this item id, which always
+    // precedes the approval request for the same change.
+    if (this.currentMode === "guarded") {
+      if (!this.guardedFileChangePathsByItemId.has(parsed.itemId)) {
+        // Review finding #4: no entry means the paths were never tracked at all -- a malformed
+        // or missing changes payload, a notification that never arrived, or a future channel
+        // this code doesn't know about yet. Unproven is not safe; decline rather than accept.
+        return this.declineUntrackedGuardedFileChange(parsed.itemId);
+      }
+      const changedPaths = this.guardedFileChangePathsByItemId.get(parsed.itemId) ?? [];
+      // Review finding #6: once this approval resolves, the entry is never needed again --
+      // evict it immediately rather than waiting for the item's own completion notification.
+      this.guardedFileChangePathsByItemId.delete(parsed.itemId);
+      const cwd = this.config.cwd ?? process.cwd();
+      const sensitivePath = changedPaths
+        .map((changedPath) => {
+          const resolved = resolveGuardedFileChangePath(changedPath, cwd);
+          return {
+            path: changedPath,
+            // Review finding #2: test the resolved real path, not the reported literal one, and
+            // treat a path realpath couldn't resolve at all as sensitive rather than safe.
+            reason:
+              resolved === null
+                ? "a path that could not be resolved to a real location"
+                : describeGuardedSensitiveFileChangePath(resolved),
+          };
+        })
+        .find((entry) => entry.reason !== null);
+      if (sensitivePath) {
+        const reason = `Blocked by the Paseo guard: ${sensitivePath.path} is ${sensitivePath.reason}.`;
+        this.emitEvent({
+          type: "timeline",
+          provider: CODEX_PROVIDER,
+          item: { type: "assistant_message", text: formatOutOfBandStatusMessage(reason) },
+        });
+        return Promise.resolve({ decision: "decline" });
+      }
+      return Promise.resolve({ decision: "accept" });
+    }
+
     const requestId = `permission-${parsed.itemId}`;
     const request: AgentPermissionRequest = {
       id: requestId,
@@ -7032,6 +7566,7 @@ export class CodexAppServerAgentClient implements AgentClient {
       "provider.codex.spawn",
     );
     const child = spawnProcess(launchPrefix.command, args, {
+      priority: "agent",
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"],
       ...createProviderEnvSpec({

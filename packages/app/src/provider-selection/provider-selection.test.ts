@@ -85,6 +85,18 @@ describe("combined model selector data", () => {
     });
   });
 
+  it("carries a budget note onto the account it names, and only that one", () => {
+    const providers = buildSelectableProviderSelectorProviders(
+      [snapshotEntry({ provider: "claude-backup" }), snapshotEntry({ provider: "claude" })],
+      new Map([["claude-backup", "out until Sat 06:00"]]),
+    );
+
+    expect(providers.map((provider) => provider.budgetNote)).toEqual([
+      "out until Sat 06:00",
+      undefined,
+    ]);
+  });
+
   it("synthesizes a default model row for ready enabled providers without explicit models", () => {
     expect(
       buildSelectableProviderSelectorProviders([

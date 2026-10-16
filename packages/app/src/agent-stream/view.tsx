@@ -8,8 +8,10 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ComponentProps,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -24,7 +26,7 @@ import {
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { MAX_CONTENT_WIDTH, useIsCompactFormFactor } from "@/constants/layout";
 import { useMutation } from "@tanstack/react-query";
-import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
+import Animated from "react-native-reanimated";
 import { Check, ChevronDown, X } from "lucide-react-native";
 import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 import { openExplorerSidebarView } from "@/workspace-tabs/explorer-sidebar";
@@ -71,6 +73,13 @@ import { resolveStreamRenderStrategy } from "./strategy-resolver";
 import { type StreamSegmentRenderers, type StreamViewportHandle } from "./strategy";
 import { ChatOutlineRail } from "@/agent-stream/chat-outline/rail";
 import { useChatOutline } from "@/agent-stream/chat-outline/use-chat-outline";
+import { useStickyLastPrompt } from "@/agent-stream/sticky-last-prompt/use-sticky-last-prompt";
+import type { StickyLastPromptSource } from "@/agent-stream/sticky-last-prompt/model";
+import { usePromptNavigator } from "@/agent-stream/sticky-last-prompt/use-prompt-navigator";
+import { createRowHighlightPublisher, type RowHighlightSource } from "./row-highlight";
+import { TopOverlay } from "./top-overlay";
+import { primaryColorMapping, scrollIndicatorStyles } from "./scroll-indicator-styles";
+import { resolveScrollIndicatorFade } from "./scroll-indicator-fade";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { planTimelineTailFetch } from "@/timeline/timeline-sync-plan";
 import {
@@ -83,6 +92,8 @@ import {
 } from "./turn-footer";
 import { resolveBottomOverlayTailInset } from "./bottom-overlay-inset";
 import { layoutStream, type StreamLayoutItem } from "./layout";
+import { useJumpToStart } from "./use-jump-to-start";
+import { shouldShowJumpToStart } from "./jump-to-start-visibility";
 import {
   type BottomAnchorLocalRequest,
   type BottomAnchorRouteRequest,
@@ -109,6 +120,10 @@ import { useRetainedPanelActive } from "@/components/retained-panel";
 import { useStreamHistoryWindow } from "./use-stream-history-window";
 import { PluginTimelineItemView, useInstalledTimelineTransform } from "@/plugins/timeline";
 import { projectPluginTimelineItems } from "@/plugins/timeline/projection";
+import { useAgentJevDecisions } from "@/jev/use-agent-jev-decisions";
+import { buildJevMarkerLines, placeJevMarkers, splitJevMarkerLines } from "@/jev/jev-marker-model";
+import { JevMarkerChip } from "@/jev/jev-marker-chip";
+import type { JevDecisionRecord } from "@getpaseo/protocol/jev/rpc-schemas";
 
 function renderLiveAuxiliaryNode(input: {
   pendingPermissions: ReactNode;
@@ -141,6 +156,7 @@ function BottomOverlayInset({ height }: { height: number }) {
 function renderPendingPermissionsNode(input: {
   pendingPermissions: PendingPermission[];
   client: DaemonClient | null;
+  readOnly?: boolean;
 }): ReactNode {
   if (input.pendingPermissions.length === 0) {
     return null;
@@ -148,7 +164,12 @@ function renderPendingPermissionsNode(input: {
   return (
     <View style={stylesheet.permissionsContainer}>
       {input.pendingPermissions.map((permission) => (
-        <PermissionRequestCard key={permission.key} permission={permission} client={input.client} />
+        <PermissionRequestCard
+          key={permission.key}
+          permission={permission}
+          client={input.client}
+          readOnly={input.readOnly}
+        />
       ))}
     </View>
   );
@@ -160,6 +181,7 @@ function renderStreamItemWithTurnFooter(input: {
   strategy: TurnContentStrategy;
   supportsTimelineCursor: boolean;
   onForkAssistantTurn?: AssistantTurnForkHandler;
+  rowHighlightSource: RowHighlightSource;
 }): ReactNode {
   if (!input.content) {
     return null;
@@ -177,7 +199,11 @@ function renderStreamItemWithTurnFooter(input: {
     />
   ) : null;
   const content = (
-    <StreamItemWrapper itemId={input.layoutItem.item.id} gapBelow={input.layoutItem.gapBelow}>
+    <StreamItemWrapper
+      itemId={input.layoutItem.item.id}
+      gapBelow={input.layoutItem.gapBelow}
+      highlightSource={input.rowHighlightSource}
+    >
       {input.content}
     </StreamItemWrapper>
   );
@@ -290,6 +316,8 @@ export interface AgentStreamViewProps {
   toast?: ToastApi | null;
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
   readOnly?: boolean;
+  /** Pinned-grid cells: render the sticky prompt bar one-line and unobtrusive. */
+  compact?: boolean;
   historyPagination?: {
     hasOlder: boolean;
     isLoadingOlder: boolean;
@@ -311,6 +339,7 @@ const AGENT_CAPABILITY_FLAG_KEYS: (keyof AgentCapabilityFlags)[] = [
 ];
 
 const EMPTY_STREAM_HEAD: StreamItem[] = [];
+const EMPTY_JEV_DECISIONS: readonly JevDecisionRecord[] = [];
 
 function useRetainedValue<T>(value: T, active: boolean): T {
   const retainedRef = useRef(value);
@@ -324,6 +353,15 @@ const GROUPED_TOOL_CALL_DETAIL_MAX_HEIGHT = 200;
 
 function resolveBottomOverlayControlOffset(clearance: number | undefined): number {
   return Math.max(16, clearance ?? 0);
+}
+
+function jumpToStickyLastPrompt(
+  source: StickyLastPromptSource,
+  viewportRef: RefObject<StreamViewportHandle | null>,
+): void {
+  const prompt = source.getState().prompt;
+  if (!prompt) return;
+  viewportRef.current?.scrollToMessage?.(prompt.id);
 }
 
 const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamViewProps>(
@@ -344,6 +382,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       toast,
       onOpenWorkspaceFile,
       readOnly = false,
+      compact,
       historyPagination,
     },
     ref,
@@ -353,11 +392,13 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const toolCallDetailLevel = useSettings((settings) => settings.toolCallDetailLevel);
     const chatOutlineEnabled = useSettings((settings) => settings.chatOutlineEnabled);
     const viewportRef = useRef<StreamViewportHandle | null>(null);
+    const rowHighlightSource = useMemo(() => createRowHighlightPublisher(), []);
     const pendingClientMessageIds = useMemo(
       () => new Set(pendingMessageSubmissions.map((submission) => submission.clientMessageId)),
       [pendingMessageSubmissions],
     );
     const isMobile = useIsCompactFormFactor();
+    const resolvedCompact = compact === true;
     const streamRenderStrategy = useMemo(
       () =>
         resolveStreamRenderStrategy({
@@ -367,6 +408,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       [isMobile],
     );
     const [isNearBottom, setIsNearBottom] = useState(true);
+    const [isNearHistoryStart, setIsNearHistoryStart] = useState(true);
     const [expandedInlineToolCallIds, setExpandedInlineToolCallIds] = useState<Set<string>>(
       new Set(),
     );
@@ -423,18 +465,10 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           loadOlder: historyPagination.onLoadOlder,
         }
       : agentHistoryPagination;
-    // Keep entry/exit animations off on Android due to RN dispatchDraw crashes
-    // tracked in react-native-reanimated#8422.
-    const shouldDisableEntryExitAnimations = Platform.OS === "android";
-    const scrollIndicatorFadeIn = shouldDisableEntryExitAnimations
-      ? undefined
-      : FadeIn.duration(200);
-    const scrollIndicatorFadeOut = shouldDisableEntryExitAnimations
-      ? undefined
-      : FadeOut.duration(200);
 
     useEffect(() => {
       setIsNearBottom(true);
+      setIsNearHistoryStart(true);
       setExpandedInlineToolCallIds(new Set());
       setExpandedToolCallGroupIds(new Set());
     }, [agentId]);
@@ -566,6 +600,34 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       }),
       [projectedToolCalls.head, projectedToolCalls.tail, transformTimelineItem],
     );
+    // No `enabled` override: defaults to true and shares the popover's query key/cache and 15s
+    // poll, so the stream picks up new decisions live without polling any faster than the meter
+    // already does (docs/agent-stream-performance.md).
+    const { data: jevDecisionsData } = useAgentJevDecisions(resolvedServerId, agentId);
+    const jevMarkerLines = useMemo(
+      () =>
+        buildJevMarkerLines(
+          jevDecisionsData?.decisions ?? EMPTY_JEV_DECISIONS,
+          jevDecisionsData?.status ?? null,
+        ),
+      [jevDecisionsData],
+    );
+    const tailBoundaryMs =
+      projectedPlugins.tail.length > 0
+        ? projectedPlugins.tail[projectedPlugins.tail.length - 1].timestamp.getTime()
+        : null;
+    const { forTail: tailJevMarkerLines, forHead: headJevMarkerLines } = useMemo(
+      () => splitJevMarkerLines(jevMarkerLines, tailBoundaryMs),
+      [jevMarkerLines, tailBoundaryMs],
+    );
+    const tailWithJevMarkers = useMemo(
+      () => placeJevMarkers(projectedPlugins.tail, tailJevMarkerLines),
+      [projectedPlugins.tail, tailJevMarkerLines],
+    );
+    const headWithJevMarkers = useMemo(
+      () => placeJevMarkers(projectedPlugins.head, headJevMarkerLines),
+      [projectedPlugins.head, headJevMarkerLines],
+    );
     const {
       start: historyWindowStart,
       hasLocalHistory,
@@ -573,7 +635,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       loadOlder,
     } = useStreamHistoryWindow({
       agentId,
-      items: projectedPlugins.tail,
+      items: tailWithJevMarkers,
       loadRemoteOlder,
     });
     const isLoadingOlder = remoteIsLoadingOlder;
@@ -584,8 +646,8 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       return buildAgentStreamRenderModel({
         isTurnActive,
         activeTurnStartedAt: effectiveTurnPresentation.startedAt,
-        tail: projectedPlugins.tail,
-        head: projectedPlugins.head,
+        tail: tailWithJevMarkers,
+        head: headWithJevMarkers,
         platform: isWeb ? "web" : "native",
         isMobileBreakpoint: isMobile,
         historyStart: historyWindowStart,
@@ -593,8 +655,8 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     }, [
       isMobile,
       isTurnActive,
-      projectedPlugins.head,
-      projectedPlugins.tail,
+      headWithJevMarkers,
+      tailWithJevMarkers,
       effectiveTurnPresentation.startedAt,
       historyWindowStart,
     ]);
@@ -618,6 +680,14 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const handleTimelineHistoryLoadError = useCallback(() => {
       toast?.error(t("agentStream.historyLoadFailed"));
     }, [t, toast]);
+    const { jumpToStart, isJumpingToStart, invalidateJumpToStart } = useJumpToStart({
+      agentId,
+      serverId: resolvedServerId,
+      hasRemoteOlderHistory: remoteHasOlder,
+      revealLoadedHistory,
+      viewportRef,
+      onError: handleTimelineHistoryLoadError,
+    });
     const visibleHistoryItemIds = useMemo(
       () =>
         new Set(
@@ -638,20 +708,66 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       revealLoadedItem: revealLoadedHistory,
     });
 
+    const stickyLastPrompt = useStickyLastPrompt({
+      agentId,
+      items: effectiveStreamItems,
+      head: effectiveStreamHead,
+    });
+    const handleJumpToStickyPrompt = useCallback(() => {
+      invalidateJumpToStart();
+      jumpToStickyLastPrompt(stickyLastPrompt.source, viewportRef);
+    }, [invalidateJumpToStart, stickyLastPrompt]);
+    const handleHighlightRow = useCallback(
+      (itemId: string) => rowHighlightSource.highlight(itemId),
+      [rowHighlightSource],
+    );
+    const promptNavigator = usePromptNavigator({
+      agentId,
+      items: effectiveStreamItems,
+      head: effectiveStreamHead,
+      hasOlderHistory: hasOlder,
+      isLoadingOlderHistory: isLoadingOlder,
+      loadOlder,
+      viewportRef,
+      visibleItemIds: visibleHistoryItemIds,
+      revealLoadedItem: revealLoadedHistory,
+      onHighlight: handleHighlightRow,
+    });
+    const handleJumpToSelectedPrompt = useCallback(() => {
+      invalidateJumpToStart();
+      promptNavigator.jumpToSelected();
+    }, [invalidateJumpToStart, promptNavigator]);
+    const handleJumpToOutlinePrompt = useCallback(
+      (seq: number) => {
+        invalidateJumpToStart();
+        chatOutline.jumpToPrompt(seq);
+      },
+      [chatOutline, invalidateJumpToStart],
+    );
+    const handleReadingPositionChange = useCallback(
+      (rowId: string | null) => {
+        chatOutline.reportReadingPosition(rowId);
+        stickyLastPrompt.reportReadingPosition(rowId);
+      },
+      [chatOutline, stickyLastPrompt],
+    );
+
     useImperativeHandle(
       ref,
       () => ({
         scrollToBottom(reason = "jump-to-bottom") {
+          invalidateJumpToStart();
           viewportRef.current?.scrollToBottom(reason);
         },
         prepareForViewportChange() {
           viewportRef.current?.prepareForViewportChange();
         },
       }),
-      [],
+      [invalidateJumpToStart],
     );
 
     const scrollToBottom = useCallback(() => {
+      invalidateJumpToStart();
       if (!isTimelineDetached) {
         viewportRef.current?.scrollToBottom("jump-to-bottom");
         return;
@@ -664,7 +780,13 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         scrollToBottom: () => viewportRef.current?.scrollToBottom("jump-to-bottom"),
         onError: handleTimelineHistoryLoadError,
       });
-    }, [agentId, handleTimelineHistoryLoadError, isTimelineDetached, resolvedServerId]);
+    }, [
+      agentId,
+      handleTimelineHistoryLoadError,
+      invalidateJumpToStart,
+      isTimelineDetached,
+      resolvedServerId,
+    ]);
 
     const setInlineDetailsExpanded = useCallback(
       (itemId: string, expanded: boolean) => {
@@ -897,6 +1019,9 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
               <PluginTimelineItemView agentId={agentId} item={item} serverId={resolvedServerId} />
             );
 
+          case "jev_marker":
+            return <JevMarkerChip lines={item.lines} />;
+
           default:
             return null;
         }
@@ -922,12 +1047,14 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           strategy: streamRenderStrategy,
           supportsTimelineCursor: supportsAgentForkContextCursor,
           onForkAssistantTurn: readOnly ? undefined : handleForkAssistantTurn,
+          rowHighlightSource,
         });
       },
       [
         handleForkAssistantTurn,
         readOnly,
         renderStreamItemContent,
+        rowHighlightSource,
         streamRenderStrategy,
         supportsAgentForkContextCursor,
       ],
@@ -943,8 +1070,9 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         renderPendingPermissionsNode({
           pendingPermissions: pendingPermissionItems,
           client,
+          readOnly,
         }),
-      [client, pendingPermissionItems],
+      [client, pendingPermissionItems, readOnly],
     );
     const turnFooterNode = useMemo(
       () =>
@@ -1103,7 +1231,9 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
               routeBottomAnchorRequest,
               isAuthoritativeHistoryReady,
               onNearBottomChange: setIsNearBottom,
-              onReadingPositionChange: chatOutline.reportReadingPosition,
+              onNearHistoryStartChange: setIsNearHistoryStart,
+              onReadingPositionChange: handleReadingPositionChange,
+              onViewableRowIdsChange: stickyLastPrompt.reportVisibleRowIds,
               onNearHistoryStart: loadOlder,
               isLoadingOlderHistory: isLoadingOlder,
               hasOlderHistory: hasOlder,
@@ -1117,28 +1247,68 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           <ChatOutlineRail
             prompts={chatOutline.prompts}
             activePrompt={chatOutline.activePrompt}
-            onJumpToPrompt={chatOutline.jumpToPrompt}
+            onJumpToPrompt={handleJumpToOutlinePrompt}
           />
-          {(!isNearBottom || isTimelineDetached) && (
-            <View style={scrollToBottomContainerStyle} pointerEvents="box-none">
-              <Animated.View entering={scrollIndicatorFadeIn} exiting={scrollIndicatorFadeOut}>
-                <Pressable
-                  style={stylesheet.scrollToBottomButton}
-                  onPress={scrollToBottom}
-                  accessibilityRole="button"
-                  accessibilityLabel={t("agentStream.scrollToBottom")}
-                  testID="scroll-to-bottom-button"
-                >
-                  <ChevronDown size={24} color={stylesheet.scrollToBottomIcon.color} />
-                </Pressable>
-              </Animated.View>
-            </View>
-          )}
+          <TopOverlay
+            agentId={agentId}
+            stickyPromptSource={stickyLastPrompt.source}
+            compact={resolvedCompact}
+            onJumpToStickyPrompt={handleJumpToStickyPrompt}
+            selectedPrompt={promptNavigator.selectedPrompt}
+            positionLabel={promptNavigator.positionLabel}
+            canStepBack={promptNavigator.canStepBack}
+            canStepForward={promptNavigator.canStepForward}
+            onStepBack={promptNavigator.stepBack}
+            onStepForward={promptNavigator.stepForward}
+            onJumpToSelected={handleJumpToSelectedPrompt}
+            showJumpToStart={shouldShowJumpToStart({
+              hasOlderHistory: hasOlder,
+              isNearHistoryStart,
+            })}
+            isJumpingToStart={isJumpingToStart}
+            onJumpToStart={jumpToStart}
+          />
+          <BottomScrollIndicator
+            containerStyle={scrollToBottomContainerStyle}
+            showScrollToBottom={!isNearBottom || isTimelineDetached}
+            onScrollToBottom={scrollToBottom}
+          />
         </AssistantSelectionCopySurface>
       </ToolCallSheetProvider>
     );
   },
 );
+
+function BottomScrollIndicator({
+  containerStyle,
+  showScrollToBottom,
+  onScrollToBottom,
+}: {
+  containerStyle: StyleProp<ViewStyle>;
+  showScrollToBottom: boolean;
+  onScrollToBottom: () => void;
+}) {
+  const { t } = useTranslation();
+  const { fadeIn, fadeOut } = resolveScrollIndicatorFade();
+  if (!showScrollToBottom) {
+    return null;
+  }
+  return (
+    <View style={containerStyle} pointerEvents="box-none" testID="agent-stream-bottom-overlay">
+      <Animated.View entering={fadeIn} exiting={fadeOut}>
+        <Pressable
+          style={scrollIndicatorStyles.button}
+          onPress={onScrollToBottom}
+          accessibilityRole="button"
+          accessibilityLabel={t("agentStream.scrollToBottom")}
+          testID="scroll-to-bottom-button"
+        >
+          <ChevronDown size={24} color={scrollIndicatorStyles.icon.color} />
+        </Pressable>
+      </Animated.View>
+    </View>
+  );
+}
 
 function agentCapabilityFlagsEqual(
   left: AgentCapabilityFlags | undefined,
@@ -1253,6 +1423,7 @@ function agentStreamViewPropsEqual(
   if (left.toast !== right.toast) reasons.push("toast");
   if (left.onOpenWorkspaceFile !== right.onOpenWorkspaceFile) reasons.push("onOpenWorkspaceFile");
   if (left.readOnly !== right.readOnly) reasons.push("readOnly");
+  if (left.compact !== right.compact) reasons.push("compact");
   if (!historyPaginationPropsEqual(left.historyPagination, right.historyPagination)) {
     reasons.push("historyPagination");
   }
@@ -1320,9 +1491,6 @@ const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 const ThemedCheckIcon = withUnistyles(Check);
 const ThemedXIcon = withUnistyles(X);
 
-const primaryColorMapping = (theme: Theme) => ({
-  color: theme.colors.foreground,
-});
 const mutedColorMapping = (theme: Theme) => ({
   color: theme.colors.foregroundMuted,
 });
@@ -1383,9 +1551,11 @@ function PermissionActionButton({
 function PermissionRequestCard({
   permission,
   client,
+  readOnly,
 }: {
   permission: PendingPermission;
   client: DaemonClient | null;
+  readOnly?: boolean;
 }) {
   const { t } = useTranslation();
   const isMobile = useIsCompactFormFactor();
@@ -1521,6 +1691,7 @@ function PermissionRequestCard({
         permission={permission}
         onRespond={handleResponse}
         isResponding={isResponding}
+        allowFreeText={!readOnly}
       />
     );
   }
@@ -1628,6 +1799,10 @@ const stylesheet = StyleSheet.create((theme) => ({
     alignSelf: "center",
     paddingHorizontal: theme.spacing[2],
   },
+  // Brief flash for a jump-to-prompt target (row-highlight.ts clears it automatically).
+  streamItemWrapperHighlighted: {
+    backgroundColor: theme.colors.surface3,
+  },
   emptyState: {
     flex: 1,
     alignItems: "center",
@@ -1665,18 +1840,8 @@ const stylesheet = StyleSheet.create((theme) => ({
     left: 0,
     right: 0,
     alignItems: "center",
-  },
-  scrollToBottomButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: theme.colors.surface2,
-    alignItems: "center",
-    justifyContent: "center",
-    ...theme.shadow.sm,
-  },
-  scrollToBottomIcon: {
-    color: theme.colors.foreground,
+    flexDirection: "column",
+    justifyContent: "flex-end",
   },
 }));
 
@@ -1756,12 +1921,29 @@ interface StreamItemWrapperProps {
   itemId: string;
   gapBelow: number;
   children: ReactNode;
+  highlightSource: RowHighlightSource;
 }
 
-function StreamItemWrapper({ gapBelow, children }: StreamItemWrapperProps) {
+// Subscribes only this one row's wrapper to the highlight publisher (mirrors
+// StickyPromptOverlay's useSyncExternalStore), so a jump-to-prompt highlight
+// never re-renders the rest of the transcript.
+function StreamItemWrapper({
+  itemId,
+  gapBelow,
+  children,
+  highlightSource,
+}: StreamItemWrapperProps) {
+  const isHighlighted = useSyncExternalStore(
+    highlightSource.subscribe,
+    () => highlightSource.getState() === itemId,
+  );
   const wrapperStyle = useMemo(
-    () => [stylesheet.streamItemWrapper, { marginBottom: gapBelow }],
-    [gapBelow],
+    () => [
+      stylesheet.streamItemWrapper,
+      { marginBottom: gapBelow },
+      isHighlighted && stylesheet.streamItemWrapperHighlighted,
+    ],
+    [gapBelow, isHighlighted],
   );
   return <View style={wrapperStyle}>{children}</View>;
 }

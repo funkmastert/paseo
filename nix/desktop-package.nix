@@ -203,14 +203,18 @@ buildNpmPackage {
     ''}
 
     ${lib.optionalString stdenv.hostPlatform.isDarwin ''
-      app="$(find packages/desktop/release -maxdepth 3 -type d -name Paseo.app -print -quit)"
+      # electron-builder names the bundle after executableName/productName
+      # (electron-builder.yml), which a rebranded fork overrides — never
+      # hardcode "Paseo" here, same reasoning as scripts/executable-name.js.
+      app_name="$(node -e "console.log(require('./packages/desktop/scripts/executable-name.js').readExecutableNameFromConfig())")"
+      app="$(find packages/desktop/release -maxdepth 3 -type d -name "''${app_name}.app" -print -quit)"
       if [ -z "$app" ]; then
-        echo "electron-builder did not produce Paseo.app" >&2
+        echo "electron-builder did not produce ''${app_name}.app" >&2
         exit 1
       fi
       mkdir -p "$out/Applications"
-      cp -R "$app" "$out/Applications/Paseo.app"
-      ln -s ../Applications/Paseo.app/Contents/MacOS/Paseo "$out/bin/paseo-desktop"
+      cp -R "$app" "$out/Applications/''${app_name}.app"
+      ln -s "../Applications/''${app_name}.app/Contents/MacOS/''${app_name}" "$out/bin/paseo-desktop"
     ''}
 
     runHook postInstall

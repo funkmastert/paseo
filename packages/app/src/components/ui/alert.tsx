@@ -1,17 +1,32 @@
-import { AlertTriangle, CheckCircle2, Info, XCircle, type LucideIcon } from "lucide-react-native";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Info,
+  X,
+  XCircle,
+  type LucideIcon,
+} from "lucide-react-native";
 import { type ReactNode, useMemo } from "react";
-import { Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 
 export type AlertVariant = "default" | "info" | "success" | "warning" | "error";
+
+/** `quiet` (default) is the outlined chrome below. `filled` is for an alert that must not be
+ * missed — the destructive fill and foreground, never a hand-rolled background. */
+export type AlertEmphasis = "quiet" | "filled";
 
 export interface AlertProps {
   title?: string;
   description?: ReactNode;
   variant?: AlertVariant;
+  emphasis?: AlertEmphasis;
   icon?: ReactNode;
   children?: ReactNode;
   testID?: string;
+  /** Renders a close button beside the title. Omit to keep the alert non-dismissible. */
+  onDismiss?: () => void;
+  dismissAccessibilityLabel?: string;
 }
 
 const VARIANT_ICON: Record<Exclude<AlertVariant, "default">, LucideIcon> = {
@@ -25,30 +40,38 @@ export function Alert({
   title,
   description,
   variant = "default",
+  emphasis = "quiet",
   icon,
   children,
   testID,
+  onDismiss,
+  dismissAccessibilityLabel,
 }: AlertProps) {
   const { theme } = useUnistyles();
+  const filled = emphasis === "filled";
   const accentColor = resolveAccentColor(variant, theme);
   const borderColor = variant === "success" ? theme.colors.border : accentColor;
 
-  const containerStyle = useMemo(
-    () => [styles.container, borderColor ? { borderColor } : null],
-    [borderColor],
-  );
+  const containerStyle = useMemo(() => {
+    if (filled) return [styles.container, styles.containerFilled];
+    return [styles.container, borderColor ? { borderColor } : null];
+  }, [filled, borderColor]);
 
-  const titleStyle = useMemo(
-    () => [styles.title, accentColor ? { color: accentColor } : null],
-    [accentColor],
-  );
+  const textStyle = filled ? styles.filledText : null;
+  const titleStyle = useMemo(() => {
+    if (filled) return [styles.title, styles.filledText];
+    return [styles.title, accentColor ? { color: accentColor } : null];
+  }, [filled, accentColor]);
 
   const resolvedIcon = useMemo(() => {
     if (icon !== undefined) return icon;
     if (variant === "default") return null;
     const Icon = VARIANT_ICON[variant];
-    return <Icon size={theme.iconSize.sm} color={accentColor ?? theme.colors.foreground} />;
-  }, [icon, variant, theme, accentColor]);
+    const color = filled
+      ? theme.colors.destructiveForeground
+      : (accentColor ?? theme.colors.foreground);
+    return <Icon size={theme.iconSize.sm} color={color} />;
+  }, [icon, variant, theme, accentColor, filled]);
 
   const hasDescription = description != null && description !== "";
 
@@ -56,9 +79,32 @@ export function Alert({
     <View style={containerStyle} testID={testID} accessibilityRole="alert">
       {resolvedIcon ? <View style={styles.iconSlot}>{resolvedIcon}</View> : null}
       <View style={styles.body}>
-        {title ? <Text style={titleStyle}>{title}</Text> : null}
+        {title || onDismiss ? (
+          <View style={styles.titleRow}>
+            {title ? (
+              <Text style={onDismiss ? [titleStyle, styles.titleTextFlex] : titleStyle}>
+                {title}
+              </Text>
+            ) : null}
+            {onDismiss ? (
+              <Pressable
+                onPress={onDismiss}
+                hitSlop={8}
+                style={styles.dismissButton}
+                testID={testID ? `${testID}-dismiss` : undefined}
+                accessibilityRole="button"
+                accessibilityLabel={dismissAccessibilityLabel}
+              >
+                <X
+                  size={theme.iconSize.sm}
+                  color={filled ? theme.colors.destructiveForeground : theme.colors.foregroundMuted}
+                />
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
         {hasDescription && typeof description === "string" ? (
-          <Text style={styles.description}>{description}</Text>
+          <Text style={[styles.description, textStyle]}>{description}</Text>
         ) : null}
         {hasDescription && typeof description !== "string" ? (
           <View style={styles.descriptionSlot}>{description}</View>
@@ -92,6 +138,13 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.spacing[3],
     paddingHorizontal: theme.spacing[4],
   },
+  containerFilled: {
+    backgroundColor: theme.colors.destructive,
+    borderColor: theme.colors.destructive,
+  },
+  filledText: {
+    color: theme.colors.destructiveForeground,
+  },
   iconSlot: {
     paddingTop: 2,
   },
@@ -104,6 +157,17 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foreground,
     fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.medium,
+  },
+  titleRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: theme.spacing[2],
+  },
+  titleTextFlex: {
+    flex: 1,
+  },
+  dismissButton: {
+    padding: 2,
   },
   description: {
     color: theme.colors.foregroundMuted,

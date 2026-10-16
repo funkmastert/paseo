@@ -4,6 +4,7 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { getProviderIcon } from "@/components/provider-icons";
 import { StatusBadge } from "@/components/ui/status-badge";
 import type { Theme } from "@/styles/theme";
+import { resolveAccountProblem } from "./account-problem";
 import { ProviderUsageBalanceBar } from "./balance-bar";
 import { formatAgo } from "./format";
 import type { ProviderUsage } from "./types";
@@ -45,6 +46,7 @@ export function ProviderUsageCard({
   compact?: boolean;
 }) {
   const status = statusText(usage);
+  const problem = resolveAccountProblem(usage);
   const footer = footerText(usage);
   const balances = usage.balances ?? [];
   const details = usage.details ?? [];
@@ -82,6 +84,19 @@ export function ProviderUsageCard({
       {usage.error ? (
         <Text style={styles.error} numberOfLines={3}>
           {usage.error}
+        </Text>
+      ) : null}
+
+      {problem ? (
+        <Text
+          style={[
+            styles.problem,
+            problem.kind === "signed_out" ? styles.problemDanger : styles.problemWarning,
+          ]}
+          numberOfLines={3}
+          testID={`provider-usage-card-problem-${usage.providerId}`}
+        >
+          {problem.summary}
         </Text>
       ) : null}
 
@@ -190,6 +205,16 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.palette.red[300],
     fontSize: theme.fontSize.sm,
     lineHeight: theme.fontSize.sm * 1.4,
+  },
+  problem: {
+    fontSize: theme.fontSize.sm,
+    lineHeight: theme.fontSize.sm * 1.4,
+  },
+  problemDanger: {
+    color: theme.colors.statusDanger,
+  },
+  problemWarning: {
+    color: theme.colors.statusWarning,
   },
   footer: {
     color: theme.colors.foregroundMuted,

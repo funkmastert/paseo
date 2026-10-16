@@ -1475,6 +1475,33 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     };
   }
 
+  // Every observed worktree of a repository polls the same repo-wide `tea pr list` on its own
+  // timer, so a machine with dozens of worktrees spawned dozens of identical processes per cycle
+  // (and timed them out together under load). Concurrent identical queries share one process.
+  // Nothing is cached once it settles, so a later poll always sees fresh data.
+  const inFlightRepoQueries = new Map<string, Promise<unknown>>();
+
+  async function shareInFlightRepoQuery<T>(
+    cwd: string,
+    args: string[],
+    load: () => Promise<T>,
+  ): Promise<T> {
+    const remoteUrl = await resolveRemoteUrl(cwd);
+    if (!remoteUrl) {
+      return load();
+    }
+    const key = JSON.stringify([remoteUrl, args]);
+    const existing = inFlightRepoQueries.get(key);
+    if (existing) {
+      return existing as Promise<T>;
+    }
+    const pending = load().finally(() => {
+      inFlightRepoQueries.delete(key);
+    });
+    inFlightRepoQueries.set(key, pending);
+    return pending;
+  }
+
   async function listPullRequestItems(input: {
     cwd: string;
     state: "open" | "closed" | "all";
@@ -1489,7 +1516,9 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     if (typeof input.page === "number") {
       args.push("--page", String(input.page));
     }
-    const items = await runJsonArray(args, { cwd: input.cwd }, GiteaPrListItemSchema);
+    const items = await shareInFlightRepoQuery(input.cwd, args, () =>
+      runJsonArray(args, { cwd: input.cwd }, GiteaPrListItemSchema),
+    );
     const query = input.query?.trim().toLowerCase();
     if (!query) {
       return items;
