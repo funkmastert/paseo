@@ -964,7 +964,7 @@ For the regret join it keeps the absolute paths sent, the cwd and a SHA-256 of `
 
 ## Feature 9: compaction timing
 
-It asks while `agents.leaderCompaction.enabled` is true, dry run included; on 2026-10-08 the live daemon has it on in dry run. With leader compaction off it asks nothing, and the dashboard shows the feature Dormant. It is shadow by default, and a shadow verdict shapes only a dry run's would-start.
+It asks while `agents.leaderCompaction.enabled` is true, dry run included; the live daemon has it on, `dryRun:false` (check `~/.paseo/config.json` rather than trusting a date-stamped snapshot here). With leader compaction off it asks nothing, and the dashboard shows the feature Dormant. It is shadow by default, and a shadow verdict shapes only a dry run's would-start.
 
 Leader compaction ([leader-compaction.md](leader-compaction.md)) starts at one line, `prepareAtTokens` (default 400K). JEV adds a better "when": start earlier at a clean break once the context passes a lower line, and hold off while the leader is mid-way through a multi-step edit. It decides when to compact, never which messages to drop: per-item keep/drop is what independent replays measured as no better than a coin flip.
 
@@ -1598,7 +1598,7 @@ R5: `evidence.observed` also reports the same would-skips split by reader — `b
 A would-skip is a saving only if the agent did not need the file. For each `not_needed` verdict the observer (`read-check/validation.ts`) watches the agent from the read for the rest of that turn and its next two, at most 60 minutes, and records the first sign it used the file:
 
 - `edited`: an Edit, Write, MultiEdit or NotebookEdit on the path, from the hooks;
-- `reread`: a `Read` or a Bash read of the path, any range, from the hooks; in live, the retry after a deny;
+- `reread`: a `Read` or a Bash read of the path whose own line range overlaps the range the skip would have covered, from the hooks; in live, the retry after a deny. A later read of an unrelated part of the same file is not a reread of this one — a large file reopened at a different offset does not count. A range neither side can resolve (a Bash read, or a `Read` with no line accounting) falls back to the old rule and counts regardless of range;
 - `quoted`: a line of 40 or more characters from the range appears in a later assistant message or tool input. The observer keeps a hash set of the range's lines, at most 2,000, and its 60-second sweep scans the agent's later timeline rows, which also count the turns;
 - in live, an `ask_jev_file_*` call on the path is `redirected`: the deny worked as meant, and it is not a regret.
 
@@ -1801,15 +1801,16 @@ The dashboard never flips a mode. The evidence is how Tyler decides; the switch 
 
 **Evidence rules,** constants in `savings-formulas.ts`, fixed before the data arrives:
 
-| Feature               | Flip           | Rule                                                                                                                                                                                 |
-| --------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 2 spawn hint          | shadow → live  | 50 settled unlabelled children, and a positive would-have sum after upward moves                                                                                                     |
-| 3a remediation triage | shadow → live  | 20 would-be skips to a person, at most 1 in 5 `contradicted` (the agent fixed it). Deferrals are judged live; the evidence shows how many would-be deferrals cleared inside the hold |
-| 3b finish triage      | shadow → live  | 50 would-be notices with a follow-up, at least 80% `held`                                                                                                                            |
-| 4–6 agent tools       | live → off     | 20 file-tool calls, over half ending in a regret read (feature 4's rule), or the D8 report's kill rule                                                                               |
-| 10 stall judgment     | shadow → live  | 10 person-first labels whose agent ran, at least 70% of those agents ended NOT FIXED                                                                                                 |
-| 14 away reply         | dry run → live | 20 follow-ups, `sameChoice` in at least 90%                                                                                                                                          |
-| 16 read check         | shadow → live  | 200 would-skips of reads of 8,000 tokens or more, at most 30% false skips, a positive projected net                                                                                  |
+| Feature               | Flip           | Rule                                                                                                                                                                                                                                                                |
+| --------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2 spawn hint          | shadow → live  | 50 settled unlabelled children, and a positive would-have sum after upward moves                                                                                                                                                                                    |
+| 3a remediation triage | shadow → live  | 20 would-be skips to a person, at most 1 in 5 `contradicted` (the agent fixed it). Deferrals are judged live; the evidence shows how many would-be deferrals cleared inside the hold                                                                                |
+| 3b finish triage      | shadow → live  | 50 would-be notices with a follow-up, at least 80% `held`                                                                                                                                                                                                           |
+| 4–6 agent tools       | live → off     | 20 file-tool calls, over half ending in a regret read (feature 4's rule), or the D8 report's kill rule                                                                                                                                                              |
+| 9 compaction timing   | none           | Advice only: `priceCompactionTiming` always returns `none` (no token claim to gate a flip on), and there is no auto-promotion rule. `agents.leaderCompaction` (whether compaction acts on the timing advice) is Tyler's own switch, set independently of this table |
+| 10 stall judgment     | shadow → live  | 10 person-first labels whose agent ran, at least 70% of those agents ended NOT FIXED                                                                                                                                                                                |
+| 14 away reply         | dry run → live | 20 follow-ups, `sameChoice` in at least 90%                                                                                                                                                                                                                         |
+| 16 read check         | shadow → live  | 200 would-skips of reads of 8,000 tokens or more, at most 30% false skips, a positive projected net                                                                                                                                                                 |
 
 Spawn-hint records settled before 2026-10-09 priced `base` with the mechanical seed reading title and prompt; later ones read the title only. Count the spawn-hint flip evidence from that date.
 

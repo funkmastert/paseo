@@ -237,6 +237,22 @@ describe("the spawn hint's savings record", () => {
     expect(savings.factsOf(pending!.id)).not.toMatchObject({ declaredAudit: true });
   });
 
+  test("a role-driven model swap counts as changed even when the mechanical move is none", async () => {
+    const { savings, recorder, calls } = await setup();
+    calls.set("call-7", { ...calls.get("call-7")!, outcome: "answered" });
+    const roleSwapLabels = {
+      "paseo.jev-call": "call-7",
+      "paseo.jev-spawn":
+        "v1;base=standard/claude-sonnet-5;would=reviewer/claude-haiku-4-5;move=none;applied=1;audit=0",
+      "paseo.task-class": "standard",
+      "paseo.task-class-source": "default",
+    };
+
+    recorder.onAgent(child({ labels: roleSwapLabels }));
+    const [pending] = savings.events({ range: "today" }).events;
+    expect(pending).toMatchObject({ mode: "live", decision: { changed: true } });
+  });
+
   test("an agent with no spawn label, or created before the daemon with no record, is left alone", async () => {
     const { savings, recorder } = await setup();
 

@@ -9,7 +9,10 @@ import type { JevSavingsValidation } from "../contract.js";
  * at most 60 minutes, and closes on the first sign of use:
  *
  * - `edited`: an Edit, Write, MultiEdit or NotebookEdit on the path;
- * - `reread`: a `Read` or a Bash read of the path, any range; in live, the retry after a deny;
+ * - `reread`: a `Read` or a Bash read of the path whose own line range overlaps the range the
+ *   skipped read would have covered; in live, the retry after a deny. A read of an unrelated
+ *   part of the same file is not a reread of this one — a large file reopened at a different
+ *   offset must not count as proof the skip was wrong;
  * - `quoted`: a line of 40 or more characters from the range in a later assistant message or
  *   tool input;
  * - `redirected`, live only: an `ask_jev_file_*` call on the path. The deny worked as meant.
@@ -31,6 +34,18 @@ const MAX_OPEN_WINDOWS = 500;
 const MAX_RECENT_SIGNALS = 1000;
 
 export type ReadCheckSignal = "edited" | "reread" | "quoted" | "redirected";
+
+/** Inclusive 1-based line bounds, resolved from whatever range a reader printed. */
+export interface ReadCheckLineRange {
+  first: number;
+  last: number;
+}
+
+/** Unknown on either side always overlaps: the old, conservative behavior when a range cannot be resolved. */
+function overlaps(a: ReadCheckLineRange | null, b: ReadCheckLineRange | null): boolean {
+  if (a === null || b === null) return true;
+  return a.first <= b.last && b.first <= a.last;
+}
 
 export interface ReadCheckTimelineRow {
   seq: number;
@@ -55,6 +70,8 @@ export interface ReadCheckWindowInput {
   signalsAfter?: number;
   /** The text the read loaded (or would have), for the quote check. */
   rangeText: string;
+  /** The skipped read's own resolved line range, for the reread overlap check. Null: unknown. */
+  range: ReadCheckLineRange | null;
   /** The read's timeline row, when it was found: later rows are scanned from here. */
   after: { epoch: string; seq: number } | null;
   /** The turn the read happened in, when known. */
@@ -67,6 +84,8 @@ interface RecentSignal {
   path: string;
   signal: ReadCheckSignal;
   at: number;
+  /** The signalling read's own line range; only meaningful for `reread`. */
+  range: ReadCheckLineRange | null;
 }
 
 interface OpenWindow extends Omit<ReadCheckWindowInput, "rangeText" | "signalsAfter"> {
@@ -165,7 +184,10 @@ export class ReadCheckValidation {
     if (signalsAfter === undefined) return;
     const used = this.recent.find(
       (entry) =>
-        entry.mark > signalsAfter && entry.agentId === input.agentId && entry.path === input.path,
+        entry.mark > signalsAfter &&
+        entry.agentId === input.agentId &&
+        entry.path === input.path &&
+        (entry.signal !== "reread" || overlaps(input.range, entry.range)),
     );
     if (used) this.close(input.savingsId, used.signal, used.at);
   }
@@ -193,11 +215,12 @@ export class ReadCheckValidation {
   }
 
   noteEdit(agentId: string, path: string, at: number): void {
-    this.signalPath(agentId, path, "edited", at);
+    this.signalPath(agentId, path, "edited", at, null);
   }
 
-  noteRead(agentId: string, path: string, at: number): void {
-    this.signalPath(agentId, path, "reread", at);
+  /** `range` is the reading read's own resolved line range; null when it cannot be resolved. */
+  noteRead(agentId: string, path: string, at: number, range: ReadCheckLineRange | null): void {
+    this.signalPath(agentId, path, "reread", at, range);
   }
 
   /**
@@ -241,14 +264,20 @@ export class ReadCheckValidation {
     }
   }
 
-  private signalPath(agentId: string, path: string, signal: ReadCheckSignal, at: number): void {
+  private signalPath(
+    agentId: string,
+    path: string,
+    signal: ReadCheckSignal,
+    at: number,
+    range: ReadCheckLineRange | null,
+  ): void {
     this.lastMark += 1;
-    this.recent.push({ mark: this.lastMark, agentId, path, signal, at });
+    this.recent.push({ mark: this.lastMark, agentId, path, signal, at, range });
     if (this.recent.length > MAX_RECENT_SIGNALS) this.recent.shift();
     for (const [savingsId, window] of this.windows) {
-      if (window.agentId === agentId && window.path === path && at >= window.openedAt) {
-        this.close(savingsId, signal, at);
-      }
+      if (window.agentId !== agentId || window.path !== path || at < window.openedAt) continue;
+      if (signal === "reread" && !overlaps(window.range, range)) continue;
+      this.close(savingsId, signal, at);
     }
   }
 

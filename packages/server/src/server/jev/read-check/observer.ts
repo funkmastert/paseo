@@ -58,6 +58,7 @@ import {
 } from "./state.js";
 import {
   ReadCheckValidation,
+  type ReadCheckLineRange,
   type ReadCheckTimelineRow,
   type ReadCheckWindowClose,
 } from "./validation.js";
@@ -366,6 +367,12 @@ function measure(read: RecognizedRead, response: unknown): Measured | null {
   return read.tool === "Read"
     ? measureReadTool(read, record(response))
     : measureBash(read, response);
+}
+
+/** The line range a measured read resolved to, for the reread-overlap check. Null: unresolved. */
+function rereadRangeOf(measured: Measured | null): ReadCheckLineRange | null {
+  if (!measured?.lines) return null;
+  return { first: measured.lines.first, last: measured.lines.first + measured.lines.count - 1 };
 }
 
 /** KTD-2: one read, rendered the same shape `recentLine` already knows how to show. */
@@ -1224,11 +1231,13 @@ export class ReadCheckObserver implements FileReadObserver {
     // once per file it named.
     let ringRefused = false;
 
+    const rereadRange = rereadRangeOf(measured);
+
     for (const file of read.files) {
       const realPath = await this.realpathOf(file.path);
       if (this.isRefusedForRing(file.path, realPath)) ringRefused = true;
       this.noteRead(event.agentId, realPath, read.tool, at, contextTokens);
-      this.validation.noteRead(event.agentId, realPath, at);
+      this.validation.noteRead(event.agentId, realPath, at, rereadRange);
       const signalMark = this.validation.mark();
       if (liveSavingsId && read.files.length === 1) {
         this.settle(liveSavingsId, { contextTokens, estimated: false });
@@ -1341,6 +1350,7 @@ export class ReadCheckObserver implements FileReadObserver {
         openedAt: input.at,
         signalsAfter: input.signalMark,
         rangeText: slice.text,
+        range: { first: slice.firstLine, last: slice.lastLine },
         after: asked.around.cursor,
         turnId: asked.around.turnId,
       });
@@ -1860,6 +1870,7 @@ export class ReadCheckObserver implements FileReadObserver {
         openedAt: now,
         signalsAfter: input.signalMark,
         rangeText: prepared.slice.text,
+        range: { first: prepared.slice.firstLine, last: prepared.slice.lastLine },
         after: asked.around.cursor,
         turnId: asked.around.turnId,
       });

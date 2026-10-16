@@ -408,7 +408,14 @@ describe("AwayReplyJob", () => {
         decide: async (input) => {
           const outcome = await jev.decide(input);
           h.fleet.presence = {
-            clients: [{ focusedAgentId: null, appVisible: true, lastActivityAtMs: h.now() }],
+            clients: [
+              {
+                focusedAgentId: null,
+                focusedWorkspaceId: null,
+                appVisible: true,
+                lastActivityAtMs: h.now(),
+              },
+            ],
             availability: "available",
           };
           return outcome;
@@ -444,14 +451,35 @@ describe("AwayReplyJob", () => {
 
   it.each([
     [
-      "used the app in the last hour",
-      { focusedAgentId: "other", appVisible: false, lastActivityAtMs: T0 + 20 * MINUTE },
+      "used the app in the last hour, with no agent focused",
+      {
+        focusedAgentId: null,
+        focusedWorkspaceId: null,
+        appVisible: false,
+        lastActivityAtMs: T0 + 20 * MINUTE,
+      },
+      "available",
+      "tyler-active-recently",
+    ],
+    [
+      "used the app on a sibling agent in this leader's workspace",
+      {
+        focusedAgentId: "other",
+        focusedWorkspaceId: "ws-1",
+        appVisible: false,
+        lastActivityAtMs: T0 + 20 * MINUTE,
+      },
       "available",
       "tyler-active-recently",
     ],
     [
       "has this leader open",
-      { focusedAgentId: "leader-1", appVisible: true, lastActivityAtMs: T0 },
+      {
+        focusedAgentId: "leader-1",
+        focusedWorkspaceId: "ws-1",
+        appVisible: true,
+        lastActivityAtMs: T0,
+      },
       "available",
       "tyler-viewing-agent",
     ],
@@ -464,6 +492,26 @@ describe("AwayReplyJob", () => {
     const report = await h.job.tick();
     expect(report?.entries).toMatchObject([{ action: "skipped", reason }]);
     expect(h.calls()).toBe(0);
+  });
+
+  it("replies even though Tyler recently used the app on an unrelated agent in another workspace", async () => {
+    const h = setup();
+    h.waitingLeader();
+    h.fleet.presence = {
+      clients: [
+        {
+          focusedAgentId: "other",
+          focusedWorkspaceId: "ws-unrelated",
+          appVisible: false,
+          lastActivityAtMs: T0 + 20 * MINUTE,
+        },
+      ],
+      availability: "available",
+    };
+    h.at(T0 + 62 * MINUTE);
+    const report = await h.job.tick();
+    expect(report?.entries).toMatchObject([{ action: "replied" }]);
+    expect(h.fleet.turns).toHaveLength(1);
   });
 
   it("does not reply when presence cannot be read", async () => {
@@ -483,6 +531,24 @@ describe("AwayReplyJob", () => {
     const report = await h.job.tick();
     expect(report?.entries).toMatchObject([{ action: "skipped", reason: "tyler-read-thread" }]);
     expect(h.calls()).toBe(0);
+  });
+
+  it("defers a glance with no reply rather than closing the episode for good", async () => {
+    const h = setup();
+    h.waitingLeader();
+    h.fleet.agent("leader-1").requiresAttention = false;
+    h.at(T0 + 62 * MINUTE);
+    const first = await h.job.tick();
+    expect(first?.entries).toMatchObject([{ action: "skipped", reason: "tyler-read-thread" }]);
+    expect(h.calls()).toBe(0);
+
+    // Something re-raises the unread flag later, with the episode otherwise unchanged. A
+    // permanent close would still skip it; a deferral reconsiders and can reply.
+    h.fleet.agent("leader-1").requiresAttention = true;
+    h.at(T0 + 70 * MINUTE);
+    const second = await h.job.tick();
+    expect(second?.entries).toMatchObject([{ action: "replied" }]);
+    expect(h.fleet.turns).toHaveLength(1);
   });
 
   it("does not count a cancel from an earlier turn against a later one", async () => {
