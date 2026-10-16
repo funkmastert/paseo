@@ -2194,6 +2194,13 @@ export const en = {
     jevOlder: "{{count}} older",
     jevAllActivity: "All JEV activity",
   },
+  jevMarker: {
+    chipLabel: "JEV",
+    chipLabelCount: "JEV · {{count}}",
+    accessibilityLabel: "JEV decision",
+    accessibilityLabelCount: "{{count}} JEV decisions",
+    wouldHaveAction: "Would have: {{action}}",
+  },
   tokenUsage: {
     byModelTitle: "Tokens by model",
     byRoleTitle: "Tokens by role",

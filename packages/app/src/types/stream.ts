@@ -7,6 +7,7 @@ import type {
 import { timelineItemIdentity } from "@getpaseo/protocol/timeline-identity";
 import type { AgentAttachment, AgentStreamEventPayload } from "@getpaseo/protocol/messages";
 import type { AttachmentMetadata } from "@/attachments/types";
+import type { JevDecisionLine } from "@/jev/jev-decisions-model";
 import { extractTaskEntriesFromToolCall } from "../utils/tool-call-parsers";
 import { splitMarkdownBlocks } from "@/utils/split-markdown-blocks";
 
@@ -86,7 +87,8 @@ export type StreamItem =
   | TodoListItem
   | NotificationItem
   | CompactionItem
-  | PluginTimelineStreamItem;
+  | PluginTimelineStreamItem
+  | JevMarkerItem;
 
 export type UserMessageImageAttachment = AttachmentMetadata;
 
@@ -810,6 +812,20 @@ export interface PluginTimelineStreamItem {
   itemKind: string;
   version: number;
   data: JsonValue;
+}
+
+/**
+ * One or more JEV decisions collapsed into a single inline marker, synthesized at render time
+ * from the decision store (never the timeline) — see `@/jev/jev-marker-model`. Never persisted:
+ * `runtime/replica-cache` and `plugins/timeline/projection` both return `null` for this kind.
+ */
+export interface JevMarkerItem {
+  kind: "jev_marker";
+  id: string;
+  timelineCursor?: TimelinePosition;
+  turnId?: string;
+  timestamp: Date;
+  lines: JevDecisionLine[];
 }
 
 export interface TodoEntry {

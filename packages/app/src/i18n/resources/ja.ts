@@ -2205,6 +2205,13 @@ export const ja: TranslationResources = {
     jevOlder: "ほか {{count}} 件",
     jevAllActivity: "すべての JEV アクティビティ",
   },
+  jevMarker: {
+    chipLabel: "JEV",
+    chipLabelCount: "JEV · {{count}}",
+    accessibilityLabel: "JEV の判断",
+    accessibilityLabelCount: "JEV の判断 {{count}} 件",
+    wouldHaveAction: "実行していた場合: {{action}}",
+  },
   tokenUsage: {
     byModelTitle: "モデル別トークン",
     byRoleTitle: "ロール別トークン",

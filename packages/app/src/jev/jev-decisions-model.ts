@@ -42,7 +42,7 @@ export function jevFeatureLabel(feature: string): string {
  * hook-in has no `mode`; for those, fall back to the old heuristic (today's status, which can be
  * wrong if the feature's shadow setting changed since).
  */
-function tagFor(record: JevDecisionRecord, status: JevStatus | null): JevDecisionTag | null {
+export function tagFor(record: JevDecisionRecord, status: JevStatus | null): JevDecisionTag | null {
   if (record.mode !== undefined) {
     if (record.mode !== "shadow") return null;
     return record.feature === "awayReply" ? "dryRun" : "shadow";
@@ -62,7 +62,7 @@ export function formatJevCost(usd: number | null, provider: string | null): stri
   return `$${usd.toFixed(3)}`;
 }
 
-function parseAt(at: string): Date | null {
+export function parseJevDecisionAt(at: string): Date | null {
   const ms = Date.parse(at);
   return Number.isFinite(ms) ? new Date(ms) : null;
 }
@@ -81,7 +81,7 @@ export function buildJevDecisionsView(
     action: record.action,
     tag: tagFor(record, status),
     cost: formatJevCost(record.costUsd, provider),
-    at: parseAt(record.at),
+    at: parseJevDecisionAt(record.at),
   }));
   return { lines, hidden: Math.max(0, decisions.length - lines.length) };
 }

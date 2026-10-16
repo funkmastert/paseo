@@ -74,6 +74,8 @@ export function estimateStreamItemHeight(item: StreamItem): number {
       return 88;
     case "compaction":
       return 72;
+    case "jev_marker":
+      return 32;
     default:
       return 120;
   }

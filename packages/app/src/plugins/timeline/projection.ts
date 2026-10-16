@@ -71,6 +71,10 @@ function sourceTimelineItem(item: StreamItem): AgentTimelineItem | null {
       };
     case "plugin":
       return null;
+    case "jev_marker":
+      // Synthesized at render time from the JEV decision store, not a real timeline entry — a
+      // plugin's timeline transform never sees it.
+      return null;
   }
 }
 

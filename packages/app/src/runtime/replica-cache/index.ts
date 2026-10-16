@@ -482,6 +482,11 @@ function serializeTimelineItem(item: StreamItem): StoredTimelineItem | null {
         version: item.version,
         data: item.data,
       };
+    case "jev_marker":
+      // Synthesized at render time from the JEV decision store, never the timeline — storing it
+      // here would replicate exactly the `jev_decision` timeline row the design rejected for
+      // breaking account-failover dating (docs/jev.md).
+      return null;
   }
 }
 

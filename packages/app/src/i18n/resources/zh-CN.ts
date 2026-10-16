@@ -2158,6 +2158,13 @@ export const zhCN: TranslationResources = {
     jevOlder: "更早的 {{count}} 条",
     jevAllActivity: "所有 JEV 活动",
   },
+  jevMarker: {
+    chipLabel: "JEV",
+    chipLabelCount: "JEV · {{count}}",
+    accessibilityLabel: "JEV 决策",
+    accessibilityLabelCount: "{{count}} 条 JEV 决策",
+    wouldHaveAction: "本会执行：{{action}}",
+  },
   tokenUsage: {
     byModelTitle: "按模型统计 Token",
     byRoleTitle: "按角色统计 Token",
