@@ -2185,6 +2185,13 @@ export const ar: TranslationResources = {
     jevOlder: "{{count}} أقدم",
     jevAllActivity: "كل نشاط JEV",
   },
+  jevMarker: {
+    chipLabel: "JEV",
+    chipLabelCount: "JEV · {{count}}",
+    accessibilityLabel: "قرار JEV",
+    accessibilityLabelCount: "{{count}} قرارات JEV",
+    wouldHaveAction: "كان سيصبح: {{action}}",
+  },
   tokenUsage: {
     byModelTitle: "الرموز حسب النموذج",
     byRoleTitle: "الرموز حسب الدور",

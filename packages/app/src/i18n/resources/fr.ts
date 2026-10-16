@@ -2238,6 +2238,13 @@ export const fr: TranslationResources = {
     jevOlder: "{{count}} plus anciennes",
     jevAllActivity: "Toute l'activité JEV",
   },
+  jevMarker: {
+    chipLabel: "JEV",
+    chipLabelCount: "JEV · {{count}}",
+    accessibilityLabel: "Décision JEV",
+    accessibilityLabelCount: "{{count}} décisions JEV",
+    wouldHaveAction: "Aurait fait : {{action}}",
+  },
   tokenUsage: {
     byModelTitle: "Tokens par modèle",
     byRoleTitle: "Tokens par rôle",

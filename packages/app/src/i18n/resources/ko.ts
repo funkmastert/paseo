@@ -2196,6 +2196,13 @@ export const ko: TranslationResources = {
     jevOlder: "이전 {{count}}건",
     jevAllActivity: "모든 JEV 활동",
   },
+  jevMarker: {
+    chipLabel: "JEV",
+    chipLabelCount: "JEV · {{count}}",
+    accessibilityLabel: "JEV 결정",
+    accessibilityLabelCount: "JEV 결정 {{count}}건",
+    wouldHaveAction: "실행했다면: {{action}}",
+  },
   tokenUsage: {
     byModelTitle: "모델별 토큰",
     byRoleTitle: "역할별 토큰",

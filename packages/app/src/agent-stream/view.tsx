@@ -120,6 +120,10 @@ import { useRetainedPanelActive } from "@/components/retained-panel";
 import { useStreamHistoryWindow } from "./use-stream-history-window";
 import { PluginTimelineItemView, useInstalledTimelineTransform } from "@/plugins/timeline";
 import { projectPluginTimelineItems } from "@/plugins/timeline/projection";
+import { useAgentJevDecisions } from "@/jev/use-agent-jev-decisions";
+import { buildJevMarkerLines, placeJevMarkers, splitJevMarkerLines } from "@/jev/jev-marker-model";
+import { JevMarkerChip } from "@/jev/jev-marker-chip";
+import type { JevDecisionRecord } from "@getpaseo/protocol/jev/rpc-schemas";
 
 function renderLiveAuxiliaryNode(input: {
   pendingPermissions: ReactNode;
@@ -335,6 +339,7 @@ const AGENT_CAPABILITY_FLAG_KEYS: (keyof AgentCapabilityFlags)[] = [
 ];
 
 const EMPTY_STREAM_HEAD: StreamItem[] = [];
+const EMPTY_JEV_DECISIONS: readonly JevDecisionRecord[] = [];
 
 function useRetainedValue<T>(value: T, active: boolean): T {
   const retainedRef = useRef(value);
@@ -595,6 +600,34 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       }),
       [projectedToolCalls.head, projectedToolCalls.tail, transformTimelineItem],
     );
+    // No `enabled` override: defaults to true and shares the popover's query key/cache and 15s
+    // poll, so the stream picks up new decisions live without polling any faster than the meter
+    // already does (docs/agent-stream-performance.md).
+    const { data: jevDecisionsData } = useAgentJevDecisions(resolvedServerId, agentId);
+    const jevMarkerLines = useMemo(
+      () =>
+        buildJevMarkerLines(
+          jevDecisionsData?.decisions ?? EMPTY_JEV_DECISIONS,
+          jevDecisionsData?.status ?? null,
+        ),
+      [jevDecisionsData],
+    );
+    const tailBoundaryMs =
+      projectedPlugins.tail.length > 0
+        ? projectedPlugins.tail[projectedPlugins.tail.length - 1].timestamp.getTime()
+        : null;
+    const { forTail: tailJevMarkerLines, forHead: headJevMarkerLines } = useMemo(
+      () => splitJevMarkerLines(jevMarkerLines, tailBoundaryMs),
+      [jevMarkerLines, tailBoundaryMs],
+    );
+    const tailWithJevMarkers = useMemo(
+      () => placeJevMarkers(projectedPlugins.tail, tailJevMarkerLines),
+      [projectedPlugins.tail, tailJevMarkerLines],
+    );
+    const headWithJevMarkers = useMemo(
+      () => placeJevMarkers(projectedPlugins.head, headJevMarkerLines),
+      [projectedPlugins.head, headJevMarkerLines],
+    );
     const {
       start: historyWindowStart,
       hasLocalHistory,
@@ -602,7 +635,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       loadOlder,
     } = useStreamHistoryWindow({
       agentId,
-      items: projectedPlugins.tail,
+      items: tailWithJevMarkers,
       loadRemoteOlder,
     });
     const isLoadingOlder = remoteIsLoadingOlder;
@@ -613,8 +646,8 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       return buildAgentStreamRenderModel({
         isTurnActive,
         activeTurnStartedAt: effectiveTurnPresentation.startedAt,
-        tail: projectedPlugins.tail,
-        head: projectedPlugins.head,
+        tail: tailWithJevMarkers,
+        head: headWithJevMarkers,
         platform: isWeb ? "web" : "native",
         isMobileBreakpoint: isMobile,
         historyStart: historyWindowStart,
@@ -622,8 +655,8 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     }, [
       isMobile,
       isTurnActive,
-      projectedPlugins.head,
-      projectedPlugins.tail,
+      headWithJevMarkers,
+      tailWithJevMarkers,
       effectiveTurnPresentation.startedAt,
       historyWindowStart,
     ]);
@@ -985,6 +1018,9 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             return (
               <PluginTimelineItemView agentId={agentId} item={item} serverId={resolvedServerId} />
             );
+
+          case "jev_marker":
+            return <JevMarkerChip lines={item.lines} />;
 
           default:
             return null;
