@@ -14,6 +14,7 @@ import {
   type TaskClassId,
 } from "../shared/role-policy-schema";
 import { sameModel } from "../shared/model-identity";
+import { priceWeight } from "@getpaseo/protocol/jev/pricing";
 import {
   DEFAULT_TOOL_PROFILE,
   isToolProfileExpressibleOnCodex,
@@ -113,6 +114,13 @@ import { decideMcp, type McpDecision, type McpGatewaySnapshot } from "./mcp-scop
  * Bash away, which is how a prompt containing the word "check" once stripped
  * an implementation agent to read-only and cost 1.1M tokens. Settled; see
  * `toolProfileIsEvidenceBased`.
+ *
+ * Nor may inference make a create pricier than its no-hint baseline. JEV's spawn hint
+ * (`applyHard`/`applyRole`) may change a create's class or role, but only if the model that
+ * results prices no higher, by `priceWeight`, than the model the create would get without it —
+ * otherwise the no-JEV model runs and the decision records `jev.modelClamped: true` (docs/jev.md,
+ * Feature 2, "pays only if it moves down"). Its thinking level is held the same way, on any
+ * applied hint: never above the level the create would think at without it.
  *
  * ## Nothing silent
  *
@@ -524,7 +532,9 @@ export interface JevHintDecision {
     taskClass: TaskClassId | null;
     /** Present when the role was asked. */
     role?: string;
-    /** The model that class and role would run, spelled like `ModelDecision.model`. */
+    /** The model that class and role would run, spelled like `ModelDecision.model`. Always JEV's
+     * answer, whole-hog, regardless of whether live mode actually clamped it (see `modelClamped`
+     * below) — a day's "JEV wanted to go up" count must not blur into "and it ran that way". */
     model: string | null;
     move: "down" | "up" | "none";
   };
@@ -537,6 +547,15 @@ export interface JevHintDecision {
     taskClass: TaskClassId | null;
     model: string | null;
   };
+  /**
+   * Only ever on when the hint actually applied (class or role) and the resulting model priced
+   * more than `base.model` by `priceWeight` — the live create ran on `base.model` instead (docs/jev.md,
+   * Feature 2, "pays only if it moves down"). `false` for shadow mode, which never applies anything
+   * to clamp, and for an applied hint that was flat or cheaper. `wouldBe.model` is untouched by
+   * this: it keeps reporting what JEV asked for, clamped or not. The thinking level has its own
+   * hold, on every applied hint whether or not the model was clamped; its reason sentence says so.
+   */
+  modelClamped: boolean;
 }
 
 /** The D8 arm for the JEV agent tools, or null when the create is not eligible. */
@@ -1483,6 +1502,22 @@ function decideThinking(
   };
 }
 
+/**
+ * The lower of two thinking decisions made for the same model: JEV's, and the one the create
+ * would get without the hint. A level `thinkingLevelRank` doesn't rank (Ultra Code, an id off
+ * Paseo's ladder) can't be judged higher or lower, so JEV's decision stands, as the model clamp
+ * does for a model `priceWeight` doesn't know.
+ */
+function lowerThinking(jev: ThinkingDecision, noJev: ThinkingDecision): ThinkingDecision {
+  const jevRank = jev.optionId === null ? undefined : thinkingLevelRank(jev.optionId);
+  const noJevRank = noJev.optionId === null ? undefined : thinkingLevelRank(noJev.optionId);
+  if (jevRank === undefined || noJevRank === undefined || noJevRank >= jevRank) return jev;
+  return {
+    ...noJev,
+    reason: `${noJev.reason} Held to the level the create would get without JEV's hint, which may only make a create cheaper.`,
+  };
+}
+
 /** The reason sentence for a decided level: what applies, why, then each thing that changed it on the way. */
 function describeThinking(decision: {
   outcome: "leader-rule" | "requested" | "task-class-default";
@@ -1784,10 +1819,45 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     reason: describeTaskClass(classPartial) + hintNote(input.jevHint, classResolution.taskClass, wouldBeClass),
   };
 
-  const model = decideModel(input, world, roleDecision.role, taskClass.taskClass, classResolution.source === "declared");
+  // JEV may only make a create cheaper (docs/jev.md, Feature 2, "pays only if it moves down"): a
+  // role or class it changed (`applyRole`/`applyHard`) is held to the model the create would get
+  // without it whenever that model prices higher, by `priceWeight` — the same table
+  // `priceSpawnHint` prices the savings record against, so a shadow day's accounting and this
+  // clamp never disagree about what counts as "pricier". The clamp touches the model and the
+  // thinking level decided below: `roleDecision`/`taskClass` keep reporting JEV's own answer, and
+  // tools/MCP already come from `toolRole` (the jevless role, which is also the baseline's) (D2).
+  const hintChangedModel = classResolution.source === "jev" || roleDecision.source === "classified-jev";
+  // Shared with `decideJevRecord` below (its own `base`/`wouldBe` reporting needs the same
+  // class-with-no-hint value), so a create that carries a hint resolves it once, not twice.
+  const baselineClass = input.jevHint ? resolveTaskClass(textInput).taskClass : undefined;
+  const jevModel = decideModel(input, world, roleDecision.role, taskClass.taskClass, classResolution.source === "declared");
+  let model = jevModel;
+  let modelClamped = false;
+  if (hintChangedModel) {
+    const noJevModel = decideModel(
+      input,
+      world,
+      toolRole.role,
+      baselineClass,
+      classResolution.source === "declared",
+    );
+    const wJev = priceWeight(jevModel.model);
+    const wBase = priceWeight(noJevModel.model);
+    // A model `priceWeight` doesn't recognize can't be judged pricier or cheaper — never guess.
+    if (wJev !== null && wBase !== null && wJev > wBase) {
+      model = noJevModel;
+      modelClamped = true;
+    }
+  }
   const tools = decideTools(world, toolRole, hasCaller);
   const account = decideAccount(input, world, model, asChild, hasCaller);
-  const thinking = decideThinking(input, world, model, taskClass.taskClass, roleDecision, asChild);
+  // Nor may an applied hint raise the thinking level: it thinks at the lower of JEV's level and
+  // the no-JEV class and role's, both decided for the model that runs. A class raise can leave the
+  // model's price flat (no model clamp) and still lift thinking, from high to xhigh say.
+  const jevThinking = decideThinking(input, world, model, taskClass.taskClass, roleDecision, asChild);
+  const thinking = hintChangedModel
+    ? lowerThinking(jevThinking, decideThinking(input, world, model, baselineClass, toolRole, asChild))
+    : jevThinking;
   const outputStyle = decideOutputStyle(input, world, model, hasCaller);
   const mcp = decideMcp(
     { hasCaller, labels: input.labels, title: input.title, initialPrompt: input.initialPrompt },
@@ -1801,10 +1871,13 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     decision.jev = decideJevRecord(input, world, input.jevHint, {
       hasCaller,
       role: roleDecision,
-      baseRole: (jevlessRole ?? roleDecision).role,
+      baseRole: toolRole.role,
       taskClass: classResolution.taskClass,
       source: classResolution.source,
       wouldBeClass,
+      baselineClass,
+      applied: hintChangedModel,
+      modelClamped,
     });
   }
   if (jevTools) {
@@ -1826,6 +1899,12 @@ function decideJevRecord(
     taskClass: TaskClassId | undefined;
     source: TaskClassSource;
     wouldBeClass: TaskClassId | undefined;
+    /** The class with no hint at all — the same value `classifyAgent` already resolved once. */
+    baselineClass: TaskClassId | undefined;
+    /** `classifyAgent`'s own `hintChangedModel`: whether the hint changed this create's class or role. */
+    applied: boolean;
+    /** Whether `classifyAgent` held the real decision to the no-JEV model (see `JevHintDecision`). */
+    modelClamped: boolean;
   },
 ): JevHintDecision {
   const hint = answeredHint(jevHint);
@@ -1836,10 +1915,11 @@ function decideJevRecord(
       ...("reason" in jevHint ? { reason: jevHint.reason } : {}),
       applied: false,
       declaredAudit: false,
+      modelClamped: false,
     };
   }
   const textInput = { labels: input.labels, title: input.title, initialPrompt: input.initialPrompt };
-  const baselineClass = resolveTaskClass(textInput).taskClass;
+  const baselineClass = resolved.baselineClass;
   const wouldBeRole =
     resolved.hasCaller && hint.proposal.roleId !== undefined
       ? resolveRole(world.policy, textInput, { roleId: hint.proposal.roleId, apply: true }).role
@@ -1856,7 +1936,7 @@ function decideJevRecord(
     status: hint.status,
     callId: hint.callId,
     answers: hint.answers,
-    applied: resolved.source === "jev" || resolved.role.source === "classified-jev",
+    applied: resolved.applied,
     declaredAudit: hint.declaredAudit,
     wouldBe: {
       taskClass: resolved.wouldBeClass ?? null,
@@ -1865,5 +1945,6 @@ function decideJevRecord(
       move: rankDelta < 0 ? "down" : rankDelta > 0 ? "up" : "none",
     },
     base: { taskClass: baselineClass ?? null, model: baseModel.model ?? null },
+    modelClamped: resolved.modelClamped,
   };
 }

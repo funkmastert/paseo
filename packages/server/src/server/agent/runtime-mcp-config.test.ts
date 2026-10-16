@@ -5,7 +5,9 @@ import {
   MCP_SCOPE_LABEL,
   claudeAiConnectorsInScope,
   scopeMcpGatewayServerNames,
+  stripJevToolsMcpServer,
   stripMcpGatewayServers,
+  withRuntimeJevToolsMcpServer,
   withRuntimeMcpGatewayServers,
   withRuntimePaseoMcpServer,
 } from "./runtime-mcp-config.js";
@@ -54,6 +56,105 @@ describe("withRuntimePaseoMcpServer", () => {
     });
 
     expect(result.mcpServers).toBeUndefined();
+  });
+});
+
+describe("withRuntimeJevToolsMcpServer", () => {
+  test("an 'on'-arm agent gets a dedicated alwaysLoad server with &tools=jev", () => {
+    const result = withRuntimeJevToolsMcpServer({
+      config: BASE_CONFIG,
+      agentId: "agent-1",
+      mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
+      mcpAuthToken: "cap-token",
+      enabled: true,
+    });
+
+    expect(result.mcpServers?.["paseo-jev"]).toEqual({
+      type: "http",
+      url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=agent-1&tools=jev",
+      alwaysLoad: true,
+      headers: { Authorization: "Bearer cap-token" },
+    });
+  });
+
+  test("a hold-out or ineligible agent (enabled: false) gets nothing", () => {
+    const result = withRuntimeJevToolsMcpServer({
+      config: BASE_CONFIG,
+      agentId: "agent-1",
+      mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
+      mcpAuthToken: "cap-token",
+      enabled: false,
+    });
+
+    expect(result.mcpServers?.["paseo-jev"]).toBeUndefined();
+  });
+
+  test("does not inject when no MCP base URL is configured, even if enabled", () => {
+    const result = withRuntimeJevToolsMcpServer({
+      config: BASE_CONFIG,
+      agentId: "agent-1",
+      mcpBaseUrl: null,
+      mcpAuthToken: "cap-token",
+      enabled: true,
+    });
+
+    expect(result.mcpServers).toBeUndefined();
+  });
+
+  test("a stale entry from a prior 'on' label is stripped once disabled, mirroring the gateway's persistence safety", () => {
+    const withStaleEntry: AgentSessionConfig = {
+      ...BASE_CONFIG,
+      mcpServers: {
+        "paseo-jev": {
+          type: "http",
+          url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=agent-1&tools=jev",
+          alwaysLoad: true,
+        },
+      },
+    };
+
+    const result = withRuntimeJevToolsMcpServer({
+      config: withStaleEntry,
+      agentId: "agent-1",
+      mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
+      mcpAuthToken: null,
+      enabled: false,
+    });
+
+    expect(result.mcpServers).toBeUndefined();
+  });
+});
+
+describe("stripJevToolsMcpServer", () => {
+  test("removes the paseo-jev entry by pathname and &tools=jev, leaving an unrelated entry alone", () => {
+    const config: AgentSessionConfig = {
+      ...BASE_CONFIG,
+      mcpServers: {
+        "paseo-jev": {
+          type: "http",
+          url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=a&tools=jev",
+        },
+        other: { type: "stdio", command: "echo" },
+      },
+    };
+
+    const result = stripJevToolsMcpServer(config);
+
+    expect(result.mcpServers?.["paseo-jev"]).toBeUndefined();
+    expect(result.mcpServers?.other).toBeDefined();
+  });
+
+  test("a same-named entry without &tools=jev (not ours) is left alone", () => {
+    const config: AgentSessionConfig = {
+      ...BASE_CONFIG,
+      mcpServers: {
+        "paseo-jev": { type: "http", url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=a" },
+      },
+    };
+
+    const result = stripJevToolsMcpServer(config);
+
+    expect(result.mcpServers?.["paseo-jev"]).toBeDefined();
   });
 });
 

@@ -392,6 +392,7 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
       callId: "call-2",
       applied: false,
       declaredAudit: false,
+      modelClamped: false,
     });
   });
 
@@ -523,6 +524,98 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
     // A role-only ask is not the declared-label audit, even though this child's class is
     // declared too: the savings track must be able to tell the two apart (finding, 2026-10-08).
     expect(decision.jev?.declaredAudit).toBe(false);
+  });
+
+  describe("the clamp: JEV may only move price down (docs/jev.md, Feature 2)", () => {
+    it("an applied role+class that would cost more than the no-JEV model is clamped to the no-JEV model", () => {
+      // advisor's mechanicalModels is empty, so "mechanical" falls back to its standard pool,
+      // whose first entry is claude-opus-5-5 — pricier than the no-JEV worker/standard model.
+      const without = classifyAgent(implementation, world({ policy: LIVE_POLICY }));
+      const decision = classifyAgent(
+        { ...implementation, jevHint: jevHint("advisor", "mechanical") },
+        world({ policy: LIVE_POLICY }),
+      );
+
+      expect(decision.model.model).toBe(without.model.model);
+      expect(decision.jev?.modelClamped).toBe(true);
+      // The hypothetical field keeps reporting JEV's own (unclamped) answer.
+      expect(decision.jev?.wouldBe?.model).not.toBe(without.model.model);
+      // The role/class decisions themselves still read as JEV's answer — only the model is held.
+      expect(decision.role.role.id).toBe("advisor");
+      expect(decision.taskClass).toMatchObject({ taskClass: "mechanical", source: "jev" });
+      // Thinking takes the lower level: JEV's mechanical class thinks low, below the no-JEV high.
+      expect(without.thinking.optionId).toBe("high");
+      expect(decision.thinking.optionId).toBe("low");
+    });
+
+    it("a class raise that leaves the model's price flat still never raises thinking", () => {
+      // worker's hard pool is Sonnet here, so JEV's hard answer runs the no-JEV model (no model
+      // clamp), but hard would think at xhigh where the no-JEV standard class thinks at high.
+      const policy = withRole(LIVE_POLICY, "worker", { hardModels: ["claude-sonnet-5"] });
+      const without = classifyAgent(implementation, world({ policy }));
+      const decision = classifyAgent({ ...implementation, jevHint: jevHint("worker", "hard") }, world({ policy }));
+
+      expect(decision.taskClass).toMatchObject({ taskClass: "hard", source: "jev" });
+      expect(decision.model.model).toBe(without.model.model);
+      expect(decision.jev?.modelClamped).toBe(false);
+      expect(without.thinking.optionId).toBe("high");
+      expect(decision.thinking.optionId).toBe("high");
+      expect(decision.thinking.reason).toContain("without JEV's hint");
+    });
+
+    it("an applied role+class that costs less than the no-JEV model is never clamped", () => {
+      const without = classifyAgent(implementation, world({ policy: LIVE_POLICY }));
+      const decision = classifyAgent(
+        { ...implementation, jevHint: jevHint("reviewer", "mechanical") },
+        world({ policy: LIVE_POLICY }),
+      );
+
+      expect(decision.model.model).toBe("claude-haiku-4-5-20251001");
+      expect(decision.model.model).not.toBe(without.model.model);
+      expect(decision.jev?.modelClamped).toBe(false);
+    });
+
+    it("a clamp never touches tools or MCP — they already come from the jevless role (D2)", () => {
+      const without = classifyAgent(implementation, world({ policy: LIVE_POLICY }));
+      const decision = classifyAgent(
+        { ...implementation, jevHint: jevHint("advisor", "mechanical") },
+        world({ policy: LIVE_POLICY }),
+      );
+
+      expect(decision.jev?.modelClamped).toBe(true);
+      expect(decision.tools).toEqual(without.tools);
+      expect(decision.mcp).toEqual(without.mcp);
+    });
+
+    it("a model priceWeight doesn't recognize is never clamped — it can't be judged pricier", () => {
+      const policy = {
+        ...withRole(LIVE_POLICY, "advisor", {
+          models: ["claude-future-model"],
+          mechanicalModels: [],
+          hardModels: [],
+        }),
+        allowUnlistedModels: [...LIVE_POLICY.allowUnlistedModels, "claude-future-model"],
+      };
+
+      const decision = classifyAgent(
+        { ...implementation, jevHint: jevHint("advisor") },
+        world({ policy }),
+      );
+
+      expect(decision.model.model).toBe("claude-future-model");
+      expect(decision.jev?.modelClamped).toBe(false);
+    });
+
+    it("shadow mode never clamps: nothing it answers is ever applied", () => {
+      const hint = jevHint("advisor", "mechanical");
+      if (hint?.status !== "answered") throw new Error("expected an answered hint");
+      const shadow: ClassifierInput["jevHint"] = { ...hint, status: "shadow" };
+
+      const decision = classifyAgent({ ...implementation, jevHint: shadow }, world({ policy: LIVE_POLICY }));
+
+      expect(decision.jev?.applied).toBe(false);
+      expect(decision.jev?.modelClamped).toBe(false);
+    });
   });
 });
 

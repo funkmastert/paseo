@@ -107,6 +107,7 @@ import {
   stripInternalPaseoMcpServer,
   claudeAiConnectorsInScope,
   scopeMcpGatewayServerNames,
+  withRuntimeJevToolsMcpServer,
   withRuntimeMcpGatewayServers,
   withRuntimePaseoMcpServer,
 } from "./runtime-mcp-config.js";
@@ -7601,16 +7602,25 @@ export class AgentManager {
     const brokeredServerNames = brokersMcpServers
       ? scopeMcpGatewayServerNames(this.mcpGateway?.getServerNames() ?? [], labels)
       : [];
+    // Same gate as the main paseo server: no point injecting either when paseo tools are off
+    // for this policy, since the jev-only server is a slice of that same catalog.
+    const paseoMcpBaseUrl =
+      this.paseoToolsEnabled && isPaseoToolPolicyEnabled(paseoToolPolicy) ? this.mcpBaseUrl : null;
     const launchConfig = this.applyDaemonAppendSystemPrompt(
       withRuntimeMcpGatewayServers({
-        config: withRuntimePaseoMcpServer({
-          config: storedConfig,
+        config: withRuntimeJevToolsMcpServer({
+          config: withRuntimePaseoMcpServer({
+            config: storedConfig,
+            agentId,
+            mcpBaseUrl: paseoMcpBaseUrl,
+            mcpAuthToken: this.mcpAuthToken,
+          }),
           agentId,
-          mcpBaseUrl:
-            this.paseoToolsEnabled && isPaseoToolPolicyEnabled(paseoToolPolicy)
-              ? this.mcpBaseUrl
-              : null,
+          mcpBaseUrl: paseoMcpBaseUrl,
           mcpAuthToken: this.mcpAuthToken,
+          // The D8 "on" arm only (docs/jev.md, "Which agents get them") — a hold-out ("control")
+          // arm, an ineligible create, or one with no jevTools decision at all gets nothing here.
+          enabled: labels?.[JEV_TOOLS_LABEL] === "on",
         }),
         enabled: brokersMcpServers,
         gatewayBaseUrl: this.mcpGatewayBaseUrl,

@@ -57,7 +57,7 @@ export function describeDecision(decision: AgentDecision): string {
   if (decision.jev?.wouldBe) {
     const { wouldBe } = decision.jev;
     lines.push(
-      `JEV spawn hint: ${decision.jev.status}, ${decision.jev.applied ? "applied" : "not applied"}. With every answer applied: ${wouldBe.taskClass ?? "standard"}${wouldBe.role !== undefined ? `, role ${wouldBe.role}` : ""}, ${wouldBe.model ?? "the request's own model"} (${wouldBe.move === "none" ? "no class move" : `a move ${wouldBe.move}`}).`,
+      `JEV spawn hint: ${decision.jev.status}, ${decision.jev.applied ? "applied" : "not applied"}. With every answer applied: ${wouldBe.taskClass ?? "standard"}${wouldBe.role !== undefined ? `, role ${wouldBe.role}` : ""}, ${wouldBe.model ?? "the request's own model"} (${wouldBe.move === "none" ? "no class move" : `a move ${wouldBe.move}`})${decision.jev.modelClamped ? " — held: would have cost more, ran the no-JEV model instead" : ""}.`,
     );
   }
 

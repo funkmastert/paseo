@@ -87,7 +87,7 @@ function child(overrides: Partial<SpawnHintAgentView> = {}): SpawnHintAgentView 
 }
 
 describe("paseo.jev-spawn", () => {
-  test("parses the role router's label; a missing class is null; no audit field defaults false", () => {
+  test("parses the role router's label; a missing class is null; no audit or clamped field defaults false", () => {
     expect(parseJevSpawnLabel(LABEL)).toEqual({
       baseClass: null,
       baseModel: "claude-sonnet-5",
@@ -96,6 +96,7 @@ describe("paseo.jev-spawn", () => {
       move: "down",
       applied: false,
       audit: false,
+      clamped: false,
     });
   });
 
@@ -110,6 +111,19 @@ describe("paseo.jev-spawn", () => {
         "v1;base=hard/claude-sonnet-5;would=reviewer/claude-sonnet-5;move=none;applied=0;audit=0",
       ),
     ).toMatchObject({ audit: false });
+  });
+
+  test("reads the clamped field; absent defaults false even with other fields present", () => {
+    expect(
+      parseJevSpawnLabel(
+        "v1;base=standard/claude-sonnet-5;would=hard/claude-opus-5-5;move=none;applied=1;audit=0;clamped=1",
+      ),
+    ).toMatchObject({ clamped: true });
+    expect(
+      parseJevSpawnLabel(
+        "v1;base=hard/claude-sonnet-5;would=reviewer/claude-sonnet-5;move=none;applied=0;audit=0",
+      ),
+    ).toMatchObject({ clamped: false });
   });
 
   test("rejects another version or a broken field", () => {
@@ -155,6 +169,24 @@ describe("the spawn hint's savings record", () => {
     expect(settled).toMatchObject({ pending: false, tokensSavedEstimate: 25_000 });
     expect(savings.summary("today").shadow.tokensWouldSave).toBe(25_000);
     expect(savings.summary("today").live.tokensSaved).toBe(0);
+  });
+
+  test("a clamped spawn records clamped: true and saves nothing: it ran on the base model", async () => {
+    const { savings, recorder, calls } = await setup();
+    calls.set("call-7", { ...calls.get("call-7")!, outcome: "answered" });
+    const labels = {
+      "paseo.jev-call": "call-7",
+      "paseo.jev-spawn":
+        "v1;base=standard/claude-sonnet-5;would=hard/claude-opus-5-5;move=up;applied=1;audit=0;clamped=1",
+      "paseo.task-class-source": "jev",
+    };
+    recorder.onAgent(child({ labels }));
+    const [pending] = savings.events({ range: "today" }).events;
+    expect(savings.factsOf(pending!.id)).toMatchObject({ clamped: true });
+
+    recorder.onAgent(child({ labels, closed: true, totalTokens: 1_000_000 }));
+    const [settled] = savings.events({ range: "today" }).events;
+    expect(settled).toMatchObject({ mode: "live", pending: false, tokensSavedEstimate: 0 });
   });
 
   test("a child that outlived a restart settles partial: its tokens restarted at zero", async () => {
