@@ -331,7 +331,7 @@ Verified by reading the code at `09a1c045f`. Build on these; do not design aroun
 
 ### compaction
 
-- The monitor is a 60-second poll, not an event listener (`agent-leader-compaction-monitor.ts:22, 194-206, 251-286`), and off unless `agents.leaderCompaction.enabled` (`:254`). It is off on the live daemon.
+- The monitor is a 60-second poll, not an event listener (`agent-leader-compaction-monitor.ts:22, 194-206, 251-286`), and off unless `agents.leaderCompaction.enabled` (`:254`). On the live daemon it is `enabled:true, dryRun:false` — live, not off; keep this line current against `~/.paseo/config.json` rather than restating a snapshot.
 - The planner is pure (`leader-compaction-planner.ts:165-220`); `isOverThreshold` (`:117-122`); `DEFAULT_PREPARE_AT_TOKENS = 400_000` (`:9`).
 - Steps start only through `startTurnIfIdle` (`agent-manager.ts:1959-1972`); the context size is `lastUsage.contextWindowUsedTokens` (`:1927-1940`).
 - `formatCompactCommand` takes no arguments today (`agent-leader-compaction-monitor.ts:85-91`).
