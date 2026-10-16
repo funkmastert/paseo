@@ -1,5 +1,4 @@
 import type { AgentAttentionReason } from "@getpaseo/protocol/agent-attention-notification";
-import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import type { NotifyLevel } from "./notify-policy/levels.js";
 
 export const PRESENCE_THRESHOLD_MS = 180_000;
@@ -83,13 +82,11 @@ export function isPushEligibleAttentionReason(reason: AgentAttentionReason): boo
 
 /**
  * How urgent an agent's attention push is. A permission request blocks the agent on a person, so
- * it is an alert. A finish is an alert for an agent someone is waiting on, but a delegated child
- * reports to its parent, not to a person, so it waits for a digest. A child that never reaches
- * its parent is escalated separately (docs/finish-reports.md).
+ * it is an alert. Every finish, root agents included, is a notice: nothing a finish reports needs
+ * interrupting Tyler for, and anything he must actually answer arrives as a permission request
+ * instead. A child whose finish never reaches its parent is escalated separately
+ * (docs/finish-reports.md).
  */
-export function attentionPushLevel(
-  reason: AgentAttentionReason,
-  labels: Record<string, unknown> | null | undefined,
-): NotifyLevel {
-  return reason === "finished" && getParentAgentIdFromLabels(labels) !== null ? "notice" : "alert";
+export function attentionPushLevel(reason: AgentAttentionReason): NotifyLevel {
+  return reason === "finished" ? "notice" : "alert";
 }

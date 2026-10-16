@@ -235,17 +235,11 @@ describe("isPushEligibleAttentionReason", () => {
 });
 
 describe("attentionPushLevel", () => {
-  const child = { "paseo.parent-agent-id": "leader-1" };
-
-  it("makes a finished root agent an alert", () => {
-    expect(attentionPushLevel("finished", {})).toBe("alert");
+  it("makes every finish a notice, root agents included", () => {
+    expect(attentionPushLevel("finished")).toBe("notice");
   });
 
-  it("lets a delegated child's finish wait for a digest", () => {
-    expect(attentionPushLevel("finished", child)).toBe("notice");
-  });
-
-  it("never demotes a permission request, even a child's", () => {
-    expect(attentionPushLevel("permission", child)).toBe("alert");
+  it("keeps a permission request an alert", () => {
+    expect(attentionPushLevel("permission")).toBe("alert");
   });
 });

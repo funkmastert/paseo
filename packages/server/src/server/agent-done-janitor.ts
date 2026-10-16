@@ -250,10 +250,15 @@ export interface DoneJanitorDependencies {
   countRunningScripts(workspaceId: string): Promise<number>;
   /** HEAD's commit time and the directory's own mtime; never the git index. */
   readActivitySignals(directory: string): Promise<WorkspaceActivitySignals>;
-  /** Every file in the worktree read against `commit`, HEAD when null; null when git cannot. */
+  /**
+   * Every file in the worktree read against `commit`, HEAD when null; null when git cannot.
+   * `mainRepoRoot` (the workspace's own, when it is a worktree) lets it recognize an ignored file
+   * or directory as a worktree-setup script's copy rather than this worktree's only one.
+   */
   readWorktreeCoverage(input: {
     worktreePath: string;
     commit: string | null;
+    mainRepoRoot?: string | null;
   }): Promise<WorktreeCoverage | null>;
   /** Null when the snapshot is a backup a deletion may rely on; otherwise why it is not. */
   verifyBackup(input: {
@@ -782,6 +787,7 @@ export class AgentDoneJanitor {
       report,
       plan.directory,
       `done janitor, before archiving idle workspace ${workspace.workspaceId}`,
+      workspace.mainRepoRoot,
     );
     if (!check.ok) {
       report.entries.push(describe("kept-idle-workspace", check.reason));
@@ -932,7 +938,7 @@ export class AgentDoneJanitor {
       return { kind: "archive", deletesDirectory: false, detail: "its directory is gone" };
     }
     if (!safety.safe && !safety.atRisk) return keep(safety.reason);
-    const preview = await this.previewDeletion(path);
+    const preview = await this.previewDeletion(path, workspace.mainRepoRoot);
     if (!preview.ok) return keep(preview.reason, preview.category);
     return {
       kind: "archive",
@@ -948,10 +954,14 @@ export class AgentDoneJanitor {
    * starts agents in it, a process inside it, and the deletion invariant read against HEAD. Both
    * a dry run and a live run plan with it, so a dry run lists every deletion a live run could make.
    */
-  private async previewDeletion(path: string): Promise<DeletionCheck> {
+  private async previewDeletion(path: string, mainRepoRoot: string | null): Promise<DeletionCheck> {
     const occupied = await this.occupiedReason(path);
     if (occupied) return { ok: false, reason: occupied.reason, category: occupied.category };
-    const coverage = await this.deps.readWorktreeCoverage({ worktreePath: path, commit: null });
+    const coverage = await this.deps.readWorktreeCoverage({
+      worktreePath: path,
+      commit: null,
+      mainRepoRoot,
+    });
     const invariant = checkDeletionInvariant(coverage, "plan");
     return invariant.holds
       ? { ok: true, invariant: invariant.detail }
@@ -969,6 +979,7 @@ export class AgentDoneJanitor {
     report: DoneJanitorSweepReport,
     path: string,
     reason: string,
+    mainRepoRoot: string | null,
   ): Promise<DeletionCheck> {
     const occupied = await this.occupiedReason(path);
     if (occupied) return { ok: false, reason: occupied.reason, category: occupied.category };
@@ -980,7 +991,11 @@ export class AgentDoneJanitor {
       };
     }
     if (snapshot.kind === "nothing-at-risk") {
-      const coverage = await this.deps.readWorktreeCoverage({ worktreePath: path, commit: null });
+      const coverage = await this.deps.readWorktreeCoverage({
+        worktreePath: path,
+        commit: null,
+        mainRepoRoot,
+      });
       const invariant = checkDeletionInvariant(coverage, "head");
       return invariant.holds
         ? { ok: true, invariant: invariant.detail }
@@ -993,6 +1008,7 @@ export class AgentDoneJanitor {
     const coverage = await this.deps.readWorktreeCoverage({
       worktreePath: path,
       commit: snapshot.commit,
+      mainRepoRoot,
     });
     const invariant = checkDeletionInvariant(coverage, "snapshot");
     return invariant.holds
@@ -1672,7 +1688,7 @@ export class AgentDoneJanitor {
       baseBranch: workspace.baseBranch,
     });
     if (!safety.safe) return keep(safety.reason);
-    const preview = await this.previewDeletion(path);
+    const preview = await this.previewDeletion(path, workspace.mainRepoRoot);
     if (!preview.ok) return keep(preview.reason);
     return {
       kind: "reclaim",
@@ -1729,6 +1745,7 @@ export class AgentDoneJanitor {
       report,
       plan.path,
       `done janitor, before deleting workspace ${plan.workspace.workspaceId}`,
+      plan.workspace.mainRepoRoot,
     );
     if (!check.ok) return kept(check.reason);
     // The plan is minutes old now. Look again here, and archive-by-scope looks again inside,

@@ -15,11 +15,15 @@ import { recordFinishSavings, validateFinishFollowup } from "./jev/savings-hooks
 import { levelAtLeast, type NotifyLevel } from "./notify-policy/levels.js";
 
 /**
- * Feature 3b, finish triage (docs/jev.md). A root agent's finish pushes an `alert`; JEV reads the
- * final message and can move a routine one to a `notice`, which the notify policy holds for the
- * digest. It only ever lowers an `alert` to a `notice`, never drops or raises a push, and never
- * sees a permission, an error or a delegated child's finish. In shadow it changes nothing and the
- * push is not delayed. While Tyler is away or off it asks nothing: a notice would be held for
+ * Feature 3b, finish triage (docs/jev.md). Dormant since `attentionPushLevel` made every finish a
+ * `notice`: `triageAndSend` only ever runs past its `base !== "alert"` guard when a caller passes
+ * an `alert` finish directly, which nothing in production does any more. Kept, not deleted, for
+ * that guard and for its tests: a future caller that needs an `alert` finish triaged again, a root
+ * agent's push someone widens back out, gets this for free. When it does run: JEV reads the final
+ * message and can move a routine one to a `notice`, which the notify policy holds for the digest.
+ * It only ever lowers an `alert` to a `notice`, never drops or raises a push, and never sees a
+ * permission, an error or a delegated child's finish. In shadow it changes nothing and the push is
+ * not delayed. While Tyler is away or off it asks nothing: a notice would be held for
  * hours, long enough for the away auto-reply (feature 14) to answer the finish first.
  */
 
@@ -357,7 +361,7 @@ export class FinishFollowups {
 
 export interface AttentionPushInput {
   reason: "finished" | "error" | "permission";
-  /** `attentionPushLevel`: `alert` for a root's finish, `notice` for a delegated child's. */
+  /** `attentionPushLevel`: `notice` for every finish now, `alert` for a permission or an error. */
   base: NotifyLevel;
   agentId: string;
   finalMessage: string | null;

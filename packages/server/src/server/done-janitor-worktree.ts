@@ -10,11 +10,11 @@
 
 import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, realpathSync, rmSync, type Dirent } from "node:fs";
-import { access, constants, lstat, opendir, readdir, stat } from "node:fs/promises";
+import { access, constants, lstat, opendir, readdir, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-import { isBuildManifest } from "./agent/workspace-sweep-detector.js";
+import { isBuildManifest, isRegenerablePath } from "./agent/workspace-sweep-detector.js";
 import type { WorktreeSnapshotOffsite } from "./remediation/contract.js";
 import { runGitCommand, type RunGitCommand } from "../utils/run-git-command.js";
 
@@ -426,6 +426,14 @@ export interface WorktreeCoverage {
   nestedRepositories: string[];
   /** Directories on the way to an ignored path that hold a build manifest, relative, sorted. */
   manifestDirectories: string[];
+  /**
+   * Ignored paths, part (c) of the deletion invariant's other half: a file or directory whose
+   * content is byte-identical to the same relative path in the worktree's main checkout, so a
+   * worktree-setup script copied it rather than the worktree holding the only copy. Empty when no
+   * main checkout was given, when it differs, or when it doesn't exist there — see
+   * `partitionCopiedFromMainCheckout`.
+   */
+  copiedFromMainCheckout: string[];
 }
 
 /**
@@ -442,6 +450,8 @@ export async function readWorktreeCoverage(input: {
   worktreePath: string;
   commit: string | null;
   runGit?: RunGitCommand;
+  /** The repo root this worktree was created from, when known (`DoneJanitorWorkspace.mainRepoRoot`). */
+  mainRepoRoot?: string | null;
 }): Promise<WorktreeCoverage | null> {
   const { worktreePath } = input;
   if (!existsSync(worktreePath)) return null;
@@ -510,6 +520,7 @@ export async function readWorktreeCoverage(input: {
       return null;
     }
     const tree = await walkWorktree(worktreePath);
+    const manifestDirectories = await readManifestDirectories(worktreePath, ignored);
     return {
       commit,
       changed: splitNul(changed),
@@ -524,7 +535,14 @@ export async function readWorktreeCoverage(input: {
       lfs: [...new Set(splitNul(lfs))].sort(),
       unreadable: tree.unreadable,
       nestedRepositories: tree.nestedRepositories,
-      manifestDirectories: await readManifestDirectories(worktreePath, ignored),
+      manifestDirectories,
+      copiedFromMainCheckout: input.mainRepoRoot
+        ? await partitionCopiedFromMainCheckout(
+            worktreePath,
+            input.mainRepoRoot,
+            unregenerableIgnored(ignored, manifestDirectories),
+          )
+        : [],
     };
   } finally {
     rmSync(indexFile, { force: true });
@@ -674,6 +692,112 @@ async function readManifestDirectories(
     if (names.some(isBuildManifest)) found.push(candidate);
   }
   return found.sort();
+}
+
+/**
+ * `ignored` minus whatever `isRegenerablePath` already allows by name: `checkDeletionInvariant`
+ * never consults `copiedFromMainCheckout` for an entry regenerable by name, so comparing one
+ * against the main checkout — a full recursive byte comparison for a directory — would read
+ * `node_modules/`, `build/`, `Pods/` and the rest of `REGENERABLE_DIRS` for a result nobody uses.
+ */
+function unregenerableIgnored(
+  ignored: readonly string[],
+  manifestDirectories: readonly string[],
+): string[] {
+  const manifestDirectorySet = new Set(manifestDirectories);
+  return ignored.filter((entry) => !isRegenerablePath(entry, manifestDirectorySet));
+}
+
+/**
+ * A file above this size is never hashed: reading two copies of it into memory on every sweep
+ * check is not worth sparing one worktree. Past the cap a file counts as unique, the same as one
+ * that differs — the deletion invariant's doubt-keeps-it rule.
+ */
+const COPY_COMPARISON_SIZE_CAP_BYTES = 1_000_000;
+
+/**
+ * Which of `candidates` (already filtered to entries not regenerable by name) are byte-identical
+ * to the same relative path under `mainRepoRoot`: a worktree-setup script's copy, not this
+ * worktree's only copy. A directory entry (ends with `/`) counts only when every file under it
+ * matches, recursively, and neither side holds an extra one. Missing, size-mismatched, over-cap or
+ * genuinely different entries are left out, which keeps the worktree exactly as before this check
+ * existed.
+ */
+async function partitionCopiedFromMainCheckout(
+  worktreePath: string,
+  mainRepoRoot: string,
+  candidates: readonly string[],
+): Promise<string[]> {
+  const copied: string[] = [];
+  for (const entry of candidates) {
+    const isDirectory = entry.endsWith("/");
+    const relative = isDirectory ? entry.slice(0, -1) : entry;
+    // A symlink is this worktree's own entry whatever its target holds; `readdir` and `stat`
+    // would follow it and compare the target instead.
+    if (await isSymbolicLink(join(worktreePath, relative))) continue;
+    const matches = isDirectory
+      ? await directoriesByteIdentical(join(worktreePath, relative), join(mainRepoRoot, relative))
+      : await filesByteIdentical(join(worktreePath, relative), join(mainRepoRoot, relative));
+    if (matches) copied.push(entry);
+  }
+  return copied;
+}
+
+async function isSymbolicLink(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** Two regular files (never symlinks) of the same size, small enough to compare, equal in full. */
+async function filesByteIdentical(pathA: string, pathB: string): Promise<boolean> {
+  let statA: Awaited<ReturnType<typeof lstat>>;
+  let statB: Awaited<ReturnType<typeof lstat>>;
+  try {
+    [statA, statB] = await Promise.all([lstat(pathA), lstat(pathB)]);
+  } catch {
+    return false;
+  }
+  if (!statA.isFile() || !statB.isFile()) return false;
+  if (statA.size !== statB.size) return false;
+  if (statA.size > COPY_COMPARISON_SIZE_CAP_BYTES) return false;
+  const [contentA, contentB] = await Promise.all([readFile(pathA), readFile(pathB)]);
+  return contentA.equals(contentB);
+}
+
+/**
+ * Recursively: the same file names, each a byte-identical file or a matching subdirectory. A
+ * symlink, or anything `readdir` or a stat fails on, is never confirmed a copy.
+ */
+async function directoriesByteIdentical(directoryA: string, directoryB: string): Promise<boolean> {
+  let entriesA: Dirent[];
+  let entriesB: Dirent[];
+  try {
+    [entriesA, entriesB] = await Promise.all([
+      readdir(directoryA, { withFileTypes: true }),
+      readdir(directoryB, { withFileTypes: true }),
+    ]);
+  } catch {
+    return false;
+  }
+  if (entriesA.length !== entriesB.length) return false;
+  const byNameB = new Map(entriesB.map((entry) => [entry.name, entry]));
+  for (const entryA of entriesA) {
+    const entryB = byNameB.get(entryA.name);
+    if (!entryB) return false;
+    const pathA = join(directoryA, entryA.name);
+    const pathB = join(directoryB, entryB.name);
+    if (entryA.isDirectory() && entryB.isDirectory()) {
+      if (!(await directoriesByteIdentical(pathA, pathB))) return false;
+    } else if (entryA.isFile() && entryB.isFile()) {
+      if (!(await filesByteIdentical(pathA, pathB))) return false;
+    } else {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**

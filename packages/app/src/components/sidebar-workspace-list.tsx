@@ -2510,9 +2510,9 @@ function ProjectModeList({
         ? listHeaderComponent
         : null}
       {sidebarFilterEmpty ? <SidebarFilterEmptyState /> : projectBody}
-      {/* Project mode keeps its own project headers for everything else, but agent-made
-          workspaces (R3) never get one — they sit in the one collapsed group every grouping
-          mode shares, reusing the same header/row component status mode renders. */}
+      {/* Project mode keeps its own project headers for everything else; agent-made workspaces
+          never reach this list at all (docs/done-janitor.md#manual-pin-vs-auto-pin). Status mode
+          reuses this same component for its status groups. */}
       {sidebarFilterEmpty ? null : (
         <StatusGroupList
           groups={workspaceGroups}

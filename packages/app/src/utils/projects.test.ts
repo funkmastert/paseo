@@ -102,6 +102,27 @@ describe("buildProjects", () => {
     });
   });
 
+  test("carries createdBy and pinnedAt into the workspace summary, for the hidden-workspace predicate", () => {
+    const result = buildProjects({
+      hosts: [
+        {
+          serverId: "host-a",
+          serverName: "Host A",
+          isOnline: true,
+          projects: [descriptor("prj_a", "local-a", "/a/app")],
+          workspaces: [
+            { ...workspace("ws_a", "prj_a", "/a/app"), createdBy: "agent", pinnedAt: "2026-07-12" },
+          ],
+        },
+      ],
+    });
+
+    expect(result.projects[0]?.hosts[0]?.workspaces[0]).toMatchObject({
+      createdBy: "agent",
+      pinnedAt: "2026-07-12",
+    });
+  });
+
   test("keeps a new project's own root when it has not created a workspace", () => {
     const result = buildProjects({
       hosts: [

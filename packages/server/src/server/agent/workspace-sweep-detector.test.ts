@@ -519,6 +519,7 @@ describe("checkDeletionInvariant", () => {
       unreadable: [],
       nestedRepositories: [],
       manifestDirectories: [],
+      copiedFromMainCheckout: [],
       ...overrides,
     };
   }
@@ -556,6 +557,31 @@ describe("checkDeletionInvariant", () => {
         category: "ignored-path",
       });
     }
+  });
+
+  test.each([
+    ["local Xcode settings", "apps/mobile/ios/.xcode.env.local"],
+    ["Firebase config", "apps/mobile/android/app/google-services.json"],
+  ])("%s byte-identical to the main checkout's copy may go", (_name, entry) => {
+    expect(
+      checkDeletionInvariant(
+        coverage({ ignored: ["node_modules/", entry], copiedFromMainCheckout: [entry] }),
+        "head",
+      ),
+    ).toEqual({
+      holds: true,
+      detail: `holds: every file is tracked and pushed; ignored only regenerable (node_modules/, ${entry})`,
+    });
+  });
+
+  test("an env file that differs from the main checkout's copy still keeps the worktree", () => {
+    expect(
+      checkDeletionInvariant(coverage({ ignored: [".env"], copiedFromMainCheckout: [] }), "head"),
+    ).toEqual({
+      holds: false,
+      reason: "1 ignored path(s) that are not regenerable and no backup holds (.env)",
+      category: "ignored-path",
+    });
   });
 
   test("a listing git could not make holds nothing", () => {
@@ -671,6 +697,7 @@ describe("isRegenerablePath", () => {
     "game",
     "tools",
     "ios/Packages",
+    "src/Camp.Api",
   ]);
 
   test.each([
@@ -689,6 +716,9 @@ describe("isRegenerablePath", () => {
     [".yarn/cache/", true],
     [".yarn/install-state.gz", true],
     ["node_modules/pkg/build/", true],
+    ["src/Camp.Api/bin/", true],
+    ["src/Camp.Api/obj/", true],
+    ["src/bin/", false],
     [".yarn/", false],
     [".yarn/releases/yarn.cjs", false],
     [".env", false],
@@ -725,6 +755,10 @@ describe("isBuildManifest", () => {
     ["App.xcodeproj", true],
     ["go.mod", true],
     ["pom.xml", true],
+    ["Camp.Api.csproj", true],
+    ["Camp.fsproj", true],
+    ["Camp.vbproj", true],
+    ["Camp.sln", true],
     ["README.md", false],
     ["package-lock.json", false],
     ["tsconfig.json", false],
