@@ -162,6 +162,7 @@ describe("PersistedConfigSchema agents.doneJanitor config", () => {
       deadQuietHours: 48,
       maxDeadArchivesPerSweep: 20,
       askFinished: false,
+      regenerableIgnoredPaths: ["embedded-feature-flags/default-ff.json"],
     };
     expect(PersistedConfigSchema.parse({ agents: { doneJanitor } }).agents?.doneJanitor).toEqual(
       doneJanitor,

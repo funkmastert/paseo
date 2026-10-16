@@ -74,16 +74,21 @@ export const SECRET_PATHSPEC_GLOBS = [
   "auth.json",
 ] as const;
 
-/** A glob's `*` matches any run of characters within one path segment, dots included, as in git. */
-function globToRegExp(glob: string): RegExp {
+/**
+ * A glob's `*` matches any run of characters within one path segment, dots included, as in git.
+ * Exported for `agent/workspace-sweep-detector.ts`'s `regenerableIgnoredPaths` matcher, which
+ * needs the same glob semantics with a different flag (`"u"`, case-sensitive, instead of this
+ * module's own case-insensitive `"i"`) rather than a second copy of the escape-and-join logic.
+ */
+export function globToRegExp(glob: string, flags = "i"): RegExp {
   const body = glob
     .split("*")
     .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
     .join("[^/]*");
-  return new RegExp(`(^|/)${body}$`, "i");
+  return new RegExp(`(^|/)${body}$`, flags);
 }
 
-const SECRET_NAME_RES = SECRET_PATHSPEC_GLOBS.map(globToRegExp);
+const SECRET_NAME_RES = SECRET_PATHSPEC_GLOBS.map((glob) => globToRegExp(glob));
 
 /** Letters that render like ASCII ones (Cyrillic and Greek): `.еnv` is matched as `.env`. */
 const LOOKALIKES: Record<string, string> = {
