@@ -84,11 +84,21 @@ function Harness({
   showJumpToStart = true,
   isJumpingToStart = false,
   onJumpToStart = vi.fn(),
+  positionLabel = null,
+  canStepBack = false,
+  canStepForward = false,
+  onStepBack = vi.fn(),
+  onStepForward = vi.fn(),
 }: {
   source: StickyLastPromptSource;
   showJumpToStart?: boolean;
   isJumpingToStart?: boolean;
   onJumpToStart?: () => void;
+  positionLabel?: string | null;
+  canStepBack?: boolean;
+  canStepForward?: boolean;
+  onStepBack?: () => void;
+  onStepForward?: () => void;
 }) {
   return (
     <TopOverlay
@@ -96,6 +106,13 @@ function Harness({
       stickyPromptSource={source}
       compact={false}
       onJumpToStickyPrompt={vi.fn()}
+      selectedPrompt={null}
+      positionLabel={positionLabel}
+      canStepBack={canStepBack}
+      canStepForward={canStepForward}
+      onStepBack={onStepBack}
+      onStepForward={onStepForward}
+      onJumpToSelected={vi.fn()}
       showJumpToStart={showJumpToStart}
       isJumpingToStart={isJumpingToStart}
       onJumpToStart={onJumpToStart}
@@ -139,6 +156,45 @@ describe("TopOverlay", () => {
     const buttonIndex = children.findIndex((el) => el.contains(button));
     expect(barIndex).toBeGreaterThanOrEqual(0);
     expect(buttonIndex).toBeGreaterThan(barIndex);
+  });
+
+  it("renders the position label and arrows inside the overlay alongside the jump-to-start button", () => {
+    const source = createStickyLastPromptPublisher();
+    source.publish({ prompt: prompt("p1"), barVisible: true });
+    render(<Harness source={source} positionLabel="3/7" canStepBack canStepForward />);
+
+    const overlay = query("agent-stream-top-overlay");
+    expect(overlay?.querySelector('[data-testid="sticky-prompt-bar-position"]')?.textContent).toBe(
+      "3/7",
+    );
+    expect(overlay?.querySelector('[data-testid="sticky-prompt-bar-step-back"]')).not.toBeNull();
+    expect(overlay?.querySelector('[data-testid="sticky-prompt-bar-step-forward"]')).not.toBeNull();
+    expect(overlay?.querySelector('[data-testid="jump-to-start-button"]')).not.toBeNull();
+  });
+
+  it("calls onStepBack/onStepForward when the overlay's navigator arrows are pressed", () => {
+    const source = createStickyLastPromptPublisher();
+    source.publish({ prompt: prompt("p1"), barVisible: true });
+    const onStepBack = vi.fn();
+    const onStepForward = vi.fn();
+    render(
+      <Harness
+        source={source}
+        canStepBack
+        canStepForward
+        onStepBack={onStepBack}
+        onStepForward={onStepForward}
+      />,
+    );
+
+    act(() => {
+      query("sticky-prompt-bar-step-back")?.click();
+    });
+    act(() => {
+      query("sticky-prompt-bar-step-forward")?.click();
+    });
+    expect(onStepBack).toHaveBeenCalledTimes(1);
+    expect(onStepForward).toHaveBeenCalledTimes(1);
   });
 
   it("renders only the button, with no bar, when there is no sticky prompt", () => {

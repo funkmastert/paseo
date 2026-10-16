@@ -8,6 +8,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ComponentProps,
   type ReactNode,
   type RefObject,
@@ -74,6 +75,8 @@ import { ChatOutlineRail } from "@/agent-stream/chat-outline/rail";
 import { useChatOutline } from "@/agent-stream/chat-outline/use-chat-outline";
 import { useStickyLastPrompt } from "@/agent-stream/sticky-last-prompt/use-sticky-last-prompt";
 import type { StickyLastPromptSource } from "@/agent-stream/sticky-last-prompt/model";
+import { usePromptNavigator } from "@/agent-stream/sticky-last-prompt/use-prompt-navigator";
+import { createRowHighlightPublisher, type RowHighlightSource } from "./row-highlight";
 import { TopOverlay } from "./top-overlay";
 import { primaryColorMapping, scrollIndicatorStyles } from "./scroll-indicator-styles";
 import { resolveScrollIndicatorFade } from "./scroll-indicator-fade";
@@ -174,6 +177,7 @@ function renderStreamItemWithTurnFooter(input: {
   strategy: TurnContentStrategy;
   supportsTimelineCursor: boolean;
   onForkAssistantTurn?: AssistantTurnForkHandler;
+  rowHighlightSource: RowHighlightSource;
 }): ReactNode {
   if (!input.content) {
     return null;
@@ -191,7 +195,11 @@ function renderStreamItemWithTurnFooter(input: {
     />
   ) : null;
   const content = (
-    <StreamItemWrapper itemId={input.layoutItem.item.id} gapBelow={input.layoutItem.gapBelow}>
+    <StreamItemWrapper
+      itemId={input.layoutItem.item.id}
+      gapBelow={input.layoutItem.gapBelow}
+      highlightSource={input.rowHighlightSource}
+    >
       {input.content}
     </StreamItemWrapper>
   );
@@ -379,6 +387,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const toolCallDetailLevel = useSettings((settings) => settings.toolCallDetailLevel);
     const chatOutlineEnabled = useSettings((settings) => settings.chatOutlineEnabled);
     const viewportRef = useRef<StreamViewportHandle | null>(null);
+    const rowHighlightSource = useMemo(() => createRowHighlightPublisher(), []);
     const pendingClientMessageIds = useMemo(
       () => new Set(pendingMessageSubmissions.map((submission) => submission.clientMessageId)),
       [pendingMessageSubmissions],
@@ -675,6 +684,26 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       invalidateJumpToStart();
       jumpToStickyLastPrompt(stickyLastPrompt.source, viewportRef);
     }, [invalidateJumpToStart, stickyLastPrompt]);
+    const handleHighlightRow = useCallback(
+      (itemId: string) => rowHighlightSource.highlight(itemId),
+      [rowHighlightSource],
+    );
+    const promptNavigator = usePromptNavigator({
+      agentId,
+      items: effectiveStreamItems,
+      head: effectiveStreamHead,
+      hasOlderHistory: hasOlder,
+      isLoadingOlderHistory: isLoadingOlder,
+      loadOlder,
+      viewportRef,
+      visibleItemIds: visibleHistoryItemIds,
+      revealLoadedItem: revealLoadedHistory,
+      onHighlight: handleHighlightRow,
+    });
+    const handleJumpToSelectedPrompt = useCallback(() => {
+      invalidateJumpToStart();
+      promptNavigator.jumpToSelected();
+    }, [invalidateJumpToStart, promptNavigator]);
     const handleJumpToOutlinePrompt = useCallback(
       (seq: number) => {
         invalidateJumpToStart();
@@ -982,12 +1011,14 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           strategy: streamRenderStrategy,
           supportsTimelineCursor: supportsAgentForkContextCursor,
           onForkAssistantTurn: readOnly ? undefined : handleForkAssistantTurn,
+          rowHighlightSource,
         });
       },
       [
         handleForkAssistantTurn,
         readOnly,
         renderStreamItemContent,
+        rowHighlightSource,
         streamRenderStrategy,
         supportsAgentForkContextCursor,
       ],
@@ -1187,6 +1218,13 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             stickyPromptSource={stickyLastPrompt.source}
             compact={resolvedCompact}
             onJumpToStickyPrompt={handleJumpToStickyPrompt}
+            selectedPrompt={promptNavigator.selectedPrompt}
+            positionLabel={promptNavigator.positionLabel}
+            canStepBack={promptNavigator.canStepBack}
+            canStepForward={promptNavigator.canStepForward}
+            onStepBack={promptNavigator.stepBack}
+            onStepForward={promptNavigator.stepForward}
+            onJumpToSelected={handleJumpToSelectedPrompt}
             showJumpToStart={shouldShowJumpToStart({
               hasOlderHistory: hasOlder,
               isNearHistoryStart,
@@ -1725,6 +1763,10 @@ const stylesheet = StyleSheet.create((theme) => ({
     alignSelf: "center",
     paddingHorizontal: theme.spacing[2],
   },
+  // Brief flash for a jump-to-prompt target (row-highlight.ts clears it automatically).
+  streamItemWrapperHighlighted: {
+    backgroundColor: theme.colors.surface3,
+  },
   emptyState: {
     flex: 1,
     alignItems: "center",
@@ -1843,12 +1885,29 @@ interface StreamItemWrapperProps {
   itemId: string;
   gapBelow: number;
   children: ReactNode;
+  highlightSource: RowHighlightSource;
 }
 
-function StreamItemWrapper({ gapBelow, children }: StreamItemWrapperProps) {
+// Subscribes only this one row's wrapper to the highlight publisher (mirrors
+// StickyPromptOverlay's useSyncExternalStore), so a jump-to-prompt highlight
+// never re-renders the rest of the transcript.
+function StreamItemWrapper({
+  itemId,
+  gapBelow,
+  children,
+  highlightSource,
+}: StreamItemWrapperProps) {
+  const isHighlighted = useSyncExternalStore(
+    highlightSource.subscribe,
+    () => highlightSource.getState() === itemId,
+  );
   const wrapperStyle = useMemo(
-    () => [stylesheet.streamItemWrapper, { marginBottom: gapBelow }],
-    [gapBelow],
+    () => [
+      stylesheet.streamItemWrapper,
+      { marginBottom: gapBelow },
+      isHighlighted && stylesheet.streamItemWrapperHighlighted,
+    ],
+    [gapBelow, isHighlighted],
   );
   return <View style={wrapperStyle}>{children}</View>;
 }

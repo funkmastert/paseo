@@ -14,6 +14,18 @@ export function selectLastPrompt(items: readonly StreamItem[]): UserMessageItem 
   return null;
 }
 
+/**
+ * Same rule as `selectLastPrompt`, generalized to the whole ordered list
+ * instead of only the newest -- the prompt navigator's candidate set.
+ */
+export function selectRecentPrompts(items: readonly StreamItem[]): UserMessageItem[] {
+  const prompts: UserMessageItem[] = [];
+  for (const item of items) {
+    if (item.kind === "user_message") prompts.push(item);
+  }
+  return prompts;
+}
+
 export interface LastPromptVisibilityInput {
   lastPromptId: string;
   readingPositionRowId: string | null;
