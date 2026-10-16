@@ -640,6 +640,7 @@ describe("failing open", () => {
         reason: "contract",
         applied: false,
         declaredAudit: false,
+        modelClamped: false,
       });
     }
     const failed = await hintFor(child(), { outcome: "failed", reason: "timeout", callId: 7 as unknown as string });
@@ -697,6 +698,7 @@ describe("failing open", () => {
       callId: "c-x",
       applied: false,
       declaredAudit: false,
+      modelClamped: false,
     });
   });
 
@@ -813,7 +815,7 @@ describe("precedence", () => {
     expect(decideWith(input, hint).taskClass).toMatchObject({ taskClass: "mechanical", source: "classified" });
   });
 
-  it("5. with applyHard on, a JEV standard or hard answer with deep reasoning lifts a task off the mechanical seed", async () => {
+  it("5. with applyHard on, a JEV standard or hard answer with deep reasoning lifts the class off the mechanical seed, held to the seed's model", async () => {
     const input = worker({ title: "rename the retry module and rework its callers" });
     const on = { ...LIVE, applyHard: true };
     const standard = await hintFor(input, { answers: answers({ taskClass: ["standard", 0.41], reasoning: [1.87] }) }, on);
@@ -822,8 +824,14 @@ describe("precedence", () => {
     const decision = decideWith(input, standard);
     expect(decision.taskClass).toMatchObject({ taskClass: "standard", source: "jev" });
     expect(decision.taskClass.reason).toContain("mechanical keyword was overruled");
-    expect(decision.model.model).toBe("claude-sonnet-5");
-    expect(decision.jev).toMatchObject({ applied: true, wouldBe: { taskClass: "standard", move: "up" } });
+    // Only move down: the lift is recorded and the class follows JEV, but Sonnet prices above
+    // the seed's Haiku, so the create runs the model it would have without the hint.
+    expect(decision.model.model).toBe(decideWith(input, undefined).model.model);
+    expect(decision.jev).toMatchObject({
+      applied: true,
+      modelClamped: true,
+      wouldBe: { taskClass: "standard", model: "claude-sonnet-5", move: "up" },
+    });
     expect(decideWith(input, hardUnderFloor).taskClass).toMatchObject({ taskClass: "standard", source: "jev" });
   });
 

@@ -119,7 +119,8 @@ import { decideMcp, type McpDecision, type McpGatewaySnapshot } from "./mcp-scop
  * (`applyHard`/`applyRole`) may change a create's class or role, but only if the model that
  * results prices no higher, by `priceWeight`, than the model the create would get without it —
  * otherwise the no-JEV model runs and the decision records `jev.modelClamped: true` (docs/jev.md,
- * Feature 2, "pays only if it moves down").
+ * Feature 2, "pays only if it moves down"). Its thinking level is held the same way, on any
+ * applied hint: never above the level the create would think at without it.
  *
  * ## Nothing silent
  *
@@ -551,7 +552,8 @@ export interface JevHintDecision {
    * more than `base.model` by `priceWeight` — the live create ran on `base.model` instead (docs/jev.md,
    * Feature 2, "pays only if it moves down"). `false` for shadow mode, which never applies anything
    * to clamp, and for an applied hint that was flat or cheaper. `wouldBe.model` is untouched by
-   * this: it keeps reporting what JEV asked for, clamped or not.
+   * this: it keeps reporting what JEV asked for, clamped or not. The thinking level has its own
+   * hold, on every applied hint whether or not the model was clamped; its reason sentence says so.
    */
   modelClamped: boolean;
 }
@@ -1500,6 +1502,22 @@ function decideThinking(
   };
 }
 
+/**
+ * The lower of two thinking decisions made for the same model: JEV's, and the one the create
+ * would get without the hint. A level `thinkingLevelRank` doesn't rank (Ultra Code, an id off
+ * Paseo's ladder) can't be judged higher or lower, so JEV's decision stands, as the model clamp
+ * does for a model `priceWeight` doesn't know.
+ */
+function lowerThinking(jev: ThinkingDecision, noJev: ThinkingDecision): ThinkingDecision {
+  const jevRank = jev.optionId === null ? undefined : thinkingLevelRank(jev.optionId);
+  const noJevRank = noJev.optionId === null ? undefined : thinkingLevelRank(noJev.optionId);
+  if (jevRank === undefined || noJevRank === undefined || noJevRank >= jevRank) return jev;
+  return {
+    ...noJev,
+    reason: `${noJev.reason} Held to the level the create would get without JEV's hint, which may only make a create cheaper.`,
+  };
+}
+
 /** The reason sentence for a decided level: what applies, why, then each thing that changed it on the way. */
 function describeThinking(decision: {
   outcome: "leader-rule" | "requested" | "task-class-default";
@@ -1805,9 +1823,9 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
   // role or class it changed (`applyRole`/`applyHard`) is held to the model the create would get
   // without it whenever that model prices higher, by `priceWeight` — the same table
   // `priceSpawnHint` prices the savings record against, so a shadow day's accounting and this
-  // clamp never disagree about what counts as "pricier". This is the only thing the clamp
-  // touches: `roleDecision`/`taskClass` keep reporting JEV's own answer below, and tools/MCP
-  // already come from `toolRole` (the jevless role) regardless (D2).
+  // clamp never disagree about what counts as "pricier". The clamp touches the model and the
+  // thinking level decided below: `roleDecision`/`taskClass` keep reporting JEV's own answer, and
+  // tools/MCP already come from `toolRole` (the jevless role, which is also the baseline's) (D2).
   const hintChangedModel = classResolution.source === "jev" || roleDecision.source === "classified-jev";
   // Shared with `decideJevRecord` below (its own `base`/`wouldBe` reporting needs the same
   // class-with-no-hint value), so a create that carries a hint resolves it once, not twice.
@@ -1816,11 +1834,10 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
   let model = jevModel;
   let modelClamped = false;
   if (hintChangedModel) {
-    const baselineRole = jevlessRole ?? roleDecision;
     const noJevModel = decideModel(
       input,
       world,
-      baselineRole.role,
+      toolRole.role,
       baselineClass,
       classResolution.source === "declared",
     );
@@ -1834,7 +1851,13 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
   }
   const tools = decideTools(world, toolRole, hasCaller);
   const account = decideAccount(input, world, model, asChild, hasCaller);
-  const thinking = decideThinking(input, world, model, taskClass.taskClass, roleDecision, asChild);
+  // Nor may an applied hint raise the thinking level: it thinks at the lower of JEV's level and
+  // the no-JEV class and role's, both decided for the model that runs. A class raise can leave the
+  // model's price flat (no model clamp) and still lift thinking, from high to xhigh say.
+  const jevThinking = decideThinking(input, world, model, taskClass.taskClass, roleDecision, asChild);
+  const thinking = hintChangedModel
+    ? lowerThinking(jevThinking, decideThinking(input, world, model, baselineClass, toolRole, asChild))
+    : jevThinking;
   const outputStyle = decideOutputStyle(input, world, model, hasCaller);
   const mcp = decideMcp(
     { hasCaller, labels: input.labels, title: input.title, initialPrompt: input.initialPrompt },
@@ -1848,7 +1871,7 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     decision.jev = decideJevRecord(input, world, input.jevHint, {
       hasCaller,
       role: roleDecision,
-      baseRole: (jevlessRole ?? roleDecision).role,
+      baseRole: toolRole.role,
       taskClass: classResolution.taskClass,
       source: classResolution.source,
       wouldBeClass,

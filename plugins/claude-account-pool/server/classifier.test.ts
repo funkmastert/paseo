@@ -543,6 +543,24 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
       // The role/class decisions themselves still read as JEV's answer — only the model is held.
       expect(decision.role.role.id).toBe("advisor");
       expect(decision.taskClass).toMatchObject({ taskClass: "mechanical", source: "jev" });
+      // Thinking takes the lower level: JEV's mechanical class thinks low, below the no-JEV high.
+      expect(without.thinking.optionId).toBe("high");
+      expect(decision.thinking.optionId).toBe("low");
+    });
+
+    it("a class raise that leaves the model's price flat still never raises thinking", () => {
+      // worker's hard pool is Sonnet here, so JEV's hard answer runs the no-JEV model (no model
+      // clamp), but hard would think at xhigh where the no-JEV standard class thinks at high.
+      const policy = withRole(LIVE_POLICY, "worker", { hardModels: ["claude-sonnet-5"] });
+      const without = classifyAgent(implementation, world({ policy }));
+      const decision = classifyAgent({ ...implementation, jevHint: jevHint("worker", "hard") }, world({ policy }));
+
+      expect(decision.taskClass).toMatchObject({ taskClass: "hard", source: "jev" });
+      expect(decision.model.model).toBe(without.model.model);
+      expect(decision.jev?.modelClamped).toBe(false);
+      expect(without.thinking.optionId).toBe("high");
+      expect(decision.thinking.optionId).toBe("high");
+      expect(decision.thinking.reason).toContain("without JEV's hint");
     });
 
     it("an applied role+class that costs less than the no-JEV model is never clamped", () => {

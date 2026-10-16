@@ -171,20 +171,22 @@ describe("the spawn hint's savings record", () => {
     expect(savings.summary("today").live.tokensSaved).toBe(0);
   });
 
-  test("a clamped label's facts carry clamped: true, and an unclamped one carries false", async () => {
-    const { savings, recorder } = await setup();
-    recorder.onAgent(
-      child({
-        labels: {
-          "paseo.jev-call": "call-7",
-          "paseo.jev-spawn":
-            "v1;base=standard/claude-sonnet-5;would=hard/claude-opus-5-5;move=none;applied=1;audit=0;clamped=1",
-          "paseo.task-class-source": "jev",
-        },
-      }),
-    );
+  test("a clamped spawn records clamped: true and saves nothing: it ran on the base model", async () => {
+    const { savings, recorder, calls } = await setup();
+    calls.set("call-7", { ...calls.get("call-7")!, outcome: "answered" });
+    const labels = {
+      "paseo.jev-call": "call-7",
+      "paseo.jev-spawn":
+        "v1;base=standard/claude-sonnet-5;would=hard/claude-opus-5-5;move=up;applied=1;audit=0;clamped=1",
+      "paseo.task-class-source": "jev",
+    };
+    recorder.onAgent(child({ labels }));
     const [pending] = savings.events({ range: "today" }).events;
     expect(savings.factsOf(pending!.id)).toMatchObject({ clamped: true });
+
+    recorder.onAgent(child({ labels, closed: true, totalTokens: 1_000_000 }));
+    const [settled] = savings.events({ range: "today" }).events;
+    expect(settled).toMatchObject({ mode: "live", pending: false, tokensSavedEstimate: 0 });
   });
 
   test("a child that outlived a restart settles partial: its tokens restarted at zero", async () => {
