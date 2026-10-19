@@ -167,8 +167,12 @@ describe("summarizeJevDecision", () => {
     const finish = (verdict: string) =>
       summarizeJevDecision(record({ feature: "finishReview", verdict }));
     expect(finish("done (0.88)")).toBe("JEV: the report looks done");
+    expect(finish("in_progress (0.80)")).toBe(
+      "JEV: this turn isn't finished yet, not a gap in the report",
+    );
     expect(finish("missing_tests (0.90)")).toBe("JEV: the report doesn't mention tests");
     expect(finish("missing_scope (0.81)")).toBe("JEV: the report may cover only part of the task");
+    expect(finish("unsure (0.51)")).toBe("JEV wasn't sure whether this report is done");
     expect(finish("no answer")).toBe("JEV read the finish report");
   });
 

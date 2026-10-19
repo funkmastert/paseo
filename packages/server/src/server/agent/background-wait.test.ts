@@ -6,10 +6,12 @@ import {
   BACKGROUND_WAIT_PROMPT_MARK,
   buildBackgroundWaitPrompt,
   buildExternalWaitPrompt,
+  classifyFinalTurnWait,
   findBackgroundShells,
   findBackgroundWait,
   findExternalWait,
   readFinalMessage,
+  readFinalTurnMessages,
   readFinalTurnWork,
 } from "./background-wait.js";
 import type { ProcessSampleRow } from "./process-sampler.js";
@@ -86,6 +88,14 @@ describe("a final message that waits on background work", () => {
     const message = `Waiting on the background build. ${"The rest of the summary. ".repeat(40)}`;
     expect(findBackgroundWait(message)).toBeNull();
   });
+
+  test("a WAIT_PATTERNS match is not a wait when the same sentence reports it done", () => {
+    expect(
+      findBackgroundWait(
+        "I also kicked off a background cleanup job -- I'll be notified when it completes, but the main task is done and verified.",
+      ),
+    ).toBeNull();
+  });
 });
 
 describe("a final message that waits on something outside the machine", () => {
@@ -110,6 +120,12 @@ describe("a final message that waits on something outside the machine", () => {
     ["a status table", "| #6722 | waiting on CI | Tyler |"],
   ])("does not match %s", (_name, message) => {
     expect(findExternalWait(message)).toBeNull();
+  });
+
+  test("an EXTERNAL_PATTERNS match is not a wait when the same sentence reports it done", () => {
+    expect(
+      findExternalWait("I'll merge once the PR checks pass, and the fix is already done."),
+    ).toBeNull();
   });
 });
 
@@ -159,6 +175,34 @@ describe("the final message", () => {
       ]),
     ).toBeNull();
     expect(readFinalMessage([])).toBeNull();
+  });
+});
+
+describe("the final turn's assistant messages", () => {
+  test("every one of the final turn, oldest first", () => {
+    const rows = [
+      row({ type: "user_message", text: "fix the parser" }),
+      row({ type: "assistant_message", text: "Found the bug in tokenize()." }),
+      bash("npm test", "42 passed"),
+      row({ type: "assistant_message", text: "Pushed the fix." }),
+    ];
+    expect(readFinalTurnMessages(rows)).toEqual([
+      "Found the bug in tokenize().",
+      "Pushed the fix.",
+    ]);
+  });
+
+  test("none before the last user message", () => {
+    const rows = [
+      row({ type: "assistant_message", text: "Old update." }),
+      row({ type: "user_message", text: "and now?" }),
+      row({ type: "assistant_message", text: "Still waiting on the gate." }),
+    ];
+    expect(readFinalTurnMessages(rows)).toEqual(["Still waiting on the gate."]);
+  });
+
+  test("empty when the turn has no assistant message yet", () => {
+    expect(readFinalTurnMessages([row({ type: "user_message", text: "go" })])).toEqual([]);
   });
 });
 
@@ -224,6 +268,63 @@ describe("what the final turn launched", () => {
       tool(name, { type: "unknown", input: {}, output: null }),
     ];
     expect(readFinalTurnWork(rows).watcher).toBe(watcher);
+  });
+});
+
+describe("classifying a final turn's wait", () => {
+  test("a watcher alone, with no wait phrase, is not a wait -- the deliverable can be the schedule itself", () => {
+    const rows = [
+      row({ type: "user_message", text: "set up a nightly backup job" }),
+      tool("mcp__paseo__create_schedule", { type: "unknown", input: {}, output: null }),
+      row({ type: "assistant_message", text: "Done -- schedule created and verified." }),
+    ];
+    expect(classifyFinalTurnWait(rows, { hasLiveParent: false })).toBeNull();
+  });
+
+  test("a watcher with a matching wait phrase is the watcher class", () => {
+    const rows = [
+      row({ type: "user_message", text: "set up a nightly backup job" }),
+      tool("mcp__paseo__create_schedule", { type: "unknown", input: {}, output: null }),
+      row({
+        type: "assistant_message",
+        text: "Scheduled it. I'll check back once the first run reports back.",
+      }),
+    ];
+    expect(classifyFinalTurnWait(rows, { hasLiveParent: false })?.waitClass).toBe("watcher");
+  });
+
+  test("own-work: background work launched this turn, with a matching wait phrase", () => {
+    const rows = [
+      row({ type: "user_message", text: "run the gate" }),
+      bash("npm run gate", BACKGROUND_OUTPUT),
+      row({ type: "assistant_message", text: "I started the gate in the background." }),
+    ];
+    expect(classifyFinalTurnWait(rows, { hasLiveParent: false })?.waitClass).toBe("own-work");
+  });
+
+  test("external-wait: no launched work, an external wait, and no live parent", () => {
+    const rows = [
+      row({ type: "user_message", text: "ship it" }),
+      row({ type: "assistant_message", text: "Pushed. Waiting on CI for the run." }),
+    ];
+    expect(classifyFinalTurnWait(rows, { hasLiveParent: false })?.waitClass).toBe("external-wait");
+  });
+
+  test("a live parent already owns the external wait, so it is not this turn's to classify", () => {
+    const rows = [
+      row({ type: "user_message", text: "ship it" }),
+      row({ type: "assistant_message", text: "Pushed. Waiting on CI for the run." }),
+    ];
+    expect(classifyFinalTurnWait(rows, { hasLiveParent: true })).toBeNull();
+  });
+
+  test("none of the three classes when the turn just finished", () => {
+    const rows = [
+      row({ type: "user_message", text: "fix the parser" }),
+      bash("npm test", "42 passed"),
+      row({ type: "assistant_message", text: "Fixed and verified." }),
+    ];
+    expect(classifyFinalTurnWait(rows, { hasLiveParent: false })).toBeNull();
   });
 });
 

@@ -43,7 +43,40 @@ import type {
   AgentRunResult,
   AgentSession,
   AgentStreamEvent,
+  AgentTimelineItem,
 } from "./agent-sdk-types.js";
+import type { AgentTimelineRow } from "./agent-timeline-store-types.js";
+
+let timelineSeq = 0;
+function timelineRow(item: AgentTimelineItem): AgentTimelineRow {
+  timelineSeq += 1;
+  return { seq: timelineSeq, timestamp: new Date(timelineSeq * 1000).toISOString(), item };
+}
+function timelineBash(command: string, output?: string): AgentTimelineRow {
+  return timelineRow({
+    type: "tool_call",
+    callId: `c${timelineSeq}`,
+    name: "Bash",
+    detail: { type: "shell", command, ...(output ? { output } : {}) },
+    status: "completed",
+    error: null,
+  });
+}
+function timelineTool(
+  name: string,
+  detail: Extract<AgentTimelineItem, { type: "tool_call" }>["detail"],
+): AgentTimelineRow {
+  return timelineRow({
+    type: "tool_call",
+    callId: `c${timelineSeq}`,
+    name,
+    detail,
+    status: "completed",
+    error: null,
+  });
+}
+const BACKGROUND_SHELL_OUTPUT =
+  "Command running in background with ID: b4k2. Output is being written to: /private/tmp/claude-501/x/tasks/b4k2.output";
 
 interface CapturedLogger {
   logger: Logger;
@@ -51,7 +84,7 @@ interface CapturedLogger {
   nextRecord: Promise<void>;
 }
 
-function createCapturedLogger(level: "error" | "warn" = "error"): CapturedLogger {
+function createCapturedLogger(level: "error" | "warn" | "info" = "error"): CapturedLogger {
   const records: Array<Record<string, unknown>> = [];
   let resolveNextRecord!: () => void;
   const nextRecord = new Promise<void>((resolve) => {
@@ -83,6 +116,8 @@ interface FinishNotificationScenarioOptions {
   storedRecords?: Record<string, { labels?: Record<string, string>; archivedAt?: string }>;
   /** Feature 18 (finish review): wired into the obligation service when set. */
   jev?: JevService;
+  /** Feature 18: the child's live timeline, read fresh for the review. Unset: no live timeline. */
+  childTimelineRows?: AgentTimelineRow[];
 }
 
 interface FinishNotificationScenario {
@@ -185,6 +220,12 @@ function createFinishNotificationScenario(
   });
   Reflect.set(agentManager, "getLastAssistantMessage", async () => {
     return options?.childLastAssistantMessage ?? null;
+  });
+  Reflect.set(agentManager, "fetchTimeline", (agentId: string) => {
+    if (agentId === "child-agent" && options?.childTimelineRows) {
+      return { rows: options.childTimelineRows };
+    }
+    throw new Error(`no live timeline for ${agentId}`);
   });
   Reflect.set(agentManager, "tryRunOutOfBand", () => false);
   Reflect.set(agentManager, "flagUndeliveredDelegatedOutcome", (_id: string, reason: string) => {
@@ -446,6 +487,158 @@ describe("feature 18: JEV reviews a finish report before it reaches the owner", 
     expect(jev.transport.calls).toHaveLength(1);
     await ask(2);
     expect(jev.transport.calls).toHaveLength(2);
+  });
+
+  test("an interim turn end waiting on its own background work is never sent to JEV", async () => {
+    const jev = finishJev("missing_scope");
+    const scenario = createFinishNotificationScenario({
+      childLastAssistantMessage:
+        "I'll end this turn and wait for the background build-wait task to notify me when gradle finishes.",
+      childTimelineRows: [
+        timelineRow({ type: "user_message", text: "ship it" }),
+        timelineBash("npm run build", BACKGROUND_SHELL_OUTPUT),
+        timelineRow({
+          type: "assistant_message",
+          text: "I'll end this turn and wait for the background build-wait task to notify me when gradle finishes.",
+        }),
+      ],
+      jev,
+    });
+    scenario.startWatchingChild();
+    const prompt = await scenario.finishChildAndReadParentPrompt();
+    expect(prompt).not.toContain("JEV flagged");
+    expect(jev.transport.calls).toHaveLength(0);
+  });
+
+  test("a real finish gets every assistant message of the final turn, not just the last line", async () => {
+    const jev = finishJev("done");
+    const scenario = createFinishNotificationScenario({
+      childLastAssistantMessage: "Pushed the fix.",
+      childTimelineRows: [
+        timelineRow({ type: "user_message", text: "fix the parser" }),
+        timelineRow({ type: "assistant_message", text: "Found the bug in tokenize()." }),
+        timelineBash("npm test", "42 passed"),
+        timelineRow({ type: "assistant_message", text: "Pushed the fix." }),
+      ],
+      jev,
+    });
+    scenario.startWatchingChild();
+    await scenario.finishChildAndReadParentPrompt();
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]?.state as { final_message?: string };
+    expect(state.final_message).toBe("Found the bug in tokenize().\n\nPushed the fix.");
+  });
+
+  test("a watcher with no wait phrase is not interim -- the deliverable can be the schedule itself", async () => {
+    const jev = finishJev("done");
+    const scenario = createFinishNotificationScenario({
+      childLastAssistantMessage: "Done -- schedule created and verified.",
+      childTimelineRows: [
+        timelineRow({ type: "user_message", text: "set up a nightly backup job" }),
+        timelineTool("mcp__paseo__create_schedule", { type: "unknown", input: {}, output: null }),
+        timelineRow({ type: "assistant_message", text: "Done -- schedule created and verified." }),
+      ],
+      jev,
+    });
+    scenario.startWatchingChild();
+    await scenario.finishChildAndReadParentPrompt();
+    expect(jev.transport.calls).toHaveLength(1);
+  });
+
+  test("an uncaught interim phrasing still reaches JEV, which catches it as in_progress", async () => {
+    const jev = finishJev("in_progress");
+    const scenario = createFinishNotificationScenario({
+      childLastAssistantMessage:
+        "Still waiting on the quality and efficiency reviewers to finish — I'll pick back up automatically when they report.",
+      childTimelineRows: [
+        timelineRow({ type: "user_message", text: "review the diff" }),
+        timelineTool("Task", { type: "sub_agent", description: "quality review", log: "" }),
+        timelineTool("Task", { type: "sub_agent", description: "efficiency review", log: "" }),
+        timelineRow({
+          type: "assistant_message",
+          text: "Still waiting on the quality and efficiency reviewers to finish — I'll pick back up automatically when they report.",
+        }),
+      ],
+      jev,
+    });
+    scenario.startWatchingChild();
+    const prompt = await scenario.finishChildAndReadParentPrompt();
+    expect(jev.transport.calls).toHaveLength(1);
+    expect(prompt).toContain(
+      "JEV flagged this report: the final message reads like the agent is still waiting on its own work, not finished yet.",
+    );
+  });
+
+  test("the interim skip is logged, naming which rule fired", async () => {
+    const captured = createCapturedLogger("info");
+    const jev = finishJev("missing_scope");
+    const scenario = createFinishNotificationScenario({
+      logger: captured.logger,
+      childLastAssistantMessage:
+        "I'll end this turn and wait for the background build-wait task to notify me when gradle finishes.",
+      childTimelineRows: [
+        timelineRow({ type: "user_message", text: "ship it" }),
+        timelineBash("npm run build", BACKGROUND_SHELL_OUTPUT),
+        timelineRow({
+          type: "assistant_message",
+          text: "I'll end this turn and wait for the background build-wait task to notify me when gradle finishes.",
+        }),
+      ],
+      jev,
+    });
+    scenario.startWatchingChild();
+    await scenario.finishChildAndReadParentPrompt();
+    await vi.waitFor(() =>
+      expect(captured.records).toContainEqual(
+        expect.objectContaining({
+          msg: "Finish review skipped: the final turn looks like an interim wait, not a finish",
+          childAgentId: "child-agent",
+          ownerAgentId: "caller-agent",
+          waitClass: "own-work",
+        }),
+      ),
+    );
+  });
+
+  test("readFinalTurn is cached per generation, so a retry reuses the first verdict even if the live timeline later changes", () => {
+    const options: FinishNotificationScenarioOptions = {
+      childTimelineRows: [
+        timelineRow({ type: "user_message", text: "ship it" }),
+        timelineBash("npm run build", BACKGROUND_SHELL_OUTPUT),
+        timelineRow({
+          type: "assistant_message",
+          text: "I'll end this turn and wait for the background build-wait task to notify me when gradle finishes.",
+        }),
+      ],
+    };
+    const scenario = createFinishNotificationScenario(options);
+    const readFinalTurnOnce = Reflect.get(scenario.finishObligations, "readFinalTurnOnce") as (
+      childAgentId: string,
+      obligation: { generation: number },
+    ) => { interim: boolean; account: string | null; waitClass: string | null };
+
+    const first = readFinalTurnOnce.call(scenario.finishObligations, "child-agent", {
+      generation: 1,
+    });
+    expect(first.interim).toBe(true);
+
+    // The child auto-resumed into unrelated, already-finished work between delivery attempts.
+    options.childTimelineRows = [
+      timelineRow({ type: "user_message", text: "fix the parser" }),
+      timelineBash("npm test", "42 passed"),
+      timelineRow({ type: "assistant_message", text: "Fixed and verified." }),
+    ];
+
+    const retried = readFinalTurnOnce.call(scenario.finishObligations, "child-agent", {
+      generation: 1,
+    });
+    expect(retried).toBe(first);
+    expect(retried.interim).toBe(true);
+
+    const rearmed = readFinalTurnOnce.call(scenario.finishObligations, "child-agent", {
+      generation: 2,
+    });
+    expect(rearmed.interim).toBe(false);
   });
 });
 

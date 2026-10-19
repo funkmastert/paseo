@@ -15,6 +15,12 @@ import {
   sendPromptToAgent,
   setupFinishNotification,
 } from "./agent-prompt.js";
+import {
+  BACKGROUND_WAIT_READ_ROWS,
+  classifyFinalTurnWait,
+  readFinalTurnMessages,
+  type FinalTurnWaitClass,
+} from "./background-wait.js";
 import { pacedResume, type PaceResume } from "./resume-pacer.js";
 import { readFirstUserMessage } from "./stall-judgment.js";
 import {
@@ -82,6 +88,13 @@ export interface FinishObligationServiceOptions {
 /** Feature 18 verdicts kept for retried deliveries; Map order makes the first key the oldest. */
 const FINISH_REVIEW_NOTES_MAX = 500;
 
+interface FinalTurn {
+  account: string | null;
+  interim: boolean;
+  /** Which rule fired, for the skip log; null when `interim` is false. */
+  waitClass: FinalTurnWaitClass | null;
+}
+
 interface ChildPresence extends AgentPresence {
   parentAgentId: string | null;
   record: StoredAgentRecord | null;
@@ -124,6 +137,13 @@ export class FinishObligationService {
    * judgment instead of asking JEV again for the same report.
    */
   private readonly finishReviewNotes = new Map<string, string | null>();
+  /**
+   * Feature 18's final-turn read for one obligation, by `child|generation` like
+   * `finishReviewNotes`: the child's live timeline can keep moving between retried delivery
+   * attempts, so without this a later attempt could read a different `interim` verdict for the
+   * same logical finish.
+   */
+  private readonly finalTurnCache = new Map<string, FinalTurn>();
   private readonly pendingWrites = new Set<Promise<void>>();
   private pushNotificationSender: PushNotificationSender | null = null;
   private unsubscribe: (() => void) | null = null;
@@ -703,13 +723,21 @@ export class FinishObligationService {
       obligation.outcome?.message ??
       null;
     if (reason === "finished" && this.options.jev) {
-      const note = await this.reviewFinishOnce(childAgentId, obligation, {
-        jev: this.options.jev,
-        ownerAgentId: obligation.ownerAgentId,
-        title: record?.title ?? null,
-        finalMessage: lastAssistantMessage,
-      });
-      if (note) notes.push(note);
+      const turn = this.readFinalTurnOnce(childAgentId, obligation);
+      if (turn.interim) {
+        this.options.logger.info(
+          { childAgentId, ownerAgentId: obligation.ownerAgentId, waitClass: turn.waitClass },
+          "Finish review skipped: the final turn looks like an interim wait, not a finish",
+        );
+      } else {
+        const note = await this.reviewFinishOnce(childAgentId, obligation, {
+          jev: this.options.jev,
+          ownerAgentId: obligation.ownerAgentId,
+          title: record?.title ?? null,
+          finalMessage: turn.account ?? lastAssistantMessage,
+        });
+        if (note) notes.push(note);
+      }
     }
     return formatFinishNotificationBody({
       childAgentId,
@@ -719,6 +747,58 @@ export class FinishObligationService {
       inheritedFrom: obligation.inheritedFrom,
       notes,
     });
+  }
+
+  /**
+   * Feature 18: the child's final turn, read fresh for the review rather than through the single
+   * line `getLastAssistantMessage` keeps. Two things come of it:
+   *
+   * - `account`: every assistant message of the turn, for a judge that needs more than its
+   *   closing sentence (`lastAssistantMessage` is the fallback when there is no live timeline).
+   * - `interim`/`waitClass`: whether the turn ended waiting on work it started itself — a
+   *   background command, a subagent, a schedule — from `classifyFinalTurnWait`
+   *   (`background-wait.ts`), the same classifier the background-wait stall rule uses
+   *   (docs/stalled-agents.md), so a "finished" agent that is really mid-wait is never judged.
+   *   Passes `hasLiveParent: false`: that parameter is the stall sweep's own exclusion for when a
+   *   live parent already owns the next step, and here this code IS that parent.
+   *
+   * Unreadable (the agent is not loaded, as after a restart): fails open, same as the rest of
+   * this feature — no account, not interim.
+   */
+  private readFinalTurn(childAgentId: string): FinalTurn {
+    try {
+      const rows = this.options.agentManager.fetchTimeline(childAgentId, {
+        direction: "tail",
+        limit: BACKGROUND_WAIT_READ_ROWS,
+      }).rows;
+      const messages = readFinalTurnMessages(rows);
+      const classified = classifyFinalTurnWait(rows, { hasLiveParent: false });
+      return {
+        account: messages.length > 0 ? messages.join("\n\n") : null,
+        interim: classified !== null,
+        waitClass: classified?.waitClass ?? null,
+      };
+    } catch {
+      return { account: null, interim: false, waitClass: null };
+    }
+  }
+
+  /**
+   * `readFinalTurn`, cached per obligation generation like `reviewFinishOnce`: the child's live
+   * timeline can keep moving between retried delivery attempts, so without this a retry could
+   * read a different `interim` verdict for the same logical finish than the first attempt did.
+   */
+  private readFinalTurnOnce(childAgentId: string, obligation: FinishObligation): FinalTurn {
+    const cacheKey = `${childAgentId}|${obligation.generation}`;
+    const cached = this.finalTurnCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+    const turn = this.readFinalTurn(childAgentId);
+    this.finalTurnCache.set(cacheKey, turn);
+    if (this.finalTurnCache.size > FINISH_REVIEW_NOTES_MAX) {
+      const oldest = this.finalTurnCache.keys().next().value;
+      if (oldest !== undefined) this.finalTurnCache.delete(oldest);
+    }
+    return turn;
   }
 
   /**

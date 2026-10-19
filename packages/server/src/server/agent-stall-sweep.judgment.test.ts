@@ -783,6 +783,21 @@ describe("an idle agent nothing will wake", () => {
         }),
       ]);
     });
+
+    test("a WAIT_PATTERNS phrase that also reports completion in the same sentence is not a wait", async () => {
+      // classifyFinalTurnWait (background-wait.ts) is shared between finish review and this
+      // sweep; pin its REPORTS_DONE narrowing from the sweep's own entry point, readIdleWait,
+      // not only from background-wait.test.ts and finish review's own fixtures.
+      const h = new Harness();
+      h.addIdle(
+        "a1",
+        "I also kicked off a background cleanup job -- I'll be notified when it completes, but the main task is done and verified.",
+        12,
+      );
+      await h.sweep.tick();
+      expect(h.idleResumes).toEqual([]);
+      expect(h.linesOf("background-wait")).toEqual([]);
+    });
   });
 
   describe("live", () => {

@@ -14,11 +14,11 @@ import {
   MAX_BACKGROUND_WAIT_RESUMES_PER_DAY,
   buildBackgroundWaitPrompt,
   buildExternalWaitPrompt,
+  classifyFinalTurnWait,
   findBackgroundShells,
   findBackgroundWait,
   findExternalWait,
   readFinalMessage,
-  readFinalTurnWork,
   type BackgroundWaitClass,
 } from "./agent/background-wait.js";
 import { ACCOUNT_FAILOVER_MIGRATED_TO_LABEL } from "./agent/account-failover-detector.js";
@@ -968,26 +968,18 @@ export class AgentStallSweep {
     const rows = this.readActivity(agent.id, BACKGROUND_WAIT_READ_ROWS);
     const message = rows ? readFinalMessage(rows) : null;
     if (!rows || !message) return null;
-    const work = readFinalTurnWork(rows);
-    // A wakeup, schedule or heartbeat it set up will wake it.
-    if (work.watcher) return null;
-    const wait = findBackgroundWait(message.text);
-    const external = findExternalWait(message.text);
-    const base = { agent, quietForMs, seq: message.seq };
-    if (work.launched.length > 0 && (wait ?? external)) {
-      const quote = (wait ?? external)?.quote ?? "";
-      return { ...base, waitClass: "own-work", quote, launched: work.launched, target: null };
-    }
-    if (work.launched.length === 0 && external && !hasLiveParent) {
-      return {
-        ...base,
-        waitClass: "external-wait",
-        quote: external.quote,
-        launched: [],
-        target: external.target,
-      };
-    }
-    return null;
+    const classified = classifyFinalTurnWait(rows, { hasLiveParent });
+    // A wakeup, schedule or heartbeat it set up will wake it: nothing to nudge either way.
+    if (!classified || classified.waitClass === "watcher") return null;
+    return {
+      agent,
+      quietForMs,
+      seq: message.seq,
+      waitClass: classified.waitClass,
+      quote: classified.quote ?? "",
+      launched: classified.launched,
+      target: classified.target,
+    };
   }
 
   private markIdleChecked(agent: StallSweepAgentSummary): IdleWaitMemory {

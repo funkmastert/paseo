@@ -24,6 +24,8 @@ export const FINISH_REVIEW_QUESTIONS: JevQuestions = {
       "`task` is what the agent was asked to do; `final_message` is its own account of finishing. Judge whether the work looks done.",
     criteria: {
       done: "The final message describes work that answers the task, with nothing obviously missing",
+      in_progress:
+        "The final message says the agent is pausing or waiting on work it started itself — a background command, a subagent, CI, a review — before it is actually done. Not a gap in the report: the turn just is not finished yet",
       missing_verification:
         "The final message does not say whether the change was run, tested or otherwise checked to work",
       missing_scope:
@@ -36,14 +38,21 @@ export const FINISH_REVIEW_QUESTIONS: JevQuestions = {
   },
 };
 
-/** Choices that mean something looks missing. `unclear` and `other` are not confident claims. */
-const MISSING_CHOICES = new Set(["missing_verification", "missing_scope", "missing_tests"]);
+/** Choices that earn a note on the delivered report. `unclear` and `other` are not confident claims. */
+const FLAGGED_CHOICES = new Set([
+  "missing_verification",
+  "missing_scope",
+  "missing_tests",
+  "in_progress",
+]);
 
-const MISSING_NOTES: Readonly<Record<string, string>> = {
+const FLAGGED_NOTES: Readonly<Record<string, string>> = {
   missing_verification:
     "JEV flagged this report: it doesn't say whether the change was verified to work.",
   missing_scope: "JEV flagged this report: it may cover only part of what was asked.",
   missing_tests: "JEV flagged this report: it doesn't mention tests for the change.",
+  in_progress:
+    "JEV flagged this report: the final message reads like the agent is still waiting on its own work, not finished yet.",
 };
 
 export function buildFinishReviewState(input: {
@@ -92,8 +101,8 @@ export async function reviewFinishReport(input: ReviewFinishReportInput): Promis
     });
     if (outcome === "error") return null;
     const confident = confidentChoice(outcome, "finish_quality", input.minConfidence);
-    const note = confident && MISSING_CHOICES.has(confident) ? MISSING_NOTES[confident] : null;
-    recordFinishReview(input, { outcome, flagged: Boolean(note) });
+    const note = confident && FLAGGED_CHOICES.has(confident) ? FLAGGED_NOTES[confident] : null;
+    recordFinishReview(input, { outcome, confident, flagged: Boolean(note) });
     return note ?? null;
   } catch {
     return null;
@@ -102,16 +111,21 @@ export async function reviewFinishReport(input: ReviewFinishReportInput): Promis
 
 function recordFinishReview(
   input: ReviewFinishReportInput,
-  result: { outcome: JevOutcome; flagged: boolean },
+  result: { outcome: JevOutcome; confident: string | null; flagged: boolean },
 ): void {
-  const { outcome, flagged } = result;
+  const { outcome, confident, flagged } = result;
   if (outcome.kind !== "answered") return;
   try {
     const { choice, confidence } = rawChoice(outcome, "finish_quality");
-    const verdict = choice === null ? "no answer" : `${choice} (${confidence?.toFixed(2) ?? "?"})`;
-    const action = flagged
-      ? `noted as missing in the report to ${input.ownerAgentId}`
-      : "looks done; no note added";
+    // Below the floor, the record says JEV could not tell rather than naming a specific choice —
+    // a low-confidence `missing_scope` must never read like a verdict (docs/jev.md, feature 18).
+    const label = confident ?? "unsure";
+    const verdict = choice === null ? "no answer" : `${label} (${confidence?.toFixed(2) ?? "?"})`;
+    const action = (() => {
+      if (flagged) return `flagged in the report to ${input.ownerAgentId}`;
+      if (choice !== null && !confident) return "not confident enough to judge; no note added";
+      return "looks done; no note added";
+    })();
     const savingsId = input.jev.savings.record({
       feature: "finishReview",
       callSite: FINISH_REVIEW_CALL_SITE,

@@ -128,10 +128,11 @@ describe("reviewFinishReport", () => {
     });
   });
 
-  it("does not flag a missing choice below the confidence floor", async () => {
+  it("does not flag a missing choice below the confidence floor, and records it as unsure", async () => {
     const jev = makeJev({
       answers: { finish_quality: { type: "choice", choice: "missing_scope", confidence: 0.5 } },
     });
+    const record = vi.spyOn(jev.decisions, "record");
     const note = await reviewFinishReport({
       ...BASE_INPUT,
       jev,
@@ -139,6 +140,25 @@ describe("reviewFinishReport", () => {
       minConfidence: 0.75,
     });
     expect(note).toBeNull();
+    const notes = record.mock.calls.map((call) => call[0] as JevDecisionNote);
+    expect(notes).toMatchObject([
+      { agentId: "child-1", feature: "finishReview", applied: false, verdict: "unsure (0.50)" },
+      { agentId: "owner-1", feature: "finishReview", applied: false },
+    ]);
+  });
+
+  it("flags a confident in_progress verdict as a wait, not a gap in scope", async () => {
+    const jev = makeJev({
+      answers: { finish_quality: { type: "choice", choice: "in_progress", confidence: 0.9 } },
+    });
+    const note = await reviewFinishReport({
+      ...BASE_INPUT,
+      jev,
+      finalMessage: "Still waiting on the quality and efficiency reviewers to finish.",
+    });
+    expect(note).toBe(
+      "JEV flagged this report: the final message reads like the agent is still waiting on its own work, not finished yet.",
+    );
   });
 
   it("never flags 'unclear' or 'other', even at high confidence", async () => {
