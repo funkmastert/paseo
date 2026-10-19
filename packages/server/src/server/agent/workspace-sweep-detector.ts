@@ -442,7 +442,7 @@ export type CoverageBasis =
  */
 export type DeletionInvariant =
   | { holds: true; detail: string }
-  | { holds: false; reason: string; category?: "ignored-path" };
+  | { holds: false; reason: string; category?: "ignored-path" | "nested-repo" };
 
 /**
  * The deletion invariant (docs/done-janitor.md): a worktree's directory goes only when every file
@@ -498,6 +498,7 @@ export function checkDeletionInvariant(
     return {
       holds: false,
       reason: `${nested.length} submodule(s) or nested repositor(ies) a backup holds only as a pointer (${listSome(nested)})`,
+      category: "nested-repo",
     };
   }
   const regenerable = describeExcusedIgnored({

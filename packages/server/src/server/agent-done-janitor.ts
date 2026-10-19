@@ -328,6 +328,7 @@ export interface DoneJanitorDependencies {
     backupIgnoredPaths?: readonly string[];
     maxBackupIgnoredFileBytes?: number;
     maxBackupIgnoredTotalBytes?: number;
+    releaseSafeNestedRepos?: boolean;
   }): Promise<WorktreeCoverage | null>;
   /** Null when the snapshot is a backup a deletion may rely on; otherwise why it is not. */
   verifyBackup(input: {
@@ -408,7 +409,7 @@ type IdleWorkspacePlan =
  * path no backup covers. Everything else may resolve on its own sooner — a push, a lock released
  * — so only these two earn the cooldown.
  */
-type KeptCooldownCategory = "process" | "ignored-path";
+type KeptCooldownCategory = "process" | "ignored-path" | "nested-repo";
 
 /** Whether a worktree's directory may go: the deletion invariant's verdict, or why not. */
 type DeletionCheck =
@@ -1038,6 +1039,7 @@ export class AgentDoneJanitor {
       backupIgnoredPaths: config.backupIgnoredPaths,
       maxBackupIgnoredFileBytes: config.maxBackupIgnoredFileBytes,
       maxBackupIgnoredTotalBytes: config.maxBackupIgnoredTotalBytes,
+      releaseSafeNestedRepos: config.releaseSafeNestedRepos,
     });
     const invariant = await this.evaluateDeletionInvariant(path, coverage, "plan", config);
     return invariant.holds
@@ -1072,11 +1074,12 @@ export class AgentDoneJanitor {
 
   /**
    * Whether re-running the invariant with nested-repository safety applied could still change a
-   * failed verdict: when the block is the nested-repo check itself (no `category`, and nothing
-   * unlisted — unreadable content, hidden edits, or an LFS file — already failed it first), or an
-   * ignored-path block that names at least one container of only nested repositories. Anything
-   * else — unlisted content, an unrelated ignored file, dirty or unpushed work — is unaffected by
-   * it, so there is no reason to pay for the git calls.
+   * failed verdict: when the block is the nested-repo check itself (`category: "nested-repo"`),
+   * or an ignored-path block that names at least one container of only nested repositories.
+   * Anything else — unlisted content, an unrelated ignored file, dirty or unpushed work — is
+   * unaffected by it, so there is no reason to pay for the git calls. Reading the invariant's own
+   * category, rather than inferring "nested-repo" from the absence of one, means a future
+   * category added to some other failure can never silently widen this gate.
    */
   private nestedRepositorySafetyCouldHelp(
     coverage: WorktreeCoverage,
@@ -1084,9 +1087,7 @@ export class AgentDoneJanitor {
   ): boolean {
     if (invariant.holds) return false;
     if (coverage.ignoredDirectoriesHoldingOnlyNestedRepositories.length > 0) return true;
-    const unlistedBlocked =
-      coverage.unreadable.length > 0 || coverage.hidden.length > 0 || coverage.lfs.length > 0;
-    return !unlistedBlocked && invariant.category === undefined;
+    return invariant.category === "nested-repo";
   }
 
   /**
@@ -1127,6 +1128,7 @@ export class AgentDoneJanitor {
         backupIgnoredPaths: config.backupIgnoredPaths,
         maxBackupIgnoredFileBytes: config.maxBackupIgnoredFileBytes,
         maxBackupIgnoredTotalBytes: config.maxBackupIgnoredTotalBytes,
+        releaseSafeNestedRepos: config.releaseSafeNestedRepos,
       });
       const invariant = await this.evaluateDeletionInvariant(path, coverage, "head", config);
       return invariant.holds
@@ -1141,6 +1143,7 @@ export class AgentDoneJanitor {
       worktreePath: path,
       commit: snapshot.commit,
       mainRepoRoot,
+      releaseSafeNestedRepos: config.releaseSafeNestedRepos,
     });
     const invariant = await this.evaluateDeletionInvariant(path, coverage, "snapshot", config);
     return invariant.holds
@@ -2159,6 +2162,8 @@ function describeKeptCooldownCategory(category: KeptCooldownCategory): string {
       return "a process inside it";
     case "ignored-path":
       return "an unbacked ignored path";
+    case "nested-repo":
+      return "a nested repository not judged safe";
   }
 }
 

@@ -557,7 +557,7 @@ const AgentDoneJanitorSchema = z
     maxBackupIgnoredTotalBytes: z.number().int().positive().optional(),
     // Off by default: excuses a nested repository, and an ignored container holding only safe
     // nested repositories, from the deletion invariant once its own HEAD is on a trusted remote
-    // and its own tree is clean. See docs/done-janitor.md, "Unbacked ignored files".
+    // and its own tree is clean. See docs/done-janitor.md, "The deletion invariant".
     releaseSafeNestedRepos: z.boolean().optional(),
   })
   .strict();

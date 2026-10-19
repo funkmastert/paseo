@@ -11,8 +11,8 @@
 import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, realpathSync, rmSync, type Dirent } from "node:fs";
 import { access, constants, lstat, opendir, readdir, readFile, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { hostname as osHostname, tmpdir } from "node:os";
+import { dirname, join, resolve, sep } from "node:path";
 
 import {
   DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
@@ -460,6 +460,81 @@ export interface WorktreeCoverage {
 }
 
 /**
+ * The scratch-index reads `readWorktreeCoverage` needs: diff, untracked, ignored, staged, hidden,
+ * LFS pointers and the unbacked-commit count. Split out so the caller's own branching (the
+ * `releaseSafeNestedRepos` gate, the final shape) doesn't push its complexity over the lint cap.
+ */
+async function readScratchIndexState(
+  git: ReadOnlyGit,
+  scratch: ReadOnlyGit,
+  worktreePath: string,
+  commit: string,
+  head: string,
+): Promise<{
+  changed: string;
+  untracked: string;
+  ignored: string[];
+  staged: string;
+  hidden: string[];
+  lfs: string;
+  unbackedCommits: number;
+} | null> {
+  const changed = await scratch([
+    "diff",
+    "--no-ext-diff",
+    "--no-renames",
+    "--ignore-submodules=none",
+    "--name-only",
+    "-z",
+  ]);
+  const untracked = await scratch(["ls-files", "-z", "--others", "--exclude-standard"]);
+  // Not `ls-files --ignored --directory`: it never looks inside an untracked directory, so a
+  // `.env` beside a new, untracked source file would be in neither list. `matching` shows a
+  // directory an ignore rule names as one entry, and every other ignored file on its own.
+  const status = await scratch([
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--no-renames",
+    "--ignored=matching",
+    "--untracked-files=all",
+  ]);
+  const ignored = status === null ? null : await listIgnored(worktreePath, status);
+  const staged = await scratch(["ls-files", "-z", "--stage"]);
+  const hidden = await readHiddenFiles(git, worktreePath);
+  const lfs = await git([
+    "ls-files",
+    "-z",
+    "--cached",
+    "--others",
+    "--exclude-standard",
+    "--",
+    ":(attr:filter=lfs)",
+  ]);
+  const unbacked = await git([
+    "rev-list",
+    "--count",
+    "HEAD",
+    "--not",
+    "--remotes",
+    ...(commit === head ? [] : [commit]),
+  ]);
+  const unbackedCommits = unbacked === null ? Number.NaN : Number.parseInt(unbacked.trim(), 10);
+  if (
+    changed === null ||
+    untracked === null ||
+    ignored === null ||
+    staged === null ||
+    hidden === null ||
+    lfs === null ||
+    !Number.isFinite(unbackedCommits)
+  ) {
+    return null;
+  }
+  return { changed, untracked, ignored, staged, hidden, lfs, unbackedCommits };
+}
+
+/**
  * Reads the working tree against `commit` (HEAD when null) through a scratch index outside the
  * repository, seeded from the worktree's own index so unchanged files are not re-hashed. The
  * worktree's index, HEAD and refs are never written. It judges nothing a snapshot decided: a file
@@ -481,6 +556,13 @@ export async function readWorktreeCoverage(input: {
   maxBackupIgnoredFileBytes?: number;
   /** `agents.doneJanitor.maxBackupIgnoredTotalBytes`. Defaults to `DEFAULT_MAX_BACKUP_IGNORED_TOTAL_BYTES`. */
   maxBackupIgnoredTotalBytes?: number;
+  /**
+   * `agents.doneJanitor.releaseSafeNestedRepos`. Default `false`: the ignored-container walk
+   * (`listIgnoredDirectoriesOfOnlyNestedRepos`) is skipped entirely and this field reads `[]`,
+   * since its result is inert while the flag is off and the walk itself costs a filesystem
+   * traversal that scales with container size (an SPM checkout, for one).
+   */
+  releaseSafeNestedRepos?: boolean;
 }): Promise<WorktreeCoverage | null> {
   const { worktreePath } = input;
   if (!existsSync(worktreePath)) return null;
@@ -496,58 +578,9 @@ export async function readWorktreeCoverage(input: {
   try {
     const scratch = createReadOnlyGit(worktreePath, runGit, { GIT_INDEX_FILE: indexFile });
     if (!(await seedScratchIndex({ git, scratch, indexFile, commit }))) return null;
-    const changed = await scratch([
-      "diff",
-      "--no-ext-diff",
-      "--no-renames",
-      "--ignore-submodules=none",
-      "--name-only",
-      "-z",
-    ]);
-    const untracked = await scratch(["ls-files", "-z", "--others", "--exclude-standard"]);
-    // Not `ls-files --ignored --directory`: it never looks inside an untracked directory, so a
-    // `.env` beside a new, untracked source file would be in neither list. `matching` shows a
-    // directory an ignore rule names as one entry, and every other ignored file on its own.
-    const status = await scratch([
-      "status",
-      "--porcelain=v1",
-      "-z",
-      "--no-renames",
-      "--ignored=matching",
-      "--untracked-files=all",
-    ]);
-    const ignored = status === null ? null : await listIgnored(worktreePath, status);
-    const staged = await scratch(["ls-files", "-z", "--stage"]);
-    const hidden = await readHiddenFiles(git, worktreePath);
-    const lfs = await git([
-      "ls-files",
-      "-z",
-      "--cached",
-      "--others",
-      "--exclude-standard",
-      "--",
-      ":(attr:filter=lfs)",
-    ]);
-    const unbacked = await git([
-      "rev-list",
-      "--count",
-      "HEAD",
-      "--not",
-      "--remotes",
-      ...(commit === head ? [] : [commit]),
-    ]);
-    const unbackedCommits = unbacked === null ? Number.NaN : Number.parseInt(unbacked.trim(), 10);
-    if (
-      changed === null ||
-      untracked === null ||
-      ignored === null ||
-      staged === null ||
-      hidden === null ||
-      lfs === null ||
-      !Number.isFinite(unbackedCommits)
-    ) {
-      return null;
-    }
+    const state = await readScratchIndexState(git, scratch, worktreePath, commit, head);
+    if (!state) return null;
+    const { changed, untracked, ignored, staged, hidden, lfs, unbackedCommits } = state;
     const tree = await walkWorktree(worktreePath);
     const manifestDirectories = await readManifestDirectories(worktreePath, ignored);
     const unregenerable = unregenerableIgnored(ignored, manifestDirectories);
@@ -576,12 +609,13 @@ export async function readWorktreeCoverage(input: {
         maxFileBytes: input.maxBackupIgnoredFileBytes,
         maxTotalBytes: input.maxBackupIgnoredTotalBytes,
       }),
-      ignoredDirectoriesHoldingOnlyNestedRepositories:
-        await listIgnoredDirectoriesOfOnlyNestedRepos(
-          worktreePath,
-          ignored,
-          tree.nestedRepositories,
-        ),
+      ignoredDirectoriesHoldingOnlyNestedRepositories: input.releaseSafeNestedRepos
+        ? await listIgnoredDirectoriesOfOnlyNestedRepos(
+            worktreePath,
+            ignored,
+            tree.nestedRepositories,
+          )
+        : [],
     };
   } finally {
     rmSync(indexFile, { force: true });
@@ -921,68 +955,221 @@ async function onlyHoldsNestedRepositories(
   return true;
 }
 
-/** A git remote URL that identifies a real network host, never a local filesystem path. */
-function isNetworkRemoteUrl(url: string): boolean {
+/** Whether `candidate` is `root` or inside it, compared by realpath. */
+function isPathInsideRoot(candidate: string, root: string): boolean {
+  const resolvedRoot = realpathOrSelf(root);
+  const resolvedCandidate = realpathOrSelf(candidate);
+  if (resolvedCandidate === resolvedRoot) return true;
+  return resolvedCandidate.startsWith(
+    resolvedRoot.endsWith(sep) ? resolvedRoot : resolvedRoot + sep,
+  );
+}
+
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "::1", "[::1]"]);
+
+/**
+ * Whether `host` is this machine, under any name a remote URL could use: the usual loopback
+ * names, the whole `127.0.0.0/8` block (`ssh://127.0.0.42/x` is as local as `127.0.0.1`), and
+ * this machine's own hostname. A remote at any of these can only be a bare repo or another
+ * worktree on the same disk, so it is never trusted: `git config` cannot tell a log-in to this
+ * machine from a log-in to a different one, and doubt keeps the worktree.
+ */
+function isLoopbackOrOwnHost(host: string): boolean {
+  const normalized = host.toLowerCase();
+  if (LOOPBACK_HOSTS.has(normalized)) return true;
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/u.test(normalized)) return true;
+  return normalized === osHostname().toLowerCase();
+}
+
+/** The host a git remote URL names, or null when it names none (a local filesystem path). */
+function remoteUrlHost(url: string): string | null {
   const trimmed = url.trim();
-  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed)) return !/^file:\/\//iu.test(trimmed);
+  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed)) {
+    if (/^file:\/\//iu.test(trimmed)) return null;
+    try {
+      return new URL(trimmed).hostname.toLowerCase() || null;
+    } catch {
+      return null;
+    }
+  }
   // scp-like syntax: user@host:path, no scheme.
-  return /^[^/\s]+@[^:\s]+:/u.test(trimmed);
+  const scp = /^[^/\s@]+@([^:\s]+):/u.exec(trimmed);
+  return scp ? scp[1].toLowerCase() : null;
+}
+
+/** A git remote URL that identifies a real, non-local network host. */
+function isTrustedNetworkRemoteUrl(url: string): boolean {
+  const host = remoteUrlHost(url);
+  return host !== null && !isLoopbackOrOwnHost(host);
+}
+
+interface FetchRefspecEntry {
+  remoteName: string;
+  /** The destination side of the refspec, leading `+` stripped. */
+  dst: string;
+}
+
+async function readFetchRefspecs(git: ReadOnlyGit): Promise<FetchRefspecEntry[] | null> {
+  const listing = await git(["config", "--get-regexp", "^remote\\..*\\.fetch$"]);
+  if (listing === null) return [];
+  const entries: FetchRefspecEntry[] = [];
+  for (const line of listing.split("\n")) {
+    const match = /^remote\.(.+)\.fetch\s+(.+)$/u.exec(line.trim());
+    if (!match) continue;
+    const [, remoteName, refspec] = match;
+    const dst = refspec.trim().replace(/^\+/u, "").split(":")[1]?.trim();
+    if (dst) entries.push({ remoteName, dst });
+  }
+  return entries;
+}
+
+/** Whether a fetch refspec's destination side maps into `refs/remotes/<name>/`. */
+function mapsIntoRemoteNamespace(dst: string, name: string): boolean {
+  const prefix = `refs/remotes/${name}/`;
+  return dst === prefix || dst === `refs/remotes/${name}` || dst.startsWith(prefix);
 }
 
 /**
- * Names of this repository's remotes whose URL is a real network host (#6, docs/done-janitor.md):
- * a local path -- `file://`, absolute, or relative -- never counts, even when it resolves outside
- * the worktree being deleted, because a relative URL's base cannot be read back out of git
- * reliably. An empty result (no remote at all, or git cannot read the config) reads as "trust
- * nothing", same doubt-keeps-it posture as every other check here.
+ * Names of this repository's remotes that may be trusted (#1, #6, docs/done-janitor.md). All of:
+ *
+ * - every URL `git remote get-url --all <name>` and `git remote get-url --push --all <name>`
+ *   report — the configuration git actually uses once `url.<base>.insteadOf` and
+ *   `pushInsteadOf` rewrite a raw `remote.<name>.url`/`pushurl` — names a real network host, not
+ *   a loopback address, this machine's own hostname, or a bare filesystem path.
+ * - `remote.<name>.fetch`, when set explicitly, maps into `refs/remotes/<name>/`; left unset, git's
+ *   own default (`+refs/heads/*:refs/remotes/<name>/*`) already does.
+ * - no *other* remote's fetch refspec writes into `refs/remotes/<name>/` for any configured name:
+ *   a foreign refspec would make a commit that arrived via that other remote's fetch look like
+ *   this one's, so its presence anywhere untrusts every remote, not just the one it targets.
+ *
+ * An empty result (no remote at all, a foreign refspec anywhere, or git cannot read the config)
+ * reads as "trust nothing", same doubt-keeps-it posture as every other check here.
  */
 async function readTrustedRemoteNames(git: ReadOnlyGit): Promise<string[]> {
-  const listing = await git(["config", "--get-regexp", "^remote\\..*\\.url$"]);
-  if (listing === null) return [];
+  const namesOutput = await git(["remote"]);
+  if (namesOutput === null) return [];
+  const names = namesOutput
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (names.length === 0) return [];
+
+  const refspecs = await readFetchRefspecs(git);
+  if (refspecs === null) return [];
+  const hasForeignRefspec = refspecs.some((entry) =>
+    names.some((name) => name !== entry.remoteName && mapsIntoRemoteNamespace(entry.dst, name)),
+  );
+  if (hasForeignRefspec) return [];
+
   const trusted: string[] = [];
-  for (const line of listing.split("\n")) {
-    const match = /^remote\.(.+)\.url\s+(.+)$/u.exec(line.trim());
-    if (!match) continue;
-    const [, name, url] = match;
-    if (isNetworkRemoteUrl(url)) trusted.push(name);
+  for (const name of names) {
+    const ownRefspecs = refspecs.filter((entry) => entry.remoteName === name);
+    if (
+      ownRefspecs.length > 0 &&
+      !ownRefspecs.some((entry) => mapsIntoRemoteNamespace(entry.dst, name))
+    ) {
+      continue;
+    }
+    const fetchUrls = await git(["remote", "get-url", "--all", name]);
+    const pushUrls = await git(["remote", "get-url", "--push", "--all", name]);
+    if (fetchUrls === null || pushUrls === null) continue;
+    const urls = [...splitNonEmptyLines(fetchUrls), ...splitNonEmptyLines(pushUrls)];
+    if (urls.length > 0 && urls.every((url) => isTrustedNetworkRemoteUrl(url))) {
+      trusted.push(name);
+    }
   }
   return trusted;
 }
 
+function splitNonEmptyLines(output: string): string[] {
+  return output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
 /**
- * Whether a repository nested inside a worktree is safe to lose when the worktree goes. All of:
+ * Executable or config settings that would run code the daemon's user controls, read before any
+ * `git status` call inside a nested repository (#9, docs/done-janitor.md): a clean/smudge
+ * filter, a diff driver, a custom ssh command, hooks, or fsmonitor, all of which a nested repo's
+ * own tracked `.gitattributes`/local config can point at a script the janitor would then execute
+ * as a side effect of a read-only safety check. Reading config never executes anything; only
+ * `git status`/`diff` invoking a filter or driver does, so this runs first. True (unsafe) when
+ * git cannot even be asked.
+ */
+async function hasDangerousLocalGitConfig(git: ReadOnlyGit): Promise<boolean> {
+  const listing = await git(["config", "--local", "--list", "--includes"]);
+  if (listing === null) return true;
+  for (const line of listing.split("\n")) {
+    const key = line.split("=")[0]?.trim().toLowerCase();
+    if (!key) continue;
+    if (
+      key.startsWith("filter.") ||
+      key === "core.fsmonitor" ||
+      key === "core.hookspath" ||
+      key === "core.sshcommand" ||
+      key === "diff.external" ||
+      (key.startsWith("diff.") && key.endsWith(".textconv"))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a repository nested inside `worktreePath` is safe to lose when the worktree goes. All
+ * of:
  *
  * - git's own discovery resolves `nestedRepositoryPath` as the repository's own toplevel (#4): an
  *   invalid `.git` entry (an empty directory, a dangling gitdir file) would otherwise let git
  *   climb to an ancestor repository — the outer worktree, clean and pushed — and read that as
  *   "safe" for a directory that is not really a repository at all.
+ * - no local git config could run code as a side effect of the checks below (#9): a clean/smudge
+ *   filter, a diff driver, a custom ssh command, hooks, or fsmonitor, checked before any `status`.
  * - the outer gate's own guards hold here too (#3), reusing `readTreeProblem`: not locked, no
  *   half-done merge/rebase/cherry-pick/bisect, and no tracked file hidden with
  *   `--assume-unchanged` or `--skip-worktree`.
  * - `git status` (tracked and untracked) is empty, same as before.
  * - every ignored path left is one `isRegenerablePath` already excuses by name (#5): the outer
  *   worktree's own ignored-path rule, applied to this nested repository instead of bypassed.
- * - every ref reachable from HEAD and from every other local branch (`refs/heads/*`), and any
- *   stash entry, is reachable from a *trusted* remote-tracking ref (#2, #6) — a second branch or a
- *   stash in a standalone nested clone has no other copy once the worktree goes, and a remote
- *   whose own URL is a local path is never trusted, because it may be deleted along with the
- *   worktree itself (an SPM `.build/index-build/repositories/...` cache, for one).
+ * - HEAD is reachable from a *trusted* remote-tracking ref (`readTrustedRemoteNames`, #1, #6): a
+ *   remote whose own URL — after `insteadOf`/`pushInsteadOf` — names a real, non-loopback network
+ *   host, with no foreign fetch refspec writing into its namespace.
+ * - when the repository's `--git-common-dir` resolves **inside** `worktreePath` — a standalone
+ *   clone, whose whole ref store goes with the deletion — every other local branch
+ *   (`refs/heads/*`) and every other ref (`refs/backup`, `refs/notes`, `refs/original`, a custom
+ *   namespace) is also reachable from a trusted remote, and no stash entry exists (#2): nothing
+ *   here but HEAD has anywhere else to be. When the common dir resolves **outside**
+ *   `worktreePath` (#6) — a linked worktree sharing a repository that survives the deletion — its
+ *   other branches, tags and stash live in that surviving repository and are not checked: only
+ *   this worktree's own HEAD, tree and ignored files are its own.
  *
- * A git failure, a dirty tree, an unreachable ref, a stash entry, or no trusted remote at all
- * reads as unsafe: every check here refuses on doubt, same as `checkWorktreeDeletionSafety`.
+ * A git failure, a dirty tree, an unreachable ref, a stash entry (for a standalone clone), or no
+ * trusted remote at all reads as unsafe: every check here refuses on doubt, same as
+ * `checkWorktreeDeletionSafety`. Reflog-only commits are an accepted loss, the same as the outer
+ * gate: nothing here, or in `checkWorktreeDeletionSafety`, reads the reflog.
  */
-export async function checkNestedRepositorySafety(
+/**
+ * The non-ref preflight for {@link checkNestedRepositorySafety}: git's own discovery, dangerous
+ * local config, the outer gate's tree-problem and ignored-path checks. Split out so the ref-trust
+ * branching below doesn't push the caller's complexity over the lint cap.
+ */
+async function checkNestedRepositoryPreflight(
+  git: ReadOnlyGit,
   nestedRepositoryPath: string,
-  runGit: RunGitCommand = runGitCommand,
-): Promise<boolean> {
-  const git = createReadOnlyGit(nestedRepositoryPath, runGit);
-
+): Promise<{ commonDir: string } | null> {
   const toplevel = (await git(["rev-parse", "--path-format=absolute", "--show-toplevel"]))?.trim();
-  if (!toplevel || realpathOrSelf(toplevel) !== realpathOrSelf(nestedRepositoryPath)) return false;
+  if (!toplevel || realpathOrSelf(toplevel) !== realpathOrSelf(nestedRepositoryPath)) return null;
   const gitDir = (await git(["rev-parse", "--path-format=absolute", "--git-dir"]))?.trim();
-  if (!gitDir) return false;
+  if (!gitDir) return null;
+  const commonDir = (
+    await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+  )?.trim();
+  if (!commonDir) return null;
 
-  if ((await readTreeProblem(git, nestedRepositoryPath, gitDir)) !== null) return false;
+  if (await hasDangerousLocalGitConfig(git)) return null;
+  if ((await readTreeProblem(git, nestedRepositoryPath, gitDir)) !== null) return null;
 
   const ignoredStatus = await git([
     "status",
@@ -992,10 +1179,33 @@ export async function checkNestedRepositorySafety(
     "--ignored=matching",
     "--untracked-files=all",
   ]);
-  if (ignoredStatus === null) return false;
+  if (ignoredStatus === null) return null;
   const ignored = await listIgnored(nestedRepositoryPath, ignoredStatus);
   const manifestDirectories = await readManifestDirectories(nestedRepositoryPath, ignored);
-  if (unregenerableIgnored(ignored, manifestDirectories).length > 0) return false;
+  if (unregenerableIgnored(ignored, manifestDirectories).length > 0) return null;
+
+  return { commonDir };
+}
+
+/**
+ * Whether `git rev-list --count <args>` resolves to zero: a null output or an unparsable count
+ * reads as unsafe (non-zero), same as every other doubt in this file.
+ */
+async function hasUnsafeUnreachableCommits(git: ReadOnlyGit, args: string[]): Promise<boolean> {
+  const output = await git(["rev-list", "--count", ...args]);
+  const count = output === null ? Number.NaN : Number.parseInt(output.trim(), 10);
+  return !Number.isFinite(count) || count > 0;
+}
+
+export async function checkNestedRepositorySafety(
+  worktreePath: string,
+  nestedRepositoryPath: string,
+  runGit: RunGitCommand = runGitCommand,
+): Promise<boolean> {
+  const git = createReadOnlyGit(nestedRepositoryPath, runGit);
+
+  const preflight = await checkNestedRepositoryPreflight(git, nestedRepositoryPath);
+  if (!preflight) return false;
 
   const head = (await git(["rev-parse", "--verify", "--quiet", "HEAD"]))?.trim();
   if (!head) return false;
@@ -1004,24 +1214,16 @@ export async function checkNestedRepositorySafety(
   if (trustedRemotes.length === 0) return false;
   const survivors = trustedRemotes.map((name) => `--remotes=${name}`);
 
-  const unreachableHead = await git(["rev-list", "--count", "HEAD", "--not", ...survivors]);
-  const headCount =
-    unreachableHead === null ? Number.NaN : Number.parseInt(unreachableHead.trim(), 10);
-  if (!Number.isFinite(headCount) || headCount > 0) return false;
+  if (await hasUnsafeUnreachableCommits(git, ["HEAD", "--not", ...survivors])) return false;
 
-  const unreachableAll = await git([
-    "rev-list",
-    "--count",
-    "--branches",
-    "--tags",
-    "--not",
-    ...survivors,
-  ]);
-  const allCount =
-    unreachableAll === null ? Number.NaN : Number.parseInt(unreachableAll.trim(), 10);
-  if (!Number.isFinite(allCount) || allCount > 0) return false;
+  // A linked worktree's common dir survives the deletion: its other branches, tags and stash are
+  // not this worktree's to lose.
+  if (!isPathInsideRoot(preflight.commonDir, worktreePath)) return true;
 
-  // Non-null means refs/stash resolved: a stash entry exists.
+  if (await hasUnsafeUnreachableCommits(git, ["--all", "--not", ...survivors])) return false;
+
+  // Non-null means refs/stash resolved: a stash entry exists. `--all` above already reaches any
+  // commit a stash entry holds, so this is a second, independent signal rather than the only one.
   if ((await git(["rev-parse", "--verify", "--quiet", "refs/stash"])) !== null) return false;
 
   return true;
@@ -1033,6 +1235,12 @@ export async function checkNestedRepositorySafety(
  * by {@link checkNestedRepositorySafety}. Candidate paths come with mixed trailing-slash
  * conventions (a gitlink has none; a walked or untracked directory ends with `/`); both read the
  * same directory on disk, so the returned set keeps whichever form the candidate used.
+ *
+ * Stops at the first unsafe candidate (#8): `checkDeletionInvariant`'s own nested-repo check
+ * fails the whole worktree once any one candidate is not in the returned set, so checking the
+ * rest cannot change the outcome. The set may then under-report which *other* candidates were
+ * actually safe — the deletion audit line names fewer than it could — but never over-reports one
+ * that was not checked.
  */
 export async function computeSafeNestedRepositories(
   worktreePath: string,
@@ -1042,9 +1250,9 @@ export async function computeSafeNestedRepositories(
   const safe = new Set<string>();
   for (const candidate of candidates) {
     const relative = candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
-    if (await checkNestedRepositorySafety(join(worktreePath, relative), runGit)) {
-      safe.add(candidate);
-    }
+    const nestedRepositoryPath = join(worktreePath, relative);
+    if (!(await checkNestedRepositorySafety(worktreePath, nestedRepositoryPath, runGit))) break;
+    safe.add(candidate);
   }
   return safe;
 }

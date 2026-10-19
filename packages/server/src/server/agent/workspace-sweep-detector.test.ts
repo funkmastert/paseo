@@ -636,6 +636,7 @@ describe("checkDeletionInvariant", () => {
       holds: false,
       reason:
         "1 submodule(s) or nested repositor(ies) a backup holds only as a pointer (vendor/tool)",
+      category: "nested-repo",
     });
     expect(checkDeletionInvariant(coverage({ untracked: ["vendor/other/"] }), "plan").holds).toBe(
       false,
@@ -687,6 +688,7 @@ describe("checkDeletionInvariant", () => {
       holds: false,
       reason:
         "1 submodule(s) or nested repositor(ies) a backup holds only as a pointer (.cache/tool/)",
+      category: "nested-repo",
     });
   });
 

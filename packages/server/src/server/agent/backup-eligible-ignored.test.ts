@@ -24,6 +24,22 @@ describe("resolveBackupIgnoredPaths", () => {
     expect(rejected).toEqual([".env"]);
   });
 
+  // #7: the JEV secret globs are end-anchored, so a trailing slash used to hide a secret-named
+  // directory pattern from the rejection check.
+  test("rejects a secret-named directory pattern with a trailing slash", () => {
+    const rejected: string[] = [];
+    expect(resolveBackupIgnoredPaths([".env/", ".worker-logs/"], (p) => rejected.push(p))).toEqual([
+      ".worker-logs/",
+    ]);
+    expect(rejected).toEqual([".env/"]);
+  });
+
+  test("rejects a secret-named directory pattern without a trailing slash too", () => {
+    const rejected: string[] = [];
+    expect(resolveBackupIgnoredPaths([".env"], (p) => rejected.push(p))).toEqual([]);
+    expect(rejected).toEqual([".env"]);
+  });
+
   test("rejects a pattern that is only wildcards", () => {
     const rejected: string[] = [];
     expect(resolveBackupIgnoredPaths(["*", "**"], (p) => rejected.push(p))).toEqual([]);
@@ -143,6 +159,39 @@ describe("isBackupEligibleIgnoredPath", () => {
         worktreePath,
         entry: ".worker-logs/",
         patterns: [".worker-logs/"],
+        maxFileBytes: 1024,
+      }),
+    ).resolves.toBe(false);
+  });
+
+  // #7: a secret-shaped entry (a directory, here) is never eligible even when a broad pattern
+  // would otherwise match it -- the trailing slash must not hide it from the check.
+  test("a secret-named directory entry is not eligible even when a pattern matches it", async () => {
+    mkdirSync(join(worktreePath, ".env"));
+    writeFileSync(join(worktreePath, ".env", "local"), "DATABASE_PASSWORD=hunter2\n");
+
+    await expect(
+      isBackupEligibleIgnoredPath({
+        worktreePath,
+        entry: ".env/",
+        patterns: [".env/"],
+        maxFileBytes: 1024,
+      }),
+    ).resolves.toBe(false);
+  });
+
+  // #7: a file under a secret-shaped ancestor directory is ineligible even when the top-level
+  // matched entry (a plain "logs/") is not itself secret-shaped.
+  test("a file under a secret-shaped ancestor directory is not eligible", async () => {
+    mkdirSync(join(worktreePath, "logs", ".env"), { recursive: true });
+    writeFileSync(join(worktreePath, "logs", ".env", "local"), "DATABASE_PASSWORD=hunter2\n");
+    writeFileSync(join(worktreePath, "logs", "plain.log"), "fine\n");
+
+    await expect(
+      isBackupEligibleIgnoredPath({
+        worktreePath,
+        entry: "logs/",
+        patterns: ["logs/"],
         maxFileBytes: 1024,
       }),
     ).resolves.toBe(false);

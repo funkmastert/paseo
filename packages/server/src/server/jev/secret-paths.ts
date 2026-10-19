@@ -221,11 +221,14 @@ export function resolveIgnoredPathPatterns(
   for (const pattern of patterns) {
     const sample = pattern.replace(/\*/gu, "x");
     const trimmed = options.allowDirectory ? pattern.trim().replace(/\/$/u, "") : pattern.trim();
+    const trimmedSample = trimmed.replace(/\*/gu, "x");
     const lastSegment = trimmed.split("/").pop() ?? "";
     if (
       lastSegment.replace(/\*/gu, "") === "" ||
       isSecretShapedPath(pattern) ||
-      isSecretShapedPath(sample)
+      isSecretShapedPath(sample) ||
+      isSecretShapedPath(trimmed) ||
+      isSecretShapedPath(trimmedSample)
     ) {
       onRejectedPattern(pattern);
       continue;

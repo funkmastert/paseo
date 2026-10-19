@@ -41,8 +41,11 @@ export function resolveBackupIgnoredPaths(
 }
 
 function matchesAnyPattern(path: string, patterns: readonly string[]): boolean {
-  if (patterns.length === 0 || isSecretShapedPath(path)) return false;
+  if (patterns.length === 0) return false;
   const withoutTrailingSlash = path.endsWith("/") ? path.slice(0, -1) : path;
+  // A directory entry's own trailing slash can hide it from the secret-name check (the JEV
+  // globs are end-anchored), so both forms are tested.
+  if (isSecretShapedPath(path) || isSecretShapedPath(withoutTrailingSlash)) return false;
   return patterns.some(
     (pattern) =>
       globToRegExp(pattern, "u").test(path) ||
@@ -165,14 +168,25 @@ async function collectEligibleFilesInDirectory(
   return { files, totalBytes };
 }
 
+/** Whether any directory on the way to `relativePath` (not the file itself) is secret-shaped. */
+function hasSecretShapedAncestor(relativePath: string): boolean {
+  const segments = relativePath.split("/");
+  for (let length = 1; length < segments.length; length += 1) {
+    if (isSecretShapedPath(segments.slice(0, length).join("/"))) return true;
+  }
+  return false;
+}
+
 async function collectEligibleFile(
   worktreePath: string,
   relativePath: string,
   maxFileBytes: number,
 ): Promise<CollectedFiles | null> {
   // Applied per file, not just to the top-level entry: a name on the JEV secret list buried
-  // inside an otherwise-plain directory must disqualify it too.
-  if (isSecretShapedPath(relativePath)) return null;
+  // inside an otherwise-plain directory must disqualify it too -- its own name, or any directory
+  // on the way to it (a secret-named directory pattern like `.env/` passed its own rejection
+  // check, so this is the backstop for a file found underneath one by some other pattern).
+  if (isSecretShapedPath(relativePath) || hasSecretShapedAncestor(relativePath)) return null;
   const absolutePath = join(worktreePath, relativePath);
   let stats: Stats;
   try {
