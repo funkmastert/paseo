@@ -500,7 +500,14 @@ describe("a stall candidate's judgment", () => {
   });
 
   test.each([
-    ["a timeout", { behavior: { kind: "timeout" } as JevFakeBehavior, jev: ANSWERED }],
+    // The fake's timeout waits for the abort, so keep it well under the test's own 5 s limit.
+    [
+      "a timeout",
+      {
+        behavior: { kind: "timeout" } as JevFakeBehavior,
+        jev: { stallJudgment: { shadow: false, timeoutMs: 50 } },
+      },
+    ],
     [
       "an HTTP error",
       { behavior: { kind: "http", status: 503 } as JevFakeBehavior, jev: ANSWERED },

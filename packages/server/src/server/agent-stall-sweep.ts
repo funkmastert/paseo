@@ -624,7 +624,8 @@ export class AgentStallSweep {
     if (judgment.callId !== null) {
       // `mode` is shadow or live, from the outcome; `applied` here means the action changed, as
       // every track but remediation's reads it (docs/jev.md, "Decision store").
-      let mode: "live" | "shadow" | undefined;
+      let mode: "live" | "shadow" | undefined =
+        judgment.kind === "none" ? judgment.mode : undefined;
       if (summary) mode = summary.applied ? "live" : "shadow";
       this.deps.judgeStall?.record({
         agentId: agent.id,

@@ -311,8 +311,12 @@ describe("createEscalationTriage over the fake", () => {
     expect(jev.transport.calls).toHaveLength(0);
   });
 
-  it("sends nothing when the evidence names company work (D7 text scan)", async () => {
-    const jev = createTestJevService({ config: liveConfig, answers: script });
+  it("sends nothing when the evidence names configured company work (D7 text scan)", async () => {
+    // The default markers are empty since 2026-10-02 (docs/jev.md, D7), so configure one.
+    const jev = createTestJevService({
+      config: { ...liveConfig, excludeTextMarkers: ["mobile-worktrees"] },
+      answers: script,
+    });
     const triage = await createEscalationTriage(jev)({
       episodeKey: "cpu-saturation",
       observation: observation({ evidence: "pid 7 gradle in ~/mobile-worktrees/android 400%" }),
@@ -326,7 +330,12 @@ describe("createEscalationTriage over the fake", () => {
       { kind: "timeout" as const },
       { kind: "contract-violation" as const },
     ]) {
-      const jev = createTestJevService({ config: liveConfig, answers: script, behavior });
+      // The fake's timeout waits for the abort, so keep it well under the test's own 5 s limit.
+      const jev = createTestJevService({
+        config: { remediationTriage: { shadow: false, timeoutMs: 50 } },
+        answers: script,
+        behavior,
+      });
       const triage = await createEscalationTriage(jev)({
         episodeKey: "system-memory",
         observation: observation(),
