@@ -9,21 +9,16 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { StreamItem } from "@/types/stream";
 import { createWebStreamStrategy } from "@/agent-stream/strategy-web";
-import type { StreamSegmentRenderers, StreamViewportHandle } from "@/agent-stream/strategy";
-import type { StickyLastPromptState } from "./model";
+import type { StreamViewportHandle } from "@/agent-stream/strategy";
 import { useStickyLastPrompt } from "./use-sticky-last-prompt.web";
-
-function at(second: number): Date {
-  return new Date(`2026-01-01T00:00:${second.toString().padStart(2, "0")}.000Z`);
-}
-
-function userMessage(id: string, second: number): StreamItem {
-  return { kind: "user_message", id, text: id, timestamp: at(second) };
-}
-
-function assistantMessage(id: string, second: number): StreamItem {
-  return { kind: "assistant_message", id, text: id, timestamp: at(second) };
-}
+import {
+  assistantMessage,
+  createRenderers,
+  nextFrame,
+  type PromptStateHarnessApi,
+  userMessage,
+  waitForState,
+} from "./browser-test-harness";
 
 const ROW_STYLE = { height: 300 };
 // Phone-width viewport (iPhone SE/8 class), matching the compact breakpoint.
@@ -34,20 +29,6 @@ const HARNESS_STYLE = {
   width: 375,
 };
 
-function createRenderers(): StreamSegmentRenderers {
-  const renderRow = (item: StreamItem) => <div style={ROW_STYLE}>{item.id}</div>;
-  return {
-    renderHistoryVirtualizedRow: renderRow,
-    renderHistoryMountedRow: renderRow,
-    renderLiveHeadRow: renderRow,
-    renderLiveAuxiliary: () => null,
-  };
-}
-
-interface HarnessApi {
-  getState: () => StickyLastPromptState;
-}
-
 function Harness({
   tail,
   head,
@@ -55,7 +36,7 @@ function Harness({
 }: {
   tail: StreamItem[];
   head: StreamItem[];
-  apiRef: { current: HarnessApi | null };
+  apiRef: { current: PromptStateHarnessApi | null };
 }) {
   const viewportRef = useRef<StreamViewportHandle>(null);
   const strategyRef = useRef(createWebStreamStrategy({ isMobileBreakpoint: true }));
@@ -72,7 +53,7 @@ function Harness({
           hasMountedHistory: tail.length > 0,
           hasLiveHead: head.length > 0,
         },
-        renderers: createRenderers(),
+        renderers: createRenderers(ROW_STYLE),
         listEmptyComponent: null,
         viewportRef,
         routeBottomAnchorRequest: null,
@@ -91,37 +72,6 @@ function Harness({
       })}
     </div>
   );
-}
-
-function nextFrame(): Promise<void> {
-  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
-}
-
-// The settle this waits for (the 'scroll' event's async dispatch, then reportReadingPosition's
-// layout read) has no fixed frame count -- a real browser's scroll event and the follow-output
-// settle timeout in strategy-web.tsx both land whenever the event loop gets to them, which
-// stretches out under machine load. Poll the actual state instead of guessing a frame count, so
-// the test passes as soon as the real condition lands rather than racing a fixed wait.
-async function waitForState(
-  apiRef: { current: HarnessApi | null },
-  expected: { prompt: StreamItem; barVisible: boolean },
-  maxFrames = 120,
-): Promise<StickyLastPromptState> {
-  const getState = () => {
-    if (!apiRef.current) {
-      throw new Error("Expected harness api");
-    }
-    return apiRef.current.getState();
-  };
-  let state = getState();
-  for (let frame = 0; frame < maxFrames; frame++) {
-    if (state.barVisible === expected.barVisible && state.prompt?.id === expected.prompt?.id) {
-      return state;
-    }
-    await nextFrame();
-    state = getState();
-  }
-  return state;
 }
 
 describe("sticky last prompt at the mobile breakpoint", () => {
@@ -161,7 +111,7 @@ describe("sticky last prompt at the mobile breakpoint", () => {
     // Harness is a plain, unmemoized test harness -- there's no memo boundary for this
     // object-identity prop to break.
     /* oxlint-disable react-perf/jsx-no-new-object-as-prop */
-    const apiRef: { current: HarnessApi | null } = { current: null };
+    const apiRef: { current: PromptStateHarnessApi | null } = { current: null };
 
     act(() => {
       root?.render(<Harness tail={tail} head={head} apiRef={apiRef} />);
@@ -197,7 +147,7 @@ describe("sticky last prompt at the mobile breakpoint", () => {
       assistantMessage("tail-assistant-4", 5),
     ];
     /* oxlint-disable react-perf/jsx-no-new-object-as-prop */
-    const apiRef: { current: HarnessApi | null } = { current: null };
+    const apiRef: { current: PromptStateHarnessApi | null } = { current: null };
 
     act(() => {
       root?.render(<Harness tail={tail} head={[]} apiRef={apiRef} />);
