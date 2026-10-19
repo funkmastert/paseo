@@ -3,6 +3,8 @@ import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import { buildFinishReportNotificationPayload } from "@getpaseo/protocol/finish-report-notification";
 import type { AgentManager, AgentManagerEvent, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent-storage.js";
+import type { JevService } from "../jev/contract.js";
+import { FINISH_REVIEW_DEFAULT_MIN_CONFIDENCE, reviewFinishReport } from "../jev/finish-review.js";
 import type { PushNotificationSender } from "../push/index.js";
 import { HANDOFF_FROM_LABEL, isAccountDeadError } from "./account-failover-detector.js";
 import { findExistingSuccessor } from "./account-failover-migration.js";
@@ -14,6 +16,7 @@ import {
   setupFinishNotification,
 } from "./agent-prompt.js";
 import { pacedResume, type PaceResume } from "./resume-pacer.js";
+import { readFirstUserMessage } from "./stall-judgment.js";
 import {
   armObligation,
   canPassToSuccessor,
@@ -70,7 +73,14 @@ export interface FinishObligationServiceOptions {
   sweepIntervalMs?: number;
   ladder?: Partial<FinishReportLadderConfig>;
   now?: () => number;
+  /** Feature 18, finish review (docs/jev.md). Unset: the feature never runs. */
+  jev?: JevService;
+  /** Feature 18's confidence floor for flagging a finish as missing something. */
+  readFinishReviewMinConfidence?: () => number;
 }
+
+/** Feature 18 verdicts kept for retried deliveries; Map order makes the first key the oldest. */
+const FINISH_REVIEW_NOTES_MAX = 500;
 
 interface ChildPresence extends AgentPresence {
   parentAgentId: string | null;
@@ -108,6 +118,12 @@ export class FinishObligationService {
   /** Children whose obligations could not be written yet (no record) or failed to write. */
   private readonly dirty = new Set<string>();
   private readonly successorChecked = new Set<string>();
+  /**
+   * Feature 18's verdict for one obligation, by `child|generation`, so a retried delivery (the
+   * owner rung retries up to `maxOwnerAttempts`, then the orchestrator rung) reuses the first
+   * judgment instead of asking JEV again for the same report.
+   */
+  private readonly finishReviewNotes = new Map<string, string | null>();
   private readonly pendingWrites = new Set<Promise<void>>();
   private pushNotificationSender: PushNotificationSender | null = null;
   private unsubscribe: (() => void) | null = null;
@@ -682,17 +698,62 @@ export class FinishObligationService {
           "another agent for the same task.",
       );
     }
+    const lastAssistantMessage =
+      (await this.options.agentManager.getLastAssistantMessage(childAgentId)) ??
+      obligation.outcome?.message ??
+      null;
+    if (reason === "finished" && this.options.jev) {
+      const note = await this.reviewFinishOnce(childAgentId, obligation, {
+        jev: this.options.jev,
+        ownerAgentId: obligation.ownerAgentId,
+        title: record?.title ?? null,
+        finalMessage: lastAssistantMessage,
+      });
+      if (note) notes.push(note);
+    }
     return formatFinishNotificationBody({
       childAgentId,
       title: record?.title ?? childAgentId,
       reason,
-      lastAssistantMessage:
-        (await this.options.agentManager.getLastAssistantMessage(childAgentId)) ??
-        obligation.outcome?.message ??
-        null,
+      lastAssistantMessage,
       inheritedFrom: obligation.inheritedFrom,
       notes,
     });
+  }
+
+  /**
+   * Feature 18, asked at most once per obligation generation: `buildReport` runs again on every
+   * retried delivery attempt (the owner rung, then the orchestrator rung), and without this the
+   * same finish would be judged — and recorded — by JEV once per attempt.
+   */
+  private async reviewFinishOnce(
+    childAgentId: string,
+    obligation: FinishObligation,
+    input: {
+      jev: JevService;
+      ownerAgentId: string;
+      title: string | null;
+      finalMessage: string | null;
+    },
+  ): Promise<string | null> {
+    const cacheKey = `${childAgentId}|${obligation.generation}`;
+    const cached = this.finishReviewNotes.get(cacheKey);
+    if (cached !== undefined) return cached;
+    const note = await reviewFinishReport({
+      ...input,
+      childAgentId,
+      task: readFirstUserMessage(this.options.agentManager, childAgentId),
+      minConfidence:
+        this.options.readFinishReviewMinConfidence?.() ?? FINISH_REVIEW_DEFAULT_MIN_CONFIDENCE,
+    });
+    this.finishReviewNotes.set(cacheKey, note);
+    // Retries for one finish land within the ladder's window, so the oldest entries are long
+    // settled: a cap keeps a daemon that runs for weeks from holding one entry per child ever.
+    if (this.finishReviewNotes.size > FINISH_REVIEW_NOTES_MAX) {
+      const oldest = this.finishReviewNotes.keys().next().value;
+      if (oldest !== undefined) this.finishReviewNotes.delete(oldest);
+    }
+    return note;
   }
 
   private async wrapForOrchestrator(obligation: FinishObligation, report: string): Promise<string> {

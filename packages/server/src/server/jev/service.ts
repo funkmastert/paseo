@@ -63,13 +63,23 @@ export const JEV_FEATURE_LANES: Record<JevFeatureId, JevLane> = {
   stallJudgment: "control",
   awayReply: "control",
   titleRefresh: "control",
+  finishReview: "control",
   agentTools: "agentTools",
   askJev: "interactive",
   readCheck: "reads",
 };
 
-/** Features whose answers always go to the caller: an agent or a person asked, so it gets one. */
-const JEV_FEATURES_WITHOUT_SHADOW = new Set<JevFeatureId>(["agentTools", "askJev", "titleRefresh"]);
+/**
+ * Features whose answers always go to the caller: an agent or a person asked, so it gets one.
+ * `finishReview` is live from the start by design (docs/jev.md, feature 18), not because someone
+ * is waiting on the answer.
+ */
+const JEV_FEATURES_WITHOUT_SHADOW = new Set<JevFeatureId>([
+  "agentTools",
+  "askJev",
+  "titleRefresh",
+  "finishReview",
+]);
 
 const JEV_FEATURES = Object.keys(JEV_FEATURE_LANES) as JevFeatureId[];
 

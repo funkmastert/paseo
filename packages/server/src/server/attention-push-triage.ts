@@ -2,7 +2,7 @@ import type { NotifyAvailabilityMode } from "@getpaseo/protocol/notify-policy/ty
 import type { Logger } from "pino";
 
 import type { AgentManager, AgentOperatorSignal } from "./agent/agent-manager.js";
-import { confidentChoice } from "./jev/answers.js";
+import { confidentChoice, rawChoice } from "./jev/answers.js";
 import type {
   JevDecisionNote,
   JevOutcome,
@@ -10,6 +10,7 @@ import type {
   JevSavingsSink,
   JevService,
 } from "./jev/contract.js";
+import { decideWithHardTimeout } from "./jev/decide-with-hard-timeout.js";
 import type { JsonlAppender } from "./jsonl-appender.js";
 import { recordFinishSavings, validateFinishFollowup } from "./jev/savings-hooks.js";
 import { levelAtLeast, type NotifyLevel } from "./notify-policy/levels.js";
@@ -227,16 +228,6 @@ export function finishedPushLevel(
 function wouldBeLevel(base: NotifyLevel, outcome: JevOutcome, postFloor: NotifyLevel): NotifyLevel {
   if (outcome.kind !== "shadow") return finishedPushLevel(base, outcome, postFloor);
   return finishedPushLevel(base, { ...outcome, kind: "answered" }, postFloor);
-}
-
-function readChoice(outcome: JevOutcome): { choice: string | null; confidence: number | null } {
-  if (outcome.kind !== "answered" && outcome.kind !== "shadow") {
-    return { choice: null, confidence: null };
-  }
-  const answer = outcome.answers.needs_person;
-  return answer?.type === "choice"
-    ? { choice: answer.choice, confidence: answer.confidence }
-    : { choice: null, confidence: null };
 }
 
 /** One JSON line per root finish JEV could have judged, and one follow-up per triaged finish. */
@@ -490,25 +481,15 @@ async function triageFinish(input: {
   finalMessage: string;
   hardTimeoutMs: number;
 }): Promise<JevOutcome | "error"> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  try {
-    const decide = input.jev.decide({
-      feature: "notificationTriage",
-      callSite: FINISH_TRIAGE_CALL_SITE,
-      state: buildFinishTriageState({ title: input.title, finalMessage: input.finalMessage }),
-      questions: FINISH_TRIAGE_QUESTIONS,
-      scope: { cwds: [], agentIds: [input.agentId] },
-      subject: { agentId: input.agentId },
-    });
-    const timeout = new Promise<"error">((resolve) => {
-      timer = setTimeout(() => resolve("error"), input.hardTimeoutMs);
-    });
-    return await Promise.race([decide, timeout]);
-  } catch {
-    return "error";
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  return decideWithHardTimeout(input.jev, {
+    feature: "notificationTriage",
+    callSite: FINISH_TRIAGE_CALL_SITE,
+    state: buildFinishTriageState({ title: input.title, finalMessage: input.finalMessage }),
+    questions: FINISH_TRIAGE_QUESTIONS,
+    scope: { cwds: [], agentIds: [input.agentId] },
+    subject: { agentId: input.agentId },
+    hardTimeoutMs: input.hardTimeoutMs,
+  });
 }
 
 function recordTriaged(
@@ -536,7 +517,7 @@ function recordTriagedUnguarded(
 ): void {
   const { outcome } = result;
   const { choice, confidence } =
-    outcome === "error" ? { choice: null, confidence: null } : readChoice(outcome);
+    outcome === "error" ? { choice: null, confidence: null } : rawChoice(outcome, "needs_person");
   const wouldBe =
     outcome === "error" ? result.base : wouldBeLevel(result.base, outcome, result.postFloor);
   const callId = outcome === "error" ? null : outcome.callId;

@@ -875,6 +875,7 @@ describe("JevService: ledger, audit, status", () => {
       "askJev",
       "awayReply",
       "compactionTiming",
+      "finishReview",
       "notificationTriage",
       "readCheck",
       "remediationTriage",

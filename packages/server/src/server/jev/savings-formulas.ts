@@ -72,6 +72,9 @@ export const JEV_SAVINGS_BENEFIT: Readonly<Record<JevSavingsFeature, JevBenefitK
   // calls avoided) is written. See docs/jev.md, feature 17.
   titleRefresh: "none",
   readCheck: "tokens",
+  // Feature 18. No counterfactual to price: it is live from the start, with nothing to compare
+  // against. The dashboard counts involvements; it claims no tokens or time.
+  finishReview: "none",
 };
 
 export type JevSavingsFacts = Record<string, string | number | boolean | null>;
@@ -196,6 +199,11 @@ export function priceSavings(input: JevSavingsPriceInput): JevSavingsPrice {
       return noTokensPrice("none", "none: a person's own question, counted as an involvement");
     case "titleRefresh":
       return noTokensPrice("none", "none yet: counted as an involvement until its formula lands");
+    case "finishReview":
+      return noTokensPrice(
+        "none",
+        "none: no tokens or time claimed; the dashboard counts involvements and how many flagged something missing",
+      );
   }
 }
 
@@ -740,9 +748,48 @@ function declaredAuditNote(auditN: number, auditSum: number): string {
     : `; declared-label audit: ${auditN} settled, would-have sum ${Math.round(auditSum)}`;
 }
 
+/** Features with counted evidence: the switch below has a case for each. */
+const COUNTED_FEATURES = [
+  "spawnHint",
+  "remediationTriage",
+  "notificationTriage",
+  "agentTools",
+  "stallJudgment",
+  "awayReply",
+  "readCheck",
+] as const;
+
+type CountedFeature = (typeof COUNTED_FEATURES)[number];
+
+const COUNTED_FEATURE_SET: ReadonlySet<string> = new Set(COUNTED_FEATURES);
+
+/**
+ * Every other feature: no shadow -> live gate to evaluate, because it claims no savings, or none
+ * yet. A feature missing from both this and `COUNTED_FEATURES` is a type error, so a new one
+ * cannot be forgotten here.
+ */
+const NO_EVIDENCE_RULE: Record<Exclude<JevSavingsFeature, CountedFeature>, string> = {
+  compactionTiming: "none: chooses when to compact, claims no savings",
+  askJev: "none: a person's own questions, claims no savings",
+  titleRefresh: "none yet: claims no savings until its formula lands",
+  finishReview: "none: live from the start, no shadow -> live gate",
+};
+
 /** Each feature's rule against its summed counters. `jevUsd` is the feature's JEV spend in range. */
 export function evaluateEvidence(
   feature: JevSavingsFeature,
+  counters: Readonly<Record<string, number>>,
+  jevUsd: number,
+): JevEvidence {
+  if (COUNTED_FEATURE_SET.has(feature)) {
+    return evaluateCountedEvidence(feature as CountedFeature, counters, jevUsd);
+  }
+  const rule = NO_EVIDENCE_RULE[feature as Exclude<JevSavingsFeature, CountedFeature>];
+  return { rule, observed: "-", met: null };
+}
+
+function evaluateCountedEvidence(
+  feature: CountedFeature,
   counters: Readonly<Record<string, number>>,
   jevUsd: number,
 ): JevEvidence {
@@ -829,23 +876,5 @@ export function evaluateEvidence(
         met: n < 200 ? null : falseSkips <= 0.3 * n && net > 0,
       };
     }
-    case "compactionTiming":
-      return {
-        rule: "none: chooses when to compact, claims no savings",
-        observed: "-",
-        met: null,
-      };
-    case "askJev":
-      return {
-        rule: "none: a person's own questions, claims no savings",
-        observed: "-",
-        met: null,
-      };
-    case "titleRefresh":
-      return {
-        rule: "none yet: claims no savings until its formula lands",
-        observed: "-",
-        met: null,
-      };
   }
 }

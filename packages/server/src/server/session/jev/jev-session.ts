@@ -67,6 +67,7 @@ const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
     askJev: { enabled: false, shadow: false },
     readCheck: { enabled: false, shadow: true },
     titleRefresh: { enabled: false, shadow: false },
+    finishReview: { enabled: false, shadow: false },
   },
   lanes: {
     control: {
@@ -215,6 +216,15 @@ const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
       usdSource: "none",
     },
     titleRefresh: {
+      calls: 0,
+      answered: 0,
+      failed: 0,
+      unavailable: 0,
+      inputTokens: 0,
+      usd: 0,
+      usdSource: "none",
+    },
+    finishReview: {
       calls: 0,
       answered: 0,
       failed: 0,

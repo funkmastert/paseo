@@ -56,6 +56,7 @@ Nothing is sent for a subject inside the [D7 exclusion](#the-d7-exclusion). Ever
 | 15 Ask JEV            | What a person pastes as context (60 KB cap), their question and the options or levels they typed. With an agent attached: its title and the last 8,000 characters of its recent activity, which carries tool calls with full Bash command lines, their output, and assistant text                                                                                                                                                                                                   |
 | 16 Read check         | For each judged file read: the agent's title; the first 800 characters of its assignment; its last 8 timeline rows, clipped, which carry Bash command lines and assistant text; the file's path relative to the agent's cwd, its size, up to 2,000 characters of its declaration lines and the first 6,000 characters of the range being read                                                                                                                                       |
 | 17 Title refresh      | The workspace's current title and branch; for up to 4 recent sessions, their status, latest activity summary, first request and last 3 requests (each cut to 1,200 characters); the newest session's last reply (cut to 1,200 characters), which can quote code and command output                                                                                                                                                                                                  |
+| 18 Finish review      | The child's title; the first 800 characters of its task; the last 4,000 characters of its final message, which can quote code, diffs and pull request bodies                                                                                                                                                                                                                                                                                                                        |
 
 Before the first live call, confirm that prompt logging is off on the OpenRouter account and check whether the decisions endpoint accepts a per-request data-collection or zero-retention field; if it does, the transport sends it. Once TypeSafe grants direct access, prefer `provider: "typesafe"`: one party fewer.
 
@@ -1913,6 +1914,70 @@ No key, the switch off, an outage, a low-confidence answer or D7 all land on the
 - `workspace-title-refresh-jev.test.ts`: each action, low confidence, D7 sending nothing, the state leaving out agent titles, and the decision-store record. The savings involvement on an answered fits/stale look, and nothing written for a look JEV never gated (the cadence, the ceiling, or an outage).
 - `workspace-title-tracker.test.ts`: hours of "fits" renaming at both ceilings, JEV down renaming on the cadence, no look without a new turn, near-equal names, the rename race, a cleared title, and an agent-supplied (`auto`) title.
 - `workspace-title-source-migration.test.ts`: each reclassification rule, the run-once marker, and a `workspaces.json` written after the migration parsing with the previous build's `auto | manual` schema.
+
+## Feature 18: finish review
+
+Live from the start: Tyler asked for it live, so there is no shadow mode and no shadow -> live gate. When a child's finish report is about to be delivered to its parent ([finish-reports.md](finish-reports.md)), JEV reads the task the child was given and its final message, and judges whether the work looks done. The verdict is recorded in the decision store for both the child and the owner, so it shows as a marker on both ends. When JEV is confident something looks missing, the report gains one short line saying so — never a block, a delay, or a dropped report.
+
+### Seam
+
+`FinishObligationService.buildReport` (`agent/finish-obligation-service.ts`), only when the outcome's reason is `"finished"` — an error, a cancellation, a close, or a restart-sweep report ("stopped before reporting") already carries its own explanatory note and is not reviewed. `reviewFinishReport` (`jev/finish-review.ts`) never throws and is bounded by a hard timeout past `jev.decide`'s own deadline, so a hang can never hold up delivery. The task comes from the child's live timeline (`firstUserMessage`, `stall-judgment.ts`) when the child is still loaded; when it is not — the restart-sweep path — the task is null and JEV still judges from the final message alone.
+
+### State and question
+
+```json
+{
+  "title": "<child title>",
+  "task": "<first 800 characters>",
+  "final_message": "<last 4000 characters>"
+}
+```
+
+```json
+{
+  "finish_quality": {
+    "type": "choice",
+    "instructions": "`task` is what the agent was asked to do; `final_message` is its own account of finishing. Judge whether the work looks done.",
+    "criteria": {
+      "done": "nothing obviously missing",
+      "missing_verification": "doesn't say whether the change was run, tested or checked to work",
+      "missing_scope": "covers only part of the task, or leaves a stated step undone",
+      "missing_tests": "a code change with no mention of tests for it",
+      "unclear": "not enough information to judge",
+      "other": "none of these"
+    }
+  }
+}
+```
+
+### Thresholds
+
+`missing_verification`, `missing_scope` and `missing_tests` at or over `finishReview.minConfidence` (default 0.75) add one line naming what looks missing. `done`, `unclear` and `other` add nothing: `unclear` is not a confident claim of missing work, and `other` is too vague to act on.
+
+### Fail open
+
+No key, the switch off, a timeout, the hard bound, a throw, or an answer that is not `answered` all add nothing: the report goes out exactly as `FinishObligationService` would have built it without this feature.
+
+### Config
+
+`agents.jev.finishReview` (`jev/config.ts`). No shadow mode, like `agentTools`, `askJev` and `titleRefresh`; the key is accepted and ignored.
+
+| Key             | Default | What it does                                       |
+| --------------- | ------- | -------------------------------------------------- |
+| `enabled`       | `true`  | The JEV call. Off: the report never gains a line   |
+| `timeoutMs`     | `3000`  | Clamps `jev.decide`'s own deadline                 |
+| `minConfidence` | `0.75`  | A missing-something choice below this adds no line |
+
+### Cost, cache, latency
+
+- Under 1,500 input tokens per finish. No cache effect. It sits on the delivery path, bounded by `timeoutMs` (3 seconds) and a hard timeout (5 seconds) that bounds `jev.decide` from outside in case it ever hangs past its own deadline. The sweep delivers obligations in turn, so during a JEV outage each first delivery of a finish in one sweep can wait up to that bound. A retried delivery reuses the first verdict (`finishReviewNotes`, capped at 500 entries) and asks nothing.
+- **Pays if** a flagged finish catches something a reviewer would otherwise have missed. No tokens or time are claimed: the savings ledger counts involvements and how many flagged something missing (`benefit: "none"`), honestly, since there is no counterfactual to price against.
+
+### Tests and verification
+
+- `finish-review.test.ts`: `buildFinishReviewState`'s clipping; no call with an empty final message; the feature-disabled path; the scope, call site and subject on the decide call; a confident `done` recording with no note; a confident missing choice adding its note and recording `applied: true` for both the child and the owner, with a savings record; a missing choice below the floor adding nothing; `unclear` and `other` never flagging; a timeout, a throw and a hang all failing open without recording.
+- `agent/agent-prompt.test.ts` ("feature 18"): through the real `FinishObligationService`, a confident missing verdict adds its line to the owner's report and a `done` verdict adds nothing; a retried delivery of one finish reuses the verdict and a re-armed obligation asks again.
+- Verify: `npx vitest run packages/server/src/server/jev/finish-review.test.ts --bail=1`.
 
 ## Testing
 

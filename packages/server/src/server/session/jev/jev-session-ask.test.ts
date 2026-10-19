@@ -33,6 +33,15 @@ function tempDir(prefix: string): string {
   return dir;
 }
 
+/**
+ * Company exclusions, configured: the defaults are empty since 2026-10-02 (docs/jev.md, D7), so a
+ * test of the refusal has to name the roots and markers itself.
+ */
+const D7_CONFIG = {
+  excludeCwds: ["~/mobile-worktrees", "~/backend-net"],
+  excludeTextMarkers: ["wonderlydotcom"],
+};
+
 function harness(
   options: TestJevServiceOptions & {
     readAgentThread?: (agentId: string) => JevAskAgentThread | null;
@@ -129,7 +138,7 @@ describe("jev.ask through the fake transport", () => {
   });
 
   it("refuses company text under D7 and sends nothing", async () => {
-    const { ask, transport, home } = harness();
+    const { ask, transport, home } = harness({ config: D7_CONFIG });
 
     const payload = await ask({
       context: "git clone git@github.com:wonderlydotcom/mobile.git",
@@ -147,7 +156,7 @@ describe("jev.ask through the fake transport", () => {
   });
 
   it("refuses a question whose context names a Wonderly path, with no marker text, and sends nothing", async () => {
-    const { ask, transport, home } = harness();
+    const { ask, transport, home } = harness({ config: D7_CONFIG });
     const contexts = [
       `cat ${path.join(home, "mobile-worktrees", "app", "build.gradle")}`,
       "~/backend-net/src/Deals/DealService.cs throws on an empty page",
@@ -164,6 +173,7 @@ describe("jev.ask through the fake transport", () => {
 
   it("refuses an attached agent whose cwd is under a D7 root and sends nothing", async () => {
     const { ask, transport, home } = harness({
+      config: D7_CONFIG,
       service: {
         resolveAgentCwds: async () => [path.join(home, "mobile-worktrees", "app")],
       },

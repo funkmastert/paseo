@@ -317,7 +317,7 @@ import {
   nudgeStalledAgent,
   resumeIdleAgentWaitingOnBackground,
 } from "./agent-stall-sweep.js";
-import { createJevStallJudge, firstUserMessage } from "./agent/stall-judgment.js";
+import { createJevStallJudge, readFirstUserMessage } from "./agent/stall-judgment.js";
 import { StallJudgmentLog } from "./agent/stall-judgment-log.js";
 import { jevConfigSection, resolveJevConfig } from "./jev/config.js";
 import type { ProcessSampler } from "./agent/process-sampler.js";
@@ -1362,15 +1362,7 @@ function createAgentStallSweep(input: {
           return null;
         }
       },
-      readAssignment: (agentId) => {
-        try {
-          return firstUserMessage(
-            agentManager.fetchTimeline(agentId, { direction: "after", limit: 50 }).rows,
-          );
-        } catch {
-          return null;
-        }
-      },
+      readAssignment: (agentId) => readFirstUserMessage(agentManager, agentId),
       judgeStall: createJevStallJudge({
         jev: input.jev,
         readLoopWatch: () =>
@@ -1408,7 +1400,7 @@ function createAgentStallSweep(input: {
 }
 
 function createFinishObligationService(input: {
-  config: Pick<PaseoDaemonConfig, "finishReportOverrides">;
+  config: Pick<PaseoDaemonConfig, "finishReportOverrides" | "paseoHome">;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   daemonConfigStore: Pick<DaemonConfigStore, "get">;
@@ -1417,6 +1409,8 @@ function createFinishObligationService(input: {
   logger: Logger;
   paceResume: PaceResume;
   isTurnHeld: (agentId: string) => boolean;
+  /** Feature 18, finish review (docs/jev.md). */
+  jev: JevService;
 }): FinishObligationService {
   const overrides = input.config.finishReportOverrides;
   return new FinishObligationService({
@@ -1434,6 +1428,11 @@ function createFinishObligationService(input: {
     sweepIntervalMs: overrides?.sweepIntervalMs,
     ladder: overrides?.ladder,
     now: overrides?.now,
+    jev: input.jev,
+    readFinishReviewMinConfidence: () =>
+      resolveJevConfig(jevConfigSection(readRawConfig(input.config.paseoHome).rawConfig), {
+        homeDir: homedir(),
+      }).finishReview.minConfidence,
   });
 }
 
@@ -2574,6 +2573,7 @@ export async function createPaseoDaemon(
     logger,
     paceResume: (resume, fn) => resumePacer.run(resume, fn),
     isTurnHeld: (agentId) => childAdmission.holdsTurnFor(agentId),
+    jev,
   });
   await finishObligations.initialize();
   agentManager.setFinishObligations(finishObligations);
