@@ -1,7 +1,16 @@
-import { describe, expect, test } from "vitest";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
+import pino from "pino";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+import { writeFileAtomic } from "../atomic-file.js";
 import type { JevDecisionNote } from "./contract.js";
-import { JevDecisionStore } from "./decisions.js";
+import { JevDecisionStore, type JevDecisionStoreOptions } from "./decisions.js";
+
+const logger = pino({ level: "silent" });
 
 function note(overrides: Partial<JevDecisionNote> = {}): JevDecisionNote {
   return {
@@ -190,5 +199,241 @@ describe("savings fields", () => {
       mode: "shadow",
       wouldBe: "mechanical on claude-haiku-4-5",
     });
+  });
+});
+
+describe("persistence", () => {
+  let dir: string;
+  let filePath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(os.tmpdir(), "jev-decisions-"));
+    filePath = path.join(dir, "jev", "decisions.json");
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function persisted(options: JevDecisionStoreOptions = {}): JevDecisionStore {
+    return new JevDecisionStore({ filePath, logger, flushIntervalMs: 60_000, ...options });
+  }
+
+  /** A store that has read the file, as `JevService.start()` leaves it. */
+  async function opened(options: JevDecisionStoreOptions = {}): Promise<JevDecisionStore> {
+    const store = persisted(options);
+    await store.load();
+    return store;
+  }
+
+  test("a new store on the same file lists what the old one recorded", async () => {
+    let now = 1000;
+    const before = await opened({ now: () => now, costFor: () => 0.0042 });
+    before.record(note({ callId: "call-1", verdict: "first", mode: "shadow", wouldBe: "notice" }));
+    now += 1000;
+    before.record(note({ callId: "call-2", verdict: "second", savingsId: "sv_2" }));
+    before.record(note({ agentId: "agent-2", callId: "call-3", verdict: "other" }));
+    await before.stop();
+
+    const after = await opened();
+    expect(after.list("agent-1", null)).toEqual(before.list("agent-1", null));
+    expect(after.list("agent-2", null)).toEqual(before.list("agent-2", null));
+    expect(after.list("agent-1", null)[1]).toMatchObject({
+      callId: "call-1",
+      at: new Date(1000).toISOString(),
+      costUsd: 0.0042,
+      mode: "shadow",
+      wouldBe: "notice",
+    });
+  });
+
+  test("writes on its own once the debounce passes, without a stop", async () => {
+    let writes = 0;
+    let wrote = () => {};
+    const written = new Promise<void>((resolve) => (wrote = resolve));
+    const writeFile = async (target: string, data: string) => {
+      writes += 1;
+      await writeFileAtomic(target, data);
+      wrote();
+    };
+    const store = await opened({ writeFile, flushIntervalMs: 10_000 });
+    vi.useFakeTimers();
+    try {
+      store.record(note({ callId: "call-1" }));
+      store.record(note({ callId: "call-2" }));
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(writes).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+    } finally {
+      vi.useRealTimers();
+    }
+    await written;
+    expect(writes).toBe(1);
+
+    const after = await opened();
+    expect(after.list("agent-1", null).map((r) => r.callId)).toEqual(["call-2", "call-1"]);
+  });
+
+  test("recomputes each summary on load: the file never carries one", async () => {
+    const before = await opened();
+    before.record(note({ callId: "call-1" }));
+    await before.stop();
+    const expected = before.list("agent-1", null)[0].summary;
+    expect(expected).toEqual(expect.any(String));
+    const file = JSON.parse(readFileSync(filePath, "utf8"));
+    expect(file.agents[0].decisions[0]).not.toHaveProperty("summary");
+    file.agents[0].decisions[0].summary = "stale wording from an older daemon";
+    writeFileSync(filePath, JSON.stringify(file));
+
+    const after = await opened();
+    expect(after.list("agent-1", null)[0].summary).toBe(expected);
+  });
+
+  test("does not persist pending spawn hints", async () => {
+    const before = await opened();
+    before.record(note({ agentId: null, callId: "spawn-call-1" }));
+    await before.stop();
+
+    const after = await opened();
+    expect(after.list("new-agent", { "paseo.jev-call": "spawn-call-1" })).toEqual([]);
+  });
+
+  test("applies the caps to what it loads, keeping the newest and the eviction order", async () => {
+    const before = await opened();
+    for (const agentId of ["a", "b", "c"]) {
+      for (let i = 0; i < 5; i += 1) before.record(note({ agentId, callId: `${agentId}-${i}` }));
+    }
+    // "a" becomes the most recently written agent.
+    before.record(note({ agentId: "a", callId: "a-5" }));
+    await before.stop();
+
+    const after = await opened({ maxPerAgent: 3, maxAgents: 2 });
+    expect(after.list("b", null)).toEqual([]);
+    expect(after.list("c", null).map((r) => r.callId)).toEqual(["c-4", "c-3", "c-2"]);
+    expect(after.list("a", null).map((r) => r.callId)).toEqual(["a-5", "a-4", "a-3"]);
+    // "c" is now the least recently written, so the next new agent evicts it.
+    after.record(note({ agentId: "d", callId: "d-0" }));
+    expect(after.list("c", null)).toEqual([]);
+    expect(after.list("a", null)).toHaveLength(3);
+  });
+
+  test("bounds the file by dropping the least recently written agents", async () => {
+    const store = await opened({ maxFileBytes: 2500 });
+    const long = "x".repeat(400);
+    for (const agentId of ["a", "b", "c", "d"]) {
+      for (let i = 0; i < 2; i += 1) {
+        store.record(note({ agentId, callId: `${agentId}-${i}`, question: long }));
+      }
+    }
+    await store.stop();
+
+    expect(readFileSync(filePath, "utf8").length).toBeLessThanOrEqual(2500);
+    // The store itself keeps every agent; only the file is bounded.
+    expect(store.list("a", null)).toHaveLength(2);
+    const after = await opened();
+    expect(after.list("d", null)).toHaveLength(2);
+    expect(after.list("a", null)).toEqual([]);
+  });
+
+  test("starts empty from a missing file, and from a corrupt one it then replaces", async () => {
+    const fromMissing = await opened();
+    expect(fromMissing.list("agent-1", null)).toEqual([]);
+    mkdirSync(path.dirname(filePath), { recursive: true });
+
+    for (const corrupt of ["{not json", JSON.stringify({ version: 2, agents: "nope" })]) {
+      writeFileSync(filePath, corrupt);
+      const store = await opened();
+      expect(store.list("agent-1", null)).toEqual([]);
+      store.record(note({ callId: "call-fresh" }));
+      await store.stop();
+      const after = await opened();
+      expect(after.list("agent-1", null).map((r) => r.callId)).toEqual(["call-fresh"]);
+    }
+  });
+
+  test("drops a malformed record or an unknown feature and keeps the rest", async () => {
+    const before = await opened();
+    before.record(note({ callId: "call-good" }));
+    await before.stop();
+    const file = JSON.parse(readFileSync(filePath, "utf8"));
+    const good = file.agents[0].decisions[0];
+    file.agents[0].decisions.push({ ...good, callId: "call-unknown", feature: "fromTheFuture" });
+    file.agents[0].decisions.push({ ...good, callId: "call-broken", applied: "yes" });
+    file.agents.push({ agentId: 7, decisions: [] });
+    writeFileSync(filePath, JSON.stringify(file));
+
+    const after = await opened();
+    expect(after.list("agent-1", null).map((r) => r.callId)).toEqual(["call-good"]);
+  });
+
+  test("never writes over the file before it has loaded it", async () => {
+    const before = await opened();
+    before.record(note({ callId: "call-1" }));
+    await before.stop();
+
+    const early = persisted();
+    early.record(note({ callId: "call-early" }));
+    await early.flush();
+    await early.stop();
+
+    const after = await opened();
+    expect(after.list("agent-1", null).map((r) => r.callId)).toEqual(["call-1"]);
+  });
+
+  test("keeps a decision recorded while it was loading, ahead of the loaded ones", async () => {
+    const before = await opened();
+    before.record(note({ callId: "call-old" }));
+    await before.stop();
+
+    const store = persisted();
+    const loading = store.load();
+    store.record(note({ callId: "call-new" }));
+    await loading;
+    expect(store.list("agent-1", null).map((r) => r.callId)).toEqual(["call-new", "call-old"]);
+  });
+
+  test("overlapping writes leave the newest state on disk and no temp files", async () => {
+    let writes = 0;
+    const writeFile = async (target: string, data: string) => {
+      // The first write is the slowest: unserialized, it would land last and win.
+      const delayMs = writes === 0 ? 40 : 0;
+      writes += 1;
+      await sleep(delayMs);
+      await writeFileAtomic(target, data);
+    };
+    const store = await opened({ writeFile });
+    const flushes: Promise<void>[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      store.record(note({ callId: `call-${i}` }));
+      flushes.push(store.flush());
+    }
+    await Promise.all(flushes);
+    await store.stop();
+
+    const after = await opened();
+    expect(after.list("agent-1", null).map((r) => r.callId)).toEqual([
+      "call-4",
+      "call-3",
+      "call-2",
+      "call-1",
+      "call-0",
+    ]);
+    expect(readdirSync(path.dirname(filePath))).toEqual(["decisions.json"]);
+  });
+
+  test("a failed write is retried by the next flush", async () => {
+    let fail = true;
+    const writeFile = async (target: string, data: string) => {
+      if (fail) throw new Error("disk full");
+      await writeFileAtomic(target, data);
+    };
+    const store = await opened({ writeFile });
+    store.record(note({ callId: "call-1" }));
+    await expect(store.flush()).resolves.toBeUndefined();
+    fail = false;
+    await store.stop();
+
+    const after = await opened();
+    expect(after.list("agent-1", null).map((r) => r.callId)).toEqual(["call-1"]);
   });
 });

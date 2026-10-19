@@ -4,6 +4,8 @@ import path from "node:path";
 import { setTimeout as sleepFor } from "node:timers/promises";
 import type { Logger } from "pino";
 
+import { JEV_STOP_TIMEOUT_MS } from "../daemon-vitals/shutdown-budget.js";
+import { withTimeout } from "../../utils/promise-timeout.js";
 import { buildJevAuditLine, JevAudit } from "./audit.js";
 import { createJevConfigReader, type JevConfigReader, type ResolvedJevConfig } from "./config.js";
 import type {
@@ -27,6 +29,7 @@ import type {
   JevWireRequest,
   JevWireResponse,
 } from "./contract.js";
+import { JEV_FEATURE_LANES } from "./contract.js";
 import { JevDecisionStore } from "./decisions.js";
 import { JevEgressScopeChecker, type JevExclusionConfig } from "./egress-scope.js";
 import { createJevKeyResolver, JEV_KEY_ENV, type CapturedJevEnvKey } from "./key.js";
@@ -54,20 +57,6 @@ import {
  * `JevService`, the one place every JEV call goes through (docs/jev.md, "The request"). `decide`
  * runs its steps in order and never rejects; every stop answers today's behaviour.
  */
-
-export const JEV_FEATURE_LANES: Record<JevFeatureId, JevLane> = {
-  spawnHint: "control",
-  remediationTriage: "control",
-  notificationTriage: "control",
-  compactionTiming: "control",
-  stallJudgment: "control",
-  awayReply: "control",
-  titleRefresh: "control",
-  finishReview: "control",
-  agentTools: "agentTools",
-  askJev: "interactive",
-  readCheck: "reads",
-};
 
 /**
  * Features whose answers always go to the caller: an agent or a person asked, so it gets one.
@@ -161,7 +150,10 @@ export interface JevServiceRuntime extends JevService {
   readonly savings: JevSavingsLedger;
   /** Loads the ledger's totals and narrows the audit files. Call once before serving. */
   start(): Promise<void>;
-  /** Flushes the ledger and the audit queue. */
+  /**
+   * Flushes the ledger, savings, decisions and audit queue. Never rejects, and returns within
+   * `JEV_STOP_TIMEOUT_MS` even when a write hangs.
+   */
   stop(): Promise<void>;
   /** The push for a lane's first spent budget of the day (`jev_budget_exhausted`). */
   setBudgetNoticeSender(send: ((event: JevBudgetExhaustedEvent) => void) | null): void;
@@ -409,6 +401,8 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
   const decisions = new JevDecisionStore({
     now,
     costFor: (callId) => ledger.find(callId)?.cost.usd ?? null,
+    filePath: path.join(jevDir, "decisions.json"),
+    logger,
   });
   const readLabelsSafe = (agentId: string): Readonly<Record<string, string>> | null => {
     try {
@@ -1196,15 +1190,28 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     async start() {
       await ledger.load();
       await savings.load();
+      // Before bootstrap listens, so the first jev.decisions.list after a restart has the file.
+      await decisions.load();
       const snap = readSnapshot(false);
       await audit.init({ retainDays: snap.config?.audit.retainDays ?? 3 });
       if (fixedTransport?.provider === "fake") logger.info("jev: fake backend");
       else if (snap.config && !keyPresent(snap)) gateReason(snap, null);
     },
     async stop() {
-      await savings.stop();
-      await ledger.stop();
-      await audit.flush();
+      const flushed = (async () => {
+        await savings.stop();
+        await ledger.stop();
+        await decisions.stop();
+        await audit.flush();
+      })();
+      // Bounded, so a stuck disk can't hold the rest of the daemon's shutdown (shutdown-budget.ts).
+      await withTimeout(
+        flushed,
+        JEV_STOP_TIMEOUT_MS,
+        `jev: stop timed out after ${JEV_STOP_TIMEOUT_MS} ms`,
+      ).catch((error: unknown) => {
+        logger.warn({ err: error }, "jev: the ledger, decisions or audit may be missing from disk");
+      });
     },
     setBudgetNoticeSender(send) {
       sendBudgetNotice = send;

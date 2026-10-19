@@ -4155,7 +4155,8 @@ export async function createPaseoDaemon(
     await readCheckObserver.observer.stop();
     spawnHintSavings.stop();
     await savingsAdapters.stop();
-    // After every JEV caller has stopped: the ledger's day totals and the audit queue go to disk.
+    // After every JEV caller has stopped: the ledger's day totals, the decisions and the audit
+    // queue go to disk, bounded inside by JEV_STOP_TIMEOUT_MS (shutdown-budget.ts).
     await jev.stop().catch((error: unknown) => {
       logger.warn({ err: error }, "Failed to flush the JEV ledger");
     });

@@ -14,13 +14,9 @@ import type {
   JevTransportResponse,
   JevWireRequest,
 } from "./contract.js";
+import { JEV_FEATURE_LANES } from "./contract.js";
 import { createFakeJevTransport, type FakeJevTransport } from "./fake.js";
-import {
-  createJevService,
-  JEV_FEATURE_LANES,
-  type JevServiceOptions,
-  type JevServiceRuntime,
-} from "./service.js";
+import { createJevService, type JevServiceOptions, type JevServiceRuntime } from "./service.js";
 
 const FAKE_KEY = "fake-jev-key-for-tests-0123456789abcdef";
 const SENTINEL = "SENTINEL-STATE-TEXT-7f3a";
@@ -963,6 +959,28 @@ describe("JevService: ledger, audit, status", () => {
     expect(listed).toHaveLength(1);
     expect(listed[0]).toMatchObject({ callId: "call-1", applied: true });
     expect(service.listDecisions("someone-else")).toEqual([]);
+  });
+
+  it("lists an agent's decisions after a restart on the same home", async () => {
+    const before = makeHarness();
+    await before.service.start();
+    before.service.decisions.record({
+      agentId: "agent-1",
+      callId: "call-stall",
+      feature: "stallJudgment",
+      question: "Is the agent stuck?",
+      verdict: "waiting_on_human (0.8)",
+      confidence: 0.8,
+      action: "nudged with a person-first handoff",
+      applied: true,
+    });
+    const listed = before.service.listDecisions("agent-1");
+    await before.service.stop();
+
+    const after = makeHarness({ extra: { paseoHome: before.paseoHome } });
+    await after.service.start();
+    expect(after.service.listDecisions("agent-1")).toEqual(listed);
+    await after.service.stop();
   });
 
   it("attaches a summary to every decision, built per feature", async () => {

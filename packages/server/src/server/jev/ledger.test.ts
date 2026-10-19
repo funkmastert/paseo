@@ -4,7 +4,7 @@ import path from "node:path";
 import pino from "pino";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import type { JevCost, JevFeatureId, JevLane } from "./contract.js";
+import { JEV_FEATURE_LANES, type JevCost, type JevFeatureId, type JevLane } from "./contract.js";
 import { JevLedger, localDay, nextLocalMidnight, type JevLedgerEntry } from "./ledger.js";
 
 const logger = pino({ level: "silent" });
@@ -336,6 +336,32 @@ describe("JevLedger markExhausted", () => {
 
     expect(events).toEqual(["control"]);
     expect(second.isExhausted("control")).toBe(true);
+  });
+});
+
+describe("JevLedger restart", () => {
+  test("a reload keeps every feature's totals for the day, titleRefresh and finishReview too", async () => {
+    const now = new Date(2026, 8, 28, 12, 0, 0).getTime();
+    const filePath = path.join(tempDir(), "ledger.json");
+    const features = Object.keys(JEV_FEATURE_LANES) as JevFeatureId[];
+    expect(features).toEqual(expect.arrayContaining(["titleRefresh", "finishReview"]));
+
+    const first = new JevLedger({ filePath, logger, now: () => now });
+    for (const feature of features) {
+      first.record(makeEntry({ feature, lane: JEV_FEATURE_LANES[feature], cost: reported(0.01) }));
+    }
+    await first.stop();
+
+    const second = new JevLedger({ filePath, logger, now: () => now });
+    await second.load();
+    for (const feature of features) {
+      expect({ feature, totals: second.featureTotalsToday(feature) }).toEqual({
+        feature,
+        totals: first.featureTotalsToday(feature),
+      });
+    }
+    expect(second.featureTotalsToday("finishReview").calls).toBe(1);
+    expect(second.featureTotalsToday("titleRefresh").usd).toBeCloseTo(0.01, 6);
   });
 });
 

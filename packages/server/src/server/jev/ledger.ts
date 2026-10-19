@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { writeFileAtomic } from "../atomic-file.js";
 import type { JevCost, JevDaySpend, JevFeatureId, JevLane, JevSpendTotals } from "./contract.js";
+import { JEV_FEATURE_LANES } from "./contract.js";
 
 /**
  * Per-call entries and daily spend totals (docs/jev.md, "Ledger"). Only totals are persisted —
@@ -16,21 +17,11 @@ const DEFAULT_FLUSH_INTERVAL_MS = 30_000;
 const DEFAULT_RING_SIZE = 2000;
 const DEFAULT_RETAIN_DAYS = 30;
 
-const KNOWN_FEATURES = new Set<JevFeatureId>([
-  "spawnHint",
-  "remediationTriage",
-  "notificationTriage",
-  "agentTools",
-  "compactionTiming",
-  "stallJudgment",
-  "awayReply",
-  "askJev",
-  "readCheck",
-]);
 const KNOWN_LANES = new Set<JevLane>(["control", "agentTools", "interactive", "reads"]);
 
+/** Against `JEV_FEATURE_LANES`, which is exhaustive by type: a hand-kept list dropped features. */
 function isJevFeatureId(value: string): value is JevFeatureId {
-  return KNOWN_FEATURES.has(value as JevFeatureId);
+  return Object.hasOwn(JEV_FEATURE_LANES, value);
 }
 
 function isJevLane(value: string): value is JevLane {
