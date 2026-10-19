@@ -4,6 +4,7 @@ import type { Logger } from "pino";
 import { resolveAwayReplyConfig, type ResolvedAwayReplyConfig } from "../away-reply/config.js";
 import { AgentJevSchema } from "../persisted-config.js";
 import { readRawConfig } from "../session/doctor/facts.js";
+import { FINISH_REVIEW_DEFAULT_MIN_CONFIDENCE } from "./finish-review.js";
 import {
   resolveWorkspaceTitleRefreshConfig,
   type ResolvedWorkspaceTitleRefreshConfig,
@@ -68,6 +69,8 @@ export interface ResolvedJevConfig {
   awayReply: ResolvedAwayReplyConfig;
   /** Feature 17. No shadow mode: see `workspace-title-refresh-config.ts`. */
   titleRefresh: ResolvedWorkspaceTitleRefreshConfig;
+  /** Feature 18. No shadow mode: live from the start (Tyler asked for it live). */
+  finishReview: ResolvedJevFeatureConfig & { minConfidence: number };
   /** Feature 15, the `interactive` lane. No shadow mode: a person asked, so they get the answer. */
   askJev: {
     enabled: boolean;
@@ -280,6 +283,7 @@ export function resolveJevConfig(
   const stallJudgment = record(section["stallJudgment"]);
   const askJev = record(section["askJev"]);
   const readCheck = record(section["readCheck"]);
+  const finishReview = record(section["finishReview"]);
 
   return {
     enabled: bool(section["enabled"], true),
@@ -379,6 +383,17 @@ export function resolveJevConfig(
       ),
       maxConcurrent: Math.floor(positiveNumber(readCheck["maxConcurrent"], 2)),
       maxUsdPerDay: positiveNumber(readCheck["maxUsdPerDay"], 0.25),
+    },
+    finishReview: {
+      enabled: bool(finishReview["enabled"], true),
+      shadow: false,
+      timeoutMs: Math.floor(positiveNumber(finishReview["timeoutMs"], 3000)),
+      minConfidence: numberInRange(
+        finishReview["minConfidence"],
+        FINISH_REVIEW_DEFAULT_MIN_CONFIDENCE,
+        0,
+        1,
+      ),
     },
   };
 }

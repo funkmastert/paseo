@@ -1,4 +1,5 @@
 import type { JevDecisionNote, JevOutcome, JevQuestions, JevService } from "../jev/contract.js";
+import type { AgentManager } from "./agent-manager.js";
 import type { AgentTimelineItem, ToolCallDetail } from "./agent-sdk-types.js";
 import type { AgentTimelineRow } from "./agent-timeline-store-types.js";
 import { projectTimelineRows } from "./timeline-projection.js";
@@ -259,6 +260,24 @@ export function firstUserMessage(rows: readonly AgentTimelineRow[]): string | nu
     if (row.item.type === "user_message" && row.item.text.trim()) return row.item.text;
   }
   return null;
+}
+
+/**
+ * `firstUserMessage` off a live agent's own timeline, or null when the agent is not loaded or the
+ * read throws. Shared by the stall sweep's assignment read (feature 10) and the finish report's
+ * task read (feature 18): both only need the agent's first message when it happens to be loaded.
+ */
+export function readFirstUserMessage(
+  agentManager: Pick<AgentManager, "fetchTimeline">,
+  agentId: string,
+): string | null {
+  try {
+    return firstUserMessage(
+      agentManager.fetchTimeline(agentId, { direction: "after", limit: 50 }).rows,
+    );
+  } catch {
+    return null;
+  }
 }
 
 // ─── The loop prefilter ──────────────────────────────────────────────────────────────────────

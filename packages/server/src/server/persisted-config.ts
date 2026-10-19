@@ -907,6 +907,17 @@ export const AgentJevSchema = z
       })
       .strict()
       .optional(),
+    // Feature 18. No shadow mode, like agentTools and askJev; the key is accepted and ignored.
+    // Live from the start: Tyler asked for it live, so there is no shadow -> live gate.
+    finishReview: z
+      .object({
+        enabled: z.boolean().optional(),
+        shadow: z.boolean().optional(),
+        timeoutMs: z.number().optional(),
+        minConfidence: z.number().min(0).max(1).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

@@ -23,6 +23,24 @@ export function confidentChoice(
   return answer.choice;
 }
 
+/**
+ * The chosen option and its confidence, regardless of floor — unlike `confidentChoice`, which
+ * answers null below it. For a record's own display text, where the raw answer matters even when
+ * it is too low-confidence to act on.
+ */
+export function rawChoice(
+  outcome: JevOutcome,
+  questionId: string,
+): { choice: string | null; confidence: number | null } {
+  if (outcome.kind !== "answered" && outcome.kind !== "shadow") {
+    return { choice: null, confidence: null };
+  }
+  const answer = outcome.answers[questionId];
+  return answer?.type === "choice"
+    ? { choice: answer.choice, confidence: answer.confidence }
+    : { choice: null, confidence: null };
+}
+
 /** The yes-probability, when answered. The caller compares it with its own floor. */
 export function noulOf(outcome: JevOutcome, questionId: string): number | null {
   const answer = answeredAnswer(outcome, questionId);

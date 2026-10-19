@@ -8,6 +8,10 @@ CLI (`paseo run`, even from inside an agent) owes nobody a report, so a lead tha
 children that way is never woken when they finish. On 2026-10-01 three finished units sat unmerged
 overnight while their lead waited. Spawn children with `create_agent`.
 
+Before a report is delivered, JEV may judge whether the child's work looks done and add one line
+to it when confident something is missing, never blocking or delaying delivery. See
+[jev.md](jev.md#feature-18-finish-review).
+
 The report used to exist only as an in-memory subscription (`setupFinishNotification`), which a
 daemon restart dropped. Shutdown closes every agent and nothing restarts a child that was mid-turn,
 so the child sat closed, its parent was never told, and the [done janitor](done-janitor.md)

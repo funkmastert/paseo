@@ -93,7 +93,9 @@ export type JevFeatureId =
   /** Feature 16: whether an agent's large file read is needed, on the `reads` lane. */
   | "readCheck"
   /** Feature 17: whether a workspace's name still fits before spending a title regeneration. */
-  | "titleRefresh";
+  | "titleRefresh"
+  /** Feature 18: judges a child's finish report when it is delivered to its parent. */
+  | "finishReview";
 
 /**
  * Slots, spend caps and circuits are per lane, so agent tools and file reads can neither starve
