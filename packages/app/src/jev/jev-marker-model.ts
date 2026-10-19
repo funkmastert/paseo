@@ -24,6 +24,7 @@ export function buildJevMarkerLines(
     if (!at) continue;
     lines.push({
       key: record.callId,
+      featureId: record.feature,
       feature: jevFeatureLabel(record.feature),
       question: record.question,
       verdict: record.verdict,
@@ -32,6 +33,7 @@ export function buildJevMarkerLines(
       cost: formatJevCost(record.costUsd, provider),
       at,
       summary: record.summary ?? null,
+      detail: record.detail ?? null,
       subjectLabel: subjectLabelFor(record),
     });
   }

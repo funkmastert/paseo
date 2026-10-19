@@ -14,6 +14,8 @@ export type JevDecisionTag = "shadow" | "dryRun";
 
 export interface JevDecisionLine {
   key: string;
+  /** The raw feature id (`spawnHint`, `stallJudgment`, ...), for looking up its purpose line. */
+  featureId: string;
   feature: string;
   question: string;
   /** The typed answers as the daemon summarized them, confidence included. */
@@ -28,6 +30,11 @@ export interface JevDecisionLine {
    * falls back to the feature/verdict/action rendering it used before this field existed.
    */
   summary: string | null;
+  /**
+   * A second plain-words line (feature 11), naming vocabulary only the daemon has. Absent for
+   * most decisions: `summary` already said everything.
+   */
+  detail: string | null;
   /**
    * Set when this decision is about a child agent rather than the one the view was built for —
    * the child's title, or a generic fallback when it has none. Null when it is about the viewing
@@ -95,6 +102,7 @@ export function buildJevDecisionsView(
   const provider = status?.provider ?? null;
   const lines = decisions.slice(0, limit).map((record, index) => ({
     key: `${record.callId}:${index}`,
+    featureId: record.feature,
     feature: jevFeatureLabel(record.feature),
     question: record.question,
     verdict: record.verdict,
@@ -103,6 +111,7 @@ export function buildJevDecisionsView(
     cost: formatJevCost(record.costUsd, provider),
     at: parseJevDecisionAt(record.at),
     summary: record.summary ?? null,
+    detail: record.detail ?? null,
     subjectLabel: subjectLabelFor(record),
   }));
   return { lines, hidden: Math.max(0, decisions.length - lines.length) };

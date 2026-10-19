@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { JevDecisionRecord } from "./contract.js";
-import { summarizeJevDecision } from "./decision-summary.js";
+import { detailForJevDecision, summarizeJevDecision } from "./decision-summary.js";
 
 function record(overrides: Partial<JevDecisionRecord>): JevDecisionRecord {
   return {
@@ -45,7 +45,7 @@ describe("summarizeJevDecision", () => {
           mode: "shadow",
         }),
       ),
-    ).toBe("JEV suggested hard on Opus 5.5 (watching only)");
+    ).toBe("JEV suggested hard on Opus 5.5");
     expect(summarizeJevDecision(record({ feature: "spawnHint" }))).toBe(
       "JEV sized up this agent's work",
     );
@@ -61,7 +61,7 @@ describe("summarizeJevDecision", () => {
           applied: false,
         }),
       ),
-    ).toBe("JEV thinks it's still making progress (watching only)");
+    ).toBe("JEV thinks it's still making progress");
     expect(
       summarizeJevDecision(
         record({
@@ -105,7 +105,7 @@ describe("summarizeJevDecision", () => {
           mode: "shadow",
         }),
       ),
-    ).toBe("JEV on compaction timing: deferred the compaction (watching only)");
+    ).toBe("JEV on compaction timing: deferred the compaction");
   });
 
   test("awayReply: answered, dry run, or held off with the reason", () => {
@@ -114,21 +114,54 @@ describe("summarizeJevDecision", () => {
       "JEV answered this agent for you",
     );
     expect(away("would reply (a plain go-ahead); dry run, nothing sent")).toBe(
-      "JEV would have answered for you (dry run)",
+      "JEV would have answered for you",
     );
     expect(away("no reply sent: the question needs a person")).toBe(
       "JEV didn't answer for you: the question needs a person",
     );
   });
 
-  test("agentTools and askJev name the verdict", () => {
+  test("agentTools reads the risk score as a level, never the raw number", () => {
     expect(
       summarizeJevDecision(
         record({ feature: "agentTools", verdict: "risk 0.8", action: "full review added" }),
       ),
-    ).toBe("JEV helped the agent: risk 0.8; full review added");
+    ).toBe("JEV reviewed the change (high risk): full review added");
+    expect(
+      summarizeJevDecision(
+        record({
+          feature: "agentTools",
+          verdict: "risk 0.2",
+          action: "no review added; the process's own review still applies",
+        }),
+      ),
+    ).toBe(
+      "JEV reviewed the change (low risk): no review added; the process's own review still applies",
+    );
+    expect(
+      summarizeJevDecision(
+        record({ feature: "agentTools", verdict: "no score", action: "full review added" }),
+      ),
+    ).toBe("JEV reviewed the change: full review added");
+  });
+
+  test("askJev reads confidence as a word, never the raw score", () => {
     expect(summarizeJevDecision(record({ feature: "askJev", verdict: "yes 0.9" }))).toBe(
-      "JEV answered your question: yes 0.9",
+      "JEV answered your question: yes (sure)",
+    );
+    expect(summarizeJevDecision(record({ feature: "askJev", verdict: "maybe 0.7" }))).toBe(
+      "JEV answered your question: maybe (fairly sure)",
+    );
+    expect(summarizeJevDecision(record({ feature: "askJev", verdict: "no 0.4" }))).toBe(
+      "JEV answered your question: no (unsure)",
+    );
+    // A noul answer's verdict is a bare probability, with no label.
+    expect(summarizeJevDecision(record({ feature: "askJev", verdict: "0.95" }))).toBe(
+      "JEV answered your question (sure)",
+    );
+    // A score answer's verdict is a bare position on the caller's scale, not a probability.
+    expect(summarizeJevDecision(record({ feature: "askJev", verdict: "3" }))).toBe(
+      "JEV answered your question",
     );
   });
 
@@ -180,5 +213,68 @@ describe("summarizeJevDecision", () => {
     expect(summarizeJevDecision(record({ feature: "someFutureFeature", verdict: "maybe" }))).toBe(
       "JEV ran someFutureFeature: maybe",
     );
+  });
+
+  test("the generic line never shows a raw score or a second typed answer", () => {
+    expect(
+      summarizeJevDecision(
+        record({ feature: "someFutureFeature", verdict: "yes (0.95)", confidence: 0.95 }),
+      ),
+    ).toBe("JEV ran someFutureFeature: yes (sure)");
+    expect(
+      summarizeJevDecision(
+        record({
+          feature: "someFutureFeature",
+          verdict: "blocked_on_person 0.08, reply_kind confirm 0.86",
+          confidence: 0.7,
+        }),
+      ),
+    ).toBe("JEV ran someFutureFeature: blocked on person (fairly sure)");
+    expect(summarizeJevDecision(record({ feature: "someFutureFeature", verdict: "0.4" }))).toBe(
+      "JEV ran someFutureFeature",
+    );
+  });
+});
+
+describe("detailForJevDecision", () => {
+  test("finishReview names what the daemon did with a flagged report", () => {
+    expect(
+      detailForJevDecision(
+        record({
+          feature: "finishReview",
+          verdict: "missing_scope (0.81)",
+          action: "flagged in the report to agent-2",
+        }),
+      ),
+    ).toBe("JEV added a note to the report so you'd see this.");
+  });
+
+  test("finishReview names a low-confidence call that added no note", () => {
+    expect(
+      detailForJevDecision(
+        record({
+          feature: "finishReview",
+          verdict: "unsure (0.51)",
+          action: "not confident enough to judge; no note added",
+        }),
+      ),
+    ).toBe("JEV wasn't sure enough to add a note.");
+  });
+
+  test("finishReview has nothing more to say about a clean report", () => {
+    expect(
+      detailForJevDecision(
+        record({
+          feature: "finishReview",
+          verdict: "done (0.9)",
+          action: "looks done; no note added",
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  test("most features have no detail beyond the summary", () => {
+    expect(detailForJevDecision(record({ feature: "stallJudgment" }))).toBeNull();
+    expect(detailForJevDecision(record({ feature: "spawnHint" }))).toBeNull();
   });
 });

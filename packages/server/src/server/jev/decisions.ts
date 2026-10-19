@@ -17,7 +17,7 @@ import type {
   JevFeatureId,
 } from "./contract.js";
 import { JEV_FEATURE_LANES } from "./contract.js";
-import { summarizeJevDecision } from "./decision-summary.js";
+import { detailForJevDecision, summarizeJevDecision } from "./decision-summary.js";
 import { parseJevSpawnLabel } from "./savings-spawn.js";
 
 /**
@@ -36,10 +36,13 @@ const DEFAULT_MAX_FILE_BYTES = 4 * 1024 * 1024;
 
 const SPAWN_HINT_APPLIED_ACTION = "task class set by JEV at create";
 
-/** The record fields the file keeps: `summary` is recomputed and the subject fields are read-time. */
+/**
+ * The record fields the file keeps: `summary` and `detail` are recomputed, and the subject
+ * fields are read-time.
+ */
 type StoredRecordField = Exclude<
   keyof JevDecisionRecord,
-  "summary" | "subjectAgentId" | "subjectAgentTitle"
+  "summary" | "detail" | "subjectAgentId" | "subjectAgentTitle"
 >;
 
 // `satisfies` makes a field added to `JevDecisionRecord` a compile error here until the schema
@@ -75,9 +78,19 @@ const PERSISTED_AGENT_SCHEMA = z.object({ agentId: z.string(), decisions: z.arra
  */
 const PERSISTED_FILE_SCHEMA = z.object({ version: z.literal(1), agents: z.array(z.unknown()) });
 
-/** A `JSON.stringify` replacer: `summary` is recomputed at load, so the file never carries it. */
+/**
+ * A `JSON.stringify` replacer: `summary` and `detail` are recomputed at load, so the file never
+ * carries them.
+ */
 function withoutSummary(key: string, value: unknown): unknown {
-  return key === "summary" ? undefined : value;
+  return key === "summary" || key === "detail" ? undefined : value;
+}
+
+/** Computes both read-time fields a decision carries (docs/jev.md, "Feature 11"). */
+function attachSummaryFields(record: JevDecisionRecord): void {
+  record.summary = summarizeJevDecision(record);
+  const detail = detailForJevDecision(record);
+  if (detail) record.detail = detail;
 }
 
 export interface JevDecisionStoreOptions {
@@ -192,7 +205,7 @@ export class JevDecisionStore implements JevDecisionSink {
       // read on every poll of every open panel it's visible in. The pending spawn-hint note
       // (below) gets its own summary once its `applied`/`wouldBe` resolve at attach time, since
       // this one is incomplete until then.
-      record.summary = summarizeJevDecision(record);
+      attachSummaryFields(record);
       if (note.agentId === null) {
         this.recordPending(note.callId, record);
       } else {
@@ -222,7 +235,7 @@ export class JevDecisionStore implements JevDecisionSink {
       : { ...pendingRecord, ...wouldBe, agentId, applied };
     // Recomputed: the pending note's own summary (set in record(), above) was built before
     // `applied`/`wouldBe` resolved, so it no longer matches this record.
-    attached.summary = summarizeJevDecision(attached);
+    attachSummaryFields(attached);
     own.push(attached);
     return own;
   }
@@ -273,7 +286,7 @@ export class JevDecisionStore implements JevDecisionSink {
         const parsed = PERSISTED_RECORD_SCHEMA.safeParse(rawRecord);
         if (!parsed.success) continue;
         const record: JevDecisionRecord = parsed.data;
-        record.summary = summarizeJevDecision(record);
+        attachSummaryFields(record);
         list.push(record);
       }
       agents.push([agent.data.agentId, list]);
