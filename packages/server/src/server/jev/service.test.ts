@@ -14,13 +14,9 @@ import type {
   JevTransportResponse,
   JevWireRequest,
 } from "./contract.js";
+import { JEV_FEATURE_LANES } from "./contract.js";
 import { createFakeJevTransport, type FakeJevTransport } from "./fake.js";
-import {
-  createJevService,
-  JEV_FEATURE_LANES,
-  type JevServiceOptions,
-  type JevServiceRuntime,
-} from "./service.js";
+import { createJevService, type JevServiceOptions, type JevServiceRuntime } from "./service.js";
 
 const FAKE_KEY = "fake-jev-key-for-tests-0123456789abcdef";
 const SENTINEL = "SENTINEL-STATE-TEXT-7f3a";

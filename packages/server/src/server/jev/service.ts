@@ -27,6 +27,7 @@ import type {
   JevWireRequest,
   JevWireResponse,
 } from "./contract.js";
+import { JEV_FEATURE_LANES } from "./contract.js";
 import { JevDecisionStore } from "./decisions.js";
 import { JevEgressScopeChecker, type JevExclusionConfig } from "./egress-scope.js";
 import { createJevKeyResolver, JEV_KEY_ENV, type CapturedJevEnvKey } from "./key.js";
@@ -54,20 +55,6 @@ import {
  * `JevService`, the one place every JEV call goes through (docs/jev.md, "The request"). `decide`
  * runs its steps in order and never rejects; every stop answers today's behaviour.
  */
-
-export const JEV_FEATURE_LANES: Record<JevFeatureId, JevLane> = {
-  spawnHint: "control",
-  remediationTriage: "control",
-  notificationTriage: "control",
-  compactionTiming: "control",
-  stallJudgment: "control",
-  awayReply: "control",
-  titleRefresh: "control",
-  finishReview: "control",
-  agentTools: "agentTools",
-  askJev: "interactive",
-  readCheck: "reads",
-};
 
 /**
  * Features whose answers always go to the caller: an agent or a person asked, so it gets one.
@@ -1198,8 +1185,7 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     async start() {
       await ledger.load();
       await savings.load();
-      // Before the daemon listens (bootstrap awaits start()), so the first jev.decisions.list
-      // after a restart already lists what the last daemon recorded.
+      // Before bootstrap listens, so the first jev.decisions.list after a restart has the file.
       await decisions.load();
       const snap = readSnapshot(false);
       await audit.init({ retainDays: snap.config?.audit.retainDays ?? 3 });

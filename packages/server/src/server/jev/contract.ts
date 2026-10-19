@@ -105,6 +105,21 @@ export type JevFeatureId =
  */
 export type JevLane = "control" | "agentTools" | "interactive" | "reads";
 
+/** Every feature's lane. Exhaustive by type, so it is also the list of known features. */
+export const JEV_FEATURE_LANES: Record<JevFeatureId, JevLane> = {
+  spawnHint: "control",
+  remediationTriage: "control",
+  notificationTriage: "control",
+  compactionTiming: "control",
+  stallJudgment: "control",
+  awayReply: "control",
+  titleRefresh: "control",
+  finishReview: "control",
+  agentTools: "agentTools",
+  askJev: "interactive",
+  readCheck: "reads",
+};
+
 /**
  * What a call's state is about, for the D7 exclusion (docs/jev.md, "The D7 exclusion"). Required
  * on every call: the service resolves every path, the agents' cwds and their git signals, and

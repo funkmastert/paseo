@@ -16,6 +16,7 @@ import type {
   JevDecisionSink,
   JevFeatureId,
 } from "./contract.js";
+import { JEV_FEATURE_LANES } from "./contract.js";
 import { summarizeJevDecision } from "./decision-summary.js";
 import { parseJevSpawnLabel } from "./savings-spawn.js";
 
@@ -35,26 +36,19 @@ const DEFAULT_MAX_FILE_BYTES = 4 * 1024 * 1024;
 
 const SPAWN_HINT_APPLIED_ACTION = "task class set by JEV at create";
 
-/** Typed against `JevFeatureId`, so a feature added there cannot be dropped at load by omission. */
-const KNOWN_FEATURES: Record<JevFeatureId, true> = {
-  spawnHint: true,
-  remediationTriage: true,
-  notificationTriage: true,
-  agentTools: true,
-  compactionTiming: true,
-  stallJudgment: true,
-  awayReply: true,
-  askJev: true,
-  readCheck: true,
-  titleRefresh: true,
-  finishReview: true,
-};
+/** The record fields the file keeps: `summary` is recomputed and the subject fields are read-time. */
+type StoredRecordField = Exclude<
+  keyof JevDecisionRecord,
+  "summary" | "subjectAgentId" | "subjectAgentTitle"
+>;
 
+// `satisfies` makes a field added to `JevDecisionRecord` a compile error here until the schema
+// keeps it; otherwise `z.object` would strip it at load without a word.
 const PERSISTED_RECORD_SCHEMA = z.object({
   agentId: z.string(),
   callId: z.string(),
   feature: z.custom<JevFeatureId>(
-    (value) => typeof value === "string" && Object.hasOwn(KNOWN_FEATURES, value),
+    (value) => typeof value === "string" && Object.hasOwn(JEV_FEATURE_LANES, value),
   ),
   question: z.string(),
   verdict: z.string(),
@@ -66,7 +60,11 @@ const PERSISTED_RECORD_SCHEMA = z.object({
   savingsId: z.string().optional(),
   at: z.string(),
   costUsd: z.number().nullable(),
-});
+} satisfies Record<StoredRecordField, z.ZodType>);
+
+/** The shape `PERSISTED_FILE_SCHEMA` reads, written by hand so each agent is serialized once. */
+const FILE_HEAD = '{"version":1,"agents":[';
+const FILE_TAIL = "]}";
 
 const PERSISTED_AGENT_SCHEMA = z.object({ agentId: z.string(), decisions: z.array(z.unknown()) });
 
@@ -274,7 +272,6 @@ export class JevDecisionStore implements JevDecisionSink {
       for (const rawRecord of agent.data.decisions) {
         const parsed = PERSISTED_RECORD_SCHEMA.safeParse(rawRecord);
         if (!parsed.success) continue;
-        // `summary` is not stored: the wording follows this daemon's decision-summary.ts.
         const record: JevDecisionRecord = parsed.data;
         record.summary = summarizeJevDecision(record);
         list.push(record);
@@ -300,9 +297,8 @@ export class JevDecisionStore implements JevDecisionSink {
    * bounded by the file, never by the store. Each agent is serialized once.
    */
   private serialize(): string {
-    const envelope = '{"version":1,"agents":[]}';
     const parts: string[] = [];
-    let bytes = envelope.length;
+    let bytes = FILE_HEAD.length + FILE_TAIL.length;
     for (const [agentId, list] of [...this.byAgent].toReversed()) {
       const part = JSON.stringify({ agentId, decisions: list }, withoutSummary);
       const cost = Buffer.byteLength(part) + (parts.length > 0 ? 1 : 0);
@@ -310,11 +306,12 @@ export class JevDecisionStore implements JevDecisionSink {
       bytes += cost;
       parts.push(part);
     }
-    return `{"version":1,"agents":[${parts.toReversed().join(",")}]}`;
+    return `${FILE_HEAD}${parts.toReversed().join(",")}${FILE_TAIL}`;
   }
 
   private scheduleFlush(): void {
-    if (this.filePath === null || !this.loaded || this.flushTimer) return;
+    // `loaded` implies a `filePath`: load() returns early without one.
+    if (!this.loaded || this.flushTimer) return;
     const timer = setTimeout(() => {
       this.flushTimer = null;
       void this.flush();

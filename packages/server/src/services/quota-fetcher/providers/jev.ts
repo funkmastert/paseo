@@ -7,7 +7,7 @@ import type {
   JevSpendTotals,
   JevStatus,
 } from "../../../server/jev/contract.js";
-import { JEV_FEATURE_LANES } from "../../../server/jev/service.js";
+import { JEV_FEATURE_LANES } from "../../../server/jev/contract.js";
 import type {
   ProviderUsage,
   ProviderUsageBalance,
