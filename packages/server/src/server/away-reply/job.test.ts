@@ -8,7 +8,7 @@ import { resolveJevConfig } from "../jev/config.js";
 import type { JevScriptedAnswer } from "../jev/fake.js";
 import { createJevService } from "../jev/service.js";
 import { AWAY_REPLY_GUARD } from "./decision.js";
-import { readTylerChoice } from "./job.js";
+import { FULL_TIMELINE_FETCH_CAP, readTylerChoice, TIMELINE_TAIL_ROWS } from "./job.js";
 import {
   MINUTE,
   T0,
@@ -212,6 +212,57 @@ describe("AwayReplyJob", () => {
     expect(h.calls()).toBe(0);
   });
 
+  it("still finds Tyler's message when a busy turn writes more rows than the tail holds", async () => {
+    const h = setup();
+    h.fleet.add(leaderView({ cwd: h.safeCwd }), []);
+    h.tyler("leader-1", "Fix the flaky test", T0);
+    // More noise than the tail read keeps, so Tyler's row falls out of the capped tail.
+    for (let index = 0; index < TIMELINE_TAIL_ROWS + 5; index += 1) {
+      h.fleet.append("leader-1", [assistant(`working on it, step ${index}`, T0 + index)]);
+    }
+    h.fleet.append("leader-1", [assistant(OPTIONS_MESSAGE, T0 + TIMELINE_TAIL_ROWS + 10)]);
+    h.at(T0 + 62 * MINUTE);
+    const report = await h.job.tick();
+    expect(report?.entries).toMatchObject([{ action: "replied", reason: "option" }]);
+    expect(h.fleet.turns).toEqual([{ agentId: "leader-1", text: GO_WITH_B_TEXT }]);
+    // Widened one doubling step from the tail (to 2x), not by copying the whole timeline.
+    expect(Math.max(...h.fleet.tailFetchLimits)).toBe(TIMELINE_TAIL_ROWS * 2);
+  });
+
+  it("widens past a single doubling when the busy turn is even longer", async () => {
+    const h = setup();
+    h.fleet.add(leaderView({ cwd: h.safeCwd }), []);
+    h.tyler("leader-1", "Fix the flaky test", T0);
+    // Needs two doublings (1000 -> 2000 -> 4000) to reach Tyler's message.
+    const noise = Array.from({ length: 3500 }, (_, index) =>
+      assistant(`working on it, step ${index}`, T0 + index),
+    );
+    h.fleet.append("leader-1", noise);
+    h.fleet.append("leader-1", [assistant(OPTIONS_MESSAGE, T0 + 3600)]);
+    h.at(T0 + 62 * MINUTE);
+    const report = await h.job.tick();
+    expect(report?.entries).toMatchObject([{ action: "replied", reason: "option" }]);
+    expect(h.fleet.turns).toEqual([{ agentId: "leader-1", text: GO_WITH_B_TEXT }]);
+    expect(h.fleet.tailFetchLimits).toEqual(expect.arrayContaining([2000, 4000]));
+  });
+
+  it("gives up at the fetch cap instead of reading an unbounded timeline", async () => {
+    const h = setup();
+    h.fleet.add(leaderView({ cwd: h.safeCwd }), []);
+    h.tyler("leader-1", "Fix the flaky test", T0);
+    // Past the cap: even widening to FULL_TIMELINE_FETCH_CAP rows cannot reach Tyler's message.
+    const noise = Array.from({ length: FULL_TIMELINE_FETCH_CAP + 100 }, (_, index) =>
+      assistant(`working on it, step ${index}`, T0 + index),
+    );
+    h.fleet.append("leader-1", noise);
+    h.fleet.append("leader-1", [assistant(OPTIONS_MESSAGE, T0 + FULL_TIMELINE_FETCH_CAP + 200)]);
+    h.at(T0 + 62 * MINUTE);
+    const report = await h.job.tick();
+    expect(report?.entries).toMatchObject([{ action: "skipped", reason: "no-tyler-message" }]);
+    expect(h.fleet.turns).toHaveLength(0);
+    expect(Math.max(...h.fleet.tailFetchLimits)).toBe(FULL_TIMELINE_FETCH_CAP);
+  });
+
   it.each([
     "wait for me",
     "Hold off on this until I'm back",
@@ -231,19 +282,16 @@ describe("AwayReplyJob", () => {
     expect(h.calls()).toBe(0);
   });
 
-  it("does not act on company code named anywhere in the thread", async () => {
+  it("answers a thread that names Wonderly code, same as any other (Tyler, 2026-10-19)", async () => {
     const h = setup();
     h.waitingLeader(`${OPTIONS_MESSAGE}\nThis is for backend-net#10032.`);
     h.at(T0 + 62 * MINUTE);
     const report = await h.job.tick();
-    expect(report?.entries).toMatchObject([{ action: "skipped", reason: "company-code" }]);
-    expect(h.calls()).toBe(0);
-    h.at(T0 + 70 * MINUTE);
-    expect((await h.job.tick())?.entries).toEqual([]);
-    expect(h.fleet.turns).toHaveLength(0);
+    expect(report?.entries).toMatchObject([{ action: "replied", reason: "option" }]);
+    expect(h.fleet.turns).toEqual([{ agentId: "leader-1", text: GO_WITH_B_TEXT }]);
   });
 
-  it("does not act on a leader in company code, or with a child there", async () => {
+  it("answers a leader whose cwd is a Wonderly path, or whose child's is", async () => {
     const h = setup();
     h.fleet.add(leaderView({ id: "company", cwd: h.companyCwd }), []);
     h.tyler("company", "Fix the flaky test", T0);
@@ -261,9 +309,28 @@ describe("AwayReplyJob", () => {
     );
     h.at(T0 + 62 * MINUTE);
     const report = await h.job.tick();
-    expect(report?.entries.filter((entry) => entry.reason === "company-code")).toHaveLength(2);
-    expect(h.calls()).toBe(0);
+    expect(report?.entries.filter((entry) => entry.reason === "company-code")).toHaveLength(0);
+    expect(report?.entries.filter((entry) => entry.action === "replied")).toHaveLength(2);
   });
+
+  it.each([
+    ["backend-net#10032 is green.\nShould I merge it now?", "excluded-merge"],
+    ["Should I git push the fix for backend-net#10032?", "excluded-outward-message"],
+    ["I can force push the rebased backend-net branch.", "excluded-force-push"],
+    ["Want me to delete the old backend-net worktrees?", "excluded-destructive"],
+  ])(
+    "still blocks %j in a Wonderly thread; the hard rules are not lifted",
+    async (message, reason) => {
+      const h = setup();
+      h.fleet.add(leaderView({ id: "company", cwd: h.companyCwd }), []);
+      h.tyler("company", "Fix the flaky test", T0);
+      h.fleet.append("company", [assistant(message, T0 + MINUTE)]);
+      h.at(T0 + 62 * MINUTE);
+      const report = await h.job.tick();
+      expect(report?.entries).toMatchObject([{ action: "skipped", reason }]);
+      expect(h.fleet.turns).toHaveLength(0);
+    },
+  );
 
   it("replies at most once per waiting episode, across sweeps and restarts", async () => {
     const h = setup();
@@ -890,6 +957,24 @@ describe("dry run (D6), the default", () => {
       }),
     ]);
     expect(JSON.stringify(followUps)).not.toContain("please");
+  });
+
+  it("finds his answer to a follow-up even when it sits beyond the tail", async () => {
+    const h = setup({ awayReply: {} });
+    h.waitingLeader();
+    h.at(T0 + 62 * MINUTE);
+    await h.job.tick();
+    h.tyler("leader-1", "go with B", T0 + 90 * MINUTE);
+    // More rows than the tail read keeps, written after his answer: it falls out of the capped
+    // tail `resolveFollowUps` reads first.
+    const noise = Array.from({ length: TIMELINE_TAIL_ROWS + 5 }, (_, index) =>
+      assistant(`working on it, step ${index}`, T0 + 90 * MINUTE + index + 1),
+    );
+    h.fleet.append("leader-1", noise);
+    h.at(T0 + 95 * MINUTE);
+    await h.job.tick();
+    const followUps = (await h.decisionLines()).filter((line) => line["type"] === "followup");
+    expect(followUps).toMatchObject([{ outcome: "tyler-message", tyler: "B", sameChoice: true }]);
   });
 
   it("fills in a follow-up when Tyler answers the request in the app", async () => {

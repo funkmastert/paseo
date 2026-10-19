@@ -42,7 +42,6 @@ import {
 } from "./detect.js";
 import { presenceSkipReason, type AwayReplyPresence } from "./presence.js";
 import {
-  findCompanyMarker,
   findExcludedAction,
   isReadOnlyPermission,
   normalizeForScan,
@@ -60,8 +59,8 @@ import { holdReason, isHoldMessage, readThread, replyTextHash } from "./thread.j
  *
  * It acts as Tyler, so when in doubt it does nothing. The hard rules live here, in `safety.ts` and
  * in `thread.ts`, not in JEV: presence, Tyler's own "stop" or "wait", a cancelled turn, the
- * deterministic exclusion over the whole thread since he last wrote, company code, one reply per
- * episode, two in a row at most without him, the daily caps, and never a turn into a running
+ * deterministic exclusion over the whole thread since he last wrote, one reply per episode, two
+ * in a row at most without him, the daily caps, and never a turn into a running
  * agent. Their state is the daemon's (`state.ts`), not agent labels. It starts in dry run (D6):
  * every decision, with the exact text it would have sent, goes to `decision-file.ts`.
  */
@@ -71,8 +70,19 @@ const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60_000;
 const MAX_EVALUATIONS_PER_SWEEP = 3;
 /** Replies in a row with no message from Tyler in between. A hard rule, not config. */
 export const MAX_CONSECUTIVE_AUTO_REPLIES = 2;
-/** Enough to reach back to Tyler's last message in a long turn; past it, nothing is answered. */
-const TIMELINE_TAIL_ROWS = 1000;
+/**
+ * The usual tail read. A turn busy enough to fill it without reaching Tyler's last message widens
+ * the read (`widenTail`) before giving up, so a long orchestration never reads as "no message from
+ * him" just because it wrote more than this many rows.
+ */
+export const TIMELINE_TAIL_ROWS = 1000;
+/**
+ * `widenTail`'s ceiling: it doubles the tail read from `TIMELINE_TAIL_ROWS` until it finds what
+ * it's looking for, reaches the start of the timeline, or hits this many rows, whichever comes
+ * first. A cap, not a copy of the whole timeline every sweep — a ten-day leader can hold far more
+ * rows than this.
+ */
+export const FULL_TIMELINE_FETCH_CAP = 20_000;
 /** A follow-up with no word from Tyler this long after the decision is closed as such. */
 const FOLLOW_UP_WINDOW_MS = 24 * 60 * 60_000;
 const MONITOR_NAME = "away-reply";
@@ -443,6 +453,28 @@ export class AwayReplyJob {
     return { cwd: agent.cwd, home: this.options.homeDir };
   }
 
+  /**
+   * `rows` widened in doubling steps — `TIMELINE_TAIL_ROWS`, then double, and so on — until
+   * `stillMissing` says the wider read is no longer needed, the timeline's actual start is
+   * reached, or `FULL_TIMELINE_FETCH_CAP` is hit. Never copies a long leader's whole timeline in
+   * one read.
+   */
+  private widenTail(
+    agentId: string,
+    rows: readonly AgentTimelineRow[],
+    stillMissing: (rows: readonly AgentTimelineRow[]) => boolean,
+  ): readonly AgentTimelineRow[] {
+    let widened = rows;
+    let limit = TIMELINE_TAIL_ROWS;
+    while (stillMissing(widened) && widened.length >= limit && limit < FULL_TIMELINE_FETCH_CAP) {
+      limit = Math.min(limit * 2, FULL_TIMELINE_FETCH_CAP);
+      const next = this.deps.readTimelineTail(agentId, limit) ?? widened;
+      widened = next;
+      if (next.length < limit) break; // reached the start of the timeline
+    }
+    return widened;
+  }
+
   /** The gates that need no JEV call, then the call, then the reply. */
   private async consider(
     agent: AwayReplyAgentView,
@@ -461,10 +493,20 @@ export class AwayReplyJob {
     if (limited) return skip(limited.reason, limited.final);
 
     const record = this.state.agent(agent.id);
-    const read = readThread(rows, {
+    const identity = {
       humanMessageIds: new Set(record.humanMessageIds),
       sentHashes: new Set(record.sentHashes),
-    });
+    };
+    let read = readThread(rows, identity);
+    if (!read.ok && read.reason === "no-tyler-message" && rows.length >= TIMELINE_TAIL_ROWS) {
+      // A long turn can write more than the tail holds; Tyler's last message may sit before it.
+      // Widen the read before concluding there is nothing to answer.
+      const widened = this.widenTail(agent.id, rows, (candidate) => {
+        const attempt = readThread(candidate, identity);
+        return !attempt.ok && attempt.reason === "no-tyler-message";
+      });
+      read = readThread(widened, identity);
+    }
     if (!read.ok) return skip(read.reason, true);
     const hold = holdReason(read.thread);
     if (hold) return skip(hold, true);
@@ -474,12 +516,13 @@ export class AwayReplyJob {
     const context = built.context;
     const scanned = threadText(context);
 
-    // Company code: the leader's cwd, its children's, or any mention in the thread.
+    // Wonderly code is in scope (Tyler, 2026-10-19, "Allow, keep guards"): the hard rules below —
+    // merge, force-push, git-history (branches, worktrees), destructive (files) and the rest of
+    // `findExcludedAction` — still gate the reply whatever repo the thread names. There is no
+    // separate company-code refusal to also pass.
     const childCwds = agents
       .filter((other) => getParentAgentIdFromLabels(other.labels) === agent.id)
       .map((other) => other.cwd);
-    const company = findCompanyMarker([agent.cwd, ...childCwds, scanned].join("\n"));
-    if (company) return skip("company-code", true);
 
     if (
       episode.kind === "permission" &&
@@ -850,14 +893,25 @@ export class AwayReplyJob {
       const record = this.state.agent(followUp.agentId);
       if (record.lastHumanAt !== null && record.lastHumanAt > followUp.decidedAt) {
         const humanIds = new Set(record.humanMessageIds);
+        const findAnswer = (candidate: readonly AgentTimelineRow[]) =>
+          candidate.find(
+            (entry) =>
+              entry.item.type === "user_message" &&
+              entry.item.clientMessageId !== undefined &&
+              humanIds.has(entry.item.clientMessageId) &&
+              timestampMs(entry) > followUp.decidedAt,
+          );
         const rows = this.deps.readTimelineTail(followUp.agentId, TIMELINE_TAIL_ROWS) ?? [];
-        const row = rows.find(
-          (entry) =>
-            entry.item.type === "user_message" &&
-            entry.item.clientMessageId !== undefined &&
-            humanIds.has(entry.item.clientMessageId) &&
-            timestampMs(entry) > followUp.decidedAt,
-        );
+        let row = findAnswer(rows);
+        if (!row && rows.length >= TIMELINE_TAIL_ROWS) {
+          // Same cutoff as `consider`: his answer can sit before a tail full of other activity.
+          const widened = this.widenTail(
+            followUp.agentId,
+            rows,
+            (candidate) => !findAnswer(candidate),
+          );
+          row = findAnswer(widened);
+        }
         const text = row?.item.type === "user_message" ? row.item.text : null;
         this.writeFollowUp(followUp, {
           outcome: "tyler-message",

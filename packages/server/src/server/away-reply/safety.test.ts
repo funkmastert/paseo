@@ -4,12 +4,7 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
 import type { AgentPermissionRequest } from "../agent/agent-sdk-types.js";
-import {
-  findCompanyMarker,
-  findExcludedAction,
-  findExcludedActions,
-  isReadOnlyPermission,
-} from "./safety.js";
+import { findExcludedAction, findExcludedActions, isReadOnlyPermission } from "./safety.js";
 import {
   BENIGN_PHRASES,
   CONTROL_PHRASES,
@@ -111,25 +106,6 @@ describe("the adversarial review's dodge phrases (appendix B)", () => {
     "STRIPE_SECRET",
   ])("catches the credential name %s", (name) => {
     expect(findExcludedActions(`set ${name} for the pool`)).toContain("credentials");
-  });
-});
-
-describe("findCompanyMarker", () => {
-  it.each([
-    ["the Wonderly app", "wonderly"],
-    ["see backend-net#10032", "backend-net"],
-    ["in ts-monorepo", "ts-monorepo"],
-    ["~/mobile-worktrees/app", "mobile-worktrees"],
-    ["push to wondergit", "wondergit"],
-    ["lease a WonderPod", "wonderpod"],
-    ["motion_net", "motion-net"],
-    ["/Users/x/.paseo/worktrees/1rlfnz6g/main", "1rlfnz6g"],
-  ])("finds %j", (text, name) => {
-    expect(findCompanyMarker(text)).toBe(name);
-  });
-
-  it("finds nothing in Bozeo work", () => {
-    expect(findCompanyMarker("~/paseo-worktrees/jev-away-reply, the Bozeo daemon")).toBeNull();
   });
 });
 

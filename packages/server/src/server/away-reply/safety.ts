@@ -360,30 +360,6 @@ export function findExcludedAction(text: string): AwayReplyExclusionHit | null {
 }
 
 /**
- * Company code (docs/jev.md, D7, and the standing rule against changing company repos): the
- * feature does not act on a thread or a leader that names any of these, whatever
- * `agents.jev.exclude*` says. Not configurable on purpose: relaxing JEV's egress lists must never
- * let this feature act as Tyler in a company repo.
- */
-const COMPANY_MARKERS: ReadonlyArray<{ name: string; pattern: RegExp }> = [
-  { name: "wonderly", pattern: /wonderly/i },
-  { name: "wondergit", pattern: /wondergit/i },
-  { name: "backend-net", pattern: /backend[-_ ]?net/i },
-  { name: "bn-worktrees", pattern: /bn[-_ ]?worktrees/i },
-  { name: "ts-monorepo", pattern: /ts[-_ ]?monorepo/i },
-  { name: "motion-net", pattern: /motion[-_ ]?net/i },
-  { name: "wonderpod", pattern: /wonder[-_ ]?pod/i },
-  { name: "mobile-worktrees", pattern: /mobile[-_ ]?worktrees/i },
-  { name: "1rlfnz6g", pattern: /1rlfnz6g/i },
-];
-
-/** The first company marker in `text`, by name, or null. */
-export function findCompanyMarker(text: string): string | null {
-  const folded = normalizeForScan(text);
-  return COMPANY_MARKERS.find(({ pattern }) => pattern.test(folded))?.name ?? null;
-}
-
-/**
  * Tools whose permission request may be approved: they only read, and each names the paths it
  * reads. Web tools are left out (a fetch or a search sends text off the machine), and so is Bash:
  * no allowlist over a shell line is sound enough to answer as Tyler. Quoting (`-de''lete`),
