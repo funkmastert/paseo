@@ -3328,6 +3328,40 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
       expect(reads).toBeGreaterThan(2);
     });
 
+    // #3, docs/done-janitor.md: "nested-repo" is the deletion invariant's own category (it feeds
+    // nestedRepositorySafetyCouldHelp's short-circuit), but it must never reach the R5 cooldown --
+    // it may clear on its own (a push) sooner than keptCooldownHours would allow re-checking, the
+    // same as every other uncategorized failure. Default config (releaseSafeNestedRepos off), so
+    // this is the one keep the fix touches without the flag ever turning on.
+    test("a nested-repo keep does not start the R5 cooldown, unlike an unbacked ignored path", async () => {
+      let reads = 0;
+      const h = owned({
+        coverage: (_path, commit) => {
+          reads += 1;
+          return coverage({ commit: commit ?? "head", gitlinks: ["vendor/tool/"] });
+        },
+      });
+
+      const first = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(first?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: expect.stringContaining("submodule(s) or nested repositor(ies)"),
+        }),
+      );
+      const readsAfterFirstTick = reads;
+      expect(readsAfterFirstTick).toBeGreaterThan(0);
+
+      h.setNow(NOW + 3 * HOUR); // would still be inside a 6h cooldown, if one had started
+
+      await h.janitor.tick();
+
+      // No cooldown: coverage is read again rather than being skipped as already-known-kept.
+      expect(reads).toBeGreaterThan(readsAfterFirstTick);
+    });
+
     test("the kept cooldown (R5): new activity in a cooled-down workspace makes it eligible again", async () => {
       const h = owned({
         ignored: () => ["node_modules/", "apps/mobile/machine-config.json"],

@@ -3,6 +3,7 @@ import { isAbsolute, resolve } from "node:path";
 import type { Logger } from "pino";
 
 import { buildDoneJanitorNotificationPayload } from "@getpaseo/protocol/done-janitor-notification";
+import { normalizeHost } from "@getpaseo/protocol/git-remote";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type {
   AgentManager,
@@ -147,6 +148,12 @@ export interface DoneJanitorConfig {
    * clean. With this off, both read as before this unit existed: an unconditional keep.
    */
   releaseSafeNestedRepos?: boolean;
+  /**
+   * Extra hosts, beside the forge registry's own cloud hosts, trusted as a nested repository's
+   * remote while `releaseSafeNestedRepos` is on (docs/done-janitor.md, "The deletion invariant").
+   * Default `[]`.
+   */
+  trustedRemoteHosts?: string[];
 }
 
 interface ResolvedDoneJanitorConfig {
@@ -167,6 +174,8 @@ interface ResolvedDoneJanitorConfig {
   maxBackupIgnoredFileBytes: number;
   maxBackupIgnoredTotalBytes: number;
   releaseSafeNestedRepos: boolean;
+  /** Normalized (lowercased, trailing dot stripped) once here, not on every nested-repo check. */
+  trustedRemoteHosts: ReadonlySet<string>;
 }
 
 function resolveConfig(config: DoneJanitorConfig, logger: Logger): ResolvedDoneJanitorConfig {
@@ -200,6 +209,7 @@ function resolveConfig(config: DoneJanitorConfig, logger: Logger): ResolvedDoneJ
     maxBackupIgnoredTotalBytes:
       config.maxBackupIgnoredTotalBytes ?? DEFAULT_MAX_BACKUP_IGNORED_TOTAL_BYTES,
     releaseSafeNestedRepos: config.releaseSafeNestedRepos ?? false,
+    trustedRemoteHosts: new Set((config.trustedRemoteHosts ?? []).map(normalizeHost)),
   };
 }
 
@@ -407,14 +417,29 @@ type IdleWorkspacePlan =
  * A keep reason the sweep treats as unlikely to change within the hour (R5,
  * docs/done-janitor.md): a process that is not the daemon's own, or an ignored, non-regenerable
  * path no backup covers. Everything else may resolve on its own sooner — a push, a lock released
- * — so only these two earn the cooldown.
+ * — so only these two earn the cooldown. `"nested-repo"` (`DeletionInvariant`'s own category) is
+ * deliberately not one of them (#3, docs/done-janitor.md): it is `nestedRepositorySafetyCouldHelp`'s
+ * short-circuit signal, not a cooldown reason, so `toCooldownCategory` strips it before it ever
+ * reaches a `DeletionCheck` or `IdleWorkspacePlan`'s `keep`.
  */
-type KeptCooldownCategory = "process" | "ignored-path" | "nested-repo";
+type KeptCooldownCategory = "process" | "ignored-path";
 
 /** Whether a worktree's directory may go: the deletion invariant's verdict, or why not. */
 type DeletionCheck =
   | { ok: true; invariant: string }
   | { ok: false; reason: string; category?: KeptCooldownCategory };
+
+/**
+ * `DeletionInvariant.category` as a cooldown reason (#3, docs/done-janitor.md): `"nested-repo"`
+ * maps to `undefined` rather than earning the cooldown. A nested-repo keep may clear itself (a
+ * push, a rebase) sooner than `keptCooldownHours` would allow re-checking, the same as every other
+ * uncategorized failure (an unreadable directory, a hidden change, an LFS file).
+ */
+function toCooldownCategory(
+  category: Extract<DeletionInvariant, { holds: false }>["category"],
+): KeptCooldownCategory | undefined {
+  return category === "nested-repo" ? undefined : category;
+}
 
 interface AskCandidate {
   root: DoneJanitorAgentView;
@@ -1044,7 +1069,7 @@ export class AgentDoneJanitor {
     const invariant = await this.evaluateDeletionInvariant(path, coverage, "plan", config);
     return invariant.holds
       ? { ok: true, invariant: invariant.detail }
-      : { ok: false, reason: invariant.reason, category: invariant.category };
+      : { ok: false, reason: invariant.reason, category: toCooldownCategory(invariant.category) };
   }
 
   /**
@@ -1067,7 +1092,9 @@ export class AgentDoneJanitor {
     if (!this.nestedRepositorySafetyCouldHelp(coverage, cheap)) return cheap;
     const candidates = listNestedRepositories(coverage);
     if (candidates.length === 0) return cheap;
-    const safeNested = await computeSafeNestedRepositories(worktreePath, candidates);
+    const safeNested = await computeSafeNestedRepositories(worktreePath, candidates, {
+      trustedRemoteHosts: config.trustedRemoteHosts,
+    });
     if (safeNested.size === 0) return cheap;
     return checkDeletionInvariant(coverage, basis, config.regenerableIgnoredPaths, safeNested);
   }
@@ -1133,7 +1160,7 @@ export class AgentDoneJanitor {
       const invariant = await this.evaluateDeletionInvariant(path, coverage, "head", config);
       return invariant.holds
         ? { ok: true, invariant: invariant.detail }
-        : { ok: false, reason: invariant.reason, category: invariant.category };
+        : { ok: false, reason: invariant.reason, category: toCooldownCategory(invariant.category) };
     }
     const omitted = describeSnapshotOmissions(snapshot);
     if (omitted) return { ok: false, reason: omitted };
@@ -1151,7 +1178,7 @@ export class AgentDoneJanitor {
           ok: true,
           invariant: `${invariant.detail}; backed up at ${snapshot.ref}, ${describeOffsite(snapshot.offsite)}`,
         }
-      : { ok: false, reason: invariant.reason, category: invariant.category };
+      : { ok: false, reason: invariant.reason, category: toCooldownCategory(invariant.category) };
   }
 
   /**
@@ -2162,8 +2189,6 @@ function describeKeptCooldownCategory(category: KeptCooldownCategory): string {
       return "a process inside it";
     case "ignored-path":
       return "an unbacked ignored path";
-    case "nested-repo":
-      return "a nested repository not judged safe";
   }
 }
 

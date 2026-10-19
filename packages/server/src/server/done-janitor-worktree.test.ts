@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -11,7 +12,7 @@ import {
   writeFileSync,
   symlinkSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -1326,13 +1327,14 @@ describe("checkNestedRepositorySafety", () => {
   }
 
   /**
-   * A remote whose URL looks like a real network host, with a local `refs/remotes/<name>/<branch>`
-   * matching `head` -- enough for `checkNestedRepositorySafety`'s reachability checks without an
-   * actual network push (#1: a local-path remote, which `git push` to a bare repo on this machine
-   * would otherwise produce, is deliberately never trusted).
+   * A remote whose URL names an allowlisted forge host (#2), with a local
+   * `refs/remotes/<name>/<branch>` matching `head` -- enough for `checkNestedRepositorySafety`'s
+   * reachability checks without an actual network push (#1: a local-path remote, which
+   * `git push` to a bare repo on this machine would otherwise produce, is deliberately never
+   * trusted either way).
    */
   function fakeNetworkRemote(nested: string, head: string, name = "origin"): void {
-    git(nested, "remote", "add", name, `https://example.invalid/${name}.git`);
+    git(nested, "remote", "add", name, `https://github.com/${name}.git`);
     git(nested, "update-ref", `refs/remotes/${name}/main`, head);
   }
 
@@ -1440,19 +1442,44 @@ describe("checkNestedRepositorySafety", () => {
     await expect(checkNestedRepositorySafety(worktree, nested)).resolves.toBe(false);
   });
 
-  // #1: ssh/scp syntax naming localhost (or 127.0.0.0/8) is a loopback address, not a different
-  // machine, whatever the path after it says.
+  // #2: trust is an allowlist of the forge registry's known cloud hosts, not a loopback/own-host
+  // denylist -- every spelling of "this machine" (a loopback name, the 127.0.0.0/8 block in any
+  // form, this machine's own hostname) and every host the registry has never heard of are
+  // untrusted the same way, with no separate loopback-detection code to miss a spelling.
   test.each([
-    ["ssh://localhost/path/to/repo.git", "ssh-scheme"],
-    ["git@127.0.0.1:owner/repo.git", "scp-syntax"],
-  ])("a remote url naming a loopback host (%s) is not safe", async (url, label) => {
-    const worktree = addWorktree(`nested-loopback-${label}`, "feature");
+    ["ssh://localhost/path/to/repo.git", "ssh-scheme-localhost"],
+    ["git@127.0.0.1:owner/repo.git", "scp-syntax-127.0.0.1"],
+    ["ssh://0.0.0.0/path/to/repo.git", "unspecified-address"],
+    ["git@127.1:owner/repo.git", "short-form-ipv4-loopback"],
+    ["ssh://[::1]/path/to/repo.git", "ipv6-loopback"],
+    [`git@${hostname()}:owner/repo.git`, "this-machine's-own-hostname"],
+    ["ssh://git.example.org/owner/repo.git", "a-host-the-registry-does-not-know"],
+  ])("a remote url naming an untrusted host (%s) is not safe", async (url, label) => {
+    const worktree = addWorktree(`nested-untrusted-${label}`, "feature");
     const nested = initNested(worktree, "vendor/tool");
     commit(nested, "f.txt", "content\n");
     git(nested, "remote", "add", "origin", url);
     git(nested, "update-ref", "refs/remotes/origin/main", git(nested, "rev-parse", "HEAD").trim());
 
     await expect(checkNestedRepositorySafety(worktree, nested)).resolves.toBe(false);
+  });
+
+  // #2: agents.doneJanitor.trustedRemoteHosts extends the allowlist past the forge registry's own
+  // cloud hosts -- the same host that is untrusted by default (the case right above) becomes
+  // trusted once it is configured, and only once.
+  test("a remote url naming a host in trustedRemoteHosts is safe, but only once configured", async () => {
+    const worktree = addWorktree("nested-custom-trusted-host", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    commit(nested, "f.txt", "content\n");
+    git(nested, "remote", "add", "origin", "https://git.example.org/owner/repo.git");
+    git(nested, "update-ref", "refs/remotes/origin/main", git(nested, "rev-parse", "HEAD").trim());
+
+    await expect(checkNestedRepositorySafety(worktree, nested)).resolves.toBe(false);
+    await expect(
+      checkNestedRepositorySafety(worktree, nested, {
+        trustedRemoteHosts: new Set(["git.example.org"]),
+      }),
+    ).resolves.toBe(true);
   });
 
   // #1: a fetch refspec that writes into another remote's refs/remotes/ namespace lets a commit
@@ -1569,17 +1596,42 @@ describe("checkNestedRepositorySafety", () => {
 
   // #9: a local filter driver in the nested repo's own config must never run as a side effect
   // of a read-only safety check -- config is read (never executed) before status is.
-  test("a nested repository with a local clean filter configured is not safe", async () => {
+  // The attributes-matched file is committed before the filter driver is configured, so its own
+  // `git add`/`commit` never exercises `filter.danger.clean` either: the guard in
+  // `hasDangerousLocalGitConfig` is the only code path that could run it. Without that commit the
+  // tree would be dirty for an unrelated reason (an untracked file), and the test would pass with
+  // the guard removed.
+  test("a nested repository with a local clean filter configured is not safe, and the filter itself never runs", async () => {
     const worktree = addWorktree("nested-filter-driver", "feature");
     const nested = initNested(worktree, "vendor/tool");
     commit(nested, ".gitattributes", "*.bin filter=danger\n");
-    commit(nested, "f.txt", "content\n");
+    commit(nested, "tracked.bin", "content\n");
     fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
-    git(nested, "config", "filter.danger.clean", "touch /tmp/paseo-test-filter-ran-$$");
+    const marker = join(root, "filter-ran-marker");
+    git(nested, "config", "filter.danger.clean", `touch ${marker}`);
     git(nested, "config", "filter.danger.smudge", "cat");
-    writeFileSync(join(nested, "new.bin"), "data\n");
 
     await expect(checkNestedRepositorySafety(worktree, nested)).resolves.toBe(false);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  // #5: a filter configured at the per-worktree scope (extensions.worktreeConfig,
+  // config.worktree) runs during status just as a local one would, so it must be read too --
+  // `--local` alone misses it, making the nested repo read clean (and the filter never even get
+  // the chance to prove itself dangerous).
+  test("a nested repository with a worktree-scope (extensions.worktreeConfig) filter is not safe, and the filter itself never runs", async () => {
+    const worktree = addWorktree("nested-worktree-scope-filter", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    commit(nested, ".gitattributes", "*.bin filter=danger\n");
+    commit(nested, "tracked.bin", "content\n");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
+    git(nested, "config", "extensions.worktreeConfig", "true");
+    const marker = join(root, "worktree-scope-filter-ran-marker");
+    git(nested, "config", "--worktree", "filter.danger.clean", `touch ${marker}`);
+    git(nested, "config", "--worktree", "filter.danger.smudge", "cat");
+
+    await expect(checkNestedRepositorySafety(worktree, nested)).resolves.toBe(false);
+    expect(existsSync(marker)).toBe(false);
   });
 
   describe("linked worktrees (#6)", () => {
@@ -1668,6 +1720,67 @@ describe("checkNestedRepositorySafety", () => {
       await expect(checkNestedRepositorySafety(worktree, linked)).resolves.toBe(false);
     });
   });
+
+  // #1 (P0): a submodule's own git-dir lives at <repo>/.git/worktrees/<wt>/modules/<name>, equal
+  // to its own common-dir (a plain submodule is never itself a linked worktree) -- even though
+  // that directory sits outside worktreePath, exactly like a genuine linked worktree's does. The
+  // round-2 shortcut asked only "is the common dir outside worktreePath", so it took this case
+  // too and skipped the --all/stash check; `git worktree remove --force` + prune then deletes
+  // <repo>/.git/worktrees/<wt> including modules/, taking the submodule's unpushed branch and
+  // stash with it. isGenuineSurvivingLinkedWorktree's git-dir/common-dir check rejects it instead.
+  // `git clone --separate-git-dir` reproduces a submodule's exact git-dir placement directly,
+  // without the submodule machinery's own checkout ceremony (and covers the adversarial
+  // --separate-git-dir variant the review also flagged, in the same test).
+  test("a submodule-shaped clone (its git-dir under the outer worktree's own admin directory) with an unpushed sibling branch and a stash is not safe", async () => {
+    const worktree = addWorktree("nested-submodule", "feature");
+    const subSeed = join(root, "sub-seed");
+    mkdirSync(subSeed, { recursive: true });
+    git(subSeed, "init", "-q", "-b", "main");
+    commit(subSeed, "f.txt", "content\n");
+
+    const outerGitDir = git(worktree, "rev-parse", "--path-format=absolute", "--git-dir").trim();
+    mkdirSync(join(worktree, "vendor"), { recursive: true });
+    mkdirSync(join(outerGitDir, "modules"), { recursive: true });
+    const sub = join(worktree, "vendor", "sub");
+    git(
+      root,
+      "clone",
+      "-q",
+      `--separate-git-dir=${join(outerGitDir, "modules", "sub")}`,
+      subSeed,
+      sub,
+    );
+
+    git(sub, "remote", "remove", "origin"); // clone set it to the local subSeed path
+    fakeNetworkRemote(sub, git(sub, "rev-parse", "HEAD").trim());
+    git(sub, "branch", "wip");
+    git(sub, "checkout", "-q", "wip");
+    commit(sub, "g.txt", "unpushed work on a sibling branch\n");
+    git(sub, "checkout", "-q", "main");
+    writeFileSync(join(sub, "f.txt"), "stashed edit\n");
+    git(sub, "stash", "push", "-q");
+
+    const gitDir = git(sub, "rev-parse", "--path-format=absolute", "--git-dir").trim();
+    const commonDir = git(sub, "rev-parse", "--path-format=absolute", "--git-common-dir").trim();
+    expect(gitDir).toBe(commonDir); // the shape the P0 shortcut must reject, not take
+
+    await expect(checkNestedRepositorySafety(worktree, sub)).resolves.toBe(false);
+  });
+
+  // #4: a nested repository that is itself the main checkout of a linked worktree living outside
+  // the directory being deleted must not read safe -- deleting it removes its own .git, including
+  // .git/worktrees/<x>, dangling that external worktree's .git link and losing its index, HEAD
+  // and per-worktree state.
+  test("a nested repository with an external linked worktree of its own is not safe", async () => {
+    const worktree = addWorktree("nested-external-worktree", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    commit(nested, "f.txt", "content\n");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
+    const external = join(root, "external-worktree");
+    git(nested, "worktree", "add", "-q", external, "-b", "elsewhere");
+
+    await expect(checkNestedRepositorySafety(worktree, nested)).resolves.toBe(false);
+  });
 });
 
 describe("computeSafeNestedRepositories", () => {
@@ -1677,7 +1790,7 @@ describe("computeSafeNestedRepositories", () => {
     mkdirSync(safe, { recursive: true });
     git(safe, "init", "-q");
     commit(safe, "f.txt", "content\n");
-    git(safe, "remote", "add", "origin", "https://example.invalid/safe.git");
+    git(safe, "remote", "add", "origin", "https://github.com/safe.git");
     git(safe, "update-ref", "refs/remotes/origin/main", git(safe, "rev-parse", "HEAD").trim());
 
     const unsafe = join(worktree, "vendor", "unsafe");
@@ -1696,7 +1809,7 @@ describe("computeSafeNestedRepositories", () => {
 
 describe("the deletion invariant: nested repositories confirmed safe", () => {
   function fakeNetworkRemote(nested: string, head: string): void {
-    git(nested, "remote", "add", "origin", "https://example.invalid/origin.git");
+    git(nested, "remote", "add", "origin", "https://github.com/origin.git");
     git(nested, "update-ref", "refs/remotes/origin/main", head);
   }
 

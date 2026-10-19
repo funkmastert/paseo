@@ -559,6 +559,11 @@ const AgentDoneJanitorSchema = z
     // nested repositories, from the deletion invariant once its own HEAD is on a trusted remote
     // and its own tree is clean. See docs/done-janitor.md, "The deletion invariant".
     releaseSafeNestedRepos: z.boolean().optional(),
+    // Extra hosts, beside the forge registry's own cloud hosts (github.com, gitlab.com, ...),
+    // trusted as a nested repository's remote while releaseSafeNestedRepos is on: a self-hosted
+    // forge the registry does not probe for this check. Default []. See docs/done-janitor.md,
+    // "The deletion invariant".
+    trustedRemoteHosts: z.array(z.string()).optional(),
   })
   .strict();
 
