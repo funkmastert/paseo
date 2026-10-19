@@ -1,9 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import { useStableEvent } from "@/hooks/use-stable-event";
+import { useEffect, useLayoutEffect, useMemo } from "react";
 import type { StreamItem } from "@/types/stream";
 import {
   createStickyLastPromptPublisher,
-  isLastPromptAboveViewport,
   NO_STICKY_PROMPT,
   selectLastPrompt,
   type StickyLastPromptSource,
@@ -13,30 +11,16 @@ export interface UseStickyLastPromptInput {
   agentId: string;
   items: readonly StreamItem[];
   /** The actively streaming turn's not-yet-committed items (rendered as the live head), not
-   * part of `items` yet. During a long turn the reading position spends most of its time here,
-   * so visibility needs the combined list -- see use-chat-outline.ts's identical `loadedItems`. */
+   * part of `items` yet -- the last prompt can be the first thing in a turn still arriving. */
   head?: readonly StreamItem[];
 }
 
 export interface UseStickyLastPromptResult {
   source: StickyLastPromptSource;
-  /** Feed the web transcript's existing reading-position signal (`onReadingPositionChange`). */
-  reportReadingPosition: (rowId: string | null) => void;
-  /** No-op on web: visibility comes from reading position instead. */
-  reportVisibleRowIds: (visibleRowIds: ReadonlySet<string>) => void;
 }
-
-function noopReportVisibleRowIds(_visibleRowIds: ReadonlySet<string>): void {}
 
 const EMPTY_STREAM_ITEMS: readonly StreamItem[] = [];
 
-/**
- * Derives sticky-bar visibility from the same reading-position signal the chat
- * outline already consumes, instead of adding a second scroll listener. See
- * the sticky-last-prompt plan's Key Technical Decisions for why this needs no
- * virtualizer-offset math: the reading-position row's order relative to the
- * last prompt is enough.
- */
 export function useStickyLastPrompt(input: UseStickyLastPromptInput): UseStickyLastPromptResult {
   const publisher = useMemo(() => createStickyLastPromptPublisher(), []);
   const head = input.head ?? EMPTY_STREAM_ITEMS;
@@ -44,22 +28,6 @@ export function useStickyLastPrompt(input: UseStickyLastPromptInput): UseStickyL
     () => (head.length > 0 ? [...input.items, ...head] : input.items),
     [input.items, head],
   );
-  const itemsRef = useRef(combinedItems);
-  itemsRef.current = combinedItems;
-  const readingPositionRowIdRef = useRef<string | null>(null);
-
-  const recomputeAndPublish = useStableEvent(() => {
-    const items = itemsRef.current;
-    const lastPrompt = selectLastPrompt(items);
-    const barVisible = lastPrompt
-      ? isLastPromptAboveViewport({
-          lastPromptId: lastPrompt.id,
-          readingPositionRowId: readingPositionRowIdRef.current,
-          items,
-        })
-      : false;
-    publisher.publish({ prompt: lastPrompt, barVisible });
-  });
 
   // useLayoutEffect, not useEffect: StickyPromptOverlay subscribes to `publisher` directly via
   // useSyncExternalStore, and that subscription forces the overlay to re-render on a publish
@@ -70,27 +38,13 @@ export function useStickyLastPrompt(input: UseStickyLastPromptInput): UseStickyL
   // agentId, upgraded here because the overlay is now memoized -- see sticky-prompt-fixes.json
   // finding 2).
   useLayoutEffect(() => {
-    readingPositionRowIdRef.current = null;
     publisher.publish(NO_STICKY_PROMPT);
   }, [publisher, input.agentId]);
 
-  // A new turn (or the first prompt arriving) changes which row is "the last prompt," so this
-  // must recompute even if the reading position itself hasn't changed.
+  // A new turn (or the first prompt arriving) changes which row is "the last prompt."
   useEffect(() => {
-    recomputeAndPublish();
-  }, [combinedItems, recomputeAndPublish]);
+    publisher.publish({ prompt: selectLastPrompt(combinedItems) });
+  }, [combinedItems, publisher]);
 
-  const reportReadingPosition = useStableEvent((rowId: string | null) => {
-    readingPositionRowIdRef.current = rowId;
-    recomputeAndPublish();
-  });
-
-  return useMemo(
-    () => ({
-      source: publisher,
-      reportReadingPosition,
-      reportVisibleRowIds: noopReportVisibleRowIds,
-    }),
-    [publisher, reportReadingPosition],
-  );
+  return useMemo(() => ({ source: publisher }), [publisher]);
 }

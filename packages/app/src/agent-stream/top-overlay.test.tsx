@@ -139,7 +139,7 @@ describe("TopOverlay", () => {
 
   it("stacks the button after the sticky bar in the same column, so it sits below it", () => {
     const source = createStickyLastPromptPublisher();
-    source.publish({ prompt: prompt("p1"), barVisible: true });
+    source.publish({ prompt: prompt("p1") });
     render(<Harness source={source} />);
 
     const overlay = query("agent-stream-top-overlay");
@@ -160,7 +160,7 @@ describe("TopOverlay", () => {
 
   it("renders the position label and arrows inside the overlay alongside the jump-to-start button", () => {
     const source = createStickyLastPromptPublisher();
-    source.publish({ prompt: prompt("p1"), barVisible: true });
+    source.publish({ prompt: prompt("p1") });
     render(<Harness source={source} positionLabel="3/7" canStepBack canStepForward />);
 
     const overlay = query("agent-stream-top-overlay");
@@ -174,7 +174,7 @@ describe("TopOverlay", () => {
 
   it("calls onStepBack/onStepForward when the overlay's navigator arrows are pressed", () => {
     const source = createStickyLastPromptPublisher();
-    source.publish({ prompt: prompt("p1"), barVisible: true });
+    source.publish({ prompt: prompt("p1") });
     const onStepBack = vi.fn();
     const onStepForward = vi.fn();
     render(
@@ -207,7 +207,7 @@ describe("TopOverlay", () => {
 
   it("renders exactly one jump-to-start button", () => {
     const source = createStickyLastPromptPublisher();
-    source.publish({ prompt: prompt("p1"), barVisible: true });
+    source.publish({ prompt: prompt("p1") });
     render(<Harness source={source} />);
 
     expect(queryAll("jump-to-start-button")).toHaveLength(1);

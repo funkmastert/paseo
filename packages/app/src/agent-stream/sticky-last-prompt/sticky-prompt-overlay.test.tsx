@@ -133,29 +133,9 @@ function Harness({
 }
 
 describe("StickyPromptOverlay", () => {
-  it("keeps the bar pinned and an open viewer mounted when barVisible flips false", () => {
-    const publisher = createStickyLastPromptPublisher();
-    publisher.publish({ prompt: prompt("p1"), barVisible: true });
-    render(<Harness testKey="agent-1" source={publisher} onJumpToOriginal={vi.fn()} />);
-
-    act(() => {
-      query("sticky-prompt-bar-expand")?.click();
-    });
-    expect(query("sticky-prompt-viewer")).not.toBeNull();
-
-    // Same prompt, back on screen: the bar is the prompt navigator, so it stays pinned, and the
-    // open viewer survives.
-    act(() => {
-      publisher.publish({ prompt: prompt("p1"), barVisible: false });
-    });
-
-    expect(query("sticky-prompt-viewer")).not.toBeNull();
-    expect(query("sticky-prompt-bar")).not.toBeNull();
-  });
-
   it("closes the viewer when the active agent switches", () => {
     const publisherA = createStickyLastPromptPublisher();
-    publisherA.publish({ prompt: prompt("p1"), barVisible: true });
+    publisherA.publish({ prompt: prompt("p1") });
     render(<Harness testKey="agent-1" source={publisherA} onJumpToOriginal={vi.fn()} />);
 
     act(() => {
@@ -164,7 +144,7 @@ describe("StickyPromptOverlay", () => {
     expect(query("sticky-prompt-viewer")).not.toBeNull();
 
     const publisherB = createStickyLastPromptPublisher();
-    publisherB.publish({ prompt: prompt("p2"), barVisible: true });
+    publisherB.publish({ prompt: prompt("p2") });
     rerender(<Harness testKey="agent-2" source={publisherB} onJumpToOriginal={vi.fn()} />);
 
     expect(query("sticky-prompt-viewer")).toBeNull();
@@ -172,7 +152,7 @@ describe("StickyPromptOverlay", () => {
 
   it("sequences 'jump to message' after the sheet's own close transition finishes", () => {
     const publisher = createStickyLastPromptPublisher();
-    publisher.publish({ prompt: prompt("p1"), barVisible: true });
+    publisher.publish({ prompt: prompt("p1") });
     const onJumpToSelected = vi.fn();
     render(
       <Harness
@@ -203,7 +183,7 @@ describe("StickyPromptOverlay", () => {
 
   it("does not jump when the viewer is dismissed via its own close control", () => {
     const publisher = createStickyLastPromptPublisher();
-    publisher.publish({ prompt: prompt("p1"), barVisible: true });
+    publisher.publish({ prompt: prompt("p1") });
     const onJumpToSelected = vi.fn();
     render(
       <Harness
@@ -229,7 +209,7 @@ describe("StickyPromptOverlay", () => {
 
   it("jumps to the selected prompt, not just the last one, when the body is tapped", () => {
     const publisher = createStickyLastPromptPublisher();
-    publisher.publish({ prompt: prompt("p1", "last prompt"), barVisible: true });
+    publisher.publish({ prompt: prompt("p1", "last prompt") });
     const onJumpToSelected = vi.fn();
     render(
       <Harness

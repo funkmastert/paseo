@@ -26,65 +26,8 @@ export function selectRecentPrompts(items: readonly StreamItem[]): UserMessageIt
   return prompts;
 }
 
-export interface LastPromptVisibilityInput {
-  lastPromptId: string;
-  readingPositionRowId: string | null;
-  items: readonly StreamItem[];
-}
-
-/**
- * The web transcript reports which row sits at the top of the viewport on
- * every scroll change. The last prompt has scrolled above the viewport only
- * once that reported row comes after it in timeline order.
- */
-export function isLastPromptAboveViewport(input: LastPromptVisibilityInput): boolean {
-  const { lastPromptId, readingPositionRowId, items } = input;
-  if (readingPositionRowId === null) return false;
-
-  const lastPromptIndex = items.findIndex((item) => item.id === lastPromptId);
-  const readingPositionIndex = items.findIndex((item) => item.id === readingPositionRowId);
-  if (lastPromptIndex === -1 || readingPositionIndex === -1) return false;
-
-  return readingPositionIndex > lastPromptIndex;
-}
-
-export interface SeenThenLeftTracker {
-  update(targetId: string, isCurrentlyVisible: boolean): boolean;
-}
-
-/**
- * Native's FlatList reports only which rows are currently viewable, not a
- * single reading-position row, and the list is inverted so an offset-based
- * "above the viewport" check would depend on fragile index direction. A
- * freshly sent prompt always starts on-screen, so instead: once the target
- * row has been seen at least once, the bar shows the moment it leaves the
- * viewable set.
- */
-export function createSeenThenLeftTracker(): SeenThenLeftTracker {
-  let trackedId: string | null = null;
-  let seen = false;
-
-  return {
-    update(targetId: string, isCurrentlyVisible: boolean): boolean {
-      if (targetId !== trackedId) {
-        trackedId = targetId;
-        seen = isCurrentlyVisible;
-        return false;
-      }
-
-      if (isCurrentlyVisible) {
-        seen = true;
-        return false;
-      }
-
-      return seen;
-    },
-  };
-}
-
 export interface StickyLastPromptState {
   prompt: UserMessageItem | null;
-  barVisible: boolean;
 }
 
 export interface StickyLastPromptSource {
@@ -96,20 +39,19 @@ export interface StickyLastPromptPublisher extends StickyLastPromptSource {
   publish: (state: StickyLastPromptState) => void;
 }
 
-export const NO_STICKY_PROMPT: StickyLastPromptState = { prompt: null, barVisible: false };
+export const NO_STICKY_PROMPT: StickyLastPromptState = { prompt: null };
 
 function stickyLastPromptStatesEqual(
   left: StickyLastPromptState,
   right: StickyLastPromptState,
 ): boolean {
-  return left.prompt?.id === right.prompt?.id && left.barVisible === right.barVisible;
+  return left.prompt?.id === right.prompt?.id;
 }
 
 /**
- * Visibility can recompute on every scroll frame (web) or viewability callback
- * (native). Publishing outside React, like `chat-outline`'s active-prompt
- * publisher, lets only the bar itself re-render on those updates instead of
- * the whole transcript.
+ * Publishing outside React, like `chat-outline`'s active-prompt publisher,
+ * lets only the bar itself re-render on a new prompt instead of the whole
+ * transcript.
  */
 export function createStickyLastPromptPublisher(): StickyLastPromptPublisher {
   const listeners = new Set<() => void>();

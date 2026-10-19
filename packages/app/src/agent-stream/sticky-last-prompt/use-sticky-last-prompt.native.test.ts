@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, renderHook } from "@testing-library/react";
+import { renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { StreamItem } from "@/types/stream";
 import { useStickyLastPrompt } from "./use-sticky-last-prompt.native";
@@ -18,52 +18,32 @@ function assistant(id: string, second: number): StreamItem {
 }
 
 describe("useStickyLastPrompt (native)", () => {
-  it("starts with the bar hidden even before any viewability report (never seen yet)", () => {
+  it("publishes the last prompt", () => {
     const items = [user("p1", 1), assistant("a1", 2)];
     const { result } = renderHook(() => useStickyLastPrompt({ agentId: "agent-1", items }));
-    expect(result.current.source.getState()).toEqual({ prompt: items[0], barVisible: false });
+    expect(result.current.source.getState()).toEqual({ prompt: items[0] });
   });
 
-  it("shows the bar once the prompt's row has been seen and then leaves the viewable set", () => {
-    const items = [user("p1", 1), assistant("a1", 2)];
-    const { result } = renderHook(() => useStickyLastPrompt({ agentId: "agent-1", items }));
-
-    act(() => {
-      result.current.reportVisibleRowIds(new Set(["p1", "a1"]));
-    });
-    expect(result.current.source.getState().barVisible).toBe(false);
-
-    act(() => {
-      result.current.reportVisibleRowIds(new Set(["a1"]));
-    });
-    expect(result.current.source.getState()).toEqual({ prompt: items[0], barVisible: true });
-  });
-
-  it("resets to hidden when a new prompt starts a new turn", () => {
+  it("recomputes the tracked prompt when a new turn starts", () => {
     const initialItems = [user("p1", 1), assistant("a1", 2)];
     const { result, rerender } = renderHook(
       ({ items }) => useStickyLastPrompt({ agentId: "agent-1", items }),
       { initialProps: { items: initialItems } },
     );
-
-    act(() => {
-      result.current.reportVisibleRowIds(new Set(["p1", "a1"]));
-      result.current.reportVisibleRowIds(new Set(["a1"]));
-    });
-    expect(result.current.source.getState().barVisible).toBe(true);
+    expect(result.current.source.getState()).toEqual({ prompt: initialItems[0] });
 
     const nextItems = [...initialItems, user("p2", 3)];
     rerender({ items: nextItems });
-    expect(result.current.source.getState()).toEqual({ prompt: nextItems[2], barVisible: false });
+    expect(result.current.source.getState()).toEqual({ prompt: nextItems[2] });
   });
 
   it("publishes no prompt when the timeline has no user_message", () => {
     const items = [assistant("a1", 1)];
     const { result } = renderHook(() => useStickyLastPrompt({ agentId: "agent-1", items }));
-    expect(result.current.source.getState()).toEqual({ prompt: null, barVisible: false });
+    expect(result.current.source.getState()).toEqual({ prompt: null });
   });
 
-  it("resets to hidden when agentId changes even before items catch up", () => {
+  it("resets to no prompt when agentId changes even before items catch up", () => {
     // Items intentionally stay the same reference across the rerender, isolating the
     // agentId-keyed reset effect from the items-driven recompute effect.
     const items = [user("p1", 1), assistant("a1", 2)];
@@ -73,14 +53,9 @@ describe("useStickyLastPrompt (native)", () => {
         initialProps: { agentId: "agent-1" },
       },
     );
-
-    act(() => {
-      result.current.reportVisibleRowIds(new Set(["p1", "a1"]));
-      result.current.reportVisibleRowIds(new Set(["a1"]));
-    });
-    expect(result.current.source.getState()).toEqual({ prompt: items[0], barVisible: true });
+    expect(result.current.source.getState()).toEqual({ prompt: items[0] });
 
     rerender({ agentId: "agent-2" });
-    expect(result.current.source.getState()).toEqual({ prompt: null, barVisible: false });
+    expect(result.current.source.getState()).toEqual({ prompt: null });
   });
 });

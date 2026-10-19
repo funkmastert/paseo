@@ -1,8 +1,6 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import { useStableEvent } from "@/hooks/use-stable-event";
+import { useEffect, useLayoutEffect, useMemo } from "react";
 import type { StreamItem } from "@/types/stream";
 import {
-  createSeenThenLeftTracker,
   createStickyLastPromptPublisher,
   NO_STICKY_PROMPT,
   selectLastPrompt,
@@ -20,34 +18,10 @@ export interface UseStickyLastPromptInput {
 
 export interface UseStickyLastPromptResult {
   source: StickyLastPromptSource;
-  /** No-op on native: there is no reading-position signal. */
-  reportReadingPosition: (rowId: string | null) => void;
-  /** Feed the native transcript's FlatList viewability callback. */
-  reportVisibleRowIds: (visibleRowIds: ReadonlySet<string>) => void;
 }
 
-function noopReportReadingPosition(_rowId: string | null): void {}
-
-/**
- * Native has no reading-position equivalent, so visibility comes from
- * FlatList's own viewability tracking via a "seen then left" state machine
- * (see model.ts) instead of inverted-list offset math.
- */
 export function useStickyLastPrompt(input: UseStickyLastPromptInput): UseStickyLastPromptResult {
   const publisher = useMemo(() => createStickyLastPromptPublisher(), []);
-  const tracker = useMemo(() => createSeenThenLeftTracker(), []);
-  const lastVisibleRowIdsRef = useRef<ReadonlySet<string>>(new Set());
-
-  const recomputeAndPublish = useStableEvent(() => {
-    const lastPrompt = selectLastPrompt(input.items);
-    if (!lastPrompt) {
-      publisher.publish({ prompt: null, barVisible: false });
-      return;
-    }
-    const isCurrentlyVisible = lastVisibleRowIdsRef.current.has(lastPrompt.id);
-    const barVisible = tracker.update(lastPrompt.id, isCurrentlyVisible);
-    publisher.publish({ prompt: lastPrompt, barVisible });
-  });
 
   // useLayoutEffect, not useEffect: StickyPromptOverlay subscribes to `publisher` directly via
   // useSyncExternalStore, and that subscription forces the overlay to re-render on a publish
@@ -58,25 +32,12 @@ export function useStickyLastPrompt(input: UseStickyLastPromptInput): UseStickyL
   // agentId, upgraded here because the overlay is now memoized -- see sticky-prompt-fixes.json
   // finding 2).
   useLayoutEffect(() => {
-    lastVisibleRowIdsRef.current = new Set();
     publisher.publish(NO_STICKY_PROMPT);
   }, [publisher, input.agentId]);
 
   useEffect(() => {
-    recomputeAndPublish();
-  }, [input.items, recomputeAndPublish]);
+    publisher.publish({ prompt: selectLastPrompt(input.items) });
+  }, [input.items, publisher]);
 
-  const reportVisibleRowIds = useStableEvent((visibleRowIds: ReadonlySet<string>) => {
-    lastVisibleRowIdsRef.current = visibleRowIds;
-    recomputeAndPublish();
-  });
-
-  return useMemo(
-    () => ({
-      source: publisher,
-      reportReadingPosition: noopReportReadingPosition,
-      reportVisibleRowIds,
-    }),
-    [publisher, reportVisibleRowIds],
-  );
+  return useMemo(() => ({ source: publisher }), [publisher]);
 }

@@ -1,11 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { StreamItem, UserMessageItem } from "@/types/stream";
-import {
-  createSeenThenLeftTracker,
-  createStickyLastPromptPublisher,
-  isLastPromptAboveViewport,
-  selectLastPrompt,
-} from "./model";
+import { createStickyLastPromptPublisher, selectLastPrompt } from "./model";
 
 function at(second: number): Date {
   return new Date(`2026-01-01T00:00:${second.toString().padStart(2, "0")}.000Z`);
@@ -41,79 +36,10 @@ describe("selectLastPrompt", () => {
   });
 });
 
-describe("isLastPromptAboveViewport", () => {
-  const items = [user("p1", 1), assistant("a1", 2), assistant("a2", 3)];
-
-  it("is false when the reading-position row is the prompt's own row", () => {
-    expect(
-      isLastPromptAboveViewport({ lastPromptId: "p1", readingPositionRowId: "p1", items }),
-    ).toBe(false);
-  });
-
-  it("is false when the reading-position row comes before the prompt", () => {
-    const withHistory = [user("older", 0), ...items];
-    expect(
-      isLastPromptAboveViewport({
-        lastPromptId: "p1",
-        readingPositionRowId: "older",
-        items: withHistory,
-      }),
-    ).toBe(false);
-  });
-
-  it("is true when the reading-position row comes after the prompt", () => {
-    expect(
-      isLastPromptAboveViewport({ lastPromptId: "p1", readingPositionRowId: "a2", items }),
-    ).toBe(true);
-  });
-
-  it("is false when no reading position has been reported yet", () => {
-    expect(
-      isLastPromptAboveViewport({ lastPromptId: "p1", readingPositionRowId: null, items }),
-    ).toBe(false);
-  });
-
-  it("is false when either id can't be found in the item list", () => {
-    expect(
-      isLastPromptAboveViewport({ lastPromptId: "missing", readingPositionRowId: "a2", items }),
-    ).toBe(false);
-    expect(
-      isLastPromptAboveViewport({ lastPromptId: "p1", readingPositionRowId: "missing", items }),
-    ).toBe(false);
-  });
-});
-
-describe("createSeenThenLeftTracker", () => {
-  it("does not show on the first call even if not yet visible (never seen, not scrolled past)", () => {
-    const tracker = createSeenThenLeftTracker();
-    expect(tracker.update("p1", false)).toBe(false);
-  });
-
-  it("shows only after being seen visible and then leaving the viewable set", () => {
-    const tracker = createSeenThenLeftTracker();
-    expect(tracker.update("p1", true)).toBe(false);
-    expect(tracker.update("p1", true)).toBe(false);
-    expect(tracker.update("p1", false)).toBe(true);
-  });
-
-  it("stays hidden across repeated not-visible calls if never seen visible first", () => {
-    const tracker = createSeenThenLeftTracker();
-    expect(tracker.update("p1", false)).toBe(false);
-    expect(tracker.update("p1", false)).toBe(false);
-  });
-
-  it("resets when the tracked id changes", () => {
-    const tracker = createSeenThenLeftTracker();
-    expect(tracker.update("p1", true)).toBe(false);
-    expect(tracker.update("p1", false)).toBe(true);
-    expect(tracker.update("p2", false)).toBe(false);
-  });
-});
-
 describe("createStickyLastPromptPublisher", () => {
-  it("starts with no prompt and the bar hidden", () => {
+  it("starts with no prompt", () => {
     const publisher = createStickyLastPromptPublisher();
-    expect(publisher.getState()).toEqual({ prompt: null, barVisible: false });
+    expect(publisher.getState()).toEqual({ prompt: null });
   });
 
   it("notifies subscribers only when the published state actually changes", () => {
@@ -121,15 +47,16 @@ describe("createStickyLastPromptPublisher", () => {
     const listener = vi.fn();
     publisher.subscribe(listener);
 
-    const prompt = user("p1", 1) as UserMessageItem;
-    publisher.publish({ prompt, barVisible: true });
+    const promptOne = user("p1", 1) as UserMessageItem;
+    publisher.publish({ prompt: promptOne });
     expect(listener).toHaveBeenCalledTimes(1);
-    expect(publisher.getState()).toEqual({ prompt, barVisible: true });
+    expect(publisher.getState()).toEqual({ prompt: promptOne });
 
-    publisher.publish({ prompt, barVisible: true });
+    publisher.publish({ prompt: promptOne });
     expect(listener).toHaveBeenCalledTimes(1);
 
-    publisher.publish({ prompt, barVisible: false });
+    const promptTwo = user("p2", 2) as UserMessageItem;
+    publisher.publish({ prompt: promptTwo });
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
@@ -139,7 +66,7 @@ describe("createStickyLastPromptPublisher", () => {
     const unsubscribe = publisher.subscribe(listener);
     unsubscribe();
 
-    publisher.publish({ prompt: user("p1", 1) as UserMessageItem, barVisible: true });
+    publisher.publish({ prompt: user("p1", 1) as UserMessageItem });
     expect(listener).not.toHaveBeenCalled();
   });
 });

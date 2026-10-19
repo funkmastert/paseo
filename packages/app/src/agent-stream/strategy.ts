@@ -76,9 +76,6 @@ export interface StreamRenderInput {
   // The history row under the top of the viewport, for surfaces that mark where the reader
   // is in the transcript. Only the web viewport measures it today.
   onReadingPositionChange?: (rowId: string | null) => void;
-  // The set of history row ids currently on screen. Only the native viewport reports this
-  // today, via FlatList's own viewability tracking.
-  onViewableRowIdsChange?: (visibleRowIds: ReadonlySet<string>) => void;
   onNearHistoryStart: () => boolean | Promise<boolean>;
   isLoadingOlderHistory: boolean;
   hasOlderHistory: boolean;

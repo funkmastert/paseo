@@ -750,9 +750,8 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const handleReadingPositionChange = useCallback(
       (rowId: string | null) => {
         chatOutline.reportReadingPosition(rowId);
-        stickyLastPrompt.reportReadingPosition(rowId);
       },
-      [chatOutline, stickyLastPrompt],
+      [chatOutline],
     );
 
     useImperativeHandle(
@@ -1236,7 +1235,6 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
               onNearBottomChange: setIsNearBottom,
               onNearHistoryStartChange: setIsNearHistoryStart,
               onReadingPositionChange: handleReadingPositionChange,
-              onViewableRowIdsChange: stickyLastPrompt.reportVisibleRowIds,
               onNearHistoryStart: loadOlder,
               isLoadingOlderHistory: isLoadingOlder,
               hasOlderHistory: hasOlder,
