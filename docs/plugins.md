@@ -164,6 +164,22 @@ survive a fresh clone; npm's does. The plugin keeps its own `tsconfig.json` and 
 `typecheck`/`test` scripts — `npm run typecheck` and `npm run test` at the root run every
 workspace's script, so the vendored plugin's checks ride along automatically.
 
+The plugin compiler keeps only the host modules external (the `external` list in
+`packages/server/src/server/plugins/compiler.ts`). It bundles any other workspace package the
+plugin imports, such as `@getpaseo/protocol`, from that package's `dist` in the checkout the plugin
+loads from. A development checkout has that `dist` (see
+[Built workspace packages](development.md#built-workspace-packages)), so tests and typecheck pass
+there. A checkout kept only to run the plugin may never have built it. The compile then fails, the
+plugin shows `failed`, and the error names the package:
+
+```text
+Could not resolve "@getpaseo/protocol/jev/pricing"
+```
+
+Daemon start, install, enable and `paseo plugin reload` all compile the plugin. Run
+`npm run build:protocol` (or the build for whichever package it imports) in that checkout before the
+plugin first compiles there, and again whenever that package's source changes.
+
 `npm run lint` and `npm run format:check` are not workspace-scoped; both walk the whole tree by
 default. A plugin developed to its own standalone conventions will not match this repo's oxlint
 ruleset without a real refactor, so exclude its directory in `.oxlintrc.json` and `.oxfmtrc.json`
