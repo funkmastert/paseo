@@ -8,7 +8,7 @@ import { resolveJevConfig } from "../jev/config.js";
 import type { JevScriptedAnswer } from "../jev/fake.js";
 import { createJevService } from "../jev/service.js";
 import { AWAY_REPLY_GUARD } from "./decision.js";
-import { readTylerChoice } from "./job.js";
+import { readTylerChoice, TIMELINE_TAIL_ROWS } from "./job.js";
 import {
   MINUTE,
   T0,
@@ -210,6 +210,21 @@ describe("AwayReplyJob", () => {
     const report = await h.job.tick();
     expect(report?.entries).toMatchObject([{ action: "skipped", reason: "no-tyler-message" }]);
     expect(h.calls()).toBe(0);
+  });
+
+  it("still finds Tyler's message when a busy turn writes more rows than the tail holds", async () => {
+    const h = setup();
+    h.fleet.add(leaderView({ cwd: h.safeCwd }), []);
+    h.tyler("leader-1", "Fix the flaky test", T0);
+    // More noise than the tail read keeps, so Tyler's row falls out of the capped tail.
+    for (let index = 0; index < TIMELINE_TAIL_ROWS + 5; index += 1) {
+      h.fleet.append("leader-1", [assistant(`working on it, step ${index}`, T0 + index)]);
+    }
+    h.fleet.append("leader-1", [assistant(OPTIONS_MESSAGE, T0 + TIMELINE_TAIL_ROWS + 10)]);
+    h.at(T0 + 62 * MINUTE);
+    const report = await h.job.tick();
+    expect(report?.entries).toMatchObject([{ action: "replied", reason: "option" }]);
+    expect(h.fleet.turns).toEqual([{ agentId: "leader-1", text: GO_WITH_B_TEXT }]);
   });
 
   it.each([

@@ -1298,7 +1298,7 @@ A message counts as Tyler's only when its `clientMessageId` is in that record. A
 
 `readThread` (`away-reply/thread.ts`) takes everything since Tyler's last message: every message, reasoning block and tool call (a shell command, a file path, an MCP tool's input, and the content of a written script), and his last three messages. The job's own earlier replies are left out by the hash of their text; a message forging the marker is not.
 
-- No message of his in the last 1,000 rows: no reply. Nothing says what he last asked for.
+- No message of his in the last 1,000 rows: the job re-reads the agent's whole timeline before giving up, since a turn busy enough to fill the tail can push his last message out of it. No message of his anywhere: no reply. Nothing says what he last asked for.
 - His latest message, or any message after it that the daemon did not inject, says to stop, wait, hold, pause, not yet, leave it, I'll decide, no, later, and the rest of `isHoldMessage`: no reply.
 - For a finished turn, a cancel since the turn started: no reply.
 

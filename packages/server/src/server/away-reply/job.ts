@@ -71,8 +71,12 @@ const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60_000;
 const MAX_EVALUATIONS_PER_SWEEP = 3;
 /** Replies in a row with no message from Tyler in between. A hard rule, not config. */
 export const MAX_CONSECUTIVE_AUTO_REPLIES = 2;
-/** Enough to reach back to Tyler's last message in a long turn; past it, nothing is answered. */
-const TIMELINE_TAIL_ROWS = 1000;
+/**
+ * The usual tail read. A turn busy enough to fill it without reaching Tyler's last message falls
+ * back to the whole timeline (`consider`) before giving up, so a long orchestration never reads as
+ * "no message from him" just because it wrote more than this many rows.
+ */
+export const TIMELINE_TAIL_ROWS = 1000;
 /** A follow-up with no word from Tyler this long after the decision is closed as such. */
 const FOLLOW_UP_WINDOW_MS = 24 * 60 * 60_000;
 const MONITOR_NAME = "away-reply";
@@ -461,10 +465,17 @@ export class AwayReplyJob {
     if (limited) return skip(limited.reason, limited.final);
 
     const record = this.state.agent(agent.id);
-    const read = readThread(rows, {
+    const identity = {
       humanMessageIds: new Set(record.humanMessageIds),
       sentHashes: new Set(record.sentHashes),
-    });
+    };
+    let read = readThread(rows, identity);
+    if (!read.ok && read.reason === "no-tyler-message" && rows.length >= TIMELINE_TAIL_ROWS) {
+      // A long turn can write more than the tail holds; Tyler's last message may sit before it.
+      // Re-read against the whole timeline before concluding there is nothing to answer.
+      const allRows = this.deps.readTimelineTail(agent.id, 0) ?? rows;
+      read = readThread(allRows, identity);
+    }
     if (!read.ok) return skip(read.reason, true);
     const hold = holdReason(read.thread);
     if (hold) return skip(hold, true);
