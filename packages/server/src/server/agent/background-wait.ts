@@ -147,9 +147,10 @@ function waitSentences(message: string): WaitSentence[] {
 /** Whether a final message says the agent is waiting on background work. Pure. */
 export function findBackgroundWait(message: string): BackgroundWaitMatch | null {
   for (const { text, plain } of waitSentences(message)) {
+    if (REPORTS_DONE.test(plain)) continue;
     const waits =
       WAIT_PATTERNS.some((pattern) => pattern.test(plain)) ||
-      (IN_BACKGROUND.some((pattern) => pattern.test(plain)) && !REPORTS_DONE.test(plain));
+      IN_BACKGROUND.some((pattern) => pattern.test(plain));
     if (waits) return { quote: clipQuote(text) };
   }
   return null;
@@ -158,6 +159,7 @@ export function findBackgroundWait(message: string): BackgroundWaitMatch | null 
 /** Whether a final message says the agent is waiting on CI, a PR, a deploy or a review. Pure. */
 export function findExternalWait(message: string): ExternalWaitMatch | null {
   for (const { text, plain } of waitSentences(message)) {
+    if (REPORTS_DONE.test(plain)) continue;
     for (const pattern of EXTERNAL_PATTERNS) {
       const target = plain.match(pattern)?.[1];
       if (target) return { quote: clipQuote(text), target };
@@ -266,6 +268,64 @@ export function readFinalTurnWork(rows: readonly AgentTimelineRow[]): FinalTurnW
     if (launch && !launched.includes(launch)) launched.push(launch);
   }
   return { launched, watcher };
+}
+
+export type FinalTurnWaitClass = BackgroundWaitClass | "watcher";
+
+export interface ClassifiedFinalTurnWait {
+  waitClass: FinalTurnWaitClass;
+  /** The sentence that says it is waiting, when the class has one. */
+  quote: string | null;
+  launched: string[];
+  target: string | null;
+}
+
+/**
+ * What a final turn's wait looks like, from its own tool calls and its last message. Shared by
+ * the background-wait stall rule (`agent-stall-sweep.ts`'s `readIdleWait`) and finish review's
+ * interim check (`finish-obligation-service.ts`'s `readFinalTurn`), so the two detectors cannot
+ * drift apart.
+ *
+ * Every class requires a matching wait statement in the final message, including `watcher`: a
+ * `ScheduleWakeup`/`create_schedule`/`create_heartbeat` call alone is not evidence of a wait — a
+ * task whose actual deliverable is setting up a schedule ends by calling it too, with a closing
+ * message that says the work is done.
+ *
+ * `hasLiveParent` is the stall sweep's own exclusion on the external-wait class: a live parent
+ * already owns what happens next, so an external wait with nothing launched is not its stall to
+ * nudge. Finish review passes `false` — it IS that live parent, building the very report the
+ * exclusion defers to.
+ */
+export function classifyFinalTurnWait(
+  rows: readonly AgentTimelineRow[],
+  options: { hasLiveParent: boolean },
+): ClassifiedFinalTurnWait | null {
+  const work = readFinalTurnWork(rows);
+  const text = readFinalMessage(rows)?.text ?? null;
+  const backgroundWait = text ? findBackgroundWait(text) : null;
+  const externalWait = text ? findExternalWait(text) : null;
+  const quote = (backgroundWait ?? externalWait)?.quote ?? null;
+  if (work.watcher !== null) {
+    if (!backgroundWait && !externalWait) return null;
+    return {
+      waitClass: "watcher",
+      quote,
+      launched: work.launched,
+      target: externalWait?.target ?? null,
+    };
+  }
+  if (work.launched.length > 0 && (backgroundWait ?? externalWait)) {
+    return { waitClass: "own-work", quote, launched: work.launched, target: null };
+  }
+  if (work.launched.length === 0 && externalWait && !options.hasLiveParent) {
+    return {
+      waitClass: "external-wait",
+      quote: externalWait.quote,
+      launched: [],
+      target: externalWait.target,
+    };
+  }
+  return null;
 }
 
 const SHELL_NAMES: ReadonlySet<string> = new Set([
