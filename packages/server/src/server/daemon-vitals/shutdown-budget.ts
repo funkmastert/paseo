@@ -15,14 +15,22 @@ export const ADMISSION_QUEUE_FLUSH_TIMEOUT_MS = 5_000;
  */
 export const SIMULATOR_SHUTDOWN_WAIT_MS = 2_000;
 
+/**
+ * `JevService.stop()`: the JEV ledger, savings rollup, decisions (up to 4 MB) and audit queue on
+ * their way to disk. Each is a few milliseconds on a healthy disk; a stuck one loses what is left.
+ */
+export const JEV_STOP_TIMEOUT_MS = 1_000;
+
 /** Every bounded wait stop() runs one after another. */
 export const SHUTDOWN_STEP_BOUNDS_MS: Readonly<Record<string, number>> = {
   admissionQueueFlush: ADMISSION_QUEUE_FLUSH_TIMEOUT_MS,
+  jevStop: JEV_STOP_TIMEOUT_MS,
   simulatorShutdownWait: SIMULATOR_SHUTDOWN_WAIT_MS,
 };
 
 /**
  * What the bounded steps must leave for the unbounded ones: closing agents, the storage flush,
  * the provider runtime, closing sockets. They are fast on a healthy machine, but nothing caps them.
+ * The JEV stop was one of them until it got its own bound, which came out of this reserve.
  */
-export const UNBOUNDED_SHUTDOWN_STEPS_RESERVE_MS = 3_000;
+export const UNBOUNDED_SHUTDOWN_STEPS_RESERVE_MS = 2_000;

@@ -4,6 +4,8 @@ import path from "node:path";
 import { setTimeout as sleepFor } from "node:timers/promises";
 import type { Logger } from "pino";
 
+import { JEV_STOP_TIMEOUT_MS } from "../daemon-vitals/shutdown-budget.js";
+import { withTimeout } from "../../utils/promise-timeout.js";
 import { buildJevAuditLine, JevAudit } from "./audit.js";
 import { createJevConfigReader, type JevConfigReader, type ResolvedJevConfig } from "./config.js";
 import type {
@@ -148,7 +150,10 @@ export interface JevServiceRuntime extends JevService {
   readonly savings: JevSavingsLedger;
   /** Loads the ledger's totals and narrows the audit files. Call once before serving. */
   start(): Promise<void>;
-  /** Flushes the ledger and the audit queue. */
+  /**
+   * Flushes the ledger, savings, decisions and audit queue. Never rejects, and returns within
+   * `JEV_STOP_TIMEOUT_MS` even when a write hangs.
+   */
   stop(): Promise<void>;
   /** The push for a lane's first spent budget of the day (`jev_budget_exhausted`). */
   setBudgetNoticeSender(send: ((event: JevBudgetExhaustedEvent) => void) | null): void;
@@ -1193,10 +1198,20 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
       else if (snap.config && !keyPresent(snap)) gateReason(snap, null);
     },
     async stop() {
-      await savings.stop();
-      await ledger.stop();
-      await decisions.stop();
-      await audit.flush();
+      const flushed = (async () => {
+        await savings.stop();
+        await ledger.stop();
+        await decisions.stop();
+        await audit.flush();
+      })();
+      // Bounded, so a stuck disk can't hold the rest of the daemon's shutdown (shutdown-budget.ts).
+      await withTimeout(
+        flushed,
+        JEV_STOP_TIMEOUT_MS,
+        `jev: stop timed out after ${JEV_STOP_TIMEOUT_MS} ms`,
+      ).catch((error: unknown) => {
+        logger.warn({ err: error }, "jev: the ledger, decisions or audit may be missing from disk");
+      });
     },
     setBudgetNoticeSender(send) {
       sendBudgetNotice = send;

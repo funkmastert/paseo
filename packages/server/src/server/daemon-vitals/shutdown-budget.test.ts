@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  JEV_STOP_TIMEOUT_MS,
   SHUTDOWN_STEP_BOUNDS_MS,
   SIMULATOR_SHUTDOWN_WAIT_MS,
   UNBOUNDED_SHUTDOWN_STEPS_RESERVE_MS,
@@ -19,5 +20,10 @@ describe("daemon stop() budget", () => {
     // A wedged simctl (the 2026-10-08 CoreSimulatorService failure) must not be able to spend
     // the budget the held-child and storage flushes need.
     expect(Object.values(SHUTDOWN_STEP_BOUNDS_MS)).toContain(SIMULATOR_SHUTDOWN_WAIT_MS);
+  });
+
+  test("the JEV stop is one of the bounded steps", () => {
+    // Its decisions file can be 4 MB; a stuck disk must not hold the sockets and vitals after it.
+    expect(Object.values(SHUTDOWN_STEP_BOUNDS_MS)).toContain(JEV_STOP_TIMEOUT_MS);
   });
 });
