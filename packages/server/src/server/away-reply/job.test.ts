@@ -523,31 +523,15 @@ describe("AwayReplyJob", () => {
     expect(report?.entries).toMatchObject([{ action: "skipped", reason: "presence-unknown" }]);
   });
 
-  it("does not answer a finished turn Tyler has already read", async () => {
+  it("still answers a finished turn Tyler has only glanced at", async () => {
+    // A glance that clears the unread flag is not a reply: it no longer holds the episode. Only
+    // a real reply, a hold phrase, or a cancel does (docs/jev.md, "Feature 14: away auto-reply").
     const h = setup();
     h.waitingLeader();
     h.fleet.agent("leader-1").requiresAttention = false;
     h.at(T0 + 62 * MINUTE);
     const report = await h.job.tick();
-    expect(report?.entries).toMatchObject([{ action: "skipped", reason: "tyler-read-thread" }]);
-    expect(h.calls()).toBe(0);
-  });
-
-  it("defers a glance with no reply rather than closing the episode for good", async () => {
-    const h = setup();
-    h.waitingLeader();
-    h.fleet.agent("leader-1").requiresAttention = false;
-    h.at(T0 + 62 * MINUTE);
-    const first = await h.job.tick();
-    expect(first?.entries).toMatchObject([{ action: "skipped", reason: "tyler-read-thread" }]);
-    expect(h.calls()).toBe(0);
-
-    // Something re-raises the unread flag later, with the episode otherwise unchanged. A
-    // permanent close would still skip it; a deferral reconsiders and can reply.
-    h.fleet.agent("leader-1").requiresAttention = true;
-    h.at(T0 + 70 * MINUTE);
-    const second = await h.job.tick();
-    expect(second?.entries).toMatchObject([{ action: "replied" }]);
+    expect(report?.entries).toMatchObject([{ action: "replied" }]);
     expect(h.fleet.turns).toHaveLength(1);
   });
 

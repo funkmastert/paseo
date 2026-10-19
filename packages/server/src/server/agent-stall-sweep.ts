@@ -590,6 +590,7 @@ export class AgentStallSweep {
       judgment,
       action: describeStallAction(action),
       wouldAction: describeStallAction(would),
+      changed: action.kind !== "today",
       quietForMs: candidate.quietForMs,
     });
     this.options.logger.info(
@@ -614,11 +615,17 @@ export class AgentStallSweep {
     judgment: StallJudgment;
     action: string;
     wouldAction: string;
+    /** Whether the code's action actually differs from today's no-JEV default. */
+    changed: boolean;
     quietForMs: number;
   }): void {
     const { agent, judgment } = input;
     const summary = summarizeJudgment(judgment);
     if (judgment.callId !== null) {
+      // `mode` is shadow or live, from the outcome; `applied` here means the action changed, as
+      // every track but remediation's reads it (docs/jev.md, "Decision store").
+      let mode: "live" | "shadow" | undefined;
+      if (summary) mode = summary.applied ? "live" : "shadow";
       this.deps.judgeStall?.record({
         agentId: agent.id,
         callId: judgment.callId,
@@ -630,7 +637,9 @@ export class AgentStallSweep {
         verdict: describeVerdict(judgment),
         confidence: summary?.confidence ?? null,
         action: summary?.applied ? input.action : `would have: ${input.wouldAction}`,
-        applied: summary?.applied === true,
+        applied: input.changed,
+        ...(mode ? { mode } : {}),
+        wouldBe: input.wouldAction,
       });
     }
     this.measure({
@@ -745,6 +754,9 @@ export class AgentStallSweep {
       judgment,
       action: applied ? would : "nothing",
       wouldAction: would,
+      // The watch only ever acts by opening a report to the ladder; everything else is a no-op
+      // description, never mind what `would` says.
+      changed: applied && reported !== null,
       quietForMs,
     });
     if (reported) await this.reportLoop(input.report, agent, reported, nowMs);

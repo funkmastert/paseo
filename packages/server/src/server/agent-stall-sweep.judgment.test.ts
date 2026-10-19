@@ -444,6 +444,35 @@ describe("a stall candidate's judgment", () => {
     expect(h.stallObservations("a1").at(-1)?.escalation?.personFirst).toBeUndefined();
   });
 
+  test("live: the decision note carries mode and applied for the action actually taken", async () => {
+    const h = new Harness({ jev: ANSWERED, answers: choice("blocked_missing_info", 0.82) });
+    h.add("a1");
+    h.timeline("a1", [assistantRow("I need the staging credentials to continue.")]);
+    await h.warmUp();
+    expect(h.jev.listDecisions("a1")).toEqual([
+      expect.objectContaining({
+        feature: "stallJudgment",
+        verdict: "blocked_missing_info (0.82)",
+        mode: "live",
+        applied: true,
+        wouldBe: expect.stringContaining("person first"),
+      }),
+    ]);
+  });
+
+  test("live, but the answer is below the floor: no change, so the note is not applied", async () => {
+    const h = new Harness({ jev: ANSWERED, answers: choice("blocked_missing_info", 0.6) });
+    h.add("a1");
+    await h.warmUp();
+    expect(h.jev.listDecisions("a1")).toEqual([
+      expect.objectContaining({
+        feature: "stallJudgment",
+        mode: "live",
+        applied: false,
+      }),
+    ]);
+  });
+
   test("shadow by default: nudged exactly as today, and the would-be action recorded", async () => {
     const h = new Harness({ answers: choice("blocked_missing_info", 0.9) });
     h.add("a1");
@@ -585,6 +614,11 @@ describe("the loop watch", () => {
     expect(h.nudges).toEqual([]);
     expect(h.handoffs).toEqual([]);
     expect(h.jev.transport.calls).toHaveLength(2);
+    // The first answer only waits for a second; the second is the one that actually reports.
+    expect(h.jev.listDecisions("a1")).toEqual([
+      expect.objectContaining({ feature: "stallJudgment", mode: "live", applied: true }),
+      expect.objectContaining({ feature: "stallJudgment", mode: "live", applied: false }),
+    ]);
 
     // Reported: not asked again while the same repeat holds; the ladder hears it every sweep.
     await h.tick();
