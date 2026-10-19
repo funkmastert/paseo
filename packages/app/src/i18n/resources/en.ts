@@ -2200,6 +2200,11 @@ export const en = {
     accessibilityLabel: "JEV decision",
     accessibilityLabelCount: "{{count}} JEV decisions",
     wouldHaveAction: "Would have: {{action}}",
+    forAgent: 'For "{{title}}"',
+  },
+  jevHeaderBadge: {
+    label: "JEV · {{count}}",
+    accessibilityLabel: "{{count}} JEV decisions",
   },
   tokenUsage: {
     byModelTitle: "Tokens by model",

@@ -29,6 +29,8 @@ function line(overrides: Partial<JevDecisionLine> = {}): JevDecisionLine {
     tag: null,
     cost: "$0.0001",
     at: new Date("2026-10-16T12:00:00.000Z"),
+    summary: null,
+    subjectLabel: null,
     ...overrides,
   };
 }
@@ -55,6 +57,22 @@ describe("buildJevMarkerLines", () => {
       null,
     );
     expect(lines.map((l) => l.key)).toEqual(["ok"]);
+  });
+
+  it("carries the daemon's summary onto the marker line", () => {
+    const lines = buildJevMarkerLines(
+      [record({ summary: "JEV judged the stall needs you" })],
+      null,
+    );
+    expect(lines[0].summary).toBe("JEV judged the stall needs you");
+  });
+
+  it("names the child a decision is about", () => {
+    const lines = buildJevMarkerLines(
+      [record({ subjectAgentId: "child-1", subjectAgentTitle: "rename helper" })],
+      null,
+    );
+    expect(lines[0].subjectLabel).toBe("rename helper");
   });
 });
 

@@ -2191,6 +2191,11 @@ export const ar: TranslationResources = {
     accessibilityLabel: "قرار JEV",
     accessibilityLabelCount: "{{count}} قرارات JEV",
     wouldHaveAction: "كان سيصبح: {{action}}",
+    forAgent: 'لـ "{{title}}"',
+  },
+  jevHeaderBadge: {
+    label: "JEV · {{count}}",
+    accessibilityLabel: "{{count}} قرارات JEV",
   },
   tokenUsage: {
     byModelTitle: "الرموز حسب النموذج",

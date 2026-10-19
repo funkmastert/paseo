@@ -23,6 +23,17 @@ export interface JevDecisionLine {
   tag: JevDecisionTag | null;
   cost: string | null;
   at: Date | null;
+  /**
+   * A plain-words one-liner (docs/jev.md, "Feature 11"). Absent from an older daemon: the chip
+   * falls back to the feature/verdict/action rendering it used before this field existed.
+   */
+  summary: string | null;
+  /**
+   * Set when this decision is about a child agent rather than the one the view was built for —
+   * the child's title, or a generic fallback when it has none. Null when it is about the viewing
+   * agent itself.
+   */
+  subjectLabel: string | null;
 }
 
 export interface JevDecisionsView {
@@ -67,6 +78,15 @@ export function parseJevDecisionAt(at: string): Date | null {
   return Number.isFinite(ms) ? new Date(ms) : null;
 }
 
+/**
+ * The text naming the child a decision is about, or null when the decision is about the agent
+ * the list was asked for. A child with no title still gets a generic fallback, never a blank.
+ */
+export function subjectLabelFor(record: JevDecisionRecord): string | null {
+  if (!record.subjectAgentId) return null;
+  return record.subjectAgentTitle?.trim() || "a subagent";
+}
+
 export function buildJevDecisionsView(
   decisions: readonly JevDecisionRecord[],
   status: JevStatus | null,
@@ -82,6 +102,8 @@ export function buildJevDecisionsView(
     tag: tagFor(record, status),
     cost: formatJevCost(record.costUsd, provider),
     at: parseJevDecisionAt(record.at),
+    summary: record.summary ?? null,
+    subjectLabel: subjectLabelFor(record),
   }));
   return { lines, hidden: Math.max(0, decisions.length - lines.length) };
 }

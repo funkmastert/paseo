@@ -66,6 +66,9 @@ function JevDecisionRow({ line, now }: { line: JevDecisionLine; now?: Date }) {
           </Text>
         ) : null}
       </View>
+      {line.subjectLabel ? (
+        <Text style={styles.muted}>{t("jevMarker.forAgent", { title: line.subjectLabel })}</Text>
+      ) : null}
       <Text style={styles.question}>{line.question}</Text>
       <Text style={styles.muted}>{`${line.verdict} → ${line.action}`}</Text>
     </View>

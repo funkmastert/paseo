@@ -270,6 +270,15 @@ export interface JevDecisionRecord extends JevDecisionNote {
   /** ISO time the decision was recorded. */
   at: string;
   costUsd: number | null;
+  /**
+   * Set when this record is about a child agent rather than the one `jev.decisions.list` was
+   * asked for (feature 11, "Decision store"). Absent for a record about the agent itself.
+   */
+  subjectAgentId?: string;
+  /** The child's title at read time, read fresh on every list; null when it had none. */
+  subjectAgentTitle?: string | null;
+  /** A plain-words one-liner built per feature (feature 11); computed at read time. */
+  summary?: string;
 }
 
 /** The foundation's in-memory store (`decisions.ts`). Feature tracks only call `record`. */
@@ -349,8 +358,12 @@ export interface JevService {
   readonly decisions: JevDecisionSink;
   /** The savings ledger (docs/jev.md, "Savings"): one record per JEV involvement. */
   readonly savings: JevSavingsSink;
-  /** The agent's decisions, newest first, including its spawn hint. Serves `jev.decisions.list`. */
-  listDecisions(agentId: string): JevDecisionRecord[];
+  /**
+   * The agent's decisions, newest first, including its spawn hint. Serves `jev.decisions.list`.
+   * `includeChildren` merges in the decisions of agents whose `paseo.parent-agent-id` label names
+   * this one (direct children only), each tagged with `subjectAgentId`/`subjectAgentTitle`.
+   */
+  listDecisions(agentId: string, options?: { includeChildren?: boolean }): JevDecisionRecord[];
 }
 
 export interface JevTransportResponse {

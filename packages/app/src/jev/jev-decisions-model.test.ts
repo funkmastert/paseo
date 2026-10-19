@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { JevDecisionRecord, JevStatus } from "@getpaseo/protocol/jev/rpc-schemas";
-import { buildJevDecisionsView, formatJevCost } from "./jev-decisions-model";
+import { buildJevDecisionsView, formatJevCost, subjectLabelFor } from "./jev-decisions-model";
 
 function record(overrides: Partial<JevDecisionRecord> = {}): JevDecisionRecord {
   return {
@@ -53,6 +53,8 @@ describe("buildJevDecisionsView", () => {
           tag: "shadow",
           cost: "$0.0002",
           at: new Date("2026-09-29T17:00:00.000Z"),
+          summary: null,
+          subjectLabel: null,
         },
       ],
       hidden: 0,
@@ -127,6 +129,52 @@ describe("buildJevDecisionsView", () => {
   it("keeps an unknown feature's id rather than dropping the decision", () => {
     expect(buildJevDecisionsView([record({ feature: "newFeature" })], null).lines[0].feature).toBe(
       "newFeature",
+    );
+  });
+});
+
+describe("buildJevDecisionsView: summary and subject naming", () => {
+  it("passes the daemon's summary through unchanged", () => {
+    const view = buildJevDecisionsView(
+      [record({ summary: "JEV judged the stall needs you" })],
+      null,
+    );
+    expect(view.lines[0].summary).toBe("JEV judged the stall needs you");
+  });
+
+  it("reads null from an older daemon that sends no summary", () => {
+    expect(buildJevDecisionsView([record()], null).lines[0].summary).toBeNull();
+  });
+
+  it("names a child agent by its title", () => {
+    const view = buildJevDecisionsView(
+      [record({ subjectAgentId: "child-1", subjectAgentTitle: "rename helper" })],
+      null,
+    );
+    expect(view.lines[0].subjectLabel).toBe("rename helper");
+  });
+
+  it("falls back to a generic label for an untitled child", () => {
+    const view = buildJevDecisionsView(
+      [record({ subjectAgentId: "child-1", subjectAgentTitle: null })],
+      null,
+    );
+    expect(view.lines[0].subjectLabel).toBe("a subagent");
+  });
+
+  it("is null for a decision about the agent itself", () => {
+    expect(buildJevDecisionsView([record()], null).lines[0].subjectLabel).toBeNull();
+  });
+});
+
+describe("subjectLabelFor", () => {
+  it("is null without a subjectAgentId", () => {
+    expect(subjectLabelFor(record())).toBeNull();
+  });
+
+  it("trims a blank title down to the generic fallback", () => {
+    expect(subjectLabelFor(record({ subjectAgentId: "child-1", subjectAgentTitle: "   " }))).toBe(
+      "a subagent",
     );
   });
 });

@@ -5,6 +5,7 @@ import {
 } from "@getpaseo/protocol/agent-labels";
 
 import type { JevDecisionNote, JevDecisionRecord, JevDecisionSink } from "./contract.js";
+import { summarizeJevDecision } from "./decision-summary.js";
 import { parseJevSpawnLabel } from "./savings-spawn.js";
 
 /**
@@ -63,6 +64,11 @@ export class JevDecisionStore implements JevDecisionSink {
         at: new Date(this.now()).toISOString(),
         costUsd,
       };
+      // Computed once here, not on every `list()` read: cheap either way, but a decision is
+      // read on every poll of every open panel it's visible in. The pending spawn-hint note
+      // (below) gets its own summary once its `applied`/`wouldBe` resolve at attach time, since
+      // this one is incomplete until then.
+      record.summary = summarizeJevDecision(record);
       if (note.agentId === null) this.recordPending(note.callId, record);
       else this.recordForAgent(note.agentId, record);
     } catch {
@@ -82,11 +88,13 @@ export class JevDecisionStore implements JevDecisionSink {
     const wouldBe = spawn
       ? { wouldBe: `${spawn.wouldClass ?? "standard"} on ${spawn.wouldModel ?? "?"}` }
       : {};
-    own.push(
-      applied
-        ? { ...pendingRecord, ...wouldBe, agentId, applied, action: SPAWN_HINT_APPLIED_ACTION }
-        : { ...pendingRecord, ...wouldBe, agentId, applied },
-    );
+    const attached: JevDecisionRecord = applied
+      ? { ...pendingRecord, ...wouldBe, agentId, applied, action: SPAWN_HINT_APPLIED_ACTION }
+      : { ...pendingRecord, ...wouldBe, agentId, applied };
+    // Recomputed: the pending note's own summary (set in record(), above) was built before
+    // `applied`/`wouldBe` resolved, so it no longer matches this record.
+    attached.summary = summarizeJevDecision(attached);
+    own.push(attached);
     return own;
   }
 

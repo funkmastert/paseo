@@ -1,6 +1,12 @@
 import type { JevDecisionRecord, JevStatus } from "@getpaseo/protocol/jev/rpc-schemas";
 import type { JevMarkerItem } from "@/types/stream";
-import { formatJevCost, jevFeatureLabel, parseJevDecisionAt, tagFor } from "./jev-decisions-model";
+import {
+  formatJevCost,
+  jevFeatureLabel,
+  parseJevDecisionAt,
+  subjectLabelFor,
+  tagFor,
+} from "./jev-decisions-model";
 import type { JevDecisionLine } from "./jev-decisions-model";
 
 /**
@@ -25,6 +31,8 @@ export function buildJevMarkerLines(
       tag: tagFor(record, status),
       cost: formatJevCost(record.costUsd, provider),
       at,
+      summary: record.summary ?? null,
+      subjectLabel: subjectLabelFor(record),
     });
   }
   return lines.sort((a, b) => (a.at?.getTime() ?? 0) - (b.at?.getTime() ?? 0));

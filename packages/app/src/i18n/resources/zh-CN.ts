@@ -2164,6 +2164,11 @@ export const zhCN: TranslationResources = {
     accessibilityLabel: "JEV 决策",
     accessibilityLabelCount: "{{count}} 条 JEV 决策",
     wouldHaveAction: "本会执行：{{action}}",
+    forAgent: "针对“{{title}}”",
+  },
+  jevHeaderBadge: {
+    label: "JEV · {{count}}",
+    accessibilityLabel: "{{count}} 条 JEV 决策",
   },
   tokenUsage: {
     byModelTitle: "按模型统计 Token",

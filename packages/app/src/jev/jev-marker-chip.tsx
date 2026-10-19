@@ -57,21 +57,50 @@ export function JevMarkerChip({ lines }: { lines: JevDecisionLine[] }) {
   );
 }
 
+/** The tag badge and cost, shared by both the pre-`summary` and `summary`-first layouts below. */
+function JevMarkerMeta({ tag, cost }: { tag: JevDecisionTag | null; cost: string | null }) {
+  const { t } = useTranslation();
+  return (
+    <>
+      {tag ? <StatusBadge label={t(TAG_KEYS[tag])} /> : null}
+      {cost ? <Text style={styles.cost}>{cost}</Text> : null}
+    </>
+  );
+}
+
 function JevMarkerDetailRow({ line }: { line: JevDecisionLine }) {
   const { t } = useTranslation();
+  // An older daemon sends no summary; render exactly as before this field existed.
+  if (!line.summary) {
+    return (
+      <View style={styles.detailRow}>
+        <View style={styles.detailHeader}>
+          <Text style={styles.feature} numberOfLines={1}>
+            {line.feature}
+          </Text>
+          <JevMarkerMeta tag={line.tag} cost={line.cost} />
+        </View>
+        <Text style={styles.question}>{line.question}</Text>
+        <Text style={styles.muted}>
+          {line.verdict} →{" "}
+          {line.tag ? t("jevMarker.wouldHaveAction", { action: line.action }) : line.action}
+        </Text>
+      </View>
+    );
+  }
   return (
     <View style={styles.detailRow}>
       <View style={styles.detailHeader}>
-        <Text style={styles.feature} numberOfLines={1}>
-          {line.feature}
+        <Text style={styles.summary} numberOfLines={2}>
+          {line.summary}
         </Text>
-        {line.tag ? <StatusBadge label={t(TAG_KEYS[line.tag])} /> : null}
-        {line.cost ? <Text style={styles.cost}>{line.cost}</Text> : null}
+        <JevMarkerMeta tag={line.tag} cost={line.cost} />
       </View>
-      <Text style={styles.question}>{line.question}</Text>
+      {line.subjectLabel ? (
+        <Text style={styles.muted}>{t("jevMarker.forAgent", { title: line.subjectLabel })}</Text>
+      ) : null}
       <Text style={styles.muted}>
-        {line.verdict} →{" "}
-        {line.tag ? t("jevMarker.wouldHaveAction", { action: line.action }) : line.action}
+        {line.feature} · {line.verdict}
       </Text>
     </View>
   );
@@ -103,6 +132,13 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foreground,
     fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.medium,
+  },
+  summary: {
+    flexShrink: 1,
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
+    lineHeight: theme.fontSize.sm * 1.4,
   },
   cost: {
     marginLeft: "auto",

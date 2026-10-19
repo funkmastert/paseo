@@ -1807,6 +1807,8 @@ export class VoiceAssistantWebSocketServer {
         jevAsk: true,
         // COMPAT(jevSavings): added in v0.8.x, remove gate after 2027-03-30.
         jevSavings: true,
+        // COMPAT(jevChildDecisions): added in v0.9.x, remove gate after 2027-04-18.
+        jevChildDecisions: true,
         // COMPAT(codexGuardStatus): added in v0.9.x, remove gate after 2027-10-10.
         codexGuardStatus: true,
         // COMPAT(deviceManagement): added in v0.8.x, remove gate after 2027-09-30.

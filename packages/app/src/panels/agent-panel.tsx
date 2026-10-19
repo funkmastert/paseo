@@ -101,6 +101,7 @@ import type { Theme } from "@/styles/theme";
 import type { PendingPermission } from "@/types/shared";
 import type { StreamItem, TodoEntry } from "@/types/stream";
 import type { ViewedTimelineStatus, ViewedTimelineUiBridge } from "@/timeline/viewed-timeline-sync";
+import { JevHeaderBadge } from "@/jev/jev-header-badge";
 import { useArchiveFinishedSubagents, useSubagentsForParent } from "@/subagents";
 import { getInitDeferred, getInitKey } from "@/utils/agent-initialization";
 import { derivePendingPermissionKey, normalizeAgentSnapshot } from "@/utils/agent-snapshots";
@@ -1419,6 +1420,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
     >
       <View style={styles.root} collapsable={false}>
         <DockedChatSurface disabled={isArchivingCurrentAgent || Boolean(readOnly)}>
+          <JevHeaderBadge serverId={serverId} agentId={agentId} />
           {contentContainer}
 
           {showHistorySyncError ? (

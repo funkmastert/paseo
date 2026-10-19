@@ -964,4 +964,101 @@ describe("JevService: ledger, audit, status", () => {
     expect(listed[0]).toMatchObject({ callId: "call-1", applied: true });
     expect(service.listDecisions("someone-else")).toEqual([]);
   });
+
+  it("attaches a summary to every decision, built per feature", async () => {
+    const { service } = makeHarness();
+    service.decisions.record({
+      agentId: "agent-1",
+      callId: "call-stall",
+      feature: "stallJudgment",
+      question: "Is the agent stuck?",
+      verdict: "stuck (0.8)",
+      confidence: 0.8,
+      action: "nudged with a person-first handoff",
+      applied: true,
+    });
+    const [decision] = service.listDecisions("agent-1");
+    expect(decision.summary).toBe("JEV judged the stall needs you");
+  });
+
+  it("falls back to a generic summary for a feature it doesn't recognize", async () => {
+    const { service } = makeHarness();
+    service.decisions.record({
+      // Cast: a feature id a sibling track added that this build doesn't know yet.
+      feature: "finishReview" as unknown as JevDecideInput["feature"],
+      agentId: "agent-1",
+      callId: "call-unknown",
+      question: "Does this finish look done?",
+      verdict: "missing tests (0.8)",
+      confidence: 0.8,
+      action: "flagged on the finish report",
+      applied: true,
+    });
+    const [decision] = service.listDecisions("agent-1");
+    expect(decision.summary).toBe("JEV ran finishReview: missing tests (0.8)");
+  });
+
+  it("includeChildren merges a direct child's decisions, tagged with its id and title", async () => {
+    const { service } = makeHarness({
+      extra: {
+        readChildAgents: (agentId) =>
+          agentId === "leader-1" ? [{ id: "child-1", title: "rename helper" }] : [],
+      },
+    });
+    service.decisions.record({
+      agentId: "leader-1",
+      callId: "call-own",
+      feature: "stallJudgment",
+      question: "Is the agent stuck?",
+      verdict: "stuck",
+      confidence: null,
+      action: "nudged",
+      applied: true,
+    });
+    service.decisions.record({
+      agentId: "child-1",
+      callId: "call-child",
+      feature: "spawnHint",
+      question: "What class of work is this create?",
+      verdict: "mechanical",
+      confidence: 0.9,
+      action: "classifier input at create",
+      applied: false,
+    });
+
+    const ownOnly = service.listDecisions("leader-1");
+    expect(ownOnly.map((d) => d.callId)).toEqual(["call-own"]);
+
+    const withChildren = service.listDecisions("leader-1", { includeChildren: true });
+    expect(withChildren.map((d) => d.callId).sort()).toEqual(["call-child", "call-own"]);
+    const childRecord = withChildren.find((d) => d.callId === "call-child");
+    expect(childRecord).toMatchObject({
+      agentId: "child-1",
+      subjectAgentId: "child-1",
+      subjectAgentTitle: "rename helper",
+    });
+    const ownRecord = withChildren.find((d) => d.callId === "call-own");
+    expect(ownRecord?.subjectAgentId).toBeUndefined();
+  });
+
+  it("includeChildren never throws when readChildAgents throws", async () => {
+    const { service } = makeHarness({
+      extra: {
+        readChildAgents: () => {
+          throw new Error("boom");
+        },
+      },
+    });
+    service.decisions.record({
+      agentId: "leader-1",
+      callId: "call-own",
+      feature: "stallJudgment",
+      question: "Is the agent stuck?",
+      verdict: "stuck",
+      confidence: null,
+      action: "nudged",
+      applied: true,
+    });
+    expect(service.listDecisions("leader-1", { includeChildren: true })).toHaveLength(1);
+  });
 });

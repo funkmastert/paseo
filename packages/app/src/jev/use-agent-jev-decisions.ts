@@ -13,8 +13,9 @@ const AGENT_JEV_DECISIONS_STALE_TIME_MS = 5 * 1000;
 export function agentJevDecisionsQueryKey(
   serverId: string | null | undefined,
   agentId: string | null | undefined,
+  includeChildren: boolean = false,
 ) {
-  return ["agentJevDecisions", serverId ?? "", agentId ?? ""] as const;
+  return ["agentJevDecisions", serverId ?? "", agentId ?? "", includeChildren] as const;
 }
 
 export interface AgentJevDecisions {
@@ -31,11 +32,15 @@ export interface AgentJevDecisions {
 export function useAgentJevDecisions(
   serverId: string | null | undefined,
   agentId: string | null | undefined,
-  options: { enabled?: boolean } = {},
+  options: { enabled?: boolean; includeChildren?: boolean } = {},
 ): { data: AgentJevDecisions | undefined; isSupported: boolean } {
   const client = useHostRuntimeClient(serverId ?? "");
   const isConnected = useHostRuntimeIsConnected(serverId ?? "");
   const isSupported = useHostFeature(serverId, "jev");
+  // COMPAT(jevChildDecisions): an older daemon ignores an unknown request field, but never asked
+  // for it either — its decisions.list only ever knew about the one agent anyway.
+  const supportsChildren = useHostFeature(serverId, "jevChildDecisions");
+  const includeChildren = Boolean(options.includeChildren && supportsChildren);
   const enabled = Boolean(
     (options.enabled ?? true) && serverId && agentId && client && isConnected && isSupported,
   );
@@ -44,7 +49,7 @@ export function useAgentJevDecisions(
     // Unreachable in practice: the query is only enabled while a client and an agent exist.
     if (!client || !agentId) throw new Error("JEV decisions requested without a host client");
     const [list, status] = await Promise.all([
-      client.listJevDecisions(agentId),
+      client.listJevDecisions(agentId, { includeChildren }),
       // The list stands without the status: a failed read only loses the shadow wording.
       client.jevStatus().then(
         (payload) => payload.status,
@@ -52,10 +57,10 @@ export function useAgentJevDecisions(
       ),
     ]);
     return { decisions: list.decisions, status };
-  }, [agentId, client]);
+  }, [agentId, client, includeChildren]);
 
   const query = useFetchQuery({
-    queryKey: agentJevDecisionsQueryKey(serverId, agentId),
+    queryKey: agentJevDecisionsQueryKey(serverId, agentId, includeChildren),
     dataShape: "value",
     staleTimeMs: AGENT_JEV_DECISIONS_STALE_TIME_MS,
     queryFn,

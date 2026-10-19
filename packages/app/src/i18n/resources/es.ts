@@ -2240,6 +2240,11 @@ export const es: TranslationResources = {
     accessibilityLabel: "Decisión de JEV",
     accessibilityLabelCount: "{{count}} decisiones de JEV",
     wouldHaveAction: "Habría hecho: {{action}}",
+    forAgent: 'Para "{{title}}"',
+  },
+  jevHeaderBadge: {
+    label: "JEV · {{count}}",
+    accessibilityLabel: "{{count}} decisiones de JEV",
   },
   tokenUsage: {
     byModelTitle: "Tokens por modelo",
