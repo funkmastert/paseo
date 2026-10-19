@@ -56,8 +56,9 @@ function JevDecisionRow({ line, now }: { line: JevDecisionLine; now?: Date }) {
   return (
     <View style={styles.row} testID="jev-decision">
       <View style={styles.header}>
-        <Text style={styles.feature} numberOfLines={1}>
-          {line.feature}
+        {/* Summary first; an older daemon sends none, so its rows read as before. */}
+        <Text style={styles.feature} numberOfLines={line.summary ? 2 : 1}>
+          {line.summary ?? line.feature}
         </Text>
         {line.tag ? <StatusBadge label={t(TAG_KEYS[line.tag])} /> : null}
         {meta ? (
@@ -69,8 +70,14 @@ function JevDecisionRow({ line, now }: { line: JevDecisionLine; now?: Date }) {
       {line.subjectLabel ? (
         <Text style={styles.muted}>{t("jevMarker.forAgent", { title: line.subjectLabel })}</Text>
       ) : null}
-      <Text style={styles.question}>{line.question}</Text>
-      <Text style={styles.muted}>{`${line.verdict} → ${line.action}`}</Text>
+      {line.summary ? (
+        <Text style={styles.muted}>{`${line.feature} · ${line.verdict}`}</Text>
+      ) : (
+        <>
+          <Text style={styles.question}>{line.question}</Text>
+          <Text style={styles.muted}>{`${line.verdict} → ${line.action}`}</Text>
+        </>
+      )}
     </View>
   );
 }

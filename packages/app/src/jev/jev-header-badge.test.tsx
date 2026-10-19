@@ -111,9 +111,10 @@ describe("JevHeaderBadgeView: tap to open on a compact layout", () => {
   it("opens the decisions popover naming the child on tap", () => {
     renderBadge();
     click('[data-testid="jev-header-badge-trigger"]');
-    // jev-decisions-list.tsx: the child's name, the question and the verdict.
+    // jev-decisions-list.tsx: the child's name, the summary and the verdict.
     expect(document.body.textContent).toContain("rename helper");
-    expect(document.body.textContent).toContain("Is this stalled?");
+    // Summary first: the plain-words line replaces the raw question when the daemon sends one.
+    expect(document.body.textContent).toContain("JEV judged the stall needs you");
     expect(document.body.textContent).toContain("yes (0.8)");
   });
 

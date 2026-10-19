@@ -353,6 +353,9 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
 }
 
+/** A leader's own decisions plus its children's, newest first, at most this many per list. */
+const MERGED_DECISIONS_MAX = 100;
+
 export function createJevService(options: JevServiceOptions): JevServiceRuntime {
   const logger = options.logger.child({ module: "jev" });
   const now = options.now ?? Date.now;
@@ -1183,9 +1186,11 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
           .map((record) => ({ ...record, subjectAgentId: id, subjectAgentTitle: title })),
       );
       // Sorted once by a precomputed timestamp, rather than reparsing `.at` on every comparison.
+      // Capped newest first: a leader with a wide fan-out gets a bounded payload every poll.
       return [...own, ...childRecords]
         .map((record) => ({ record, atMs: Date.parse(record.at) }))
         .sort((a, b) => b.atMs - a.atMs)
+        .slice(0, MERGED_DECISIONS_MAX)
         .map(({ record }) => record);
     },
     async start() {

@@ -1041,6 +1041,28 @@ describe("JevService: ledger, audit, status", () => {
     expect(ownRecord?.subjectAgentId).toBeUndefined();
   });
 
+  it("includeChildren caps a wide fan-out's merged list at 100 records", async () => {
+    const children = ["child-1", "child-2", "child-3"].map((id) => ({ id, title: id }));
+    const { service } = makeHarness({
+      extra: { readChildAgents: (agentId) => (agentId === "leader-1" ? children : []) },
+    });
+    for (const { id } of children) {
+      for (let index = 0; index < 40; index += 1) {
+        service.decisions.record({
+          agentId: id,
+          callId: `${id}-${index}`,
+          feature: "readCheck",
+          question: "Does this agent need a.md?",
+          verdict: "not_needed (0.9)",
+          confidence: 0.9,
+          action: "denied the read once (about 9,000 tokens)",
+          applied: true,
+        });
+      }
+    }
+    expect(service.listDecisions("leader-1", { includeChildren: true })).toHaveLength(100);
+  });
+
   it("includeChildren never throws when readChildAgents throws", async () => {
     const { service } = makeHarness({
       extra: {

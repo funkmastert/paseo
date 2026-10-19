@@ -51,6 +51,19 @@ describe("buildJevMarkerLines", () => {
     expect(lines.map((l) => l.key)).toEqual(["a", "b"]);
   });
 
+  it("keeps only the newest 40 decisions for the timeline", () => {
+    const records = Array.from({ length: 45 }, (_, index) =>
+      record({
+        callId: `c${index}`,
+        at: new Date(Date.UTC(2026, 9, 16, 12, 0, index)).toISOString(),
+      }),
+    );
+    const lines = buildJevMarkerLines(records, null);
+    expect(lines).toHaveLength(40);
+    expect(lines[0]?.key).toBe("c5");
+    expect(lines.at(-1)?.key).toBe("c44");
+  });
+
   it("skips a record with an unparseable timestamp", () => {
     const lines = buildJevMarkerLines(
       [record({ callId: "bad", at: "not-a-date" }), record({ callId: "ok" })],
