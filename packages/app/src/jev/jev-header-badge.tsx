@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { Pressable, View } from "react-native";
+import Animated from "react-native-reanimated";
 import { useTranslation } from "react-i18next";
 import { router } from "expo-router";
 import { Gauge } from "lucide-react-native";
@@ -8,6 +9,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { FloatingScrollView } from "@/components/ui/floating";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { buildJevDashboardRoute } from "@/utils/host-routes";
+import { resolveScrollIndicatorFade } from "@/agent-stream/scroll-indicator-fade";
 import { JevDecisionsList } from "./jev-decisions-list";
 import { buildJevDecisionsView, type JevDecisionsView } from "./jev-decisions-model";
 import { useAgentJevDecisions } from "./use-agent-jev-decisions";
@@ -61,9 +63,14 @@ export function JevHeaderBadgeView({
   const label = t("jevHeaderBadge.label", { count });
   const accessibilityLabel = t("jevHeaderBadge.accessibilityLabel", { count });
   const leadingIcon = useMemo(() => <ThemedGauge size={LEADING_ICON_SIZE} />, []);
+  // The badge mounts the first time an agent gets a JEV decision and stays mounted after, so a
+  // hard snap-in only ever happens once per agent. Fading it in (same Android-crash workaround as
+  // the scroll indicators) reads as an appearance rather than a layout jump. No `exiting`: the
+  // badge never unmounts on its own (it only appears), so there is nothing to animate out.
+  const { fadeIn } = resolveScrollIndicatorFade();
 
   return (
-    <View style={styles.row} testID="jev-header-badge">
+    <Animated.View entering={fadeIn} style={styles.row} testID="jev-header-badge">
       <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile>
         <TooltipTrigger asChild>
           <Pressable
@@ -83,7 +90,7 @@ export function JevHeaderBadgeView({
           </FloatingScrollView>
         </TooltipContent>
       </Tooltip>
-    </View>
+    </Animated.View>
   );
 }
 

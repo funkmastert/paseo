@@ -32,6 +32,14 @@ vi.mock("@gorhom/bottom-sheet", () => ({
   useBottomSheetModalInternal: () => null,
 }));
 
+// The real module's web entry point constructs a JSReanimated instance at import time, reading
+// `__DEV__` before vitest.setup.ts's assignment is visible to it; `vi.hoisted` runs ahead of every
+// `vi.mock` factory (including this one's `importOriginal`), so setting it here is what actually
+// lands before that constructor runs.
+vi.hoisted(() => {
+  (globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__ = false;
+});
+
 vi.mock("react-native-reanimated", async (importOriginal) => {
   const actual = await importOriginal<object>();
   return { ...actual, default: { ...(actual as { default?: object }).default, View: "div" } };
