@@ -21,14 +21,13 @@ export interface StickyPromptOverlayProps {
 }
 
 // Subscribes to the publisher itself (mirroring ChatOutlineRail's
-// `useSyncExternalStore(activePrompt.subscribe, activePrompt.getActiveSeq)`) so a visibility
+// `useSyncExternalStore(activePrompt.subscribe, activePrompt.getActiveSeq)`) so a published
 // change re-renders only this leaf, not the whole AgentStreamView.
 //
-// The viewer's open/snapshot state lives here, so a visibility flip alone (e.g. a streaming layout
-// shift bringing the prompt back on screen) never closes an open viewer — only `!state.prompt`
-// unmounts this leaf, and the caller remounts it on an agent switch
-// via `key={agentId}` (this component's own `return null` on a momentary null prompt does not
-// reset its hooks, so the key is what actually guarantees the switch closes the viewer).
+// The viewer's open/snapshot state lives here. Only `!state.prompt` unmounts this leaf, and the
+// caller remounts it on an agent switch via `key={agentId}` (this component's own `return null`
+// on a momentary null prompt does not reset its hooks, so the key is what actually guarantees the
+// switch closes the viewer).
 export const StickyPromptOverlay = memo(function StickyPromptOverlay({
   source,
   compact,
