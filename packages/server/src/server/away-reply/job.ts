@@ -425,9 +425,9 @@ export class AwayReplyJob {
     const present = this.presenceReason(agent.id, agent.workspaceId, config);
     if (present) return { reason: present, final: false };
     if (episode.kind === "turn-ended") {
-      // Tyler opened it after it finished, and left it. A glance that clears the unread flag is
-      // not a reply: defer, so a later sweep can still answer if he never comes back to it.
-      if (!agent.requiresAttention) return { reason: "tyler-read-thread", final: false };
+      // A glance that clears the unread flag is not a reply and no longer holds the episode: only
+      // a real reply (`already-replied`, above), a hold phrase (`holdReason`, in `consider`), or a
+      // cancel (below) ends it. Tyler reading the thread without answering falls through to JEV.
       // Stopped, by Tyler, the spend governor or anything else: not finished, not waiting.
       if (record.lastCanceledAt !== null && record.lastCanceledAt >= latestTurnStartMs(rows)) {
         return { reason: `turn-canceled-${record.lastCancelReason ?? "unknown"}`, final: true };

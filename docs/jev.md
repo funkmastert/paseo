@@ -1268,10 +1268,9 @@ A reply that lands on a thread he is reading closes the card under him, and his 
 - an app client that has this leader open and visible;
 - any app client with activity in the last hour, or the away threshold if that is longer (`AWAY_PRESENCE_WINDOW_MINUTES`). Each app client's heartbeat carries its focused agent, visibility and last input (`Session.getClientActivity`); the CLI sends none;
 - availability mode `focus` ([notification-policy.md](notification-policy.md)): he is working and wants quiet;
-- for a finished turn, its unread flag down: he opened it and left it;
 - presence that cannot be read.
 
-It checks again after the JEV call, before sending.
+It checks again after the JEV call, before sending. A finished turn's unread flag going down (he opened it) is not on this list: a glance that is not a reply no longer holds the episode (`limitReason`, `away-reply/job.ts`), only `presenceSkipReason` above, a hold phrase (`holdReason`, [What it reads](#what-it-reads)), or a cancel ([Who Tyler is](#who-tyler-is), next) does. Before 2026-10-18 it did, and could defer an episode indefinitely once he had merely looked at it without answering.
 
 ### Who Tyler is
 

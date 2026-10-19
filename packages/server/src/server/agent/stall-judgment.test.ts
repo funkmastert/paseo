@@ -306,6 +306,19 @@ describe("reading an outcome", () => {
     expect(readStallJudgment(outcome)).toMatchObject({ kind: "judged", applied: true });
   });
 
+  test("an answer with no usable activity is no judgment, but keeps whether it was live or shadow", () => {
+    for (const kind of ["answered", "shadow"] as const) {
+      const outcome: JevOutcome = { kind, callId: "c4", answers: {}, meta };
+      expect(readStallJudgment(outcome)).toEqual({
+        kind: "none",
+        callId: "c4",
+        reason: "no-activity-answer",
+        costUsd: 0.0001,
+        mode: kind === "answered" ? "live" : "shadow",
+      });
+    }
+  });
+
   test("anything else is no judgment, with the reason", () => {
     expect(
       readStallJudgment({ kind: "unavailable", callId: "c3", reason: "daily-budget" }),
@@ -391,8 +404,12 @@ describe("the judge", () => {
     expect(await h.judge.judge(h.request)).toMatchObject({ kind: "judged", applied: true });
   });
 
-  test("an agent in company code sends nothing (D7)", async () => {
-    const h = judgeHarness({ cwd: (root) => path.join(root, "backend-net", "wt") });
+  test("an agent in a configured company-code exclusion sends nothing (D7)", async () => {
+    // The default exclusion lists are empty since 2026-10-02 (docs/jev.md, D7), so configure one.
+    const h = judgeHarness({
+      cwd: (root) => path.join(root, "backend-net", "wt"),
+      config: { excludeCwds: ["~/backend-net"] },
+    });
     expect(await h.judge.judge(h.request)).toEqual({
       kind: "none",
       callId: null,
@@ -417,7 +434,8 @@ describe("the judge", () => {
       { kind: "http" as const, status: 500 },
       { kind: "contract-violation" as const },
     ]) {
-      const h = judgeHarness({ behavior });
+      // The fake's timeout waits for the abort, so keep it well under the test's own 5 s limit.
+      const h = judgeHarness({ behavior, config: { stallJudgment: { timeoutMs: 50 } } });
       expect(await h.judge.judge(h.request)).toMatchObject({ kind: "none" });
     }
   });

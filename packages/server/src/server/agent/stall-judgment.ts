@@ -471,8 +471,17 @@ export type StallJudgment =
       applied: boolean;
       costUsd: number | null;
     }
-  /** No usable answer. Today's behaviour. `callId` is null when nothing reached `decide`. */
-  | { kind: "none"; callId: string | null; reason: string; costUsd: number | null };
+  /**
+   * No usable answer. Today's behaviour. `callId` is null when nothing reached `decide`. `mode` is
+   * set when JEV did answer but the answer was unusable, so the decision note still says which.
+   */
+  | {
+      kind: "none";
+      callId: string | null;
+      reason: string;
+      costUsd: number | null;
+      mode?: "live" | "shadow";
+    };
 
 /** What the sweep is given. Every method is total: a throw inside is `none`, never an error. */
 export interface StallJudge {
@@ -507,6 +516,7 @@ export function readStallJudgment(outcome: JevOutcome): StallJudgment {
       callId: outcome.callId,
       reason: "no-activity-answer",
       costUsd: costOf(outcome),
+      mode: outcome.kind === "answered" ? "live" : "shadow",
     };
   }
   return {
