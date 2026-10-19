@@ -16,4 +16,5 @@ export const JEV_FEATURE_LABELS: Readonly<Record<string, string>> = {
   // savings ledger's JevSavingsFeature union names it, and the JEV dashboard needs its label.
   readCheck: "File-read check",
   titleRefresh: "Session titles",
+  finishReview: "Finish review",
 };

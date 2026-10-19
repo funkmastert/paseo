@@ -46,6 +46,7 @@ describe("buildJevDecisionsView", () => {
       lines: [
         {
           key: "call-1:0",
+          featureId: "remediationTriage",
           feature: "Remediation triage",
           question: "Should a remediation agent handle this?",
           verdict: "person (0.91)",
@@ -54,6 +55,7 @@ describe("buildJevDecisionsView", () => {
           cost: "$0.0002",
           at: new Date("2026-09-29T17:00:00.000Z"),
           summary: null,
+          detail: null,
           subjectLabel: null,
         },
       ],

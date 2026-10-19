@@ -9,7 +9,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import type { JevDecisionLine, JevDecisionTag } from "./jev-decisions-model";
 
 const ThemedGauge = withUnistyles(Gauge);
-const LEADING_ICON_SIZE = 10;
+const LEADING_ICON_SIZE = 14;
 
 const TAG_KEYS: Record<JevDecisionTag, string> = {
   shadow: "contextWindow.jevShadow",
@@ -18,17 +18,22 @@ const TAG_KEYS: Record<JevDecisionTag, string> = {
 
 const MARKER_POPOVER_MAX_HEIGHT = 320;
 
+/** Decisions shown directly in the row, newest first; the rest collapse into "+N more". */
+const INLINE_VISIBLE_MAX = 3;
+
 /**
- * One or more JEV decisions collapsed onto a single stream position. Quiet by design (docs/design.md):
- * a small pill, same tap-triggered `Tooltip` pattern as `TokenBurnBadge`/`ContextWindowMeter`, so it is
- * cross-platform and hover-free without any `isWeb` branch.
+ * One or more JEV decisions collapsed onto a single stream position. Quiet by design
+ * (docs/design.md), but no longer a bare pill: the newest decisions read in the row itself
+ * (docs/jev.md, "Feature 11" — O8), each with what JEV was checking, what it decided and what
+ * happened, who it was about, and whether it only watched. A tap still opens every decision in
+ * the group with its raw question, verdict and cost, reusing the same tap-triggered `Tooltip`
+ * pattern as `TokenBurnBadge`/`ContextWindowMeter`, so it stays cross-platform and hover-free
+ * without any `isWeb` branch.
  */
 export function JevMarkerChip({ lines }: { lines: JevDecisionLine[] }) {
   const { t } = useTranslation();
-  const label =
-    lines.length > 1
-      ? t("jevMarker.chipLabelCount", { count: lines.length })
-      : t("jevMarker.chipLabel");
+  const newest = useMemo(() => [...lines].slice(-INLINE_VISIBLE_MAX).reverse(), [lines]);
+  const hiddenCount = lines.length - newest.length;
   const accessibilityLabel =
     lines.length > 1
       ? t("jevMarker.accessibilityLabelCount", { count: lines.length })
@@ -39,8 +44,23 @@ export function JevMarkerChip({ lines }: { lines: JevDecisionLine[] }) {
     <View style={styles.row} testID="jev-marker">
       <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile>
         <TooltipTrigger asChild>
-          <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} hitSlop={4}>
-            <StatusBadge label={label} leading={leadingIcon} />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={accessibilityLabel}
+            hitSlop={4}
+            style={styles.trigger}
+          >
+            <View style={styles.iconWrap}>{leadingIcon}</View>
+            <View style={styles.inlineList}>
+              {newest.map((line) => (
+                <JevMarkerInlineLine key={line.key} line={line} />
+              ))}
+              {hiddenCount > 0 ? (
+                <Text style={styles.overflow}>
+                  {t("jevMarker.overflowMore", { count: hiddenCount })}
+                </Text>
+              ) : null}
+            </View>
           </Pressable>
         </TooltipTrigger>
         <TooltipContent side="top" align="start" offset={8}>
@@ -57,7 +77,35 @@ export function JevMarkerChip({ lines }: { lines: JevDecisionLine[] }) {
   );
 }
 
-/** The tag badge and cost, shared by both the pre-`summary` and `summary`-first layouts below. */
+/** `progressing (0.99)` reads `progressing`: a raw score never reaches the always-visible row. */
+function withoutRawScore(text: string): string {
+  return text.replace(/\s*\([\d.]+\)\s*$/, "");
+}
+
+/** The row's content without a tap: purpose, decision and result, subject, and watching-only. */
+function JevMarkerInlineLine({ line }: { line: JevDecisionLine }) {
+  const { t } = useTranslation();
+  const purpose = t(`jevMarker.purpose.${line.featureId}`, { defaultValue: line.feature });
+  // An older daemon sends no summary: fall back to the verdict and action, scores stripped.
+  const primary = line.summary ?? `${withoutRawScore(line.verdict)} → ${line.action}`;
+  return (
+    <View style={styles.inlineLine}>
+      <Text style={styles.purpose} numberOfLines={1}>
+        {purpose}
+      </Text>
+      <Text style={styles.primary} numberOfLines={2}>
+        {primary}
+      </Text>
+      {line.detail ? <Text style={styles.muted}>{line.detail}</Text> : null}
+      {line.subjectLabel ? (
+        <Text style={styles.muted}>{t("jevMarker.forAgent", { title: line.subjectLabel })}</Text>
+      ) : null}
+      {line.tag ? <Text style={styles.muted}>{t("jevMarker.watchingOnly")}</Text> : null}
+    </View>
+  );
+}
+
+/** The tag badge and cost, shown only in the tap-opened full detail. */
 function JevMarkerMeta({ tag, cost }: { tag: JevDecisionTag | null; cost: string | null }) {
   const { t } = useTranslation();
   return (
@@ -68,6 +116,7 @@ function JevMarkerMeta({ tag, cost }: { tag: JevDecisionTag | null; cost: string
   );
 }
 
+/** Every decision's full detail: question, raw verdict and cost, opened by a tap on the row. */
 function JevMarkerDetailRow({ line }: { line: JevDecisionLine }) {
   const { t } = useTranslation();
   // An older daemon sends no summary; render exactly as before this field existed.
@@ -109,6 +158,34 @@ function JevMarkerDetailRow({ line }: { line: JevDecisionLine }) {
 const styles = StyleSheet.create((theme) => ({
   row: {
     paddingVertical: theme.spacing[1],
+  },
+  trigger: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: theme.spacing[2],
+  },
+  iconWrap: {
+    paddingTop: theme.spacing[0.5],
+  },
+  inlineList: {
+    flexShrink: 1,
+    gap: theme.spacing[2],
+  },
+  inlineLine: {
+    gap: theme.spacing[0.5],
+  },
+  purpose: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+  },
+  primary: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    lineHeight: theme.fontSize.sm * 1.4,
+  },
+  overflow: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
   },
   popoverScroll: {
     maxHeight: MARKER_POPOVER_MAX_HEIGHT,

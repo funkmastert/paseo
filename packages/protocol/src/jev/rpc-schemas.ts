@@ -222,6 +222,10 @@ export const JevDecisionRecordSchema = z.object({
   // one-liner built server-side per feature (docs/jev.md, "Feature 11"). Absent from an older
   // daemon; the app falls back to today's feature/verdict/action rendering.
   summary: z.string().optional(),
+  // COMPAT(jevDecisionDetail): added in v0.9.x, remove gate after 2027-04-18. A second plain-words
+  // line naming daemon-only vocabulary `summary` has no room for (docs/jev.md, "Feature 11").
+  // Absent from an older daemon, and most decisions: the row renders without it.
+  detail: z.string().optional(),
 });
 
 // COMPAT(jev): added in v0.8.x, remove gate after 2027-03-28. Gated on

@@ -294,6 +294,11 @@ export interface JevDecisionRecord extends JevDecisionNote {
   subjectAgentTitle?: string | null;
   /** A plain-words one-liner built per feature (feature 11); computed at read time. */
   summary?: string;
+  /**
+   * A second plain-words line for daemon-only vocabulary `summary` has no room for (feature 11);
+   * computed at read time. Most decisions have none.
+   */
+  detail?: string;
 }
 
 /** The foundation's decision store (`decisions.ts`). Feature tracks only call `record`. */

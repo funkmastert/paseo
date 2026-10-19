@@ -22,6 +22,7 @@ function record(overrides: Partial<JevDecisionRecord> = {}): JevDecisionRecord {
 function line(overrides: Partial<JevDecisionLine> = {}): JevDecisionLine {
   return {
     key: "call-1",
+    featureId: "stallJudgment",
     feature: "Stall judgment",
     question: "Is this stalled?",
     verdict: "yes (0.8)",
@@ -30,6 +31,7 @@ function line(overrides: Partial<JevDecisionLine> = {}): JevDecisionLine {
     cost: "$0.0001",
     at: new Date("2026-10-16T12:00:00.000Z"),
     summary: null,
+    detail: null,
     subjectLabel: null,
     ...overrides,
   };
