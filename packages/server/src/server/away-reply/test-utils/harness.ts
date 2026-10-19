@@ -32,6 +32,8 @@ export class FakeFleet {
   turns: Array<{ agentId: string; text: string }> = [];
   responses: Array<{ agentId: string; requestId: string; response: AgentPermissionResponse }> = [];
   attention: string[] = [];
+  /** Every `limit` a caller has asked `readTimelineTail` for, in order. */
+  tailFetchLimits: number[] = [];
   refuseTurns = false;
   presence: AwayReplyPresence | null = { clients: [], availability: "available" };
   clock: () => number = () => T0;
@@ -57,7 +59,10 @@ export class FakeFleet {
     return {
       listAgents: async () =>
         this.agents.map((agent) => ({ ...agent, labels: { ...agent.labels } })),
-      readTimelineTail: (agentId, limit) => (this.timelines.get(agentId) ?? []).slice(-limit),
+      readTimelineTail: (agentId, limit) => {
+        this.tailFetchLimits.push(limit);
+        return (this.timelines.get(agentId) ?? []).slice(-limit);
+      },
       listPinnedWorkspaceIds: async () => new Set(["ws-pinned"]),
       startTurnIfIdle: (agentId, text): Promise<IdleTurnOutcome> | null => {
         const agent = this.agent(agentId);

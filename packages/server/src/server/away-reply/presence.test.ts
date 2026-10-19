@@ -115,6 +115,28 @@ describe("presenceSkipReason", () => {
     expect(reason([client], "available", 120)).toBe("tyler-active-recently");
   });
 
+  it("honours a short threshold instead of floor-ing it to an hour", () => {
+    const client = {
+      focusedAgentId: "leader-1",
+      focusedWorkspaceId: "ws-1",
+      appVisible: false,
+      lastActivityAtMs: NOW - 25 * MINUTE,
+    };
+    // 20-minute threshold: activity 25 minutes ago is outside it, so he counts as away.
+    expect(reason([client], "available", 20)).toBeNull();
+  });
+
+  it("never shrinks the window below the sanity floor", () => {
+    const client = {
+      focusedAgentId: "leader-1",
+      focusedWorkspaceId: "ws-1",
+      appVisible: false,
+      lastActivityAtMs: NOW - 2 * MINUTE,
+    };
+    // A 1-minute threshold still floors to AWAY_PRESENCE_MIN_WINDOW_MINUTES (5).
+    expect(reason([client], "available", 1)).toBe("tyler-active-recently");
+  });
+
   it("is present while he has this agent open, and in focus mode", () => {
     expect(
       reason([

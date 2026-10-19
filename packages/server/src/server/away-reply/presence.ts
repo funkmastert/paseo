@@ -13,11 +13,12 @@
  */
 
 /**
- * Any app activity this recent means he is around. The effective window is the longer of this and
- * the away threshold, so "away for an hour" can never be true of someone who used the app within
- * the hour.
+ * The shortest the presence window can be, whatever `thresholdMinutes` says: a heartbeat lags
+ * real activity by a little, so a window under a few minutes would call him away moments after he
+ * touched the app. Tyler picked 20 (`agents.jev.awayReply.thresholdMinutes`, "Away reply sooner",
+ * 2026-10-19) and the window must honour it, not quietly widen it to an hour.
  */
-export const AWAY_PRESENCE_WINDOW_MINUTES = 60;
+export const AWAY_PRESENCE_MIN_WINDOW_MINUTES = 5;
 
 /** One connected app client, as its last heartbeat described it. */
 export interface AwayReplyClientPresence {
@@ -48,7 +49,7 @@ export function presenceSkipReason(input: {
   const { presence, agentId, workspaceId, nowMs } = input;
   // Focus mode says he is at work and wants quiet, not that he is gone.
   if (presence.availability === "focus") return "tyler-in-focus-mode";
-  const windowMs = Math.max(AWAY_PRESENCE_WINDOW_MINUTES, input.thresholdMinutes) * 60_000;
+  const windowMs = Math.max(AWAY_PRESENCE_MIN_WINDOW_MINUTES, input.thresholdMinutes) * 60_000;
   for (const client of presence.clients) {
     if (client.appVisible && client.focusedAgentId === agentId) return "tyler-viewing-agent";
     if (client.lastActivityAtMs === null) continue;

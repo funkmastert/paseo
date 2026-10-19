@@ -8,7 +8,7 @@ import { resolveJevConfig } from "../jev/config.js";
 import type { JevScriptedAnswer } from "../jev/fake.js";
 import { createJevService } from "../jev/service.js";
 import { AWAY_REPLY_GUARD } from "./decision.js";
-import { readTylerChoice, TIMELINE_TAIL_ROWS } from "./job.js";
+import { FULL_TIMELINE_FETCH_CAP, readTylerChoice, TIMELINE_TAIL_ROWS } from "./job.js";
 import {
   MINUTE,
   T0,
@@ -225,6 +225,25 @@ describe("AwayReplyJob", () => {
     const report = await h.job.tick();
     expect(report?.entries).toMatchObject([{ action: "replied", reason: "option" }]);
     expect(h.fleet.turns).toEqual([{ agentId: "leader-1", text: GO_WITH_B_TEXT }]);
+    // Widened one doubling step from the tail (to 2x), not by copying the whole timeline.
+    expect(Math.max(...h.fleet.tailFetchLimits)).toBe(TIMELINE_TAIL_ROWS * 2);
+  });
+
+  it("gives up at the fetch cap instead of reading an unbounded timeline", async () => {
+    const h = setup();
+    h.fleet.add(leaderView({ cwd: h.safeCwd }), []);
+    h.tyler("leader-1", "Fix the flaky test", T0);
+    // Past the cap: even widening to FULL_TIMELINE_FETCH_CAP rows cannot reach Tyler's message.
+    const noise = Array.from({ length: FULL_TIMELINE_FETCH_CAP + 100 }, (_, index) =>
+      assistant(`working on it, step ${index}`, T0 + index),
+    );
+    h.fleet.append("leader-1", noise);
+    h.fleet.append("leader-1", [assistant(OPTIONS_MESSAGE, T0 + FULL_TIMELINE_FETCH_CAP + 200)]);
+    h.at(T0 + 62 * MINUTE);
+    const report = await h.job.tick();
+    expect(report?.entries).toMatchObject([{ action: "skipped", reason: "no-tyler-message" }]);
+    expect(h.fleet.turns).toHaveLength(0);
+    expect(Math.max(...h.fleet.tailFetchLimits)).toBe(FULL_TIMELINE_FETCH_CAP);
   });
 
   it.each([
@@ -246,19 +265,16 @@ describe("AwayReplyJob", () => {
     expect(h.calls()).toBe(0);
   });
 
-  it("does not act on company code named anywhere in the thread", async () => {
+  it("answers a thread that names Wonderly code, same as any other (Tyler, 2026-10-20)", async () => {
     const h = setup();
     h.waitingLeader(`${OPTIONS_MESSAGE}\nThis is for backend-net#10032.`);
     h.at(T0 + 62 * MINUTE);
     const report = await h.job.tick();
-    expect(report?.entries).toMatchObject([{ action: "skipped", reason: "company-code" }]);
-    expect(h.calls()).toBe(0);
-    h.at(T0 + 70 * MINUTE);
-    expect((await h.job.tick())?.entries).toEqual([]);
-    expect(h.fleet.turns).toHaveLength(0);
+    expect(report?.entries).toMatchObject([{ action: "replied", reason: "option" }]);
+    expect(h.fleet.turns).toEqual([{ agentId: "leader-1", text: GO_WITH_B_TEXT }]);
   });
 
-  it("does not act on a leader in company code, or with a child there", async () => {
+  it("answers a leader whose cwd is a Wonderly path, or whose child's is", async () => {
     const h = setup();
     h.fleet.add(leaderView({ id: "company", cwd: h.companyCwd }), []);
     h.tyler("company", "Fix the flaky test", T0);
@@ -276,8 +292,21 @@ describe("AwayReplyJob", () => {
     );
     h.at(T0 + 62 * MINUTE);
     const report = await h.job.tick();
-    expect(report?.entries.filter((entry) => entry.reason === "company-code")).toHaveLength(2);
-    expect(h.calls()).toBe(0);
+    expect(report?.entries.filter((entry) => entry.reason === "company-code")).toHaveLength(0);
+    expect(report?.entries.filter((entry) => entry.action === "replied")).toHaveLength(2);
+  });
+
+  it("still blocks a merge or push in a Wonderly thread; the hard rules are not lifted", async () => {
+    const h = setup();
+    h.fleet.add(leaderView({ id: "company", cwd: h.companyCwd }), []);
+    h.tyler("company", "Fix the flaky test", T0);
+    h.fleet.append("company", [
+      assistant("backend-net#10032 is green.\nShould I merge it now?", T0 + MINUTE),
+    ]);
+    h.at(T0 + 62 * MINUTE);
+    const report = await h.job.tick();
+    expect(report?.entries).toMatchObject([{ action: "skipped", reason: "excluded-merge" }]);
+    expect(h.fleet.turns).toHaveLength(0);
   });
 
   it("replies at most once per waiting episode, across sweeps and restarts", async () => {
