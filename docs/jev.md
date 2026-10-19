@@ -690,7 +690,7 @@ Not `answered`: the agent starts as today. So do a triage that throws, one the l
 
 ## Feature 3b: finish triage
 
-A root agent's finish pushes an `alert` today. JEV reads the final message and can send a routine finish as a `notice` instead, which lands in the digest. It never drops a push, never raises one, and never touches permission or error pushes.
+**Dormant.** A root agent's finish pushes a `notice` from the start now (`attentionPushLevel`, `agent-attention-policy.ts`), and `triageAndSend` only asks JEV when the push it was handed is already an `alert` — nothing in production hands a finish through as an `alert` any more, so the JEV call below never runs. The code, its config and its tests stay: a caller that needs an `alert` finish triaged again — a root agent's push someone widens back out — gets this for free, untested paths included. The rest of this section describes that path: when it would run, JEV reads the final message and can send a routine finish as a digest `notice` instead of the `alert` it was handed. It never drops a push, never raises one, and never touches permission or error pushes.
 
 ### Seam
 

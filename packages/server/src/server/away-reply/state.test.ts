@@ -8,7 +8,14 @@ import { AwayReplyState } from "./state.js";
 import { T0 } from "./test-utils/fixtures.js";
 
 const roots: string[] = [];
-afterEach(() => {
+const opened: AwayReplyState[] = [];
+afterEach(async () => {
+  // Every mutator schedules its write on AwayReplyState's internal chain without
+  // awaiting it (save() is fire-and-forget). Deleting a test's tmp root while one of
+  // those writes is still landing races writeFileAtomic's mkdir/write/rename against
+  // rmSync's directory listing and intermittently throws ENOTEMPTY. Flush every state
+  // opened by this test before removing its directory.
+  await Promise.all(opened.splice(0).map((state) => state.flush()));
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -19,7 +26,13 @@ function filePath(): string {
 }
 
 function open(file: string, now = T0): AwayReplyState {
-  return new AwayReplyState({ filePath: file, logger: pino({ level: "silent" }), now: () => now });
+  const state = new AwayReplyState({
+    filePath: file,
+    logger: pino({ level: "silent" }),
+    now: () => now,
+  });
+  opened.push(state);
+  return state;
 }
 
 describe("AwayReplyState", () => {
