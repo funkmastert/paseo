@@ -26,6 +26,8 @@ beforeEach(() => {
   setCodexGuardHealthState({ status: "green", reason: "test default", codexVersion: null });
 });
 import { FinishObligationService } from "./finish-obligation-service.js";
+import type { JevService } from "../jev/contract.js";
+import { createTestJevService } from "../jev/fake.js";
 import {
   deliverQueuedPrompt,
   formatSystemNotificationPrompt,
@@ -79,6 +81,8 @@ interface FinishNotificationScenarioOptions {
   liveAgents?: Record<string, Record<string, string>>;
   /** Agents that exist only as stored records, such as an archived successor. */
   storedRecords?: Record<string, { labels?: Record<string, string>; archivedAt?: string }>;
+  /** Feature 18 (finish review): wired into the obligation service when set. */
+  jev?: JevService;
 }
 
 interface FinishNotificationScenario {
@@ -109,6 +113,7 @@ function wireFinishObligations(
   agentManager: AgentManager,
   agentStorage: AgentStorage,
   logger: Logger = createTestLogger(),
+  jev?: JevService,
 ): FinishObligationService {
   Reflect.set(agentStorage, "list", async () => []);
   Reflect.set(agentStorage, "updateFinishObligations", async () => true);
@@ -118,6 +123,7 @@ function wireFinishObligations(
     agentStorage,
     serverId: "srv_test",
     logger,
+    ...(jev ? { jev } : {}),
   });
   agentManager.setFinishObligations(service);
   return service;
@@ -218,7 +224,12 @@ function createFinishNotificationScenario(
     }
     return null;
   });
-  const finishObligations = wireFinishObligations(agentManager, agentStorage, options?.logger);
+  const finishObligations = wireFinishObligations(
+    agentManager,
+    agentStorage,
+    options?.logger,
+    options?.jev,
+  );
 
   return {
     finishObligations,
@@ -384,6 +395,58 @@ test("a watched child is registered as observed, and released when it finishes",
   await scenario.finishChildAndReadParentPrompt();
 
   expect(scenario.isChildObserved()).toBe(false);
+});
+
+describe("feature 18: JEV reviews a finish report before it reaches the owner", () => {
+  const finishJev = (choice: string, confidence = 0.9) =>
+    createTestJevService({
+      answers: { finish_quality: { type: "choice", choice, confidence } },
+      service: { resolveAgentCwds: async () => [tmpdir()] },
+    });
+
+  test("a confident missing verdict adds one line to the owner's report", async () => {
+    const jev = finishJev("missing_tests");
+    const scenario = createFinishNotificationScenario({
+      childLastAssistantMessage: "Changed the parser.",
+      jev,
+    });
+    scenario.startWatchingChild();
+    const prompt = await scenario.finishChildAndReadParentPrompt();
+    expect(prompt).toContain("Changed the parser.");
+    expect(prompt).toContain("JEV flagged this report: it doesn't mention tests for the change.");
+    expect(jev.transport.calls).toHaveLength(1);
+  });
+
+  test("a done verdict leaves the report as it was", async () => {
+    const jev = finishJev("done");
+    const scenario = createFinishNotificationScenario({
+      childLastAssistantMessage: "Changed the parser and added tests; all pass.",
+      jev,
+    });
+    scenario.startWatchingChild();
+    const prompt = await scenario.finishChildAndReadParentPrompt();
+    expect(prompt).not.toContain("JEV flagged");
+    expect(jev.transport.calls).toHaveLength(1);
+  });
+
+  test("a retried delivery of the same finish reuses the verdict; a re-armed one asks again", async () => {
+    const jev = finishJev("missing_scope");
+    const scenario = createFinishNotificationScenario({ jev });
+    const reviewOnce = Reflect.get(scenario.finishObligations, "reviewFinishOnce") as (
+      childAgentId: string,
+      obligation: { generation: number },
+      input: Record<string, unknown>,
+    ) => Promise<string | null>;
+    const input = { jev, ownerAgentId: "caller-agent", title: "Parser", finalMessage: "Did half." };
+    const ask = (generation: number) =>
+      reviewOnce.call(scenario.finishObligations, "child-agent", { generation }, input);
+
+    const first = await ask(1);
+    expect(await ask(1)).toBe(first);
+    expect(jev.transport.calls).toHaveLength(1);
+    await ask(2);
+    expect(jev.transport.calls).toHaveLength(2);
+  });
 });
 
 // The 20:42 kill: create_agent and a later send_agent_prompt each armed a watcher for the same

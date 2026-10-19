@@ -79,6 +79,9 @@ export interface FinishObligationServiceOptions {
   readFinishReviewMinConfidence?: () => number;
 }
 
+/** Feature 18 verdicts kept for retried deliveries; Map order makes the first key the oldest. */
+const FINISH_REVIEW_NOTES_MAX = 500;
+
 interface ChildPresence extends AgentPresence {
   parentAgentId: string | null;
   record: StoredAgentRecord | null;
@@ -744,6 +747,12 @@ export class FinishObligationService {
         this.options.readFinishReviewMinConfidence?.() ?? FINISH_REVIEW_DEFAULT_MIN_CONFIDENCE,
     });
     this.finishReviewNotes.set(cacheKey, note);
+    // Retries for one finish land within the ladder's window, so the oldest entries are long
+    // settled: a cap keeps a daemon that runs for weeks from holding one entry per child ever.
+    if (this.finishReviewNotes.size > FINISH_REVIEW_NOTES_MAX) {
+      const oldest = this.finishReviewNotes.keys().next().value;
+      if (oldest !== undefined) this.finishReviewNotes.delete(oldest);
+    }
     return note;
   }
 

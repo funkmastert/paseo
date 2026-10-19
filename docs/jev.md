@@ -1970,12 +1970,13 @@ No key, the switch off, a timeout, the hard bound, a throw, or an answer that is
 
 ### Cost, cache, latency
 
-- Under 1,500 input tokens per finish. No cache effect. Off the critical path beyond its own hard timeout (5 seconds), which bounds `jev.decide` from outside in case it ever hangs past its own deadline.
+- Under 1,500 input tokens per finish. No cache effect. It sits on the delivery path, bounded by `timeoutMs` (3 seconds) and a hard timeout (5 seconds) that bounds `jev.decide` from outside in case it ever hangs past its own deadline. The sweep delivers obligations in turn, so during a JEV outage each first delivery of a finish in one sweep can wait up to that bound. A retried delivery reuses the first verdict (`finishReviewNotes`, capped at 500 entries) and asks nothing.
 - **Pays if** a flagged finish catches something a reviewer would otherwise have missed. No tokens or time are claimed: the savings ledger counts involvements and how many flagged something missing (`benefit: "none"`), honestly, since there is no counterfactual to price against.
 
 ### Tests and verification
 
 - `finish-review.test.ts`: `buildFinishReviewState`'s clipping; no call with an empty final message; the feature-disabled path; the scope, call site and subject on the decide call; a confident `done` recording with no note; a confident missing choice adding its note and recording `applied: true` for both the child and the owner, with a savings record; a missing choice below the floor adding nothing; `unclear` and `other` never flagging; a timeout, a throw and a hang all failing open without recording.
+- `agent/agent-prompt.test.ts` ("feature 18"): through the real `FinishObligationService`, a confident missing verdict adds its line to the owner's report and a `done` verdict adds nothing; a retried delivery of one finish reuses the verdict and a re-armed obligation asks again.
 - Verify: `npx vitest run packages/server/src/server/jev/finish-review.test.ts --bail=1`.
 
 ## Testing
