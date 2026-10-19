@@ -69,27 +69,33 @@ export function JevHeaderBadgeView({
   // badge never unmounts on its own (it only appears), so there is nothing to animate out.
   const { fadeIn } = resolveScrollIndicatorFade();
 
+  // The Animated.View carries no theme-tracked style: Unistyles and Reanimated both mutate the
+  // same native node, and patching one that the other owns crashes on a theme change
+  // (docs/unistyles.md, "Reanimated Animated.View + Dynamic Styles Crashes"). The themed padding
+  // lives one level in, on a plain View Reanimated never touches (status-ring/index.tsx).
   return (
-    <Animated.View entering={fadeIn} style={styles.row} testID="jev-header-badge">
-      <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile>
-        <TooltipTrigger asChild>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={accessibilityLabel}
-            hitSlop={4}
-            testID="jev-header-badge-trigger"
-          >
-            <StatusBadge label={label} leading={leadingIcon} />
-          </Pressable>
-        </TooltipTrigger>
-        <TooltipContent side="bottom" align="start" offset={8}>
-          <FloatingScrollView style={styles.popoverScroll} showsVerticalScrollIndicator={false}>
-            <View style={styles.popoverContent}>
-              <JevDecisionsList view={view} onOpenAllActivity={onOpenAllActivity} />
-            </View>
-          </FloatingScrollView>
-        </TooltipContent>
-      </Tooltip>
+    <Animated.View entering={fadeIn} testID="jev-header-badge">
+      <View style={styles.row}>
+        <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile>
+          <TooltipTrigger asChild>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={accessibilityLabel}
+              hitSlop={4}
+              testID="jev-header-badge-trigger"
+            >
+              <StatusBadge label={label} leading={leadingIcon} />
+            </Pressable>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" align="start" offset={8}>
+            <FloatingScrollView style={styles.popoverScroll} showsVerticalScrollIndicator={false}>
+              <View style={styles.popoverContent}>
+                <JevDecisionsList view={view} onOpenAllActivity={onOpenAllActivity} />
+              </View>
+            </FloatingScrollView>
+          </TooltipContent>
+        </Tooltip>
+      </View>
     </Animated.View>
   );
 }
