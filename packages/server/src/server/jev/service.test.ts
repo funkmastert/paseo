@@ -965,6 +965,28 @@ describe("JevService: ledger, audit, status", () => {
     expect(service.listDecisions("someone-else")).toEqual([]);
   });
 
+  it("lists an agent's decisions after a restart on the same home", async () => {
+    const before = makeHarness();
+    await before.service.start();
+    before.service.decisions.record({
+      agentId: "agent-1",
+      callId: "call-stall",
+      feature: "stallJudgment",
+      question: "Is the agent stuck?",
+      verdict: "waiting_on_human (0.8)",
+      confidence: 0.8,
+      action: "nudged with a person-first handoff",
+      applied: true,
+    });
+    const listed = before.service.listDecisions("agent-1");
+    await before.service.stop();
+
+    const after = makeHarness({ extra: { paseoHome: before.paseoHome } });
+    await after.service.start();
+    expect(after.service.listDecisions("agent-1")).toEqual(listed);
+    await after.service.stop();
+  });
+
   it("attaches a summary to every decision, built per feature", async () => {
     const { service } = makeHarness();
     service.decisions.record({

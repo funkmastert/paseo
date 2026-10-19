@@ -60,6 +60,7 @@ $PASEO_HOME/
 │   ├── workspace-labels.json            # Shared host-local label catalog
 │   ├── workspace-labels.transaction.json # Recoverable catalog/assignment compound commit
 │   └── icons/                           # Host-local custom project icon images
+├── jev/                                 # JEV ledger, audit, savings and decisions (docs/jev.md)
 ├── usage-history/
 │   ├── accounts.json                    # Account usage-window readings, bounded (docs/usage-history.md)
 │   └── agents/{agentId}.json            # One agent's cost-weighted spend over time

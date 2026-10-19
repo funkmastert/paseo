@@ -409,6 +409,8 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
   const decisions = new JevDecisionStore({
     now,
     costFor: (callId) => ledger.find(callId)?.cost.usd ?? null,
+    filePath: path.join(jevDir, "decisions.json"),
+    logger,
   });
   const readLabelsSafe = (agentId: string): Readonly<Record<string, string>> | null => {
     try {
@@ -1196,6 +1198,9 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     async start() {
       await ledger.load();
       await savings.load();
+      // Before the daemon listens (bootstrap awaits start()), so the first jev.decisions.list
+      // after a restart already lists what the last daemon recorded.
+      await decisions.load();
       const snap = readSnapshot(false);
       await audit.init({ retainDays: snap.config?.audit.retainDays ?? 3 });
       if (fixedTransport?.provider === "fake") logger.info("jev: fake backend");
@@ -1204,6 +1209,7 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     async stop() {
       await savings.stop();
       await ledger.stop();
+      await decisions.stop();
       await audit.flush();
     },
     setBudgetNoticeSender(send) {

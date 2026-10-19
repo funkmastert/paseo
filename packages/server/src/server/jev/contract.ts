@@ -281,7 +281,7 @@ export interface JevDecisionRecord extends JevDecisionNote {
   summary?: string;
 }
 
-/** The foundation's in-memory store (`decisions.ts`). Feature tracks only call `record`. */
+/** The foundation's decision store (`decisions.ts`). Feature tracks only call `record`. */
 export interface JevDecisionSink {
   record(note: JevDecisionNote): void;
 }
