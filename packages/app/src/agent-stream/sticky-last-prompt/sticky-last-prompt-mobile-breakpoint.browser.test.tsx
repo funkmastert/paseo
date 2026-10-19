@@ -97,6 +97,33 @@ function nextFrame(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
 
+// The settle this waits for (the 'scroll' event's async dispatch, then reportReadingPosition's
+// layout read) has no fixed frame count -- a real browser's scroll event and the follow-output
+// settle timeout in strategy-web.tsx both land whenever the event loop gets to them, which
+// stretches out under machine load. Poll the actual state instead of guessing a frame count, so
+// the test passes as soon as the real condition lands rather than racing a fixed wait.
+async function waitForState(
+  apiRef: { current: HarnessApi | null },
+  expected: { prompt: StreamItem; barVisible: boolean },
+  maxFrames = 120,
+): Promise<StickyLastPromptState> {
+  const getState = () => {
+    if (!apiRef.current) {
+      throw new Error("Expected harness api");
+    }
+    return apiRef.current.getState();
+  };
+  let state = getState();
+  for (let frame = 0; frame < maxFrames; frame++) {
+    if (state.barVisible === expected.barVisible && state.prompt?.id === expected.prompt?.id) {
+      return state;
+    }
+    await nextFrame();
+    state = getState();
+  }
+  return state;
+}
+
 describe("sticky last prompt at the mobile breakpoint", () => {
   let root: Root | null = null;
   let container: HTMLDivElement | null = null;
@@ -153,10 +180,9 @@ describe("sticky last prompt at the mobile breakpoint", () => {
     act(() => {
       scrollContainer.scrollTop = scrollContainer.scrollHeight;
     });
-    await nextFrame();
-    await nextFrame();
 
-    expect(apiRef.current?.getState()).toEqual({ prompt: tail[0], barVisible: true });
+    const expected = { prompt: tail[0], barVisible: true };
+    expect(await waitForState(apiRef, expected)).toEqual(expected);
   });
 
   it("shows the bar for an already-finished conversation with no further interaction", async () => {
@@ -177,10 +203,6 @@ describe("sticky last prompt at the mobile breakpoint", () => {
       root?.render(<Harness tail={tail} head={[]} apiRef={apiRef} />);
     });
     /* oxlint-enable react-perf/jsx-no-new-object-as-prop */
-    await nextFrame();
-    await nextFrame();
-    await nextFrame();
-
     const scrollContainer = container?.querySelector<HTMLElement>(
       '[data-testid="agent-chat-scroll"]',
     );
@@ -188,6 +210,7 @@ describe("sticky last prompt at the mobile breakpoint", () => {
       throw new Error("Expected agent chat scroll container");
     }
 
-    expect(apiRef.current?.getState()).toEqual({ prompt: tail[0], barVisible: true });
+    const expected = { prompt: tail[0], barVisible: true };
+    expect(await waitForState(apiRef, expected)).toEqual(expected);
   });
 });
