@@ -176,6 +176,8 @@ export interface WorktreeSnapshotRequest {
   backupIgnoredPaths?: readonly string[];
   /** Caps a file `backupIgnoredPaths` would otherwise stage. Default `DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES`. */
   maxBackupIgnoredFileBytes?: number;
+  /** Caps the combined size of every file staged across all eligible entries. Default `DEFAULT_MAX_BACKUP_IGNORED_TOTAL_BYTES`. */
+  maxBackupIgnoredTotalBytes?: number;
 }
 
 export type WorktreeSnapshotOffsite =

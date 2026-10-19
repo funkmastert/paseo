@@ -7,7 +7,7 @@ import {
   createForgeCliRunner,
   probeHostViaCliAuthStatus,
 } from "./forge-cli-command.js";
-import { isForgePollPidLive } from "../server/agent/daemon-forge-poll-pids.js";
+import { isForgeCliChildPidLive } from "../server/agent/daemon-forge-cli-pids.js";
 import { isPlatform } from "../test-utils/platform.js";
 
 describe.skipIf(isPlatform("win32"))("probeHostViaCliAuthStatus", () => {
@@ -152,9 +152,9 @@ describe.skipIf(isPlatform("win32"))("createForgeCliRunner", () => {
 
     const run = runner.run(["arg"], { cwd: tempDir });
     const pid = await readPidOnceWritten(pidFile);
-    expect(isForgePollPidLive(pid)).toBe(true);
+    expect(isForgeCliChildPidLive(pid)).toBe(true);
     await run;
-    expect(isForgePollPidLive(pid)).toBe(false);
+    expect(isForgeCliChildPidLive(pid)).toBe(false);
   });
 
   it("classifies a timed-out invocation through normalizeError", async () => {

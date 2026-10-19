@@ -590,7 +590,7 @@ describe("checkDeletionInvariant", () => {
       ),
     ).toEqual({
       holds: true,
-      detail: `holds: every file is tracked and pushed; ignored only regenerable (node_modules/, ${entry})`,
+      detail: `holds: every file is tracked and pushed; ignored only regenerable (node_modules/); ignored path(s) copied from the main checkout (${entry})`,
     });
   });
 

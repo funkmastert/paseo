@@ -1,5 +1,8 @@
 import { z } from "zod";
-import { clearForgePollPid, markForgePollPidLive } from "../server/agent/daemon-forge-poll-pids.js";
+import {
+  clearForgeCliChildPid,
+  markForgeCliChildPidLive,
+} from "../server/agent/daemon-forge-cli-pids.js";
 import { findExecutable } from "../executable-resolution/executable-resolution.js";
 import { runGitCommand } from "../utils/run-git-command.js";
 import { execCommand } from "../utils/spawn.js";
@@ -112,10 +115,10 @@ export function createForgeCliRunner(options: CreateForgeCliRunnerOptions): Forg
       timeout: options.timeoutMs,
       onSpawn: (pid) => {
         spawnedPid = pid;
-        if (pid !== undefined) markForgePollPidLive(pid);
+        if (pid !== undefined) markForgeCliChildPidLive(pid);
       },
     }).finally(() => {
-      if (spawnedPid !== undefined) clearForgePollPid(spawnedPid);
+      if (spawnedPid !== undefined) clearForgeCliChildPid(spawnedPid);
     });
   };
 

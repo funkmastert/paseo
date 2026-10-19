@@ -10,7 +10,11 @@
 
 import type { DoneJanitorProject, DoneJanitorWorkspace } from "../agent-done-janitor.js";
 import type { WorktreeCoverage } from "../done-janitor-worktree.js";
-import { globToRegExp, isSecretShapedPath } from "../jev/secret-paths.js";
+import {
+  globToRegExp,
+  isSecretShapedPath,
+  resolveIgnoredPathPatterns,
+} from "../jev/secret-paths.js";
 import { isProtectivePin } from "../workspace-auto-pin.js";
 import {
   DONE_JANITOR_KEEP_LABEL,
@@ -496,7 +500,15 @@ export function checkDeletionInvariant(
       reason: `${nested.length} submodule(s) or nested repositor(ies) a backup holds only as a pointer (${listSome(nested)})`,
     };
   }
-  const regenerable = describeRegenerable(coverage.ignored);
+  const regenerable = describeExcusedIgnored({
+    coverage,
+    manifestDirectories,
+    extraRegenerablePatterns,
+    copiedFromMainCheckout,
+    backupEligibleIgnored,
+    nestedOnlyContainers,
+    safeNestedRepositories,
+  });
   const differs = [...coverage.changed, ...coverage.untracked];
   if (basis === "plan") {
     const owed = [
@@ -602,8 +614,62 @@ function onlyNestedReposAlreadySafe(
   return excused;
 }
 
-function describeRegenerable(ignored: readonly string[]): string {
-  return ignored.length > 0 ? `; ignored only regenerable (${listSome(ignored)})` : "";
+/**
+ * Why every entry of `coverage.ignored` was excused, named by which rule excused it (#8,
+ * docs/done-janitor.md): a path lumped under "regenerable" that was really a nested-repo
+ * container, or a pending backup nobody confirmed landed, reads a deletion's own audit line in
+ * exactly the wrong direction. Each entry counts once, under the first rule that matches it, in
+ * the same priority `checkDeletionInvariant`'s `kept` filter reads them.
+ */
+function describeExcusedIgnored(input: {
+  coverage: WorktreeCoverage;
+  manifestDirectories: ReadonlySet<string>;
+  extraRegenerablePatterns: readonly string[];
+  copiedFromMainCheckout: ReadonlySet<string>;
+  backupEligibleIgnored: ReadonlySet<string>;
+  nestedOnlyContainers: ReadonlySet<string>;
+  safeNestedRepositories: ReadonlySet<string>;
+}): string {
+  const {
+    coverage,
+    manifestDirectories,
+    extraRegenerablePatterns,
+    copiedFromMainCheckout,
+    backupEligibleIgnored,
+    nestedOnlyContainers,
+    safeNestedRepositories,
+  } = input;
+  const regenerable: string[] = [];
+  const copied: string[] = [];
+  const backedUp: string[] = [];
+  const nestedContainers: string[] = [];
+  for (const entry of coverage.ignored) {
+    if (isRegenerablePath(entry, manifestDirectories, extraRegenerablePatterns)) {
+      regenerable.push(entry);
+    } else if (copiedFromMainCheckout.has(entry)) {
+      copied.push(entry);
+    } else if (backupEligibleIgnored.has(entry)) {
+      backedUp.push(entry);
+    } else if (nestedOnlyContainers.has(entry)) {
+      nestedContainers.push(entry);
+    }
+  }
+  const clauses = [
+    regenerable.length > 0 ? `ignored only regenerable (${listSome(regenerable)})` : null,
+    copied.length > 0
+      ? `ignored path(s) copied from the main checkout (${listSome(copied)})`
+      : null,
+    backedUp.length > 0
+      ? `ignored path(s) pending backup in the snapshot (${listSome(backedUp)})`
+      : null,
+    nestedContainers.length > 0
+      ? `container(s) of nested repo(s) judged safe (${listSome(nestedContainers)})`
+      : null,
+    safeNestedRepositories.size > 0
+      ? `nested repo(s) judged safe (${listSome([...safeNestedRepositories])})`
+      : null,
+  ].filter((part): part is string => part !== null);
+  return clauses.length > 0 ? `; ${clauses.join("; ")}` : "";
 }
 
 /**
@@ -661,36 +727,14 @@ function matchesAnyPattern(path: string, patterns: readonly string[]): boolean {
 
 /**
  * Resolves `agents.doneJanitor.regenerableIgnoredPaths` into the patterns `isRegenerablePath` may
- * use, dropping any pattern that could match a secret: the janitor's own by-name rules are a
- * closed, reviewed list, but this config key lets a pattern reach that list unreviewed, and a
- * pattern that could match a secret would make the janitor delete its only copy unread. A pattern
- * is rejected when it, or a copy with every `*` turned into a literal character, is itself a path
- * `isSecretShapedPath` (jev/secret-paths.ts) would refuse to read — the same test that already
- * covers `.env*`, `*.pem`, `*.p12`, and the rest of that list. `onRejectedPattern` is called once
- * per rejection so the caller can log it.
+ * use. A thin, files-only wrapper over `resolveIgnoredPathPatterns` (jev/secret-paths.ts), shared
+ * with `backupIgnoredPaths`'s resolver so a hardening to the secret rejection applies to both.
  */
 export function resolveRegenerableIgnoredPaths(
   patterns: readonly string[] | undefined,
   onRejectedPattern: (pattern: string) => void,
 ): string[] {
-  if (!patterns || patterns.length === 0) return [];
-  const accepted: string[] = [];
-  for (const pattern of patterns) {
-    const sample = pattern.replace(/\*/gu, "x");
-    // A last segment of only wildcards (`*`, `**`, `dir/*`, or nothing) names no file: it would
-    // make every ignored file under it regenerable.
-    const lastSegment = pattern.trim().split("/").pop() ?? "";
-    if (
-      lastSegment.replace(/\*/gu, "") === "" ||
-      isSecretShapedPath(pattern) ||
-      isSecretShapedPath(sample)
-    ) {
-      onRejectedPattern(pattern);
-      continue;
-    }
-    accepted.push(pattern);
-  }
-  return accepted;
+  return resolveIgnoredPathPatterns(patterns, onRejectedPattern);
 }
 
 /** Whether a file (or an Xcode or .NET project) is a build manifest; see `BUILD_MANIFESTS`. */

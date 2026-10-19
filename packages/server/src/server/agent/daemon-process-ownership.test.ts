@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "vitest";
-import { clearForgePollPid, markForgePollPidLive } from "./daemon-forge-poll-pids.js";
+import { clearForgeCliChildPid, markForgeCliChildPidLive } from "./daemon-forge-cli-pids.js";
 import { createDaemonProcessOwnershipTracker } from "./daemon-process-ownership.js";
 import type { ProcessSampleRow } from "./process-sampler.js";
 
@@ -64,14 +64,14 @@ describe("createDaemonProcessOwnershipTracker", () => {
   });
 });
 
-describe("createDaemonProcessOwnershipTracker, the live forge-poll registry", () => {
+describe("createDaemonProcessOwnershipTracker, the live forge-CLI pid registry", () => {
   afterEach(() => {
-    clearForgePollPid(300);
+    clearForgeCliChildPid(300);
   });
 
   test("a pid the registry says is a live forge poll reads as daemon-owned before any sample arrives", () => {
     const tracker = createDaemonProcessOwnershipTracker(daemonPid);
-    markForgePollPidLive(300);
+    markForgeCliChildPidLive(300);
     expect(tracker.isDaemonOwnProcess(300)).toBe(true);
   });
 
@@ -81,15 +81,15 @@ describe("createDaemonProcessOwnershipTracker, the live forge-poll registry", ()
     // between two `ps` samples -- so isDaemonOwnChildPid would read it as a confident "not the
     // daemon's own" rather than "unknown". The live registry is the fix: it is checked first.
     tracker.observeSample({ rows: [row({ pid: daemonPid, ppid: 1 })], agentTrees: [] });
-    markForgePollPidLive(300);
+    markForgeCliChildPidLive(300);
     expect(tracker.isDaemonOwnProcess(300)).toBe(true);
   });
 
   test("falls back to the sample once the registry no longer holds the pid (the poll exited)", () => {
     const tracker = createDaemonProcessOwnershipTracker(daemonPid, () => 0);
     tracker.observeSample({ rows: [row({ pid: daemonPid, ppid: 1 })], agentTrees: [] });
-    markForgePollPidLive(300);
-    clearForgePollPid(300);
+    markForgeCliChildPidLive(300);
+    clearForgeCliChildPid(300);
     expect(tracker.isDaemonOwnProcess(300)).toBe(false);
   });
 });

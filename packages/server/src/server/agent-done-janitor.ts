@@ -33,6 +33,7 @@ import {
 } from "./agent/done-janitor-detector.js";
 import {
   DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
+  DEFAULT_MAX_BACKUP_IGNORED_TOTAL_BYTES,
   resolveBackupIgnoredPaths,
 } from "./agent/backup-eligible-ignored.js";
 import {
@@ -42,6 +43,8 @@ import {
   listNestedRepositories,
   resolveRegenerableIgnoredPaths,
   resolveWorkspaceSweepConfig,
+  type CoverageBasis,
+  type DeletionInvariant,
   type DoneJanitorWorkspaceSweepConfig,
   type IdleProjectVerdict,
   type ResolvedWorkspaceSweepConfig,
@@ -135,6 +138,15 @@ export interface DoneJanitorConfig {
   backupIgnoredPaths?: string[];
   /** Caps a file `backupIgnoredPaths` would otherwise stage. Default 5 MiB. */
   maxBackupIgnoredFileBytes?: number;
+  /** Caps the combined size of every file staged across all eligible entries. Default 50 MiB. */
+  maxBackupIgnoredTotalBytes?: number;
+  /**
+   * Off by default. Excuses a nested repository, and an ignored container holding only safe
+   * nested repositories, from the deletion invariant once `checkNestedRepositorySafety`
+   * (done-janitor-worktree.ts) confirms its own HEAD is on a trusted remote and its own tree is
+   * clean. With this off, both read as before this unit existed: an unconditional keep.
+   */
+  releaseSafeNestedRepos?: boolean;
 }
 
 interface ResolvedDoneJanitorConfig {
@@ -153,6 +165,8 @@ interface ResolvedDoneJanitorConfig {
   /** Validated by `resolveBackupIgnoredPaths`; a pattern that could match a secret never lands here. */
   backupIgnoredPaths: string[];
   maxBackupIgnoredFileBytes: number;
+  maxBackupIgnoredTotalBytes: number;
+  releaseSafeNestedRepos: boolean;
 }
 
 function resolveConfig(config: DoneJanitorConfig, logger: Logger): ResolvedDoneJanitorConfig {
@@ -183,6 +197,9 @@ function resolveConfig(config: DoneJanitorConfig, logger: Logger): ResolvedDoneJ
     ),
     maxBackupIgnoredFileBytes:
       config.maxBackupIgnoredFileBytes ?? DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
+    maxBackupIgnoredTotalBytes:
+      config.maxBackupIgnoredTotalBytes ?? DEFAULT_MAX_BACKUP_IGNORED_TOTAL_BYTES,
+    releaseSafeNestedRepos: config.releaseSafeNestedRepos ?? false,
   };
 }
 
@@ -310,6 +327,7 @@ export interface DoneJanitorDependencies {
     mainRepoRoot?: string | null;
     backupIgnoredPaths?: readonly string[];
     maxBackupIgnoredFileBytes?: number;
+    maxBackupIgnoredTotalBytes?: number;
   }): Promise<WorktreeCoverage | null>;
   /** Null when the snapshot is a backup a deletion may rely on; otherwise why it is not. */
   verifyBackup(input: {
@@ -1019,32 +1037,56 @@ export class AgentDoneJanitor {
       mainRepoRoot,
       backupIgnoredPaths: config.backupIgnoredPaths,
       maxBackupIgnoredFileBytes: config.maxBackupIgnoredFileBytes,
+      maxBackupIgnoredTotalBytes: config.maxBackupIgnoredTotalBytes,
     });
-    const safeNested = await this.resolveSafeNestedRepositories(path, coverage);
-    const invariant = checkDeletionInvariant(
-      coverage,
-      "plan",
-      config.regenerableIgnoredPaths,
-      safeNested,
-    );
+    const invariant = await this.evaluateDeletionInvariant(path, coverage, "plan", config);
     return invariant.holds
       ? { ok: true, invariant: invariant.detail }
       : { ok: false, reason: invariant.reason, category: invariant.category };
   }
 
   /**
-   * Nested repository paths `checkDeletionInvariant` would otherwise keep the worktree for,
-   * confirmed safe (own HEAD on a remote, own tree clean) by `checkNestedRepositorySafety`
-   * (done-janitor-worktree.ts). Empty, with no git call, when `coverage` found none.
+   * `checkDeletionInvariant`, paying for nested-repository safety only when it is the one thing
+   * that could still change the verdict (#14, the review's perf finding): every cheaper check
+   * (unlisted content, an unrelated ignored path, dirty or unpushed work) already ran inside the
+   * cheap pass below, so a worktree kept for any of those never reaches a single git call here.
+   * Off entirely, with no git call at all, while `releaseSafeNestedRepos` is false (#7) -- the
+   * default, so a worktree with a nested repository or an ignored container of them is kept
+   * exactly as before this unit existed until the flag is turned on.
    */
-  private async resolveSafeNestedRepositories(
+  private async evaluateDeletionInvariant(
     worktreePath: string,
     coverage: WorktreeCoverage | null,
-  ): Promise<Set<string>> {
-    if (!coverage) return new Set();
+    basis: CoverageBasis,
+    config: ResolvedDoneJanitorConfig,
+  ): Promise<DeletionInvariant> {
+    const cheap = checkDeletionInvariant(coverage, basis, config.regenerableIgnoredPaths);
+    if (cheap.holds || !config.releaseSafeNestedRepos || !coverage) return cheap;
+    if (!this.nestedRepositorySafetyCouldHelp(coverage, cheap)) return cheap;
     const candidates = listNestedRepositories(coverage);
-    if (candidates.length === 0) return new Set();
-    return computeSafeNestedRepositories(worktreePath, candidates);
+    if (candidates.length === 0) return cheap;
+    const safeNested = await computeSafeNestedRepositories(worktreePath, candidates);
+    if (safeNested.size === 0) return cheap;
+    return checkDeletionInvariant(coverage, basis, config.regenerableIgnoredPaths, safeNested);
+  }
+
+  /**
+   * Whether re-running the invariant with nested-repository safety applied could still change a
+   * failed verdict: when the block is the nested-repo check itself (no `category`, and nothing
+   * unlisted — unreadable content, hidden edits, or an LFS file — already failed it first), or an
+   * ignored-path block that names at least one container of only nested repositories. Anything
+   * else — unlisted content, an unrelated ignored file, dirty or unpushed work — is unaffected by
+   * it, so there is no reason to pay for the git calls.
+   */
+  private nestedRepositorySafetyCouldHelp(
+    coverage: WorktreeCoverage,
+    invariant: DeletionInvariant,
+  ): boolean {
+    if (invariant.holds) return false;
+    if (coverage.ignoredDirectoriesHoldingOnlyNestedRepositories.length > 0) return true;
+    const unlistedBlocked =
+      coverage.unreadable.length > 0 || coverage.hidden.length > 0 || coverage.lfs.length > 0;
+    return !unlistedBlocked && invariant.category === undefined;
   }
 
   /**
@@ -1063,13 +1105,14 @@ export class AgentDoneJanitor {
   ): Promise<DeletionCheck> {
     const occupied = await this.occupiedReason(path);
     if (occupied) return { ok: false, reason: occupied.reason, category: occupied.category };
-    const snapshot = await this.takeSnapshot(
+    const snapshot = await this.takeSnapshot({
       report,
-      path,
+      cwd: path,
       reason,
-      config.backupIgnoredPaths,
-      config.maxBackupIgnoredFileBytes,
-    );
+      backupIgnoredPaths: config.backupIgnoredPaths,
+      maxBackupIgnoredFileBytes: config.maxBackupIgnoredFileBytes,
+      maxBackupIgnoredTotalBytes: config.maxBackupIgnoredTotalBytes,
+    });
     if (snapshot.kind === "failed") {
       return {
         ok: false,
@@ -1081,14 +1124,11 @@ export class AgentDoneJanitor {
         worktreePath: path,
         commit: null,
         mainRepoRoot,
+        backupIgnoredPaths: config.backupIgnoredPaths,
+        maxBackupIgnoredFileBytes: config.maxBackupIgnoredFileBytes,
+        maxBackupIgnoredTotalBytes: config.maxBackupIgnoredTotalBytes,
       });
-      const safeNested = await this.resolveSafeNestedRepositories(path, coverage);
-      const invariant = checkDeletionInvariant(
-        coverage,
-        "head",
-        config.regenerableIgnoredPaths,
-        safeNested,
-      );
+      const invariant = await this.evaluateDeletionInvariant(path, coverage, "head", config);
       return invariant.holds
         ? { ok: true, invariant: invariant.detail }
         : { ok: false, reason: invariant.reason, category: invariant.category };
@@ -1102,13 +1142,7 @@ export class AgentDoneJanitor {
       commit: snapshot.commit,
       mainRepoRoot,
     });
-    const safeNested = await this.resolveSafeNestedRepositories(path, coverage);
-    const invariant = checkDeletionInvariant(
-      coverage,
-      "snapshot",
-      config.regenerableIgnoredPaths,
-      safeNested,
-    );
+    const invariant = await this.evaluateDeletionInvariant(path, coverage, "snapshot", config);
     return invariant.holds
       ? {
           ok: true,
@@ -1968,23 +2002,26 @@ export class AgentDoneJanitor {
     cwd: string,
     reason: string,
   ): Promise<string | null> {
-    const result = await this.takeSnapshot(report, cwd, reason);
+    const result = await this.takeSnapshot({ report, cwd, reason });
     return result.kind === "failed" && result.worktreePath ? result.error : null;
   }
 
   /** The snapshot itself, reported, with a failure on work at risk remembered for the sweep. */
-  private async takeSnapshot(
-    report: DoneJanitorSweepReport,
-    cwd: string,
-    reason: string,
-    backupIgnoredPaths: readonly string[] = [],
-    maxBackupIgnoredFileBytes?: number,
-  ): Promise<WorktreeSnapshotResult> {
+  private async takeSnapshot(options: {
+    report: DoneJanitorSweepReport;
+    cwd: string;
+    reason: string;
+    backupIgnoredPaths?: readonly string[];
+    maxBackupIgnoredFileBytes?: number;
+    maxBackupIgnoredTotalBytes?: number;
+  }): Promise<WorktreeSnapshotResult> {
+    const { report, cwd, reason } = options;
     const result = await this.deps.snapshotWorktree({
       cwd,
       reason,
-      backupIgnoredPaths,
-      maxBackupIgnoredFileBytes,
+      backupIgnoredPaths: options.backupIgnoredPaths ?? [],
+      maxBackupIgnoredFileBytes: options.maxBackupIgnoredFileBytes,
+      maxBackupIgnoredTotalBytes: options.maxBackupIgnoredTotalBytes,
     });
     if (result.kind === "snapshotted") {
       report.entries.push({

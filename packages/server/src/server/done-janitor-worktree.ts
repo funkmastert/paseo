@@ -16,7 +16,8 @@ import { dirname, join, resolve } from "node:path";
 
 import {
   DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
-  isBackupEligibleIgnoredPath,
+  DEFAULT_MAX_BACKUP_IGNORED_TOTAL_BYTES,
+  selectBackupEligibleIgnored,
 } from "./agent/backup-eligible-ignored.js";
 import { isBuildManifest, isRegenerablePath } from "./agent/workspace-sweep-detector.js";
 import type { WorktreeSnapshotOffsite } from "./remediation/contract.js";
@@ -478,6 +479,8 @@ export async function readWorktreeCoverage(input: {
   backupIgnoredPaths?: readonly string[];
   /** `agents.doneJanitor.maxBackupIgnoredFileBytes`. Defaults to `DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES`. */
   maxBackupIgnoredFileBytes?: number;
+  /** `agents.doneJanitor.maxBackupIgnoredTotalBytes`. Defaults to `DEFAULT_MAX_BACKUP_IGNORED_TOTAL_BYTES`. */
+  maxBackupIgnoredTotalBytes?: number;
 }): Promise<WorktreeCoverage | null> {
   const { worktreePath } = input;
   if (!existsSync(worktreePath)) return null;
@@ -566,16 +569,19 @@ export async function readWorktreeCoverage(input: {
       copiedFromMainCheckout: input.mainRepoRoot
         ? await partitionCopiedFromMainCheckout(worktreePath, input.mainRepoRoot, unregenerable)
         : [],
-      backupEligibleIgnored: await partitionBackupEligibleIgnored(
+      backupEligibleIgnored: await partitionBackupEligibleIgnored({
         worktreePath,
-        unregenerable,
-        input.backupIgnoredPaths,
-        input.maxBackupIgnoredFileBytes,
-      ),
-      ignoredDirectoriesHoldingOnlyNestedRepositories: listIgnoredDirectoriesOfOnlyNestedRepos(
-        ignored,
-        tree.nestedRepositories,
-      ),
+        candidates: unregenerable,
+        patterns: input.backupIgnoredPaths,
+        maxFileBytes: input.maxBackupIgnoredFileBytes,
+        maxTotalBytes: input.maxBackupIgnoredTotalBytes,
+      }),
+      ignoredDirectoriesHoldingOnlyNestedRepositories:
+        await listIgnoredDirectoriesOfOnlyNestedRepos(
+          worktreePath,
+          ignored,
+          tree.nestedRepositories,
+        ),
     };
   } finally {
     rmSync(indexFile, { force: true });
@@ -833,26 +839,32 @@ async function directoriesByteIdentical(directoryA: string, directoryB: string):
   return true;
 }
 
+export interface PartitionBackupEligibleIgnoredOptions {
+  worktreePath: string;
+  /** Already filtered to entries not regenerable by name. */
+  candidates: readonly string[];
+  patterns?: readonly string[];
+  maxFileBytes?: number;
+  maxTotalBytes?: number;
+}
+
 /**
- * Which of `candidates` (already filtered to entries not regenerable by name) a work snapshot
- * would capture, were one taken now: `isBackupEligibleIgnoredPath` run over each, size cap and
- * secret filter included. Done once here rather than inside `checkDeletionInvariant` because that
- * function is pure and this needs to read file content.
+ * Which of `candidates` a work snapshot would capture, were one taken now:
+ * `selectBackupEligibleIgnored` run over them, size cap, total cap and secret filter included.
+ * Done once here rather than inside `checkDeletionInvariant` because that function is pure and
+ * this needs to read file content.
  */
 async function partitionBackupEligibleIgnored(
-  worktreePath: string,
-  candidates: readonly string[],
-  patterns: readonly string[] = [],
-  maxFileBytes: number = DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
+  options: PartitionBackupEligibleIgnoredOptions,
 ): Promise<string[]> {
-  if (patterns.length === 0) return [];
-  const eligible: string[] = [];
-  for (const entry of candidates) {
-    if (await isBackupEligibleIgnoredPath({ worktreePath, entry, patterns, maxFileBytes })) {
-      eligible.push(entry);
-    }
-  }
-  return eligible;
+  const { entries } = await selectBackupEligibleIgnored({
+    worktreePath: options.worktreePath,
+    candidates: options.candidates,
+    patterns: options.patterns ?? [],
+    maxFileBytes: options.maxFileBytes ?? DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
+    maxTotalBytes: options.maxTotalBytes ?? DEFAULT_MAX_BACKUP_IGNORED_TOTAL_BYTES,
+  });
+  return entries;
 }
 
 /**
@@ -860,45 +872,159 @@ async function partitionBackupEligibleIgnored(
  * `nestedRepositories` (and nothing else): a container git collapses to a single ignored entry,
  * like `.claude/worktrees/`, because it never looks inside a directory it ignores.
  * `checkDeletionInvariant` may excuse one of these once every nested repository under it is
- * confirmed safe — the container holds nothing beyond what each nested repo's own remote covers.
+ * confirmed safe — the container itself holds nothing beyond what each nested repo's own remote
+ * covers. Verified with a real filesystem walk (`lstat`, no symlinks followed): a loose file, a
+ * symlink, or anything else outside a nested-repo root disqualifies the whole container, so a
+ * stray `notes.md` or a `.claude/skills/...` file beside a safe clone keeps the worktree exactly
+ * as before this excusal existed. A directory that cannot be read disqualifies it too.
  */
-function listIgnoredDirectoriesOfOnlyNestedRepos(
+async function listIgnoredDirectoriesOfOnlyNestedRepos(
+  worktreePath: string,
   ignored: readonly string[],
   nestedRepositories: readonly string[],
-): string[] {
-  return ignored.filter((entry) => {
-    if (!entry.endsWith("/")) return false;
+): Promise<string[]> {
+  const nestedRepositorySet = new Set(nestedRepositories.map((entry) => entry.replace(/\/$/u, "")));
+  const result: string[] = [];
+  for (const entry of ignored) {
+    if (!entry.endsWith("/")) continue;
+    const relativeDir = entry.slice(0, -1);
     const nestedUnder = nestedRepositories.filter((nested) => nested.startsWith(entry));
-    return nestedUnder.length > 0;
-  });
+    if (nestedUnder.length === 0) continue;
+    if (await onlyHoldsNestedRepositories(worktreePath, relativeDir, nestedRepositorySet)) {
+      result.push(entry);
+    }
+  }
+  return result;
+}
+
+async function onlyHoldsNestedRepositories(
+  worktreePath: string,
+  relativeDir: string,
+  nestedRepositorySet: ReadonlySet<string>,
+): Promise<boolean> {
+  if (nestedRepositorySet.has(relativeDir)) return true;
+  let entries: Dirent[];
+  try {
+    entries = await readdir(join(worktreePath, relativeDir), { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) return false;
+    const child = `${relativeDir}/${entry.name}`;
+    if (nestedRepositorySet.has(child)) continue;
+    if (!entry.isDirectory()) return false;
+    if (!(await onlyHoldsNestedRepositories(worktreePath, child, nestedRepositorySet))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** A git remote URL that identifies a real network host, never a local filesystem path. */
+function isNetworkRemoteUrl(url: string): boolean {
+  const trimmed = url.trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed)) return !/^file:\/\//iu.test(trimmed);
+  // scp-like syntax: user@host:path, no scheme.
+  return /^[^/\s]+@[^:\s]+:/u.test(trimmed);
 }
 
 /**
- * Whether a repository nested inside a worktree is safe to lose when the worktree goes: its HEAD
- * is clean (no uncommitted or untracked change) and reachable from a remote-tracking ref of its
- * own. No local base branch is consulted, unlike {@link checkWorktreeDeletionSafety}: a nested
- * repository records no base branch of its own, and a backup only ever holds it as a pointer to a
- * commit, never its history. A git failure, a dirty tree or an unreachable HEAD all read as unsafe
- * — doubt keeps the worktree, same as everywhere else in this module.
+ * Names of this repository's remotes whose URL is a real network host (#6, docs/done-janitor.md):
+ * a local path -- `file://`, absolute, or relative -- never counts, even when it resolves outside
+ * the worktree being deleted, because a relative URL's base cannot be read back out of git
+ * reliably. An empty result (no remote at all, or git cannot read the config) reads as "trust
+ * nothing", same doubt-keeps-it posture as every other check here.
+ */
+async function readTrustedRemoteNames(git: ReadOnlyGit): Promise<string[]> {
+  const listing = await git(["config", "--get-regexp", "^remote\\..*\\.url$"]);
+  if (listing === null) return [];
+  const trusted: string[] = [];
+  for (const line of listing.split("\n")) {
+    const match = /^remote\.(.+)\.url\s+(.+)$/u.exec(line.trim());
+    if (!match) continue;
+    const [, name, url] = match;
+    if (isNetworkRemoteUrl(url)) trusted.push(name);
+  }
+  return trusted;
+}
+
+/**
+ * Whether a repository nested inside a worktree is safe to lose when the worktree goes. All of:
+ *
+ * - git's own discovery resolves `nestedRepositoryPath` as the repository's own toplevel (#4): an
+ *   invalid `.git` entry (an empty directory, a dangling gitdir file) would otherwise let git
+ *   climb to an ancestor repository — the outer worktree, clean and pushed — and read that as
+ *   "safe" for a directory that is not really a repository at all.
+ * - the outer gate's own guards hold here too (#3), reusing `readTreeProblem`: not locked, no
+ *   half-done merge/rebase/cherry-pick/bisect, and no tracked file hidden with
+ *   `--assume-unchanged` or `--skip-worktree`.
+ * - `git status` (tracked and untracked) is empty, same as before.
+ * - every ignored path left is one `isRegenerablePath` already excuses by name (#5): the outer
+ *   worktree's own ignored-path rule, applied to this nested repository instead of bypassed.
+ * - every ref reachable from HEAD and from every other local branch (`refs/heads/*`), and any
+ *   stash entry, is reachable from a *trusted* remote-tracking ref (#2, #6) — a second branch or a
+ *   stash in a standalone nested clone has no other copy once the worktree goes, and a remote
+ *   whose own URL is a local path is never trusted, because it may be deleted along with the
+ *   worktree itself (an SPM `.build/index-build/repositories/...` cache, for one).
+ *
+ * A git failure, a dirty tree, an unreachable ref, a stash entry, or no trusted remote at all
+ * reads as unsafe: every check here refuses on doubt, same as `checkWorktreeDeletionSafety`.
  */
 export async function checkNestedRepositorySafety(
   nestedRepositoryPath: string,
   runGit: RunGitCommand = runGitCommand,
 ): Promise<boolean> {
   const git = createReadOnlyGit(nestedRepositoryPath, runGit);
-  const status = await git([
+
+  const toplevel = (await git(["rev-parse", "--path-format=absolute", "--show-toplevel"]))?.trim();
+  if (!toplevel || realpathOrSelf(toplevel) !== realpathOrSelf(nestedRepositoryPath)) return false;
+  const gitDir = (await git(["rev-parse", "--path-format=absolute", "--git-dir"]))?.trim();
+  if (!gitDir) return false;
+
+  if ((await readTreeProblem(git, nestedRepositoryPath, gitDir)) !== null) return false;
+
+  const ignoredStatus = await git([
     "status",
     "--porcelain=v1",
+    "-z",
+    "--no-renames",
+    "--ignored=matching",
     "--untracked-files=all",
-    "--ignore-submodules=none",
   ]);
-  if (status === null) return false;
-  if (status.split("\n").some((line) => line.trim().length > 0)) return false;
+  if (ignoredStatus === null) return false;
+  const ignored = await listIgnored(nestedRepositoryPath, ignoredStatus);
+  const manifestDirectories = await readManifestDirectories(nestedRepositoryPath, ignored);
+  if (unregenerableIgnored(ignored, manifestDirectories).length > 0) return false;
+
   const head = (await git(["rev-parse", "--verify", "--quiet", "HEAD"]))?.trim();
   if (!head) return false;
-  const unreachable = await git(["rev-list", "--count", "HEAD", "--not", "--remotes"]);
-  const count = unreachable === null ? Number.NaN : Number.parseInt(unreachable.trim(), 10);
-  return Number.isFinite(count) && count === 0;
+
+  const trustedRemotes = await readTrustedRemoteNames(git);
+  if (trustedRemotes.length === 0) return false;
+  const survivors = trustedRemotes.map((name) => `--remotes=${name}`);
+
+  const unreachableHead = await git(["rev-list", "--count", "HEAD", "--not", ...survivors]);
+  const headCount =
+    unreachableHead === null ? Number.NaN : Number.parseInt(unreachableHead.trim(), 10);
+  if (!Number.isFinite(headCount) || headCount > 0) return false;
+
+  const unreachableAll = await git([
+    "rev-list",
+    "--count",
+    "--branches",
+    "--tags",
+    "--not",
+    ...survivors,
+  ]);
+  const allCount =
+    unreachableAll === null ? Number.NaN : Number.parseInt(unreachableAll.trim(), 10);
+  if (!Number.isFinite(allCount) || allCount > 0) return false;
+
+  // Non-null means refs/stash resolved: a stash entry exists.
+  if ((await git(["rev-parse", "--verify", "--quiet", "refs/stash"])) !== null) return false;
+
+  return true;
 }
 
 /**

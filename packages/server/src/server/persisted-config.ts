@@ -554,6 +554,11 @@ const AgentDoneJanitorSchema = z
     // longer keeps its worktree forever. See docs/done-janitor.md, "Unbacked ignored files".
     backupIgnoredPaths: z.array(z.string()).optional(),
     maxBackupIgnoredFileBytes: z.number().int().positive().optional(),
+    maxBackupIgnoredTotalBytes: z.number().int().positive().optional(),
+    // Off by default: excuses a nested repository, and an ignored container holding only safe
+    // nested repositories, from the deletion invariant once its own HEAD is on a trusted remote
+    // and its own tree is clean. See docs/done-janitor.md, "Unbacked ignored files".
+    releaseSafeNestedRepos: z.boolean().optional(),
   })
   .strict();
 

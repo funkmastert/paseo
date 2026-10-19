@@ -2,56 +2,42 @@
  * Whether an ignored path should be captured by a work snapshot instead of unconditionally
  * keeping its worktree forever: it matches a configured pattern
  * (`agents.doneJanitor.backupIgnoredPaths`), and every file under it (recursively, for a
- * directory) is small enough and does not look like a secret. See docs/done-janitor.md,
- * "Unbacked ignored files".
+ * directory) is small enough and does not look like a secret, within a total cap across every
+ * eligible entry. See docs/done-janitor.md, "Unbacked ignored files".
  *
- * The same predicate decides two things that must never disagree: what the snapshotter actually
- * stages into a worktree's backup, and what the done janitor's plan-time check may treat as
- * "pending backup" rather than an unconditional keep. Sharing one function is what makes the
- * plan-time deferral safe -- whatever this says can be backed up is exactly what the snapshotter
- * will back up when it runs.
+ * `selectBackupEligibleIgnored` decides two things that must never disagree: which top-level
+ * entries the done janitor's plan-time check may treat as "pending backup" rather than an
+ * unconditional keep, and the exact file list the snapshotter stages. Sharing one function is
+ * what makes the plan-time deferral safe -- whatever this says can be backed up is exactly what
+ * the snapshotter backs up when it runs, file for file.
  */
 
 import type { Dirent, Stats } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { globToRegExp, isSecretShapedPath } from "../jev/secret-paths.js";
+import {
+  globToRegExp,
+  isSecretShapedPath,
+  resolveIgnoredPathPatterns,
+} from "../jev/secret-paths.js";
 import { looksLikeSecret } from "./snapshot-secret-filter.js";
 
 /** Used when `agents.doneJanitor.maxBackupIgnoredFileBytes` is unset. */
 export const DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES = 5 * 1024 * 1024;
+/** Used when `agents.doneJanitor.maxBackupIgnoredTotalBytes` is unset. */
+export const DEFAULT_MAX_BACKUP_IGNORED_TOTAL_BYTES = 50 * 1024 * 1024;
 
 /**
  * Resolves `agents.doneJanitor.backupIgnoredPaths` the same way
- * `resolveRegenerableIgnoredPaths` (workspace-sweep-detector.ts) resolves its sibling config key:
- * each pattern is a path suffix, or a simple glob with `*` standing for any run of characters
- * within one path segment, and a pattern that could match a secret -- whatever its extension --
- * is rejected rather than risk the janitor pushing a secret into a snapshot's backup. Unlike the
- * regenerable list, a pattern here may match a directory: `.worker-logs/` has to.
+ * `resolveRegenerableIgnoredPaths` (workspace-sweep-detector.ts) resolves its sibling config key
+ * -- both are now `resolveIgnoredPathPatterns` (jev/secret-paths.ts) -- except a pattern here may
+ * match a directory: `.worker-logs/` has to.
  */
 export function resolveBackupIgnoredPaths(
   patterns: readonly string[] | undefined,
   onRejectedPattern: (pattern: string) => void,
 ): string[] {
-  if (!patterns || patterns.length === 0) return [];
-  const accepted: string[] = [];
-  for (const pattern of patterns) {
-    const sample = pattern.replace(/\*/gu, "x");
-    const trimmed = pattern.trim().replace(/\/$/u, "");
-    // A pattern here may name a directory, unlike `resolveRegenerableIgnoredPaths`'s: a trailing
-    // slash is not itself a wildcard-only last segment.
-    const lastSegment = trimmed.split("/").pop() ?? "";
-    if (
-      lastSegment.replace(/\*/gu, "") === "" ||
-      isSecretShapedPath(pattern) ||
-      isSecretShapedPath(sample)
-    ) {
-      onRejectedPattern(pattern);
-      continue;
-    }
-    accepted.push(pattern);
-  }
-  return accepted;
+  return resolveIgnoredPathPatterns(patterns, onRejectedPattern, { allowDirectory: true });
 }
 
 function matchesAnyPattern(path: string, patterns: readonly string[]): boolean {
@@ -74,56 +60,127 @@ export interface BackupEligibleIgnoredOptions {
 
 /**
  * Whether `entry` matches a configured pattern and, recursively for a directory, holds nothing
- * too large or secret-shaped to back up. A symlink, an unreadable entry, or anything over the cap
- * makes the whole entry ineligible: a partial backup of a directory is not a backup of it.
+ * too large or secret-shaped to back up. A convenience wrapper over `selectBackupEligibleIgnored`
+ * for a single candidate with no total cap, for a caller that only needs the yes/no.
  */
 export async function isBackupEligibleIgnoredPath(
   options: BackupEligibleIgnoredOptions,
 ): Promise<boolean> {
-  const { worktreePath, entry, patterns, maxFileBytes } = options;
-  if (!matchesAnyPattern(entry, patterns)) return false;
-  return entry.endsWith("/")
-    ? directoryWithinCap(worktreePath, entry.slice(0, -1), maxFileBytes)
-    : fileWithinCap(worktreePath, entry, maxFileBytes);
+  const selection = await selectBackupEligibleIgnored({
+    worktreePath: options.worktreePath,
+    candidates: [options.entry],
+    patterns: options.patterns,
+    maxFileBytes: options.maxFileBytes,
+    maxTotalBytes: Number.POSITIVE_INFINITY,
+  });
+  return selection.entries.includes(options.entry);
 }
 
-async function directoryWithinCap(
+export interface SelectBackupEligibleIgnoredOptions {
+  worktreePath: string;
+  /** Top-level candidates, as `WorktreeCoverage.ignored` lists them: a directory ends with `/`. */
+  candidates: readonly string[];
+  patterns: readonly string[];
+  maxFileBytes: number;
+  /** Across every eligible entry combined, not just one directory. */
+  maxTotalBytes: number;
+}
+
+export interface BackupEligibleSelection {
+  /** The subset of `candidates`, in order, that fit entirely within both caps. */
+  entries: string[];
+  /**
+   * Every file (never a directory), relative to `worktreePath`, under the entries above -- the
+   * exact list `writeSnapshotTree` (agent/worktree-snapshot.ts) should stage, re-checked just
+   * before it does, rather than the directory name: a file created or grown after this walk is
+   * not implicitly included.
+   */
+  files: string[];
+}
+
+/**
+ * Which of `candidates` match a configured pattern and fit within the caps: a symlink, an
+ * unreadable entry, a secret-shaped path (by name, by `looksLikeSecret`'s content scan, or by
+ * `isSecretShapedPath` applied to every file found recursively -- not just the top-level entry),
+ * or anything over `maxFileBytes` makes the whole entry ineligible, whole or nothing: a partial
+ * backup of a directory is not a backup of it. Entries are evaluated in order and accepted while
+ * the running total stays within `maxTotalBytes`; an entry that would push the total over is
+ * skipped (later, smaller entries may still fit), never allowed to silently uncap the total.
+ */
+export async function selectBackupEligibleIgnored(
+  options: SelectBackupEligibleIgnoredOptions,
+): Promise<BackupEligibleSelection> {
+  const { worktreePath, candidates, patterns, maxFileBytes, maxTotalBytes } = options;
+  const entries: string[] = [];
+  const files: string[] = [];
+  if (patterns.length === 0) return { entries, files };
+  let totalBytes = 0;
+  for (const entry of candidates) {
+    if (!matchesAnyPattern(entry, patterns)) continue;
+    const collected = entry.endsWith("/")
+      ? await collectEligibleFilesInDirectory(worktreePath, entry.slice(0, -1), maxFileBytes)
+      : await collectEligibleFile(worktreePath, entry, maxFileBytes);
+    if (!collected) continue;
+    if (totalBytes + collected.totalBytes > maxTotalBytes) continue;
+    totalBytes += collected.totalBytes;
+    entries.push(entry);
+    files.push(...collected.files);
+  }
+  return { entries, files };
+}
+
+interface CollectedFiles {
+  files: string[];
+  totalBytes: number;
+}
+
+async function collectEligibleFilesInDirectory(
   worktreePath: string,
   relativeDir: string,
   maxFileBytes: number,
-): Promise<boolean> {
+): Promise<CollectedFiles | null> {
   let entries: Dirent[];
   try {
     entries = await readdir(join(worktreePath, relativeDir), { withFileTypes: true });
   } catch {
-    return false;
+    return null;
   }
+  const files: string[] = [];
+  let totalBytes = 0;
   for (const entry of entries) {
-    if (entry.isSymbolicLink()) return false;
+    if (entry.isSymbolicLink()) return null;
     const child = `${relativeDir}/${entry.name}`;
+    let collected: CollectedFiles | null;
     if (entry.isDirectory()) {
-      if (!(await directoryWithinCap(worktreePath, child, maxFileBytes))) return false;
+      collected = await collectEligibleFilesInDirectory(worktreePath, child, maxFileBytes);
     } else if (entry.isFile()) {
-      if (!(await fileWithinCap(worktreePath, child, maxFileBytes))) return false;
+      collected = await collectEligibleFile(worktreePath, child, maxFileBytes);
     } else {
-      return false;
+      collected = null;
     }
+    if (!collected) return null;
+    files.push(...collected.files);
+    totalBytes += collected.totalBytes;
   }
-  return true;
+  return { files, totalBytes };
 }
 
-async function fileWithinCap(
+async function collectEligibleFile(
   worktreePath: string,
   relativePath: string,
   maxFileBytes: number,
-): Promise<boolean> {
+): Promise<CollectedFiles | null> {
+  // Applied per file, not just to the top-level entry: a name on the JEV secret list buried
+  // inside an otherwise-plain directory must disqualify it too.
+  if (isSecretShapedPath(relativePath)) return null;
   const absolutePath = join(worktreePath, relativePath);
   let stats: Stats;
   try {
     stats = await lstat(absolutePath);
   } catch {
-    return false;
+    return null;
   }
-  if (!stats.isFile() || stats.size > maxFileBytes) return false;
-  return !(await looksLikeSecret(absolutePath, relativePath, stats));
+  if (!stats.isFile() || stats.size > maxFileBytes) return null;
+  if (await looksLikeSecret(absolutePath, relativePath, stats)) return null;
+  return { files: [relativePath], totalBytes: stats.size };
 }

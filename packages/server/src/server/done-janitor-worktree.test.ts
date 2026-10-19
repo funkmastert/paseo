@@ -935,7 +935,7 @@ describe("the deletion invariant against the main checkout", () => {
     writeFileSync(join(worktree, "machine-config.json"), "sdk.dir=/Users/someone/Android/sdk\n");
 
     expect(await planAgainstMain(worktree)).toBe(
-      "holds: holds: every file is tracked and pushed; ignored only regenerable (machine-config.json)",
+      "holds: holds: every file is tracked and pushed; ignored path(s) copied from the main checkout (machine-config.json)",
     );
   });
 
@@ -947,7 +947,7 @@ describe("the deletion invariant against the main checkout", () => {
     }
 
     expect(await planAgainstMain(worktree)).toBe(
-      "holds: holds: every file is tracked and pushed; ignored only regenerable (config/)",
+      "holds: holds: every file is tracked and pushed; ignored path(s) copied from the main checkout (config/)",
     );
   });
 
@@ -1225,6 +1225,96 @@ describe("a work snapshot backs up a configured ignored path, and the janitor th
     const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
     expect(checkDeletionInvariant(coverage, "head").holds).toBe(false);
   });
+
+  // #11: the plan-basis excusal is safe only because the real snapshot's own basis re-reads an
+  // unstaged entry as ignored. A file eligible when the plan read it, but grown past the cap by
+  // the time the real snapshot runs, must still be read back as ignored and keep the worktree.
+  test("a file eligible at plan time but grown past the cap before the real snapshot keeps the worktree", async () => {
+    const worktree = addWorktree("backup-flow-grows", "feature");
+    commit(worktree, ".gitignore", ".worker-logs/\n");
+    mkdirSync(join(worktree, ".worker-logs"));
+    writeFileSync(join(worktree, ".worker-logs", "a.log"), "small\n");
+    git(worktree, "push", "-q", "origin", "feature");
+
+    const planCoverage = await readWorktreeCoverage({
+      worktreePath: worktree,
+      commit: null,
+      backupIgnoredPaths: [".worker-logs/"],
+      maxBackupIgnoredFileBytes: 1024,
+    });
+    expect(checkDeletionInvariant(planCoverage, "plan").holds).toBe(true);
+
+    writeFileSync(join(worktree, ".worker-logs", "a.log"), "x".repeat(2048));
+    const result = await snapshotter().snapshot({
+      cwd: worktree,
+      reason: "test",
+      backupIgnoredPaths: [".worker-logs/"],
+      maxBackupIgnoredFileBytes: 1024,
+    });
+    expect(result.kind).toBe("nothing-at-risk"); // nothing tracked changed; the log alone is over cap now
+    const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
+    expect(checkDeletionInvariant(coverage, "head").holds).toBe(false);
+  });
+
+  // #9: a total cap across every eligible entry, not just a per-file one.
+  test("a total cap smaller than the combined eligible entries excludes the later ones", async () => {
+    const worktree = addWorktree("backup-flow-total-cap", "feature");
+    commit(worktree, ".gitignore", ".worker-logs/\nmore-logs/\n");
+    mkdirSync(join(worktree, ".worker-logs"));
+    mkdirSync(join(worktree, "more-logs"));
+    writeFileSync(join(worktree, ".worker-logs", "a.log"), "x".repeat(600));
+    writeFileSync(join(worktree, "more-logs", "b.log"), "x".repeat(600));
+
+    const coverage = await readWorktreeCoverage({
+      worktreePath: worktree,
+      commit: null,
+      backupIgnoredPaths: [".worker-logs/", "more-logs/"],
+      maxBackupIgnoredFileBytes: 1024,
+      maxBackupIgnoredTotalBytes: 800,
+    });
+    // Both match and are each within the per-file cap, but together they exceed the total: only
+    // the first accepted stays within it.
+    expect(coverage?.backupEligibleIgnored).toEqual([".worker-logs/"]);
+  });
+
+  // #13: an eligible file whose name is also a glob (git pathspec syntax, not this module's own
+  // glob matching) must never pull in an unchecked, ignored sibling when force-added. Both names
+  // are ignored individually -- neither through a directory pattern, so the whole-directory
+  // eligibility walk cannot explain a sibling showing up, and neither is picked up by the normal
+  // untracked-file staging, which skips anything ignored.
+  test("staging a file whose name looks like a glob does not also stage an unchecked, ignored sibling", async () => {
+    const worktree = addWorktree("backup-flow-literal-pathspec", "feature");
+    commit(worktree, ".gitignore", "run[1].log\nrun1.log\n");
+    writeFileSync(join(worktree, "run[1].log"), "eligible\n");
+    writeFileSync(join(worktree, "run1.log"), "never asked for, ignored on its own\n");
+
+    const taken = await snapshot(worktree, undefined, ["run[1].log"]);
+    const tracked = git(worktree, "ls-tree", "-r", "--name-only", taken.commit)
+      .split("\n")
+      .filter(Boolean);
+
+    expect(tracked).toContain("run[1].log");
+    expect(tracked).not.toContain("run1.log");
+  });
+
+  // #10: isSecretShapedPath applied per file, recursively -- not just to the top-level entry --
+  // so a secret-named file the JEV list recognizes but hasSecretName (the untracked-file filter's
+  // own, narrower list) does not still disqualifies the directory holding it.
+  test("a file secret-shaped by the JEV path list, but not by the untracked-file filter's own list, disqualifies its directory", async () => {
+    const worktree = addWorktree("backup-flow-jev-secret", "feature");
+    commit(worktree, ".gitignore", ".worker-logs/\n");
+    mkdirSync(join(worktree, ".worker-logs"));
+    writeFileSync(join(worktree, ".worker-logs", "a.log"), "plain\n");
+    writeFileSync(join(worktree, ".worker-logs", "terraform.tfvars"), 'token = "x"\n');
+
+    const coverage = await readWorktreeCoverage({
+      worktreePath: worktree,
+      commit: null,
+      backupIgnoredPaths: [".worker-logs/"],
+      maxBackupIgnoredFileBytes: 1024,
+    });
+    expect(coverage?.backupEligibleIgnored).toEqual([]);
+  });
 });
 
 describe("checkNestedRepositorySafety", () => {
@@ -1235,14 +1325,22 @@ describe("checkNestedRepositorySafety", () => {
     return nested;
   }
 
-  test("a clean, pushed nested repository is safe", async () => {
+  /**
+   * A remote whose URL looks like a real network host, with a local `refs/remotes/<name>/<branch>`
+   * matching `head` -- enough for `checkNestedRepositorySafety`'s reachability checks without an
+   * actual network push (#6: a local-path remote, which `git push` to a bare repo on this machine
+   * would otherwise produce, is deliberately never trusted).
+   */
+  function fakeNetworkRemote(nested: string, head: string, name = "origin"): void {
+    git(nested, "remote", "add", name, `https://example.invalid/${name}.git`);
+    git(nested, "update-ref", `refs/remotes/${name}/main`, head);
+  }
+
+  test("a clean repository on a trusted (network) remote is safe", async () => {
     const worktree = addWorktree("nested-safe", "feature");
     const nested = initNested(worktree, "vendor/tool");
-    const nestedRemote = join(root, "nested-remote.git");
-    git(root, "init", "-q", "--bare", nestedRemote);
     commit(nested, "f.txt", "content\n");
-    git(nested, "remote", "add", "origin", nestedRemote);
-    git(nested, "push", "-q", "origin", "HEAD:main");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
 
     await expect(checkNestedRepositorySafety(nested)).resolves.toBe(true);
   });
@@ -1258,11 +1356,8 @@ describe("checkNestedRepositorySafety", () => {
   test("a nested repository with uncommitted changes is not safe", async () => {
     const worktree = addWorktree("nested-dirty", "feature");
     const nested = initNested(worktree, "vendor/tool");
-    const nestedRemote = join(root, "nested-remote-dirty.git");
-    git(root, "init", "-q", "--bare", nestedRemote);
     commit(nested, "f.txt", "content\n");
-    git(nested, "remote", "add", "origin", nestedRemote);
-    git(nested, "push", "-q", "origin", "HEAD:main");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
     writeFileSync(join(nested, "f.txt"), "edited\n");
 
     await expect(checkNestedRepositorySafety(nested)).resolves.toBe(false);
@@ -1271,11 +1366,8 @@ describe("checkNestedRepositorySafety", () => {
   test("a nested repository with unpushed commits is not safe", async () => {
     const worktree = addWorktree("nested-unpushed", "feature");
     const nested = initNested(worktree, "vendor/tool");
-    const nestedRemote = join(root, "nested-remote-unpushed.git");
-    git(root, "init", "-q", "--bare", nestedRemote);
     commit(nested, "f.txt", "content\n");
-    git(nested, "remote", "add", "origin", nestedRemote);
-    git(nested, "push", "-q", "origin", "HEAD:main");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
     commit(nested, "g.txt", "more, never pushed\n");
 
     await expect(checkNestedRepositorySafety(nested)).resolves.toBe(false);
@@ -1284,19 +1376,139 @@ describe("checkNestedRepositorySafety", () => {
   test("a directory git cannot read as a repository is not safe", async () => {
     await expect(checkNestedRepositorySafety(join(root, "does-not-exist"))).resolves.toBe(false);
   });
+
+  // #6: a remote whose own URL is a local path -- what `git push` to a bare repo on this
+  // machine produces -- is never trusted, even once pushed: that bare repo may sit inside the
+  // very directory being deleted (an SPM-style `repositories/` cache, for one).
+  test("a repository pushed only to a local-path remote is not safe", async () => {
+    const worktree = addWorktree("nested-local-remote", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    const nestedRemote = join(root, "nested-remote.git");
+    git(root, "init", "-q", "--bare", nestedRemote);
+    commit(nested, "f.txt", "content\n");
+    git(nested, "remote", "add", "origin", nestedRemote);
+    git(nested, "push", "-q", "origin", "HEAD:main");
+
+    await expect(checkNestedRepositorySafety(nested)).resolves.toBe(false);
+  });
+
+  // #2: a standalone nested clone's own refs are deleted with it, so a second local branch
+  // holding commits no trusted remote has is invisible to a HEAD-only check.
+  test("a nested repository with an unpushed sibling branch is not safe", async () => {
+    const worktree = addWorktree("nested-sibling-branch", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    commit(nested, "f.txt", "content\n");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
+    git(nested, "branch", "wip");
+    git(nested, "checkout", "-q", "wip");
+    commit(nested, "g.txt", "unpushed work on a sibling branch\n");
+    git(nested, "checkout", "-q", "main");
+
+    await expect(checkNestedRepositorySafety(nested)).resolves.toBe(false);
+  });
+
+  // #2: a stash entry is local-only, same as a sibling branch.
+  test("a nested repository with a stash entry is not safe", async () => {
+    const worktree = addWorktree("nested-stash", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    commit(nested, "f.txt", "content\n");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
+    writeFileSync(join(nested, "f.txt"), "stashed edit\n");
+    git(nested, "stash", "push", "-q");
+
+    await expect(checkNestedRepositorySafety(nested)).resolves.toBe(false);
+  });
+
+  // #5: the outer worktree's own rule (not regenerable by name, no backup) applies inside a
+  // nested repository too -- its own .gitignore must not hide a file the janitor never sees.
+  test("a nested repository with an ignored, non-regenerable file is not safe", async () => {
+    const worktree = addWorktree("nested-ignored-file", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    commit(nested, ".gitignore", "secret-notes.txt\n");
+    commit(nested, "f.txt", "content\n");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
+    writeFileSync(join(nested, "secret-notes.txt"), "only copy, never tracked\n");
+
+    await expect(checkNestedRepositorySafety(nested)).resolves.toBe(false);
+  });
+
+  // #5, the other direction: an ignored path regenerable by name (inside the nested repo's own
+  // root) does not block it -- the outer rule's exceptions apply here too, not just its rule.
+  test("a nested repository with only a regenerable ignored path is safe", async () => {
+    const worktree = addWorktree("nested-ignored-regenerable", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    commit(nested, ".gitignore", "node_modules/\n");
+    commit(nested, "f.txt", "content\n");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
+    mkdirSync(join(nested, "node_modules", "x"), { recursive: true });
+    writeFileSync(join(nested, "node_modules", "x", "index.js"), "1\n");
+
+    await expect(checkNestedRepositorySafety(nested)).resolves.toBe(true);
+  });
+
+  // #4: an invalid `.git` entry (not a real repository) must never let git discovery climb to
+  // an ancestor repository and read that outer repo's cleanliness as the candidate's own.
+  test("a directory with an invalid .git entry is not safe, even though the outer worktree is clean", async () => {
+    const worktree = addWorktree("nested-broken-git", "feature");
+    git(worktree, "push", "-q", "origin", "feature");
+    const broken = join(worktree, "vendor", "broken");
+    mkdirSync(join(broken, ".git"), { recursive: true }); // an empty .git directory: not a repo
+    writeFileSync(join(broken, "notes.md"), "would be lost\n");
+
+    await expect(checkNestedRepositorySafety(broken)).resolves.toBe(false);
+  });
+
+  // #3: the outer gate's own guards (lock, in-progress operation, hidden edits) apply to a
+  // nested *linked* worktree too, not only to a standalone clone.
+  test("a nested linked worktree with a --skip-worktree edit is not safe", async () => {
+    const worktree = addWorktree("nested-linked", "feature");
+    const upstream = join(root, "upstream-repo");
+    mkdirSync(upstream, { recursive: true });
+    git(upstream, "init", "-q", "-b", "main");
+    commit(upstream, "config.json", "{}\n");
+    const upstreamRemote = join(root, "upstream-remote.git");
+    git(root, "init", "-q", "--bare", upstreamRemote);
+    git(upstream, "remote", "add", "origin", upstreamRemote);
+    git(upstream, "push", "-q", "origin", "main");
+    git(upstream, "checkout", "-q", "--detach"); // free "main" for the linked worktree below
+    const linked = join(worktree, "vendor", "linked");
+    mkdirSync(join(worktree, "vendor"), { recursive: true });
+    git(upstream, "worktree", "add", "-q", linked, "main");
+
+    git(linked, "update-index", "--skip-worktree", "config.json");
+    writeFileSync(join(linked, "config.json"), '{"local":true}\n');
+
+    await expect(checkNestedRepositorySafety(linked)).resolves.toBe(false);
+  });
+
+  test("a locked nested linked worktree is not safe", async () => {
+    const worktree = addWorktree("nested-locked", "feature");
+    const upstream = join(root, "upstream-repo-2");
+    mkdirSync(upstream, { recursive: true });
+    git(upstream, "init", "-q", "-b", "main");
+    commit(upstream, "f.txt", "content\n");
+    const upstreamRemote = join(root, "upstream-remote-2.git");
+    git(root, "init", "-q", "--bare", upstreamRemote);
+    git(upstream, "remote", "add", "origin", upstreamRemote);
+    git(upstream, "push", "-q", "origin", "main");
+    git(upstream, "checkout", "-q", "--detach"); // free "main" for the linked worktree below
+    const linked = join(worktree, "vendor", "linked");
+    mkdirSync(join(worktree, "vendor"), { recursive: true });
+    git(upstream, "worktree", "add", "-q", "--lock", linked, "main");
+
+    await expect(checkNestedRepositorySafety(linked)).resolves.toBe(false);
+  });
 });
 
 describe("computeSafeNestedRepositories", () => {
   test("keeps only the candidates that are confirmed safe, by their own candidate string", async () => {
     const worktree = addWorktree("compute-safe", "feature");
-    const safeRemote = join(root, "safe-remote.git");
-    git(root, "init", "-q", "--bare", safeRemote);
     const safe = join(worktree, "vendor", "safe");
     mkdirSync(safe, { recursive: true });
     git(safe, "init", "-q");
     commit(safe, "f.txt", "content\n");
-    git(safe, "remote", "add", "origin", safeRemote);
-    git(safe, "push", "-q", "origin", "HEAD:main");
+    git(safe, "remote", "add", "origin", "https://example.invalid/safe.git");
+    git(safe, "update-ref", "refs/remotes/origin/main", git(safe, "rev-parse", "HEAD").trim());
 
     const unsafe = join(worktree, "vendor", "unsafe");
     mkdirSync(unsafe, { recursive: true });
@@ -1313,17 +1525,19 @@ describe("computeSafeNestedRepositories", () => {
 });
 
 describe("the deletion invariant: nested repositories confirmed safe", () => {
+  function fakeNetworkRemote(nested: string, head: string): void {
+    git(nested, "remote", "add", "origin", "https://example.invalid/origin.git");
+    git(nested, "update-ref", "refs/remotes/origin/main", head);
+  }
+
   test("a nested repository kept by checkDeletionInvariant is excused once it is in safeNestedRepositories", async () => {
     const worktree = addWorktree("invariant-nested-safe", "feature");
     git(worktree, "push", "-q", "origin", "feature");
-    const nestedRemote = join(root, "invariant-nested-remote.git");
-    git(root, "init", "-q", "--bare", nestedRemote);
     const nested = join(worktree, "vendor", "tool");
     mkdirSync(nested, { recursive: true });
     git(nested, "init", "-q");
     commit(nested, "f.txt", "content\n");
-    git(nested, "remote", "add", "origin", nestedRemote);
-    git(nested, "push", "-q", "origin", "HEAD:main");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
 
     const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
     expect(checkDeletionInvariant(coverage, "plan").holds).toBe(false);
@@ -1332,7 +1546,8 @@ describe("the deletion invariant: nested repositories confirmed safe", () => {
     const safe = await computeSafeNestedRepositories(worktree, candidates);
     expect(checkDeletionInvariant(coverage, "plan", [], safe)).toEqual({
       holds: true,
-      detail: "holds once a verified snapshot backs up 1 changed or untracked file(s)",
+      detail:
+        "holds once a verified snapshot backs up 1 changed or untracked file(s); nested repo(s) judged safe (vendor/tool/)",
     });
   });
 
@@ -1340,14 +1555,11 @@ describe("the deletion invariant: nested repositories confirmed safe", () => {
     const worktree = addWorktree("invariant-nested-container", "feature");
     commit(worktree, ".gitignore", ".claude/worktrees/\n");
     git(worktree, "push", "-q", "origin", "feature");
-    const nestedRemote = join(root, "container-nested-remote.git");
-    git(root, "init", "-q", "--bare", nestedRemote);
     const nested = join(worktree, ".claude", "worktrees", "sub");
     mkdirSync(nested, { recursive: true });
     git(nested, "init", "-q");
     commit(nested, "f.txt", "content\n");
-    git(nested, "remote", "add", "origin", nestedRemote);
-    git(nested, "push", "-q", "origin", "HEAD:main");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
 
     const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
     expect(coverage).toMatchObject({
@@ -1361,7 +1573,7 @@ describe("the deletion invariant: nested repositories confirmed safe", () => {
     expect(checkDeletionInvariant(coverage, "plan", [], safe)).toEqual({
       holds: true,
       detail:
-        "holds: every file is tracked and pushed; ignored only regenerable (.claude/worktrees/)",
+        "holds: every file is tracked and pushed; container(s) of nested repo(s) judged safe (.claude/worktrees/); nested repo(s) judged safe (.claude/worktrees/sub/)",
     });
   });
 
@@ -1381,5 +1593,30 @@ describe("the deletion invariant: nested repositories confirmed safe", () => {
     expect(safe.size).toBe(0);
     const invariant = checkDeletionInvariant(coverage, "plan", [], safe);
     expect(invariant.holds).toBe(false);
+  });
+
+  // #1: a loose file beside a safe nested repository, inside the same ignored container, must
+  // still keep the worktree -- the container is excused only when it holds nested repos and
+  // nothing else.
+  test("a loose file beside a safe nested repository in the same container keeps the worktree", async () => {
+    const worktree = addWorktree("invariant-nested-container-loose-file", "feature");
+    commit(worktree, ".gitignore", ".claude/\n");
+    git(worktree, "push", "-q", "origin", "feature");
+    mkdirSync(join(worktree, ".claude", "skills", "mine"), { recursive: true });
+    writeFileSync(join(worktree, ".claude", "skills", "mine", "SKILL.md"), "only copy\n");
+    const nested = join(worktree, ".claude", "worktrees", "n1");
+    mkdirSync(nested, { recursive: true });
+    git(nested, "init", "-q");
+    commit(nested, "f.txt", "content\n");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
+
+    const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
+    expect(coverage?.ignoredDirectoriesHoldingOnlyNestedRepositories).toEqual([]);
+
+    const candidates = listNestedRepositories(coverage as NonNullable<typeof coverage>);
+    const safe = await computeSafeNestedRepositories(worktree, candidates);
+    const invariant = checkDeletionInvariant(coverage, "plan", [], safe);
+    expect(invariant.holds).toBe(false);
+    expect(invariant.holds === false ? invariant.category : undefined).toBe("ignored-path");
   });
 });
