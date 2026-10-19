@@ -108,6 +108,25 @@ describe("JevMarkerChip", () => {
     expect(container.textContent).toContain("+2 more");
   });
 
+  it("keeps the row the same height for a group of 40 decisions as for 5", () => {
+    const decisions = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        ...DECISIONS[0],
+        callId: `c${index}`,
+        at: new Date(Date.parse("2026-10-19T12:00:00.000Z") + index * 60_000).toISOString(),
+      }));
+    const five = mount(
+      <JevMarkerChip lines={buildJevMarkerLines(decisions(5), null)} />,
+      PHONE_WIDTH,
+    );
+    const forty = mount(
+      <JevMarkerChip lines={buildJevMarkerLines(decisions(40), null)} />,
+      PHONE_WIDTH,
+    );
+    expect(forty.textContent).toContain("+37 more");
+    expect(forty.getBoundingClientRect().height).toBe(five.getBoundingClientRect().height);
+  });
+
   it.each([
     { name: "phone", width: PHONE_WIDTH },
     { name: "desktop", width: DESKTOP_WIDTH },

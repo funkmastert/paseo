@@ -1013,7 +1013,7 @@ describe("JevService: ledger, audit, status", () => {
       applied: true,
     });
     const [decision] = service.listDecisions("agent-1");
-    expect(decision.summary).toBe("JEV ran someFutureFeature: missing tests (0.8)");
+    expect(decision.summary).toBe("JEV ran someFutureFeature: missing tests (fairly sure)");
   });
 
   it("includeChildren merges a direct child's decisions, tagged with its id and title", async () => {

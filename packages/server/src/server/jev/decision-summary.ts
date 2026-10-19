@@ -11,7 +11,25 @@ import type { JevDecisionRecord } from "./contract.js";
 export function summarizeJevDecision(record: JevDecisionRecord): string {
   const summarize = SUMMARIZERS[record.feature];
   if (summarize) return summarize(record, isWatching(record));
-  return `JEV ran ${JEV_FEATURE_LABELS[record.feature] ?? record.feature}: ${record.verdict}`;
+  return genericSummary(record);
+}
+
+/**
+ * For a feature with no summarizer yet. The raw verdict can carry scores and several typed
+ * answers ("blocked_on_person 0.08, reply_kind confirm 0.86"), and the summary is shown in the
+ * inline row, so only the leading label is used and the confidence is read as a word.
+ */
+function genericSummary(record: JevDecisionRecord): string {
+  const feature = JEV_FEATURE_LABELS[record.feature] ?? record.feature;
+  const label = plainVerdict(record.verdict);
+  const confidence =
+    record.confidence !== null && record.confidence >= 0 && record.confidence <= 1
+      ? describeConfidence(record.confidence)
+      : null;
+  if (!label) return `JEV ran ${feature}`;
+  return confidence
+    ? `JEV ran ${feature}: ${label} (${confidence})`
+    : `JEV ran ${feature}: ${label}`;
 }
 
 /**
@@ -136,6 +154,20 @@ function riskLevel(risk: number): string {
 /** A shadow answer, or a live one recorded as what it would have done. */
 function isWatching(record: JevDecisionRecord): boolean {
   return record.mode === "shadow" || record.action.startsWith("would have:");
+}
+
+/**
+ * The first typed answer with its scores dropped: `missing tests (0.8)` reads `missing tests`,
+ * `blocked_on_person 0.08, reply_kind confirm 0.86` reads `blocked on person`, `0.4` reads empty.
+ */
+function plainVerdict(verdict: string): string {
+  const [first = ""] = verdict.split(",");
+  return first
+    .replace(/\(\s*[\d.]+\s*\)/g, "")
+    .replace(/(^|\s)[\d.]+(?=\s|$)/g, " ")
+    .replaceAll("_", " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /** `progressing (0.99)` reads `progressing`; a verdict with no label reads empty. */

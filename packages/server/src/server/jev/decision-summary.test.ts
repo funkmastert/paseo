@@ -214,6 +214,26 @@ describe("summarizeJevDecision", () => {
       "JEV ran someFutureFeature: maybe",
     );
   });
+
+  test("the generic line never shows a raw score or a second typed answer", () => {
+    expect(
+      summarizeJevDecision(
+        record({ feature: "someFutureFeature", verdict: "yes (0.95)", confidence: 0.95 }),
+      ),
+    ).toBe("JEV ran someFutureFeature: yes (sure)");
+    expect(
+      summarizeJevDecision(
+        record({
+          feature: "someFutureFeature",
+          verdict: "blocked_on_person 0.08, reply_kind confirm 0.86",
+          confidence: 0.7,
+        }),
+      ),
+    ).toBe("JEV ran someFutureFeature: blocked on person (fairly sure)");
+    expect(summarizeJevDecision(record({ feature: "someFutureFeature", verdict: "0.4" }))).toBe(
+      "JEV ran someFutureFeature",
+    );
+  });
 });
 
 describe("detailForJevDecision", () => {
