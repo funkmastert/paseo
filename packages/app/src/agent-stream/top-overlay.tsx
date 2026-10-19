@@ -68,20 +68,26 @@ export const TopOverlay = memo(function TopOverlay({
         onJumpToSelected={onJumpToSelected}
       />
       {showJumpToStart && (
-        <Animated.View entering={fadeIn} exiting={fadeOut} style={styles.buttonRow}>
-          <Pressable
-            style={scrollIndicatorStyles.button}
-            onPress={onJumpToStart}
-            accessibilityRole="button"
-            accessibilityLabel={t("agentStream.jumpToStart")}
-            testID="jump-to-start-button"
-          >
-            {isJumpingToStart ? (
-              <ThemedLoadingSpinner size="small" uniProps={primaryColorMapping} />
-            ) : (
-              <ArrowUpToLine size={24} color={scrollIndicatorStyles.icon.color} />
-            )}
-          </Pressable>
+        // The Animated.View carries no theme-tracked style: Unistyles and Reanimated both mutate
+        // the same native node, and patching one that the other owns crashes on a theme change
+        // (docs/unistyles.md, "Reanimated Animated.View + Dynamic Styles Crashes"). The themed
+        // margin lives one level in, on a plain View Reanimated never touches.
+        <Animated.View entering={fadeIn} exiting={fadeOut}>
+          <View style={styles.buttonRow}>
+            <Pressable
+              style={scrollIndicatorStyles.button}
+              onPress={onJumpToStart}
+              accessibilityRole="button"
+              accessibilityLabel={t("agentStream.jumpToStart")}
+              testID="jump-to-start-button"
+            >
+              {isJumpingToStart ? (
+                <ThemedLoadingSpinner size="small" uniProps={primaryColorMapping} />
+              ) : (
+                <ArrowUpToLine size={24} color={scrollIndicatorStyles.icon.color} />
+              )}
+            </Pressable>
+          </View>
         </Animated.View>
       )}
     </View>

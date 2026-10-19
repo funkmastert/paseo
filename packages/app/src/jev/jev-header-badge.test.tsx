@@ -32,9 +32,41 @@ vi.mock("@gorhom/bottom-sheet", () => ({
   useBottomSheetModalInternal: () => null,
 }));
 
+// The real module's web entry point constructs a JSReanimated instance at import time, reading
+// `__DEV__` before vitest.setup.ts's assignment is visible to it; `vi.hoisted` runs ahead of every
+// `vi.mock` factory (including this one's `importOriginal`), so setting it here is what actually
+// lands before that constructor runs.
+vi.hoisted(() => {
+  (globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__ = false;
+});
+
 vi.mock("react-native-reanimated", async (importOriginal) => {
   const actual = await importOriginal<object>();
-  return { ...actual, default: { ...(actual as { default?: object }).default, View: "div" } };
+  // A real "div" (not the bare string "div") so `entering`/`exiting` are observable instead of
+  // silently dropped as unrecognized DOM attributes -- the gap the badge's layout-shift review
+  // finding called out: nothing asserted that `Animated.View` actually receives them.
+  function RecordingView({
+    entering,
+    exiting,
+    testID,
+    children,
+    ...rest
+  }: Record<string, unknown> & { testID?: string; children?: React.ReactNode }) {
+    return (
+      <div
+        {...rest}
+        data-testid={testID}
+        data-entering={entering ? "true" : "false"}
+        data-exiting={exiting ? "true" : "false"}
+      >
+        {children}
+      </div>
+    );
+  }
+  return {
+    ...actual,
+    default: { ...(actual as { default?: object }).default, View: RecordingView },
+  };
 });
 
 vi.mock("react-native-unistyles", () => ({
@@ -106,6 +138,17 @@ function click(selector: string): void {
     el?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   });
 }
+
+describe("JevHeaderBadgeView: the mount-fade wiring", () => {
+  it("passes a defined entering animation to its Animated.View by default", () => {
+    renderBadge();
+    const badge = document.querySelector('[data-testid="jev-header-badge"]');
+    expect(badge?.getAttribute("data-entering")).toBe("true");
+    // No `exiting`: the badge only ever appears, it never unmounts on its own
+    // (jev-header-badge.tsx).
+    expect(badge?.getAttribute("data-exiting")).toBe("false");
+  });
+});
 
 describe("JevHeaderBadgeView: tap to open on a compact layout", () => {
   it("opens the decisions popover naming the child on tap", () => {

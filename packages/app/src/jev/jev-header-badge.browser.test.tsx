@@ -1,6 +1,7 @@
 import React, { act, useMemo, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { View } from "react-native";
+import { LayoutAnimationConfig } from "react-native-reanimated";
 import { page } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { JevDecisionRecord, JevStatus } from "@getpaseo/protocol/jev/rpc-schemas";
@@ -102,11 +103,17 @@ function Harness({
   return (
     <View style={styles.harness}>
       {decisions.length === 0 ? null : (
-        <JevHeaderBadgeView
-          count={decisions.length}
-          view={view}
-          onOpenAllActivity={onOpenAllActivity}
-        />
+        // This file drives `vi.useFakeTimers` for deterministic "time ago" text, which desyncs
+        // Reanimated's web entering animation from real rAF callbacks and otherwise crashes on
+        // unmount (`_updatePropsJS` reading a torn-down registry entry). The badge's mount-fade
+        // isn't what these tests assert on, so skip it here rather than fight the interaction.
+        <LayoutAnimationConfig skipEntering skipExiting>
+          <JevHeaderBadgeView
+            count={decisions.length}
+            view={view}
+            onOpenAllActivity={onOpenAllActivity}
+          />
+        </LayoutAnimationConfig>
       )}
     </View>
   );
