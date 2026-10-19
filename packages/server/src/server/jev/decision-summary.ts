@@ -69,10 +69,12 @@ const STALL_STATES: Readonly<Record<string, string>> = {
 
 const FINISH_VERDICTS: Readonly<Record<string, string>> = {
   done: "JEV: the report looks done",
+  in_progress: "JEV: this turn isn't finished yet, not a gap in the report",
   missing_verification: "JEV: the report doesn't say the work was checked",
   missing_scope: "JEV: the report may cover only part of the task",
   missing_tests: "JEV: the report doesn't mention tests",
   unclear: "JEV couldn't tell whether the work is done",
+  unsure: "JEV wasn't sure whether this report is done",
 };
 
 /** A shadow answer, or a live one recorded as what it would have done. */

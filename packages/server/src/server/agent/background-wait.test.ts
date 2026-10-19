@@ -10,6 +10,7 @@ import {
   findBackgroundWait,
   findExternalWait,
   readFinalMessage,
+  readFinalTurnMessages,
   readFinalTurnWork,
 } from "./background-wait.js";
 import type { ProcessSampleRow } from "./process-sampler.js";
@@ -159,6 +160,34 @@ describe("the final message", () => {
       ]),
     ).toBeNull();
     expect(readFinalMessage([])).toBeNull();
+  });
+});
+
+describe("the final turn's assistant messages", () => {
+  test("every one of the final turn, oldest first", () => {
+    const rows = [
+      row({ type: "user_message", text: "fix the parser" }),
+      row({ type: "assistant_message", text: "Found the bug in tokenize()." }),
+      bash("npm test", "42 passed"),
+      row({ type: "assistant_message", text: "Pushed the fix." }),
+    ];
+    expect(readFinalTurnMessages(rows)).toEqual([
+      "Found the bug in tokenize().",
+      "Pushed the fix.",
+    ]);
+  });
+
+  test("none before the last user message", () => {
+    const rows = [
+      row({ type: "assistant_message", text: "Old update." }),
+      row({ type: "user_message", text: "and now?" }),
+      row({ type: "assistant_message", text: "Still waiting on the gate." }),
+    ];
+    expect(readFinalTurnMessages(rows)).toEqual(["Still waiting on the gate."]);
+  });
+
+  test("empty when the turn has no assistant message yet", () => {
+    expect(readFinalTurnMessages([row({ type: "user_message", text: "go" })])).toEqual([]);
   });
 });
 

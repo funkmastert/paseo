@@ -43,7 +43,27 @@ import type {
   AgentRunResult,
   AgentSession,
   AgentStreamEvent,
+  AgentTimelineItem,
 } from "./agent-sdk-types.js";
+import type { AgentTimelineRow } from "./agent-timeline-store-types.js";
+
+let timelineSeq = 0;
+function timelineRow(item: AgentTimelineItem): AgentTimelineRow {
+  timelineSeq += 1;
+  return { seq: timelineSeq, timestamp: new Date(timelineSeq * 1000).toISOString(), item };
+}
+function timelineBash(command: string, output?: string): AgentTimelineRow {
+  return timelineRow({
+    type: "tool_call",
+    callId: `c${timelineSeq}`,
+    name: "Bash",
+    detail: { type: "shell", command, ...(output ? { output } : {}) },
+    status: "completed",
+    error: null,
+  });
+}
+const BACKGROUND_SHELL_OUTPUT =
+  "Command running in background with ID: b4k2. Output is being written to: /private/tmp/claude-501/x/tasks/b4k2.output";
 
 interface CapturedLogger {
   logger: Logger;
@@ -83,6 +103,8 @@ interface FinishNotificationScenarioOptions {
   storedRecords?: Record<string, { labels?: Record<string, string>; archivedAt?: string }>;
   /** Feature 18 (finish review): wired into the obligation service when set. */
   jev?: JevService;
+  /** Feature 18: the child's live timeline, read fresh for the review. Unset: no live timeline. */
+  childTimelineRows?: AgentTimelineRow[];
 }
 
 interface FinishNotificationScenario {
@@ -185,6 +207,12 @@ function createFinishNotificationScenario(
   });
   Reflect.set(agentManager, "getLastAssistantMessage", async () => {
     return options?.childLastAssistantMessage ?? null;
+  });
+  Reflect.set(agentManager, "fetchTimeline", (agentId: string) => {
+    if (agentId === "child-agent" && options?.childTimelineRows) {
+      return { rows: options.childTimelineRows };
+    }
+    throw new Error(`no live timeline for ${agentId}`);
   });
   Reflect.set(agentManager, "tryRunOutOfBand", () => false);
   Reflect.set(agentManager, "flagUndeliveredDelegatedOutcome", (_id: string, reason: string) => {
@@ -446,6 +474,46 @@ describe("feature 18: JEV reviews a finish report before it reaches the owner", 
     expect(jev.transport.calls).toHaveLength(1);
     await ask(2);
     expect(jev.transport.calls).toHaveLength(2);
+  });
+
+  test("an interim turn end waiting on its own background work is never sent to JEV", async () => {
+    const jev = finishJev("missing_scope");
+    const scenario = createFinishNotificationScenario({
+      childLastAssistantMessage:
+        "I'll end this turn and wait for the background build-wait task to notify me when gradle finishes.",
+      childTimelineRows: [
+        timelineRow({ type: "user_message", text: "ship it" }),
+        timelineBash("npm run build", BACKGROUND_SHELL_OUTPUT),
+        timelineRow({
+          type: "assistant_message",
+          text: "I'll end this turn and wait for the background build-wait task to notify me when gradle finishes.",
+        }),
+      ],
+      jev,
+    });
+    scenario.startWatchingChild();
+    const prompt = await scenario.finishChildAndReadParentPrompt();
+    expect(prompt).not.toContain("JEV flagged");
+    expect(jev.transport.calls).toHaveLength(0);
+  });
+
+  test("a real finish gets every assistant message of the final turn, not just the last line", async () => {
+    const jev = finishJev("done");
+    const scenario = createFinishNotificationScenario({
+      childLastAssistantMessage: "Pushed the fix.",
+      childTimelineRows: [
+        timelineRow({ type: "user_message", text: "fix the parser" }),
+        timelineRow({ type: "assistant_message", text: "Found the bug in tokenize()." }),
+        timelineBash("npm test", "42 passed"),
+        timelineRow({ type: "assistant_message", text: "Pushed the fix." }),
+      ],
+      jev,
+    });
+    scenario.startWatchingChild();
+    await scenario.finishChildAndReadParentPrompt();
+    expect(jev.transport.calls).toHaveLength(1);
+    const state = jev.transport.calls[0]?.state as { final_message?: string };
+    expect(state.final_message).toBe("Found the bug in tokenize().\n\nPushed the fix.");
   });
 });
 

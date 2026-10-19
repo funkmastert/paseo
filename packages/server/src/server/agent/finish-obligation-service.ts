@@ -15,6 +15,14 @@ import {
   sendPromptToAgent,
   setupFinishNotification,
 } from "./agent-prompt.js";
+import {
+  BACKGROUND_WAIT_READ_ROWS,
+  findBackgroundWait,
+  findExternalWait,
+  readFinalMessage,
+  readFinalTurnMessages,
+  readFinalTurnWork,
+} from "./background-wait.js";
 import { pacedResume, type PaceResume } from "./resume-pacer.js";
 import { readFirstUserMessage } from "./stall-judgment.js";
 import {
@@ -703,13 +711,16 @@ export class FinishObligationService {
       obligation.outcome?.message ??
       null;
     if (reason === "finished" && this.options.jev) {
-      const note = await this.reviewFinishOnce(childAgentId, obligation, {
-        jev: this.options.jev,
-        ownerAgentId: obligation.ownerAgentId,
-        title: record?.title ?? null,
-        finalMessage: lastAssistantMessage,
-      });
-      if (note) notes.push(note);
+      const turn = this.readFinalTurn(childAgentId);
+      if (!turn.interim) {
+        const note = await this.reviewFinishOnce(childAgentId, obligation, {
+          jev: this.options.jev,
+          ownerAgentId: obligation.ownerAgentId,
+          title: record?.title ?? null,
+          finalMessage: turn.account ?? lastAssistantMessage,
+        });
+        if (note) notes.push(note);
+      }
     }
     return formatFinishNotificationBody({
       childAgentId,
@@ -719,6 +730,40 @@ export class FinishObligationService {
       inheritedFrom: obligation.inheritedFrom,
       notes,
     });
+  }
+
+  /**
+   * Feature 18: the child's final turn, read fresh for the review rather than through the single
+   * line `getLastAssistantMessage` keeps. Two things come of it:
+   *
+   * - `account`: every assistant message of the turn, for a judge that needs more than its
+   *   closing sentence (`lastAssistantMessage` is the fallback when there is no live timeline).
+   * - `interim`: whether the turn ended waiting on work it started itself — a background command,
+   *   a subagent, a schedule — with the same detection the background-wait stall rule uses
+   *   (docs/stalled-agents.md), so a "finished" agent that is really mid-wait is never judged.
+   *
+   * Unreadable (the agent is not loaded, as after a restart): fails open, same as the rest of
+   * this feature — no account, not interim.
+   */
+  private readFinalTurn(childAgentId: string): { account: string | null; interim: boolean } {
+    try {
+      const rows = this.options.agentManager.fetchTimeline(childAgentId, {
+        direction: "tail",
+        limit: BACKGROUND_WAIT_READ_ROWS,
+      }).rows;
+      const messages = readFinalTurnMessages(rows);
+      const work = readFinalTurnWork(rows);
+      const text = readFinalMessage(rows)?.text ?? null;
+      const externalWait = text ? findExternalWait(text) : null;
+      const backgroundWait = text ? findBackgroundWait(text) : null;
+      const interim =
+        work.watcher !== null ||
+        (work.launched.length > 0 && (backgroundWait !== null || externalWait !== null)) ||
+        (work.launched.length === 0 && externalWait !== null);
+      return { account: messages.length > 0 ? messages.join("\n\n") : null, interim };
+    } catch {
+      return { account: null, interim: false };
+    }
   }
 
   /**

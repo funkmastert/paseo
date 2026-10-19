@@ -195,6 +195,39 @@ export interface FinalTurnWork {
   watcher: string | null;
 }
 
+/**
+ * The turn's own entries: everything after the last user message. A turn a background task
+ * started on its own has no user message, so the turn before it counts too: it launched the work
+ * being waited on. Shared by `readFinalTurnWork` and `readFinalTurnMessages`, so both agree on
+ * which entries belong to "the final turn".
+ */
+function finalTurnEntries(rows: readonly AgentTimelineRow[]) {
+  const entries = projected(rows);
+  let start = 0;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (entries[index]?.item.type === "user_message") {
+      start = index + 1;
+      break;
+    }
+  }
+  return entries.slice(start);
+}
+
+/**
+ * Every assistant message of the final turn, oldest first — the agent's whole account of that
+ * turn rather than just its closing line, for a judge that needs more than the last sentence.
+ */
+export function readFinalTurnMessages(rows: readonly AgentTimelineRow[]): string[] {
+  return finalTurnEntries(rows)
+    .map((entry) => entry.item)
+    .filter(
+      (item): item is Extract<AgentTimelineItem, { type: "assistant_message" }> =>
+        item.type === "assistant_message",
+    )
+    .map((item) => item.text)
+    .filter(Boolean);
+}
+
 type ToolCall = Extract<AgentTimelineItem, { type: "tool_call" }>;
 
 /** Claude's answer to a `run_in_background` Bash call. */
@@ -219,22 +252,13 @@ function describeLaunch(item: ToolCall): string | null {
 }
 
 /**
- * What the final turn launched and whether it set up a watcher, read from the tool calls since
- * the last user message. A turn a background task started on its own has no user message, so the
- * turn before it counts too: it launched the work being waited on.
+ * What the final turn launched and whether it set up a watcher, read from its tool calls
+ * (`finalTurnEntries`).
  */
 export function readFinalTurnWork(rows: readonly AgentTimelineRow[]): FinalTurnWork {
-  const entries = projected(rows);
-  let start = 0;
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    if (entries[index]?.item.type === "user_message") {
-      start = index + 1;
-      break;
-    }
-  }
   const launched: string[] = [];
   let watcher: string | null = null;
-  for (const entry of entries.slice(start)) {
+  for (const entry of finalTurnEntries(rows)) {
     const item = entry.item;
     if (item.type !== "tool_call") continue;
     if (WATCHER_TOOL.test(item.name)) watcher = item.name.replace(/^.*(?:__|\.)/, "");

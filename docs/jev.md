@@ -1932,11 +1932,15 @@ No key, the switch off, an outage, a low-confidence answer or D7 all land on the
 
 ## Feature 18: finish review
 
-Live from the start: Tyler asked for it live, so there is no shadow mode and no shadow -> live gate. When a child's finish report is about to be delivered to its parent ([finish-reports.md](finish-reports.md)), JEV reads the task the child was given and its final message, and judges whether the work looks done. The verdict is recorded in the decision store for both the child and the owner, so it shows as a marker on both ends. When JEV is confident something looks missing, the report gains one short line saying so — never a block, a delay, or a dropped report.
+Live from the start: Tyler asked for it live, so there is no shadow mode and no shadow -> live gate. When a child's finish report is about to be delivered to its parent ([finish-reports.md](finish-reports.md)), JEV reads the task the child was given and its final turn, and judges whether the work looks done. The verdict is recorded in the decision store for both the child and the owner, so it shows as a marker on both ends. When JEV is confident something looks missing, the report gains one short line saying so — never a block, a delay, or a dropped report.
 
 ### Seam
 
 `FinishObligationService.buildReport` (`agent/finish-obligation-service.ts`), only when the outcome's reason is `"finished"` — an error, a cancellation, a close, or a restart-sweep report ("stopped before reporting") already carries its own explanatory note and is not reviewed. `reviewFinishReport` (`jev/finish-review.ts`) never throws and is bounded by a hard timeout past `jev.decide`'s own deadline, so a hang can never hold up delivery. The task comes from the child's live timeline (`firstUserMessage`, `stall-judgment.ts`) when the child is still loaded; when it is not — the restart-sweep path — the task is null and JEV still judges from the final message alone.
+
+**Not every "finished" turn is one.** The obligation marks a child "finished" once it goes idle without erroring — but an idle child can still be mid-wait: it ended the turn saying it would pick back up once its own background work (a shell, a subagent, a schedule) reports in. Judging that message as a finish reads as a gap that was never there. Before asking JEV, `buildReport` calls `readFinalTurn(childAgentId)`, which re-fetches the child's live timeline (`agentManager.fetchTimeline`, tail, `BACKGROUND_WAIT_READ_ROWS` rows) and reuses the background-wait stall rule's own detection (`findBackgroundWait`, `findExternalWait`, `readFinalTurnWork`, `agent/background-wait.ts`; [stalled-agents.md](stalled-agents.md)) rather than a second copy of it: watcher set up, or background work launched this turn with a matching wait statement, or an external wait with nothing launched. When that's true, JEV is never asked and nothing is recorded — not a `done`, not an `unclear`, nothing. The child's live timeline is unreadable after a restart; `readFinalTurn` fails open there (not interim), same as every other failure mode of this feature.
+
+`readFinalTurn` also builds the turn's account for JEV: every assistant message since the child's last user message (`readFinalTurnMessages`), joined oldest first, not just the closing line `getLastAssistantMessage` keeps. A child that narrates its work across several messages and closes with something terse no longer reads as if it said nothing more than that last line. Falls back to `getLastAssistantMessage` when the live timeline has no messages (the restart-sweep path).
 
 ### State and question
 
@@ -1944,7 +1948,7 @@ Live from the start: Tyler asked for it live, so there is no shadow mode and no 
 {
   "title": "<child title>",
   "task": "<first 800 characters>",
-  "final_message": "<last 4000 characters>"
+  "final_message": "<last 4000 characters of the final turn's assistant messages, joined>"
 }
 ```
 
@@ -1955,6 +1959,7 @@ Live from the start: Tyler asked for it live, so there is no shadow mode and no 
     "instructions": "`task` is what the agent was asked to do; `final_message` is its own account of finishing. Judge whether the work looks done.",
     "criteria": {
       "done": "nothing obviously missing",
+      "in_progress": "pausing or waiting on its own work — a background command, a subagent, CI, a review — not a gap, just not finished yet",
       "missing_verification": "doesn't say whether the change was run, tested or checked to work",
       "missing_scope": "covers only part of the task, or leaves a stated step undone",
       "missing_tests": "a code change with no mention of tests for it",
@@ -1965,9 +1970,13 @@ Live from the start: Tyler asked for it live, so there is no shadow mode and no 
 }
 ```
 
+`in_progress` is the safety net for an interim wait the `readFinalTurn` heuristic above does not catch — the phrasing is too varied to match by regex alone (e.g. "still waiting on the quality and efficiency reviewers to finish" names no background noun the detector looks for). JEV has the whole turn's account and the task, so it can call this correctly where the cheap pre-check can't.
+
 ### Thresholds
 
-`missing_verification`, `missing_scope` and `missing_tests` at or over `finishReview.minConfidence` (default 0.75) add one line naming what looks missing. `done`, `unclear` and `other` add nothing: `unclear` is not a confident claim of missing work, and `other` is too vague to act on.
+`missing_verification`, `missing_scope`, `missing_tests` and `in_progress` at or over `finishReview.minConfidence` (default 0.75) add one line naming what looks missing or that the turn isn't done yet. `done`, `unclear` and `other` add nothing: `unclear` is not a confident claim of missing work, and `other` is too vague to act on.
+
+**Calibrated display, not just a gated note.** The confidence floor always gated whether a line was added to the delivered report; it now also gates what the decision record says. A choice below `minConfidence` is recorded and displayed as `unsure`, never as the specific (and possibly wrong) choice JEV actually returned — a 0.51-confidence `missing_scope` must never read like a verdict. The marker text (`decision-summary.ts`) follows: `in_progress` reads "this turn isn't finished yet, not a gap in the report", and a sub-floor answer of any kind reads "JEV wasn't sure whether this report is done".
 
 ### Fail open
 
@@ -1990,9 +1999,11 @@ No key, the switch off, a timeout, the hard bound, a throw, or an answer that is
 
 ### Tests and verification
 
-- `finish-review.test.ts`: `buildFinishReviewState`'s clipping; no call with an empty final message; the feature-disabled path; the scope, call site and subject on the decide call; a confident `done` recording with no note; a confident missing choice adding its note and recording `applied: true` for both the child and the owner, with a savings record; a missing choice below the floor adding nothing; `unclear` and `other` never flagging; a timeout, a throw and a hang all failing open without recording.
-- `agent/agent-prompt.test.ts` ("feature 18"): through the real `FinishObligationService`, a confident missing verdict adds its line to the owner's report and a `done` verdict adds nothing; a retried delivery of one finish reuses the verdict and a re-armed obligation asks again.
-- Verify: `npx vitest run packages/server/src/server/jev/finish-review.test.ts --bail=1`.
+- `finish-review.test.ts`: `buildFinishReviewState`'s clipping; no call with an empty final message; the feature-disabled path; the scope, call site and subject on the decide call; a confident `done` recording with no note; a confident missing choice adding its note and recording `applied: true` for both the child and the owner, with a savings record; a confident `in_progress` choice flagging as a wait rather than a scope gap; a missing choice below the floor adding nothing and recording as `unsure`; `unclear` and `other` never flagging; a timeout, a throw and a hang all failing open without recording.
+- `agent/background-wait.test.ts`: `readFinalTurnMessages` returns every assistant message of the final turn oldest first, none from before the last user message, and empty when the turn has no assistant message yet.
+- `jev/decision-summary.test.ts`: the `finishReview` marker text for `in_progress` and `unsure`.
+- `agent/agent-prompt.test.ts` ("feature 18"): through the real `FinishObligationService`, a confident missing verdict adds its line to the owner's report and a `done` verdict adds nothing; a retried delivery of one finish reuses the verdict and a re-armed obligation asks again; a final turn that launched background work and closed on a real wait statement (fixtures from the real audit lines that drove this fix) is never sent to JEV at all; a real finish gets every assistant message of the final turn joined into `final_message`, not just the last line.
+- Verify: `npx vitest run packages/server/src/server/jev/finish-review.test.ts packages/server/src/server/agent/background-wait.test.ts packages/server/src/server/jev/decision-summary.test.ts packages/server/src/server/agent/agent-prompt.test.ts --bail=1`.
 
 ## Testing
 
