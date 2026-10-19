@@ -972,20 +972,20 @@ describe("JevService: ledger, audit, status", () => {
       callId: "call-stall",
       feature: "stallJudgment",
       question: "Is the agent stuck?",
-      verdict: "stuck (0.8)",
+      verdict: "waiting_on_human (0.8)",
       confidence: 0.8,
       action: "nudged with a person-first handoff",
       applied: true,
     });
     const [decision] = service.listDecisions("agent-1");
-    expect(decision.summary).toBe("JEV judged the stall needs you");
+    expect(decision.summary).toBe("JEV: waiting on a person; nudged with a person-first handoff");
   });
 
   it("falls back to a generic summary for a feature it doesn't recognize", async () => {
     const { service } = makeHarness();
     service.decisions.record({
-      // Cast: a feature id a sibling track added that this build doesn't know yet.
-      feature: "finishReview" as unknown as JevDecideInput["feature"],
+      // Cast: a feature id a newer build adds that this one doesn't know yet.
+      feature: "someFutureFeature" as unknown as JevDecideInput["feature"],
       agentId: "agent-1",
       callId: "call-unknown",
       question: "Does this finish look done?",
@@ -995,7 +995,7 @@ describe("JevService: ledger, audit, status", () => {
       applied: true,
     });
     const [decision] = service.listDecisions("agent-1");
-    expect(decision.summary).toBe("JEV ran finishReview: missing tests (0.8)");
+    expect(decision.summary).toBe("JEV ran someFutureFeature: missing tests (0.8)");
   });
 
   it("includeChildren merges a direct child's decisions, tagged with its id and title", async () => {
