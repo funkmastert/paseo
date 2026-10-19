@@ -85,6 +85,8 @@ function coverage(overrides: Partial<WorktreeCoverage> = {}): WorktreeCoverage {
     nestedRepositories: [],
     manifestDirectories: [],
     copiedFromMainCheckout: [],
+    backupEligibleIgnored: [],
+    ignoredDirectoriesHoldingOnlyNestedRepositories: [],
     ...overrides,
   };
 }

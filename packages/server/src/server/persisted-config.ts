@@ -550,6 +550,10 @@ const AgentDoneJanitorSchema = z
     // Extra ignored paths the deletion invariant treats as regenerable, beside the janitor's own
     // by-name rules. See docs/done-janitor.md, "Idle workspaces".
     regenerableIgnoredPaths: z.array(z.string()).optional(),
+    // Ignored paths a work snapshot should also stage, so an otherwise-unbacked ignored file no
+    // longer keeps its worktree forever. See docs/done-janitor.md, "Unbacked ignored files".
+    backupIgnoredPaths: z.array(z.string()).optional(),
+    maxBackupIgnoredFileBytes: z.number().int().positive().optional(),
   })
   .strict();
 

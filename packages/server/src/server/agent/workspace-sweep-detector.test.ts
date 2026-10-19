@@ -521,6 +521,8 @@ describe("checkDeletionInvariant", () => {
       nestedRepositories: [],
       manifestDirectories: [],
       copiedFromMainCheckout: [],
+      backupEligibleIgnored: [],
+      ignoredDirectoriesHoldingOnlyNestedRepositories: [],
       ...overrides,
     };
   }

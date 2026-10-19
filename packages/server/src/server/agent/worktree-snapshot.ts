@@ -33,6 +33,10 @@ import {
   type RepoVisibility,
 } from "./github-repo-visibility.js";
 import {
+  DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
+  isBackupEligibleIgnoredPath,
+} from "./backup-eligible-ignored.js";
+import {
   displayPath,
   findTokenKind,
   hasSecretName,
@@ -244,7 +248,15 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
       };
     }
     const { worktreePath, head, branch } = assessment;
-    if (!assessment.atRisk) {
+    const backupIgnoredPaths = request.backupIgnoredPaths ?? [];
+    const maxBackupIgnoredFileBytes =
+      request.maxBackupIgnoredFileBytes ?? DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES;
+    const backupEligibleIgnored = await this.findBackupEligibleIgnored(
+      worktreePath,
+      backupIgnoredPaths,
+      maxBackupIgnoredFileBytes,
+    );
+    if (!assessment.atRisk && backupEligibleIgnored.length === 0) {
       return {
         result: { kind: "nothing-at-risk", worktreePath },
         branch,
@@ -254,7 +266,7 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
       };
     }
     try {
-      return await this.snapshotAtRisk(request, assessment);
+      return await this.snapshotAtRisk(request, assessment, backupEligibleIgnored);
     } catch (error) {
       this.options.logger.warn(
         { err: error, worktreePath },
@@ -273,6 +285,7 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
   private async snapshotAtRisk(
     request: WorktreeSnapshotRequest,
     assessment: Extract<WorktreeAssessment, { kind: "assessed" }>,
+    backupEligibleIgnored: readonly string[],
   ): Promise<DetailedWorktreeSnapshot> {
     const { worktreePath, head, branch } = assessment;
     const config = this.options.readConfig();
@@ -282,6 +295,7 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
       worktreePath,
       head,
       config.maxUntrackedFileBytes,
+      backupEligibleIgnored,
     );
 
     const newest = await this.findNewestSnapshot(worktreePath, slug);
@@ -393,6 +407,7 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
     worktreePath: string,
     head: string | null,
     maxUntrackedFileBytes: number,
+    backupEligibleIgnored: readonly string[],
   ): Promise<{ tree: string; skippedFiles: string[]; possibleSecrets: string[] }> {
     const indexFile = join(tmpdir(), `paseo-snapshot-index-${process.pid}-${randomUUID()}`);
     const env = { GIT_INDEX_FILE: indexFile };
@@ -424,12 +439,54 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
       for (let index = 0; index < keep.length; index += ADD_BATCH) {
         await this.git(worktreePath, ["add", "--", ...keep.slice(index, index + ADD_BATCH)], env);
       }
+      // `isBackupEligibleIgnoredPath` already re-confirmed each of these under the size cap and
+      // the secret filter when it found them (findBackupEligibleIgnored, moments earlier): `-f`
+      // is only to get past `.gitignore`, which `git add` would otherwise refuse.
+      for (let index = 0; index < backupEligibleIgnored.length; index += ADD_BATCH) {
+        await this.git(
+          worktreePath,
+          ["add", "-f", "--", ...backupEligibleIgnored.slice(index, index + ADD_BATCH)],
+          env,
+        );
+      }
       const tree = (await this.git(worktreePath, ["write-tree"], env)).trim();
       return { tree, skippedFiles, possibleSecrets };
     } finally {
       rmSync(indexFile, { force: true });
       rmSync(`${indexFile}.lock`, { force: true });
     }
+  }
+
+  /**
+   * Ignored paths in the working tree that `agents.doneJanitor.backupIgnoredPaths` names and that
+   * hold nothing too large or secret-shaped to back up. Empty, with no git call, when no patterns
+   * are configured — the default, unchanged behavior.
+   */
+  private async findBackupEligibleIgnored(
+    worktreePath: string,
+    patterns: readonly string[],
+    maxFileBytes: number,
+  ): Promise<string[]> {
+    if (patterns.length === 0) return [];
+    const status = await this.git(worktreePath, [
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--no-renames",
+      "--ignored=matching",
+      "--untracked-files=all",
+    ]);
+    const ignored = status
+      .split("\0")
+      .filter((entry) => entry.startsWith("!! "))
+      .map((entry) => entry.slice(3));
+    const eligible: string[] = [];
+    for (const entry of ignored) {
+      if (await isBackupEligibleIgnoredPath({ worktreePath, entry, patterns, maxFileBytes })) {
+        eligible.push(entry);
+      }
+    }
+    return eligible;
   }
 
   private async findNewestSnapshot(

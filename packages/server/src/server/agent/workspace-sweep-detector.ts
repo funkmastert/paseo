@@ -453,16 +453,32 @@ export function checkDeletionInvariant(
   coverage: WorktreeCoverage | null,
   basis: CoverageBasis,
   extraRegenerablePatterns: readonly string[] = [],
+  /**
+   * Nested repository paths (gitlinks, untracked nested repos, or anything the filesystem walk
+   * found) confirmed safe by `checkNestedRepositorySafety` (done-janitor-worktree.ts): their own
+   * HEAD is on a remote and their own tree is clean. Computed by the caller, since confirming one
+   * is I/O this pure function cannot do.
+   */
+  safeNestedRepositories: ReadonlySet<string> = new Set(),
 ): DeletionInvariant {
   if (coverage === null) return { holds: false, reason: "git could not list its files" };
   const unlisted = describeUnlisted(coverage);
   if (unlisted) return { holds: false, reason: unlisted };
   const manifestDirectories = new Set(coverage.manifestDirectories);
   const copiedFromMainCheckout = new Set(coverage.copiedFromMainCheckout);
+  // Pending a snapshot, not holding one yet: excused only while planning (basis === "plan"), so
+  // the sweep actually attempts the real snapshot that must stage them. If it fails to, or finds
+  // one secret-shaped or over the cap, the entry is still "ignored" once read against that
+  // snapshot and blocks exactly as before this existed.
+  const backupEligibleIgnored =
+    basis === "plan" ? new Set(coverage.backupEligibleIgnored) : new Set<string>();
+  const nestedOnlyContainers = onlyNestedReposAlreadySafe(coverage, safeNestedRepositories);
   const kept = coverage.ignored.filter(
     (entry) =>
       !isRegenerablePath(entry, manifestDirectories, extraRegenerablePatterns) &&
-      !copiedFromMainCheckout.has(entry),
+      !copiedFromMainCheckout.has(entry) &&
+      !backupEligibleIgnored.has(entry) &&
+      !nestedOnlyContainers.has(entry),
   );
   if (kept.length > 0) {
     return {
@@ -471,7 +487,9 @@ export function checkDeletionInvariant(
       category: "ignored-path",
     };
   }
-  const nested = listNestedRepositories(coverage);
+  const nested = listNestedRepositories(coverage).filter(
+    (entry) => !safeNestedRepositories.has(entry),
+  );
   if (nested.length > 0) {
     return {
       holds: false,
@@ -542,7 +560,7 @@ function describeUnlisted(coverage: WorktreeCoverage): string | null {
  * submodule or a snapshotted nested repository (a gitlink), an untracked one (git lists it as
  * `dir/`), and any `.git` the walk found, inside an ignored regenerable directory too. Once each.
  */
-function listNestedRepositories(coverage: WorktreeCoverage): string[] {
+export function listNestedRepositories(coverage: WorktreeCoverage): string[] {
   const seen = new Set<string>();
   const nested: string[] = [];
   for (const entry of [
@@ -556,6 +574,32 @@ function listNestedRepositories(coverage: WorktreeCoverage): string[] {
     nested.push(entry);
   }
   return nested;
+}
+
+/**
+ * Ignored directory entries that hold nothing but nested repositories
+ * (`coverage.ignoredDirectoriesHoldingOnlyNestedRepositories`, done-janitor-worktree.ts), and every
+ * one of those nested repositories under it is in `safeNestedRepositories`. A container like
+ * `.claude/worktrees/` is excused this way rather than as a regular ignored path: once each nested
+ * worktree it holds is confirmed safe, the container itself has nothing of its own to back up.
+ */
+function onlyNestedReposAlreadySafe(
+  coverage: WorktreeCoverage,
+  safeNestedRepositories: ReadonlySet<string>,
+): Set<string> {
+  const excused = new Set<string>();
+  for (const container of coverage.ignoredDirectoriesHoldingOnlyNestedRepositories) {
+    const nestedUnder = coverage.nestedRepositories.filter((nested) =>
+      nested.startsWith(container),
+    );
+    if (
+      nestedUnder.length > 0 &&
+      nestedUnder.every((nested) => safeNestedRepositories.has(nested))
+    ) {
+      excused.add(container);
+    }
+  }
+  return excused;
 }
 
 function describeRegenerable(ignored: readonly string[]): string {

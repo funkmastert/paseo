@@ -32,9 +32,14 @@ import {
   type ProbeOutcome,
 } from "./agent/done-janitor-detector.js";
 import {
+  DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
+  resolveBackupIgnoredPaths,
+} from "./agent/backup-eligible-ignored.js";
+import {
   checkDeletionInvariant,
   classifyWorkspace,
   idleProjectVerdict,
+  listNestedRepositories,
   resolveRegenerableIgnoredPaths,
   resolveWorkspaceSweepConfig,
   type DoneJanitorWorkspaceSweepConfig,
@@ -44,7 +49,11 @@ import {
   type WorkspaceSweepRule,
   type WorkspaceSweepVerdict,
 } from "./agent/workspace-sweep-detector.js";
-import type { WorktreeCoverage, WorktreeDeletionSafety } from "./done-janitor-worktree.js";
+import {
+  computeSafeNestedRepositories,
+  type WorktreeCoverage,
+  type WorktreeDeletionSafety,
+} from "./done-janitor-worktree.js";
 import type { PushNotificationSender } from "./push/index.js";
 import type {
   WorktreeSnapshotOffsite,
@@ -116,6 +125,16 @@ export interface DoneJanitorConfig {
    * dropped, never applied.
    */
   regenerableIgnoredPaths?: string[];
+  /**
+   * Ignored paths a work snapshot should also stage (size-capped, secret-filtered) so an
+   * otherwise-unbacked ignored file no longer keeps its worktree forever (docs/done-janitor.md,
+   * "Unbacked ignored files"). Each entry is a path suffix or a simple glob, same syntax as
+   * `regenerableIgnoredPaths`, but unlike that list a pattern here may match a directory. Default
+   * `[]`. A pattern that could match a secret is rejected with a warning and dropped.
+   */
+  backupIgnoredPaths?: string[];
+  /** Caps a file `backupIgnoredPaths` would otherwise stage. Default 5 MiB. */
+  maxBackupIgnoredFileBytes?: number;
 }
 
 interface ResolvedDoneJanitorConfig {
@@ -131,6 +150,9 @@ interface ResolvedDoneJanitorConfig {
   askFinished: boolean;
   /** Validated by `resolveRegenerableIgnoredPaths`; a pattern that could match a secret never lands here. */
   regenerableIgnoredPaths: string[];
+  /** Validated by `resolveBackupIgnoredPaths`; a pattern that could match a secret never lands here. */
+  backupIgnoredPaths: string[];
+  maxBackupIgnoredFileBytes: number;
 }
 
 function resolveConfig(config: DoneJanitorConfig, logger: Logger): ResolvedDoneJanitorConfig {
@@ -153,6 +175,14 @@ function resolveConfig(config: DoneJanitorConfig, logger: Logger): ResolvedDoneJ
           "Done janitor: agents.doneJanitor.regenerableIgnoredPaths entry could match a secret-shaped path, ignoring it",
         ),
     ),
+    backupIgnoredPaths: resolveBackupIgnoredPaths(config.backupIgnoredPaths, (pattern) =>
+      logger.warn(
+        { pattern },
+        "Done janitor: agents.doneJanitor.backupIgnoredPaths entry could match a secret-shaped path, ignoring it",
+      ),
+    ),
+    maxBackupIgnoredFileBytes:
+      config.maxBackupIgnoredFileBytes ?? DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
   };
 }
 
@@ -278,6 +308,8 @@ export interface DoneJanitorDependencies {
     worktreePath: string;
     commit: string | null;
     mainRepoRoot?: string | null;
+    backupIgnoredPaths?: readonly string[];
+    maxBackupIgnoredFileBytes?: number;
   }): Promise<WorktreeCoverage | null>;
   /** Null when the snapshot is a backup a deletion may rely on; otherwise why it is not. */
   verifyBackup(input: {
@@ -807,7 +839,7 @@ export class AgentDoneJanitor {
       plan.directory,
       `done janitor, before archiving idle workspace ${workspace.workspaceId}`,
       workspace.mainRepoRoot,
-      config.regenerableIgnoredPaths,
+      config,
     );
     if (!check.ok) {
       report.entries.push(describe("kept-idle-workspace", check.reason));
@@ -958,11 +990,7 @@ export class AgentDoneJanitor {
       return { kind: "archive", deletesDirectory: false, detail: "its directory is gone" };
     }
     if (!safety.safe && !safety.atRisk) return keep(safety.reason);
-    const preview = await this.previewDeletion(
-      path,
-      workspace.mainRepoRoot,
-      config.regenerableIgnoredPaths,
-    );
+    const preview = await this.previewDeletion(path, workspace.mainRepoRoot, config);
     if (!preview.ok) return keep(preview.reason, preview.category);
     return {
       kind: "archive",
@@ -981,7 +1009,7 @@ export class AgentDoneJanitor {
   private async previewDeletion(
     path: string,
     mainRepoRoot: string | null,
-    regenerableIgnoredPaths: readonly string[],
+    config: ResolvedDoneJanitorConfig,
   ): Promise<DeletionCheck> {
     const occupied = await this.occupiedReason(path);
     if (occupied) return { ok: false, reason: occupied.reason, category: occupied.category };
@@ -989,11 +1017,34 @@ export class AgentDoneJanitor {
       worktreePath: path,
       commit: null,
       mainRepoRoot,
+      backupIgnoredPaths: config.backupIgnoredPaths,
+      maxBackupIgnoredFileBytes: config.maxBackupIgnoredFileBytes,
     });
-    const invariant = checkDeletionInvariant(coverage, "plan", regenerableIgnoredPaths);
+    const safeNested = await this.resolveSafeNestedRepositories(path, coverage);
+    const invariant = checkDeletionInvariant(
+      coverage,
+      "plan",
+      config.regenerableIgnoredPaths,
+      safeNested,
+    );
     return invariant.holds
       ? { ok: true, invariant: invariant.detail }
       : { ok: false, reason: invariant.reason, category: invariant.category };
+  }
+
+  /**
+   * Nested repository paths `checkDeletionInvariant` would otherwise keep the worktree for,
+   * confirmed safe (own HEAD on a remote, own tree clean) by `checkNestedRepositorySafety`
+   * (done-janitor-worktree.ts). Empty, with no git call, when `coverage` found none.
+   */
+  private async resolveSafeNestedRepositories(
+    worktreePath: string,
+    coverage: WorktreeCoverage | null,
+  ): Promise<Set<string>> {
+    if (!coverage) return new Set();
+    const candidates = listNestedRepositories(coverage);
+    if (candidates.length === 0) return new Set();
+    return computeSafeNestedRepositories(worktreePath, candidates);
   }
 
   /**
@@ -1008,11 +1059,17 @@ export class AgentDoneJanitor {
     path: string,
     reason: string,
     mainRepoRoot: string | null,
-    regenerableIgnoredPaths: readonly string[],
+    config: ResolvedDoneJanitorConfig,
   ): Promise<DeletionCheck> {
     const occupied = await this.occupiedReason(path);
     if (occupied) return { ok: false, reason: occupied.reason, category: occupied.category };
-    const snapshot = await this.takeSnapshot(report, path, reason);
+    const snapshot = await this.takeSnapshot(
+      report,
+      path,
+      reason,
+      config.backupIgnoredPaths,
+      config.maxBackupIgnoredFileBytes,
+    );
     if (snapshot.kind === "failed") {
       return {
         ok: false,
@@ -1025,7 +1082,13 @@ export class AgentDoneJanitor {
         commit: null,
         mainRepoRoot,
       });
-      const invariant = checkDeletionInvariant(coverage, "head", regenerableIgnoredPaths);
+      const safeNested = await this.resolveSafeNestedRepositories(path, coverage);
+      const invariant = checkDeletionInvariant(
+        coverage,
+        "head",
+        config.regenerableIgnoredPaths,
+        safeNested,
+      );
       return invariant.holds
         ? { ok: true, invariant: invariant.detail }
         : { ok: false, reason: invariant.reason, category: invariant.category };
@@ -1039,7 +1102,13 @@ export class AgentDoneJanitor {
       commit: snapshot.commit,
       mainRepoRoot,
     });
-    const invariant = checkDeletionInvariant(coverage, "snapshot", regenerableIgnoredPaths);
+    const safeNested = await this.resolveSafeNestedRepositories(path, coverage);
+    const invariant = checkDeletionInvariant(
+      coverage,
+      "snapshot",
+      config.regenerableIgnoredPaths,
+      safeNested,
+    );
     return invariant.holds
       ? {
           ok: true,
@@ -1718,11 +1787,7 @@ export class AgentDoneJanitor {
       baseBranch: workspace.baseBranch,
     });
     if (!safety.safe) return keep(safety.reason);
-    const preview = await this.previewDeletion(
-      path,
-      workspace.mainRepoRoot,
-      config.regenerableIgnoredPaths,
-    );
+    const preview = await this.previewDeletion(path, workspace.mainRepoRoot, config);
     if (!preview.ok) return keep(preview.reason);
     return {
       kind: "reclaim",
@@ -1781,7 +1846,7 @@ export class AgentDoneJanitor {
       plan.path,
       `done janitor, before deleting workspace ${plan.workspace.workspaceId}`,
       plan.workspace.mainRepoRoot,
-      config.regenerableIgnoredPaths,
+      config,
     );
     if (!check.ok) return kept(check.reason);
     // The plan is minutes old now. Look again here, and archive-by-scope looks again inside,
@@ -1912,8 +1977,15 @@ export class AgentDoneJanitor {
     report: DoneJanitorSweepReport,
     cwd: string,
     reason: string,
+    backupIgnoredPaths: readonly string[] = [],
+    maxBackupIgnoredFileBytes?: number,
   ): Promise<WorktreeSnapshotResult> {
-    const result = await this.deps.snapshotWorktree({ cwd, reason });
+    const result = await this.deps.snapshotWorktree({
+      cwd,
+      reason,
+      backupIgnoredPaths,
+      maxBackupIgnoredFileBytes,
+    });
     if (result.kind === "snapshotted") {
       report.entries.push({
         action: "snapshotted",

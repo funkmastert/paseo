@@ -17,10 +17,15 @@ import pino from "pino";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { GitWorktreeSnapshotter } from "./agent/worktree-snapshot.js";
-import { checkDeletionInvariant } from "./agent/workspace-sweep-detector.js";
+import {
+  checkDeletionInvariant,
+  listNestedRepositories,
+} from "./agent/workspace-sweep-detector.js";
 import {
   checkMergedIntoRemoteBase,
+  checkNestedRepositorySafety,
   checkWorktreeDeletionSafety,
+  computeSafeNestedRepositories,
   readWorkspaceActivitySignals,
   readWorktreeCoverage,
   verifyWorktreeBackup,
@@ -481,10 +486,12 @@ function snapshotter(maxUntrackedFileBytes = 1024 * 1024): GitWorktreeSnapshotte
 async function snapshot(
   worktree: string,
   maxUntrackedFileBytes?: number,
+  backupIgnoredPaths?: readonly string[],
 ): Promise<Extract<WorktreeSnapshotResult, { kind: "snapshotted" }>> {
   const result = await snapshotter(maxUntrackedFileBytes).snapshot({
     cwd: worktree,
     reason: "test",
+    backupIgnoredPaths,
   });
   if (result.kind !== "snapshotted") throw new Error(`expected a snapshot, got ${result.kind}`);
   return result;
@@ -508,6 +515,8 @@ describe("readWorktreeCoverage", () => {
       nestedRepositories: [],
       manifestDirectories: [],
       copiedFromMainCheckout: [],
+      backupEligibleIgnored: [],
+      ignoredDirectoriesHoldingOnlyNestedRepositories: [],
     });
   });
 
@@ -551,6 +560,8 @@ describe("readWorktreeCoverage", () => {
       nestedRepositories: [],
       manifestDirectories: [],
       copiedFromMainCheckout: [],
+      backupEligibleIgnored: [],
+      ignoredDirectoriesHoldingOnlyNestedRepositories: [],
     });
   });
 
@@ -1099,5 +1110,276 @@ describe("verifyWorktreeBackup", () => {
     expect(taken.offsite.kind).toBe("bundled");
     expect(remoteRefs()).toBe(before);
     expect(await verify(leaky, taken)).toBeNull();
+  });
+});
+
+describe("readWorktreeCoverage, backup-eligible ignored paths", () => {
+  test("an ignored file matching a configured pattern is listed as backup-eligible", async () => {
+    const worktree = addWorktree("backup-eligible", "feature");
+    commit(worktree, ".gitignore", ".worker-logs/\n");
+    mkdirSync(join(worktree, ".worker-logs"));
+    writeFileSync(join(worktree, ".worker-logs", "a.log"), "line\n");
+
+    const coverage = await readWorktreeCoverage({
+      worktreePath: worktree,
+      commit: null,
+      backupIgnoredPaths: [".worker-logs/"],
+      maxBackupIgnoredFileBytes: 1024,
+    });
+
+    expect(coverage).toMatchObject({
+      ignored: [".worker-logs/"],
+      backupEligibleIgnored: [".worker-logs/"],
+    });
+  });
+
+  test("an ignored file matching no configured pattern is not backup-eligible", async () => {
+    const worktree = addWorktree("backup-no-match", "feature");
+    commit(worktree, ".gitignore", "src/build/\n");
+    mkdirSync(join(worktree, "src", "build"), { recursive: true });
+    writeFileSync(join(worktree, "src", "build", "release-signing.json"), "only copy\n");
+
+    const coverage = await readWorktreeCoverage({
+      worktreePath: worktree,
+      commit: null,
+      backupIgnoredPaths: [".worker-logs/"],
+      maxBackupIgnoredFileBytes: 1024,
+    });
+
+    expect(coverage?.backupEligibleIgnored).toEqual([]);
+  });
+
+  test("no patterns configured means nothing is backup-eligible, as before this existed", async () => {
+    const worktree = addWorktree("backup-default", "feature");
+    commit(worktree, ".gitignore", ".worker-logs/\n");
+    mkdirSync(join(worktree, ".worker-logs"));
+    writeFileSync(join(worktree, ".worker-logs", "a.log"), "line\n");
+
+    const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
+
+    expect(coverage?.backupEligibleIgnored).toEqual([]);
+  });
+
+  test("a secret-shaped file inside a matching directory makes the whole directory ineligible", async () => {
+    const worktree = addWorktree("backup-secret", "feature");
+    commit(worktree, ".gitignore", ".worker-logs/\n");
+    mkdirSync(join(worktree, ".worker-logs"));
+    writeFileSync(join(worktree, ".worker-logs", "a.log"), "line\n");
+    writeFileSync(join(worktree, ".worker-logs", ".env"), "API_KEY=1\n");
+
+    const coverage = await readWorktreeCoverage({
+      worktreePath: worktree,
+      commit: null,
+      backupIgnoredPaths: [".worker-logs/"],
+      maxBackupIgnoredFileBytes: 1024,
+    });
+
+    expect(coverage?.backupEligibleIgnored).toEqual([]);
+  });
+});
+
+describe("a work snapshot backs up a configured ignored path, and the janitor then releases it", () => {
+  test("plan defers a backup-eligible ignored file instead of keeping forever; confirming against a real snapshot that staged it holds", async () => {
+    const worktree = addWorktree("backup-flow", "feature");
+    commit(worktree, ".gitignore", ".worker-logs/\n");
+    mkdirSync(join(worktree, ".worker-logs"));
+    writeFileSync(join(worktree, ".worker-logs", "a.log"), "line\n");
+    git(worktree, "push", "-q", "origin", "feature");
+
+    const planCoverage = await readWorktreeCoverage({
+      worktreePath: worktree,
+      commit: null,
+      backupIgnoredPaths: [".worker-logs/"],
+      maxBackupIgnoredFileBytes: 1024,
+    });
+    expect(checkDeletionInvariant(planCoverage, "plan").holds).toBe(true);
+    // Without the pattern configured, planning still keeps it: nothing changed for everyone else.
+    expect(
+      checkDeletionInvariant(
+        await readWorktreeCoverage({ worktreePath: worktree, commit: null }),
+        "plan",
+      ).holds,
+    ).toBe(false);
+
+    const taken = await snapshot(worktree, undefined, [".worker-logs/"]);
+    const snapshotCoverage = await readWorktreeCoverage({
+      worktreePath: worktree,
+      commit: taken.commit,
+    });
+    const invariant = checkDeletionInvariant(snapshotCoverage, "snapshot");
+    expect(invariant).toEqual({
+      holds: true,
+      detail: "holds: every file is in the verified snapshot",
+    });
+  });
+
+  test("with no patterns configured, an ignored file never forces a snapshot, so the worktree is kept exactly as before this existed", async () => {
+    const worktree = addWorktree("backup-flow-unconfigured", "feature");
+    commit(worktree, ".gitignore", ".worker-logs/\n");
+    mkdirSync(join(worktree, ".worker-logs"));
+    writeFileSync(join(worktree, ".worker-logs", "a.log"), "line\n");
+    git(worktree, "push", "-q", "origin", "feature");
+
+    const result = await snapshotter().snapshot({ cwd: worktree, reason: "test" });
+    expect(result.kind).toBe("nothing-at-risk");
+    const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
+    expect(checkDeletionInvariant(coverage, "head").holds).toBe(false);
+  });
+});
+
+describe("checkNestedRepositorySafety", () => {
+  function initNested(worktree: string, relativePath: string): string {
+    const nested = join(worktree, ...relativePath.split("/"));
+    mkdirSync(nested, { recursive: true });
+    git(nested, "init", "-q");
+    return nested;
+  }
+
+  test("a clean, pushed nested repository is safe", async () => {
+    const worktree = addWorktree("nested-safe", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    const nestedRemote = join(root, "nested-remote.git");
+    git(root, "init", "-q", "--bare", nestedRemote);
+    commit(nested, "f.txt", "content\n");
+    git(nested, "remote", "add", "origin", nestedRemote);
+    git(nested, "push", "-q", "origin", "HEAD:main");
+
+    await expect(checkNestedRepositorySafety(nested)).resolves.toBe(true);
+  });
+
+  test("a nested repository with no remote is not safe", async () => {
+    const worktree = addWorktree("nested-no-remote", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    commit(nested, "f.txt", "content\n");
+
+    await expect(checkNestedRepositorySafety(nested)).resolves.toBe(false);
+  });
+
+  test("a nested repository with uncommitted changes is not safe", async () => {
+    const worktree = addWorktree("nested-dirty", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    const nestedRemote = join(root, "nested-remote-dirty.git");
+    git(root, "init", "-q", "--bare", nestedRemote);
+    commit(nested, "f.txt", "content\n");
+    git(nested, "remote", "add", "origin", nestedRemote);
+    git(nested, "push", "-q", "origin", "HEAD:main");
+    writeFileSync(join(nested, "f.txt"), "edited\n");
+
+    await expect(checkNestedRepositorySafety(nested)).resolves.toBe(false);
+  });
+
+  test("a nested repository with unpushed commits is not safe", async () => {
+    const worktree = addWorktree("nested-unpushed", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    const nestedRemote = join(root, "nested-remote-unpushed.git");
+    git(root, "init", "-q", "--bare", nestedRemote);
+    commit(nested, "f.txt", "content\n");
+    git(nested, "remote", "add", "origin", nestedRemote);
+    git(nested, "push", "-q", "origin", "HEAD:main");
+    commit(nested, "g.txt", "more, never pushed\n");
+
+    await expect(checkNestedRepositorySafety(nested)).resolves.toBe(false);
+  });
+
+  test("a directory git cannot read as a repository is not safe", async () => {
+    await expect(checkNestedRepositorySafety(join(root, "does-not-exist"))).resolves.toBe(false);
+  });
+});
+
+describe("computeSafeNestedRepositories", () => {
+  test("keeps only the candidates that are confirmed safe, by their own candidate string", async () => {
+    const worktree = addWorktree("compute-safe", "feature");
+    const safeRemote = join(root, "safe-remote.git");
+    git(root, "init", "-q", "--bare", safeRemote);
+    const safe = join(worktree, "vendor", "safe");
+    mkdirSync(safe, { recursive: true });
+    git(safe, "init", "-q");
+    commit(safe, "f.txt", "content\n");
+    git(safe, "remote", "add", "origin", safeRemote);
+    git(safe, "push", "-q", "origin", "HEAD:main");
+
+    const unsafe = join(worktree, "vendor", "unsafe");
+    mkdirSync(unsafe, { recursive: true });
+    git(unsafe, "init", "-q");
+    commit(unsafe, "f.txt", "content, no remote\n");
+
+    const result = await computeSafeNestedRepositories(worktree, [
+      "vendor/safe/",
+      "vendor/unsafe/",
+    ]);
+
+    expect(result).toEqual(new Set(["vendor/safe/"]));
+  });
+});
+
+describe("the deletion invariant: nested repositories confirmed safe", () => {
+  test("a nested repository kept by checkDeletionInvariant is excused once it is in safeNestedRepositories", async () => {
+    const worktree = addWorktree("invariant-nested-safe", "feature");
+    git(worktree, "push", "-q", "origin", "feature");
+    const nestedRemote = join(root, "invariant-nested-remote.git");
+    git(root, "init", "-q", "--bare", nestedRemote);
+    const nested = join(worktree, "vendor", "tool");
+    mkdirSync(nested, { recursive: true });
+    git(nested, "init", "-q");
+    commit(nested, "f.txt", "content\n");
+    git(nested, "remote", "add", "origin", nestedRemote);
+    git(nested, "push", "-q", "origin", "HEAD:main");
+
+    const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
+    expect(checkDeletionInvariant(coverage, "plan").holds).toBe(false);
+
+    const candidates = listNestedRepositories(coverage as NonNullable<typeof coverage>);
+    const safe = await computeSafeNestedRepositories(worktree, candidates);
+    expect(checkDeletionInvariant(coverage, "plan", [], safe)).toEqual({
+      holds: true,
+      detail: "holds once a verified snapshot backs up 1 changed or untracked file(s)",
+    });
+  });
+
+  test("an ignored container holding only nested repositories is excused once every one of them is safe", async () => {
+    const worktree = addWorktree("invariant-nested-container", "feature");
+    commit(worktree, ".gitignore", ".claude/worktrees/\n");
+    git(worktree, "push", "-q", "origin", "feature");
+    const nestedRemote = join(root, "container-nested-remote.git");
+    git(root, "init", "-q", "--bare", nestedRemote);
+    const nested = join(worktree, ".claude", "worktrees", "sub");
+    mkdirSync(nested, { recursive: true });
+    git(nested, "init", "-q");
+    commit(nested, "f.txt", "content\n");
+    git(nested, "remote", "add", "origin", nestedRemote);
+    git(nested, "push", "-q", "origin", "HEAD:main");
+
+    const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
+    expect(coverage).toMatchObject({
+      ignored: [".claude/worktrees/"],
+      ignoredDirectoriesHoldingOnlyNestedRepositories: [".claude/worktrees/"],
+    });
+    expect(checkDeletionInvariant(coverage, "plan").holds).toBe(false);
+
+    const candidates = listNestedRepositories(coverage as NonNullable<typeof coverage>);
+    const safe = await computeSafeNestedRepositories(worktree, candidates);
+    expect(checkDeletionInvariant(coverage, "plan", [], safe)).toEqual({
+      holds: true,
+      detail:
+        "holds: every file is tracked and pushed; ignored only regenerable (.claude/worktrees/)",
+    });
+  });
+
+  test("an ignored container is not excused while any nested repository under it is unsafe", async () => {
+    const worktree = addWorktree("invariant-nested-container-unsafe", "feature");
+    commit(worktree, ".gitignore", ".claude/worktrees/\n");
+    git(worktree, "push", "-q", "origin", "feature");
+    const nested = join(worktree, ".claude", "worktrees", "sub");
+    mkdirSync(nested, { recursive: true });
+    git(nested, "init", "-q");
+    commit(nested, "f.txt", "content, no remote\n");
+
+    const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
+    const candidates = listNestedRepositories(coverage as NonNullable<typeof coverage>);
+    const safe = await computeSafeNestedRepositories(worktree, candidates);
+
+    expect(safe.size).toBe(0);
+    const invariant = checkDeletionInvariant(coverage, "plan", [], safe);
+    expect(invariant.holds).toBe(false);
   });
 });

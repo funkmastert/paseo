@@ -14,6 +14,10 @@ import { access, constants, lstat, opendir, readdir, readFile, stat } from "node
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+import {
+  DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
+  isBackupEligibleIgnoredPath,
+} from "./agent/backup-eligible-ignored.js";
 import { isBuildManifest, isRegenerablePath } from "./agent/workspace-sweep-detector.js";
 import type { WorktreeSnapshotOffsite } from "./remediation/contract.js";
 import { runGitCommand, type RunGitCommand } from "../utils/run-git-command.js";
@@ -434,6 +438,24 @@ export interface WorktreeCoverage {
    * `partitionCopiedFromMainCheckout`.
    */
   copiedFromMainCheckout: string[];
+  /**
+   * Ignored paths, part (d): one that matches `agents.doneJanitor.backupIgnoredPaths` and holds
+   * nothing too large or secret-shaped to back up (`isBackupEligibleIgnoredPath`,
+   * backup-eligible-ignored.ts). Empty when no patterns were given. Unlike
+   * `copiedFromMainCheckout`, nothing here is backed up yet — `checkDeletionInvariant` may treat
+   * it as pending a snapshot only while planning; a live deletion still has to go through a real
+   * snapshot that stages it, same as any other at-risk file.
+   */
+  backupEligibleIgnored: string[];
+  /**
+   * Ignored directory entries (part of `ignored`) whose entire recursive content is one or more
+   * entries of `nestedRepositories` and nothing else: a container like `.claude/worktrees/` that
+   * git collapses to a single ignored entry because it never looks inside it. `checkDeletionInvariant`
+   * may excuse one of these once every nested repository under it is confirmed safe
+   * (`checkNestedRepositorySafety`) — the container itself holds nothing a nested repo's own
+   * remote doesn't already cover.
+   */
+  ignoredDirectoriesHoldingOnlyNestedRepositories: string[];
 }
 
 /**
@@ -452,6 +474,10 @@ export async function readWorktreeCoverage(input: {
   runGit?: RunGitCommand;
   /** The repo root this worktree was created from, when known (`DoneJanitorWorkspace.mainRepoRoot`). */
   mainRepoRoot?: string | null;
+  /** `agents.doneJanitor.backupIgnoredPaths`, already validated by `resolveBackupIgnoredPaths`. */
+  backupIgnoredPaths?: readonly string[];
+  /** `agents.doneJanitor.maxBackupIgnoredFileBytes`. Defaults to `DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES`. */
+  maxBackupIgnoredFileBytes?: number;
 }): Promise<WorktreeCoverage | null> {
   const { worktreePath } = input;
   if (!existsSync(worktreePath)) return null;
@@ -521,6 +547,7 @@ export async function readWorktreeCoverage(input: {
     }
     const tree = await walkWorktree(worktreePath);
     const manifestDirectories = await readManifestDirectories(worktreePath, ignored);
+    const unregenerable = unregenerableIgnored(ignored, manifestDirectories);
     return {
       commit,
       changed: splitNul(changed),
@@ -537,12 +564,18 @@ export async function readWorktreeCoverage(input: {
       nestedRepositories: tree.nestedRepositories,
       manifestDirectories,
       copiedFromMainCheckout: input.mainRepoRoot
-        ? await partitionCopiedFromMainCheckout(
-            worktreePath,
-            input.mainRepoRoot,
-            unregenerableIgnored(ignored, manifestDirectories),
-          )
+        ? await partitionCopiedFromMainCheckout(worktreePath, input.mainRepoRoot, unregenerable)
         : [],
+      backupEligibleIgnored: await partitionBackupEligibleIgnored(
+        worktreePath,
+        unregenerable,
+        input.backupIgnoredPaths,
+        input.maxBackupIgnoredFileBytes,
+      ),
+      ignoredDirectoriesHoldingOnlyNestedRepositories: listIgnoredDirectoriesOfOnlyNestedRepos(
+        ignored,
+        tree.nestedRepositories,
+      ),
     };
   } finally {
     rmSync(indexFile, { force: true });
@@ -798,6 +831,96 @@ async function directoriesByteIdentical(directoryA: string, directoryB: string):
     }
   }
   return true;
+}
+
+/**
+ * Which of `candidates` (already filtered to entries not regenerable by name) a work snapshot
+ * would capture, were one taken now: `isBackupEligibleIgnoredPath` run over each, size cap and
+ * secret filter included. Done once here rather than inside `checkDeletionInvariant` because that
+ * function is pure and this needs to read file content.
+ */
+async function partitionBackupEligibleIgnored(
+  worktreePath: string,
+  candidates: readonly string[],
+  patterns: readonly string[] = [],
+  maxFileBytes: number = DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
+): Promise<string[]> {
+  if (patterns.length === 0) return [];
+  const eligible: string[] = [];
+  for (const entry of candidates) {
+    if (await isBackupEligibleIgnoredPath({ worktreePath, entry, patterns, maxFileBytes })) {
+      eligible.push(entry);
+    }
+  }
+  return eligible;
+}
+
+/**
+ * Ignored directory entries whose only content, recursively, is one or more of
+ * `nestedRepositories` (and nothing else): a container git collapses to a single ignored entry,
+ * like `.claude/worktrees/`, because it never looks inside a directory it ignores.
+ * `checkDeletionInvariant` may excuse one of these once every nested repository under it is
+ * confirmed safe — the container holds nothing beyond what each nested repo's own remote covers.
+ */
+function listIgnoredDirectoriesOfOnlyNestedRepos(
+  ignored: readonly string[],
+  nestedRepositories: readonly string[],
+): string[] {
+  return ignored.filter((entry) => {
+    if (!entry.endsWith("/")) return false;
+    const nestedUnder = nestedRepositories.filter((nested) => nested.startsWith(entry));
+    return nestedUnder.length > 0;
+  });
+}
+
+/**
+ * Whether a repository nested inside a worktree is safe to lose when the worktree goes: its HEAD
+ * is clean (no uncommitted or untracked change) and reachable from a remote-tracking ref of its
+ * own. No local base branch is consulted, unlike {@link checkWorktreeDeletionSafety}: a nested
+ * repository records no base branch of its own, and a backup only ever holds it as a pointer to a
+ * commit, never its history. A git failure, a dirty tree or an unreachable HEAD all read as unsafe
+ * — doubt keeps the worktree, same as everywhere else in this module.
+ */
+export async function checkNestedRepositorySafety(
+  nestedRepositoryPath: string,
+  runGit: RunGitCommand = runGitCommand,
+): Promise<boolean> {
+  const git = createReadOnlyGit(nestedRepositoryPath, runGit);
+  const status = await git([
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=all",
+    "--ignore-submodules=none",
+  ]);
+  if (status === null) return false;
+  if (status.split("\n").some((line) => line.trim().length > 0)) return false;
+  const head = (await git(["rev-parse", "--verify", "--quiet", "HEAD"]))?.trim();
+  if (!head) return false;
+  const unreachable = await git(["rev-list", "--count", "HEAD", "--not", "--remotes"]);
+  const count = unreachable === null ? Number.NaN : Number.parseInt(unreachable.trim(), 10);
+  return Number.isFinite(count) && count === 0;
+}
+
+/**
+ * Every nested repository path {@link checkDeletionInvariant} would otherwise keep the worktree
+ * for (gitlinks, untracked nested repos, and anything the filesystem walk found), confirmed safe
+ * by {@link checkNestedRepositorySafety}. Candidate paths come with mixed trailing-slash
+ * conventions (a gitlink has none; a walked or untracked directory ends with `/`); both read the
+ * same directory on disk, so the returned set keeps whichever form the candidate used.
+ */
+export async function computeSafeNestedRepositories(
+  worktreePath: string,
+  candidates: readonly string[],
+  runGit: RunGitCommand = runGitCommand,
+): Promise<Set<string>> {
+  const safe = new Set<string>();
+  for (const candidate of candidates) {
+    const relative = candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
+    if (await checkNestedRepositorySafety(join(worktreePath, relative), runGit)) {
+      safe.add(candidate);
+    }
+  }
+  return safe;
 }
 
 /**

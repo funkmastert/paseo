@@ -166,6 +166,16 @@ export interface WorktreeSnapshotRequest {
   reason: string;
   /** Also push (personal GitHub) or bundle (anything else). Default true. */
   offsite?: boolean;
+  /**
+   * `agents.doneJanitor.backupIgnoredPaths`: ignored-path patterns the snapshot should also stage
+   * (size-capped, secret-filtered, forced past `.gitignore`), so an otherwise-unbacked ignored
+   * file the done janitor would keep a worktree for forever gets a real backup instead. Absent or
+   * empty: behaves exactly as before this existed. See docs/done-janitor.md, "Unbacked ignored
+   * files".
+   */
+  backupIgnoredPaths?: readonly string[];
+  /** Caps a file `backupIgnoredPaths` would otherwise stage. Default `DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES`. */
+  maxBackupIgnoredFileBytes?: number;
 }
 
 export type WorktreeSnapshotOffsite =
