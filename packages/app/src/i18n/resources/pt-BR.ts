@@ -2224,6 +2224,11 @@ export const ptBR: TranslationResources = {
     accessibilityLabel: "Decisão do JEV",
     accessibilityLabelCount: "{{count}} decisões do JEV",
     wouldHaveAction: "Teria feito: {{action}}",
+    forAgent: 'Para "{{title}}"',
+  },
+  jevHeaderBadge: {
+    label: "JEV · {{count}}",
+    accessibilityLabel: "{{count}} decisões do JEV",
   },
   tokenUsage: {
     byModelTitle: "Tokens por modelo",

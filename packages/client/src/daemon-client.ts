@@ -5506,17 +5506,25 @@ export class DaemonClient {
     });
   }
 
-  /** An agent's `JevDecisionRecord`s, newest first, including its spawn hint. */
+  /**
+   * An agent's `JevDecisionRecord`s, newest first, including its spawn hint.
+   * `includeChildren` also merges in the decisions of its direct children; callers gate sending
+   * it on `server_info.features.jevChildDecisions` (docs/jev.md, "Decision store").
+   */
   async listJevDecisions(
     agentId: string,
-    options?: { requestId?: string; timeout?: number },
+    options?: { requestId?: string; timeout?: number; includeChildren?: boolean },
   ): Promise<JevDecisionsListPayload> {
     // COMPAT(jevPaseoApi): callers gate on `server_info.features.jev`; an older daemon answers an
     // unknown request type with an `unknown_schema` rpc_error.
     return this.sendNamespacedCorrelatedSessionRequest({
       requestId: options?.requestId,
       timeout: options?.timeout,
-      message: { type: "jev.decisions.list.request", agentId },
+      message: {
+        type: "jev.decisions.list.request",
+        agentId,
+        ...(options?.includeChildren ? { includeChildren: true } : {}),
+      },
     });
   }
 

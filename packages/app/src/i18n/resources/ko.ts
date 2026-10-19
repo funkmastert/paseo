@@ -2202,6 +2202,11 @@ export const ko: TranslationResources = {
     accessibilityLabel: "JEV 결정",
     accessibilityLabelCount: "JEV 결정 {{count}}건",
     wouldHaveAction: "실행했다면: {{action}}",
+    forAgent: '"{{title}}" 에 대해',
+  },
+  jevHeaderBadge: {
+    label: "JEV · {{count}}",
+    accessibilityLabel: "JEV 결정 {{count}}건",
   },
   tokenUsage: {
     byModelTitle: "모델별 토큰",

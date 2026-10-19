@@ -2244,6 +2244,11 @@ export const fr: TranslationResources = {
     accessibilityLabel: "Décision JEV",
     accessibilityLabelCount: "{{count}} décisions JEV",
     wouldHaveAction: "Aurait fait : {{action}}",
+    forAgent: "Pour « {{title}} »",
+  },
+  jevHeaderBadge: {
+    label: "JEV · {{count}}",
+    accessibilityLabel: "{{count}} décisions JEV",
   },
   tokenUsage: {
     byModelTitle: "Tokens par modèle",

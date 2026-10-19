@@ -2211,6 +2211,11 @@ export const ja: TranslationResources = {
     accessibilityLabel: "JEV の判断",
     accessibilityLabelCount: "JEV の判断 {{count}} 件",
     wouldHaveAction: "実行していた場合: {{action}}",
+    forAgent: "「{{title}}」について",
+  },
+  jevHeaderBadge: {
+    label: "JEV · {{count}}",
+    accessibilityLabel: "JEV の判断 {{count}} 件",
   },
   tokenUsage: {
     byModelTitle: "モデル別トークン",

@@ -600,10 +600,13 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       }),
       [projectedToolCalls.head, projectedToolCalls.tail, transformTimelineItem],
     );
-    // No `enabled` override: defaults to true and shares the popover's query key/cache and 15s
-    // poll, so the stream picks up new decisions live without polling any faster than the meter
-    // already does (docs/agent-stream-performance.md).
-    const { data: jevDecisionsData } = useAgentJevDecisions(resolvedServerId, agentId);
+    // No `enabled` override: defaults to true. `includeChildren` names a child in a leader's own
+    // markers (docs/jev.md, "Decision store"), so this query key differs from the context meter's
+    // popover (which stays agent-only) but is shared with the header badge, which asks the same
+    // way — one 15s poll serves both rather than two (docs/agent-stream-performance.md).
+    const { data: jevDecisionsData } = useAgentJevDecisions(resolvedServerId, agentId, {
+      includeChildren: true,
+    });
     const jevMarkerLines = useMemo(
       () =>
         buildJevMarkerLines(

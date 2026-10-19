@@ -620,7 +620,9 @@ export class JevSession {
     const { host, service, logger } = this.options;
     let decisions: JevDecisionRecord[];
     try {
-      decisions = service.listDecisions(msg.agentId);
+      decisions = service.listDecisions(msg.agentId, {
+        includeChildren: msg.includeChildren === true,
+      });
     } catch (error) {
       logger.warn({ err: error, agentId: msg.agentId }, "jev.decisions.list failed");
       decisions = [];

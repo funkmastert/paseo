@@ -964,4 +964,123 @@ describe("JevService: ledger, audit, status", () => {
     expect(listed[0]).toMatchObject({ callId: "call-1", applied: true });
     expect(service.listDecisions("someone-else")).toEqual([]);
   });
+
+  it("attaches a summary to every decision, built per feature", async () => {
+    const { service } = makeHarness();
+    service.decisions.record({
+      agentId: "agent-1",
+      callId: "call-stall",
+      feature: "stallJudgment",
+      question: "Is the agent stuck?",
+      verdict: "waiting_on_human (0.8)",
+      confidence: 0.8,
+      action: "nudged with a person-first handoff",
+      applied: true,
+    });
+    const [decision] = service.listDecisions("agent-1");
+    expect(decision.summary).toBe("JEV: waiting on a person; nudged with a person-first handoff");
+  });
+
+  it("falls back to a generic summary for a feature it doesn't recognize", async () => {
+    const { service } = makeHarness();
+    service.decisions.record({
+      // Cast: a feature id a newer build adds that this one doesn't know yet.
+      feature: "someFutureFeature" as unknown as JevDecideInput["feature"],
+      agentId: "agent-1",
+      callId: "call-unknown",
+      question: "Does this finish look done?",
+      verdict: "missing tests (0.8)",
+      confidence: 0.8,
+      action: "flagged on the finish report",
+      applied: true,
+    });
+    const [decision] = service.listDecisions("agent-1");
+    expect(decision.summary).toBe("JEV ran someFutureFeature: missing tests (0.8)");
+  });
+
+  it("includeChildren merges a direct child's decisions, tagged with its id and title", async () => {
+    const { service } = makeHarness({
+      extra: {
+        readChildAgents: (agentId) =>
+          agentId === "leader-1" ? [{ id: "child-1", title: "rename helper" }] : [],
+      },
+    });
+    service.decisions.record({
+      agentId: "leader-1",
+      callId: "call-own",
+      feature: "stallJudgment",
+      question: "Is the agent stuck?",
+      verdict: "stuck",
+      confidence: null,
+      action: "nudged",
+      applied: true,
+    });
+    service.decisions.record({
+      agentId: "child-1",
+      callId: "call-child",
+      feature: "spawnHint",
+      question: "What class of work is this create?",
+      verdict: "mechanical",
+      confidence: 0.9,
+      action: "classifier input at create",
+      applied: false,
+    });
+
+    const ownOnly = service.listDecisions("leader-1");
+    expect(ownOnly.map((d) => d.callId)).toEqual(["call-own"]);
+
+    const withChildren = service.listDecisions("leader-1", { includeChildren: true });
+    expect(withChildren.map((d) => d.callId).sort()).toEqual(["call-child", "call-own"]);
+    const childRecord = withChildren.find((d) => d.callId === "call-child");
+    expect(childRecord).toMatchObject({
+      agentId: "child-1",
+      subjectAgentId: "child-1",
+      subjectAgentTitle: "rename helper",
+    });
+    const ownRecord = withChildren.find((d) => d.callId === "call-own");
+    expect(ownRecord?.subjectAgentId).toBeUndefined();
+  });
+
+  it("includeChildren caps a wide fan-out's merged list at 100 records", async () => {
+    const children = ["child-1", "child-2", "child-3"].map((id) => ({ id, title: id }));
+    const { service } = makeHarness({
+      extra: { readChildAgents: (agentId) => (agentId === "leader-1" ? children : []) },
+    });
+    for (const { id } of children) {
+      for (let index = 0; index < 40; index += 1) {
+        service.decisions.record({
+          agentId: id,
+          callId: `${id}-${index}`,
+          feature: "readCheck",
+          question: "Does this agent need a.md?",
+          verdict: "not_needed (0.9)",
+          confidence: 0.9,
+          action: "denied the read once (about 9,000 tokens)",
+          applied: true,
+        });
+      }
+    }
+    expect(service.listDecisions("leader-1", { includeChildren: true })).toHaveLength(100);
+  });
+
+  it("includeChildren never throws when readChildAgents throws", async () => {
+    const { service } = makeHarness({
+      extra: {
+        readChildAgents: () => {
+          throw new Error("boom");
+        },
+      },
+    });
+    service.decisions.record({
+      agentId: "leader-1",
+      callId: "call-own",
+      feature: "stallJudgment",
+      question: "Is the agent stuck?",
+      verdict: "stuck",
+      confidence: null,
+      action: "nudged",
+      applied: true,
+    });
+    expect(service.listDecisions("leader-1", { includeChildren: true })).toHaveLength(1);
+  });
 });

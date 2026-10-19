@@ -1,6 +1,12 @@
 import type { JevDecisionRecord, JevStatus } from "@getpaseo/protocol/jev/rpc-schemas";
 import type { JevMarkerItem } from "@/types/stream";
-import { formatJevCost, jevFeatureLabel, parseJevDecisionAt, tagFor } from "./jev-decisions-model";
+import {
+  formatJevCost,
+  jevFeatureLabel,
+  parseJevDecisionAt,
+  subjectLabelFor,
+  tagFor,
+} from "./jev-decisions-model";
 import type { JevDecisionLine } from "./jev-decisions-model";
 
 /**
@@ -25,10 +31,18 @@ export function buildJevMarkerLines(
       tag: tagFor(record, status),
       cost: formatJevCost(record.costUsd, provider),
       at,
+      summary: record.summary ?? null,
+      subjectLabel: subjectLabelFor(record),
     });
   }
-  return lines.sort((a, b) => (a.at?.getTime() ?? 0) - (b.at?.getTime() ?? 0));
+  lines.sort((a, b) => (a.at?.getTime() ?? 0) - (b.at?.getTime() ?? 0));
+  // The newest only: a leader with a wide fan-out gets its children's decisions too, and the
+  // timeline is for reading the conversation, not a full log (the badge's list has every one).
+  return lines.length > JEV_MARKER_LINES_MAX ? lines.slice(-JEV_MARKER_LINES_MAX) : lines;
 }
+
+/** Decisions placed in one agent's timeline, newest kept. */
+export const JEV_MARKER_LINES_MAX = 40;
 
 /**
  * Splits marker lines across the tail/head boundary so a decision is placed exactly once. A line

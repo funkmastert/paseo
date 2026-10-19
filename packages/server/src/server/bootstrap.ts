@@ -138,6 +138,7 @@ import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
+import { liveParentOf } from "./agent/live-parent.js";
 import { McpGateway, type McpGatewayConfig } from "./mcp-gateway/gateway.js";
 import { installMcpGatewayRoutes } from "./mcp-gateway/routes.js";
 import { normalizeMcpProtocolVersionHeader } from "./mcp-protocol-compat.js";
@@ -1785,6 +1786,13 @@ export async function createPaseoDaemon(
         jevKey,
       ),
     readAgentLabels: (agentId) => agentManager.getAgent(agentId)?.labels ?? null,
+    readChildAgents: (agentId) => {
+      const labelsOf = (id: string) => agentManager.getAgent(id)?.labels;
+      return agentManager
+        .listAgents()
+        .filter((agent) => liveParentOf(agent.labels, labelsOf) === agentId)
+        .map((agent) => ({ id: agent.id, title: agent.config.title ?? null }));
+    },
     readLeaderCompactionEnabled: () => daemonConfigStore.get().leaderCompaction?.enabled === true,
     // "Where agents use it" on the JEV dashboard. The storage and the registry are built below;
     // the lookups only read them once a record asks.

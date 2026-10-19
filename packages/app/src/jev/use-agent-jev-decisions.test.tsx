@@ -85,8 +85,42 @@ describe("useAgentJevDecisions", () => {
     const { result } = renderHook(() => useAgentJevDecisions("server-1", "agent-1"), { wrapper });
 
     await waitFor(() => expect(result.current.data).toBeDefined());
-    expect(client.listJevDecisions).toHaveBeenCalledWith("agent-1");
+    expect(client.listJevDecisions).toHaveBeenCalledWith("agent-1", { includeChildren: false });
     expect(result.current.data).toEqual({ decisions: [DECISION], status: { provider: "fake" } });
+  });
+
+  it("never sends includeChildren without the jevChildDecisions capability, even when asked", async () => {
+    withFeatures({ jev: true });
+    client.listJevDecisions.mockResolvedValue({
+      requestId: "r1",
+      agentId: "agent-1",
+      decisions: [DECISION],
+    });
+    client.jevStatus.mockResolvedValue({ requestId: "r2", status: { provider: "fake" } });
+
+    renderHook(() => useAgentJevDecisions("server-1", "agent-1", { includeChildren: true }), {
+      wrapper,
+    });
+
+    await waitFor(() => expect(client.listJevDecisions).toHaveBeenCalled());
+    expect(client.listJevDecisions).toHaveBeenCalledWith("agent-1", { includeChildren: false });
+  });
+
+  it("sends includeChildren when asked and the host supports it", async () => {
+    withFeatures({ jev: true, jevChildDecisions: true });
+    client.listJevDecisions.mockResolvedValue({
+      requestId: "r1",
+      agentId: "leader-1",
+      decisions: [DECISION],
+    });
+    client.jevStatus.mockResolvedValue({ requestId: "r2", status: { provider: "fake" } });
+
+    renderHook(() => useAgentJevDecisions("server-1", "leader-1", { includeChildren: true }), {
+      wrapper,
+    });
+
+    await waitFor(() => expect(client.listJevDecisions).toHaveBeenCalled());
+    expect(client.listJevDecisions).toHaveBeenCalledWith("leader-1", { includeChildren: true });
   });
 
   it("keeps the list when the status read fails", async () => {

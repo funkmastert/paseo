@@ -212,6 +212,16 @@ export const JevDecisionRecordSchema = z.object({
   savingsId: z.string().optional(),
   at: z.string(),
   costUsd: z.number().nullable(),
+  // COMPAT(jevChildDecisions): added in v0.9.x, remove gate after 2027-04-18. Set when this
+  // record is about a child agent rather than the one `jev.decisions.list` was asked for
+  // (docs/jev.md, "Decision store"). Absent for a record about the agent itself.
+  subjectAgentId: z.string().optional(),
+  // The child's title at read time; null when it had none. Meaningless without subjectAgentId.
+  subjectAgentTitle: z.string().nullable().optional(),
+  // COMPAT(jevDecisionSummary): added in v0.9.x, remove gate after 2027-04-18. A plain-words
+  // one-liner built server-side per feature (docs/jev.md, "Feature 11"). Absent from an older
+  // daemon; the app falls back to today's feature/verdict/action rendering.
+  summary: z.string().optional(),
 });
 
 // COMPAT(jev): added in v0.8.x, remove gate after 2027-03-28. Gated on
@@ -220,6 +230,10 @@ export const JevDecisionsListRequestSchema = z.object({
   type: z.literal("jev.decisions.list.request"),
   requestId: z.string(),
   agentId: z.string(),
+  // COMPAT(jevChildDecisions): added in v0.9.x, remove gate after 2027-04-18. Gated on
+  // `server_info.features.jevChildDecisions`; absent or false answers with only `agentId`'s own
+  // decisions, as before.
+  includeChildren: z.boolean().optional(),
 });
 
 export const JevDecisionsListResponseSchema = z.object({

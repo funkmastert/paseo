@@ -29,6 +29,8 @@ function line(overrides: Partial<JevDecisionLine> = {}): JevDecisionLine {
     tag: null,
     cost: "$0.0001",
     at: new Date("2026-10-16T12:00:00.000Z"),
+    summary: null,
+    subjectLabel: null,
     ...overrides,
   };
 }
@@ -49,12 +51,41 @@ describe("buildJevMarkerLines", () => {
     expect(lines.map((l) => l.key)).toEqual(["a", "b"]);
   });
 
+  it("keeps only the newest 40 decisions for the timeline", () => {
+    const records = Array.from({ length: 45 }, (_, index) =>
+      record({
+        callId: `c${index}`,
+        at: new Date(Date.UTC(2026, 9, 16, 12, 0, index)).toISOString(),
+      }),
+    );
+    const lines = buildJevMarkerLines(records, null);
+    expect(lines).toHaveLength(40);
+    expect(lines[0]?.key).toBe("c5");
+    expect(lines.at(-1)?.key).toBe("c44");
+  });
+
   it("skips a record with an unparseable timestamp", () => {
     const lines = buildJevMarkerLines(
       [record({ callId: "bad", at: "not-a-date" }), record({ callId: "ok" })],
       null,
     );
     expect(lines.map((l) => l.key)).toEqual(["ok"]);
+  });
+
+  it("carries the daemon's summary onto the marker line", () => {
+    const lines = buildJevMarkerLines(
+      [record({ summary: "JEV judged the stall needs you" })],
+      null,
+    );
+    expect(lines[0].summary).toBe("JEV judged the stall needs you");
+  });
+
+  it("names the child a decision is about", () => {
+    const lines = buildJevMarkerLines(
+      [record({ subjectAgentId: "child-1", subjectAgentTitle: "rename helper" })],
+      null,
+    );
+    expect(lines[0].subjectLabel).toBe("rename helper");
   });
 });
 

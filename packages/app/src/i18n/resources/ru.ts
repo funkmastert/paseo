@@ -2224,6 +2224,11 @@ export const ru: TranslationResources = {
     accessibilityLabel: "Решение JEV",
     accessibilityLabelCount: "{{count}} решений JEV",
     wouldHaveAction: "Сделал бы: {{action}}",
+    forAgent: "Для «{{title}}»",
+  },
+  jevHeaderBadge: {
+    label: "JEV · {{count}}",
+    accessibilityLabel: "{{count}} решений JEV",
   },
   tokenUsage: {
     byModelTitle: "Токены по модели",

@@ -290,6 +290,52 @@ describe("jev.decisions.list", () => {
 
     expect(SessionOutboundMessageSchema.parse(message)).toEqual(message);
   });
+
+  test("accepts includeChildren on the request, and omits it as before when absent", () => {
+    const withChildren = SessionInboundMessageSchema.parse({
+      type: "jev.decisions.list.request",
+      requestId: "req-1",
+      agentId: "leader-1",
+      includeChildren: true,
+    });
+    expect(withChildren).toMatchObject({ includeChildren: true });
+
+    const without = SessionInboundMessageSchema.parse({
+      type: "jev.decisions.list.request",
+      requestId: "req-2",
+      agentId: "leader-1",
+    });
+    expect(without).not.toHaveProperty("includeChildren");
+  });
+
+  test("carries a child's subjectAgentId, subjectAgentTitle and summary, and parses a record without them", () => {
+    const own = {
+      agentId: "leader-1",
+      callId: "call-own",
+      feature: "stallJudgment",
+      question: "Is this stalled?",
+      verdict: "yes (0.8)",
+      confidence: 0.8,
+      action: "nudged",
+      applied: true,
+      at: "2026-10-18T12:00:00.000Z",
+      costUsd: 0.0001,
+    };
+    const forChild = {
+      ...own,
+      agentId: "child-1",
+      callId: "call-child",
+      subjectAgentId: "child-1",
+      subjectAgentTitle: "rename helper",
+      summary: "JEV judged the stall needs you",
+    };
+    const message = {
+      type: "jev.decisions.list.response",
+      payload: { requestId: "req-1", agentId: "leader-1", decisions: [forChild, own] },
+    };
+
+    expect(SessionOutboundMessageSchema.parse(message)).toEqual(message);
+  });
 });
 
 describe("jev.decisions.list savings fields", () => {
@@ -450,6 +496,22 @@ describe("jev.savings.events", () => {
 
     expect(parsed.features?.jevSavings).toBe(true);
     expect(older.features?.jevSavings).toBeUndefined();
+  });
+
+  test("server_info carries the jevChildDecisions capability, and an older daemon's omits it", () => {
+    const parsed = ServerInfoStatusPayloadSchema.parse({
+      status: "server_info",
+      serverId: "srv",
+      features: { jev: true, jevChildDecisions: true },
+    });
+    const older = ServerInfoStatusPayloadSchema.parse({
+      status: "server_info",
+      serverId: "srv",
+      features: { jev: true },
+    });
+
+    expect(parsed.features?.jevChildDecisions).toBe(true);
+    expect(older.features?.jevChildDecisions).toBeUndefined();
   });
 });
 
