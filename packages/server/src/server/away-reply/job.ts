@@ -516,7 +516,7 @@ export class AwayReplyJob {
     const context = built.context;
     const scanned = threadText(context);
 
-    // Wonderly code is in scope (Tyler, 2026-10-20, "Allow, keep guards"): the hard rules below —
+    // Wonderly code is in scope (Tyler, 2026-10-19, "Allow, keep guards"): the hard rules below —
     // merge, force-push, git-history (branches, worktrees), destructive (files) and the rest of
     // `findExcludedAction` — still gate the reply whatever repo the thread names. There is no
     // separate company-code refusal to also pass.

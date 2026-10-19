@@ -229,6 +229,23 @@ describe("AwayReplyJob", () => {
     expect(Math.max(...h.fleet.tailFetchLimits)).toBe(TIMELINE_TAIL_ROWS * 2);
   });
 
+  it("widens past a single doubling when the busy turn is even longer", async () => {
+    const h = setup();
+    h.fleet.add(leaderView({ cwd: h.safeCwd }), []);
+    h.tyler("leader-1", "Fix the flaky test", T0);
+    // Needs two doublings (1000 -> 2000 -> 4000) to reach Tyler's message.
+    const noise = Array.from({ length: 3500 }, (_, index) =>
+      assistant(`working on it, step ${index}`, T0 + index),
+    );
+    h.fleet.append("leader-1", noise);
+    h.fleet.append("leader-1", [assistant(OPTIONS_MESSAGE, T0 + 3600)]);
+    h.at(T0 + 62 * MINUTE);
+    const report = await h.job.tick();
+    expect(report?.entries).toMatchObject([{ action: "replied", reason: "option" }]);
+    expect(h.fleet.turns).toEqual([{ agentId: "leader-1", text: GO_WITH_B_TEXT }]);
+    expect(h.fleet.tailFetchLimits).toEqual(expect.arrayContaining([2000, 4000]));
+  });
+
   it("gives up at the fetch cap instead of reading an unbounded timeline", async () => {
     const h = setup();
     h.fleet.add(leaderView({ cwd: h.safeCwd }), []);
@@ -265,7 +282,7 @@ describe("AwayReplyJob", () => {
     expect(h.calls()).toBe(0);
   });
 
-  it("answers a thread that names Wonderly code, same as any other (Tyler, 2026-10-20)", async () => {
+  it("answers a thread that names Wonderly code, same as any other (Tyler, 2026-10-19)", async () => {
     const h = setup();
     h.waitingLeader(`${OPTIONS_MESSAGE}\nThis is for backend-net#10032.`);
     h.at(T0 + 62 * MINUTE);
@@ -296,18 +313,24 @@ describe("AwayReplyJob", () => {
     expect(report?.entries.filter((entry) => entry.action === "replied")).toHaveLength(2);
   });
 
-  it("still blocks a merge or push in a Wonderly thread; the hard rules are not lifted", async () => {
-    const h = setup();
-    h.fleet.add(leaderView({ id: "company", cwd: h.companyCwd }), []);
-    h.tyler("company", "Fix the flaky test", T0);
-    h.fleet.append("company", [
-      assistant("backend-net#10032 is green.\nShould I merge it now?", T0 + MINUTE),
-    ]);
-    h.at(T0 + 62 * MINUTE);
-    const report = await h.job.tick();
-    expect(report?.entries).toMatchObject([{ action: "skipped", reason: "excluded-merge" }]);
-    expect(h.fleet.turns).toHaveLength(0);
-  });
+  it.each([
+    ["backend-net#10032 is green.\nShould I merge it now?", "excluded-merge"],
+    ["Should I git push the fix for backend-net#10032?", "excluded-outward-message"],
+    ["I can force push the rebased backend-net branch.", "excluded-force-push"],
+    ["Want me to delete the old backend-net worktrees?", "excluded-destructive"],
+  ])(
+    "still blocks %j in a Wonderly thread; the hard rules are not lifted",
+    async (message, reason) => {
+      const h = setup();
+      h.fleet.add(leaderView({ id: "company", cwd: h.companyCwd }), []);
+      h.tyler("company", "Fix the flaky test", T0);
+      h.fleet.append("company", [assistant(message, T0 + MINUTE)]);
+      h.at(T0 + 62 * MINUTE);
+      const report = await h.job.tick();
+      expect(report?.entries).toMatchObject([{ action: "skipped", reason }]);
+      expect(h.fleet.turns).toHaveLength(0);
+    },
+  );
 
   it("replies at most once per waiting episode, across sweeps and restarts", async () => {
     const h = setup();
@@ -934,6 +957,24 @@ describe("dry run (D6), the default", () => {
       }),
     ]);
     expect(JSON.stringify(followUps)).not.toContain("please");
+  });
+
+  it("finds his answer to a follow-up even when it sits beyond the tail", async () => {
+    const h = setup({ awayReply: {} });
+    h.waitingLeader();
+    h.at(T0 + 62 * MINUTE);
+    await h.job.tick();
+    h.tyler("leader-1", "go with B", T0 + 90 * MINUTE);
+    // More rows than the tail read keeps, written after his answer: it falls out of the capped
+    // tail `resolveFollowUps` reads first.
+    const noise = Array.from({ length: TIMELINE_TAIL_ROWS + 5 }, (_, index) =>
+      assistant(`working on it, step ${index}`, T0 + 90 * MINUTE + index + 1),
+    );
+    h.fleet.append("leader-1", noise);
+    h.at(T0 + 95 * MINUTE);
+    await h.job.tick();
+    const followUps = (await h.decisionLines()).filter((line) => line["type"] === "followup");
+    expect(followUps).toMatchObject([{ outcome: "tyler-message", tyler: "B", sameChoice: true }]);
   });
 
   it("fills in a follow-up when Tyler answers the request in the app", async () => {
