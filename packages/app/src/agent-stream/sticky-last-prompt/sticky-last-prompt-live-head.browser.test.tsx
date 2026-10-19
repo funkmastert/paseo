@@ -1,8 +1,6 @@
-// Real Chromium (vitest `browser` project): the bug this guards against only shows up under
-// real layout. `reportReadingPosition` (strategy-web.tsx) walks real `getBoundingClientRect()`
-// results to find the row at the top of the viewport, and jsdom returns all-zero rects for every
-// element -- a jsdom test can't distinguish "found no reading-position row" from "found the wrong
-// one," so it would pass or fail for the wrong reason either way.
+// Real Chromium (vitest `browser` project): exercises `useStickyLastPrompt` through the real
+// stream strategy's render tree, not fabricated items, so a tail/head split that doesn't match
+// what the strategy actually renders would show up here.
 import React, { useRef } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -60,7 +58,6 @@ function Harness({
         isAuthoritativeHistoryReady: true,
         onNearBottomChange: () => {},
         onNearHistoryStartChange: () => {},
-        onReadingPositionChange: stickyLastPrompt.reportReadingPosition,
         onNearHistoryStart: () => true,
         isLoadingOlderHistory: false,
         hasOlderHistory: false,
@@ -99,7 +96,7 @@ describe("sticky last prompt while the agent is actively streaming", () => {
     container = null;
   });
 
-  it("shows the bar once the prompt scrolls off, even while following live output into the streaming tool calls", async () => {
+  it("finds the user's prompt in the committed tail while the turn is still streaming in the live head", async () => {
     // The committed turn so far: the user's prompt plus a couple of already-settled rows.
     const tail: StreamItem[] = [
       userMessage("prompt-1", 1),
@@ -135,12 +132,12 @@ describe("sticky last prompt while the agent is actively streaming", () => {
     expect(scrollContainer.scrollHeight).toBeGreaterThan(scrollContainer.clientHeight);
 
     // Follow the live output to the bottom, exactly like the real viewport while the agent is
-    // actively streaming -- the user's prompt is long gone off the top of the screen.
+    // actively streaming.
     act(() => {
       scrollContainer.scrollTop = scrollContainer.scrollHeight;
     });
 
-    const expected = { prompt: tail[0], barVisible: true };
+    const expected = { prompt: tail[0] };
     expect(await waitForState(apiRef, expected)).toEqual(expected);
   });
 });

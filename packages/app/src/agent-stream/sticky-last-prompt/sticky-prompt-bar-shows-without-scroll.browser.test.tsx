@@ -81,7 +81,6 @@ function Harness({ items }: { items: StreamItem[] }) {
         isAuthoritativeHistoryReady: true,
         onNearBottomChange: () => {},
         onNearHistoryStartChange: () => {},
-        onReadingPositionChange: stickyLastPrompt.reportReadingPosition,
         onNearHistoryStart: () => true,
         isLoadingOlderHistory: false,
         hasOlderHistory: false,

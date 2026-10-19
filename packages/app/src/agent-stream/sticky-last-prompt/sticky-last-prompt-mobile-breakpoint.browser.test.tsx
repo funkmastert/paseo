@@ -1,6 +1,5 @@
-// Real Chromium (vitest `browser` project): checks whether the sticky bar's visibility
-// computation (reportReadingPosition -> isLastPromptAboveViewport) behaves the same at the
-// mobile breakpoint as it does at the desktop breakpoint covered by
+// Real Chromium (vitest `browser` project): checks that `useStickyLastPrompt` behaves the same
+// at the mobile breakpoint as it does at the desktop breakpoint covered by
 // sticky-last-prompt-live-head.browser.test.tsx. Mirrors that harness exactly except for
 // `isMobileBreakpoint: true` and a phone-width viewport.
 import React, { useRef } from "react";
@@ -60,7 +59,6 @@ function Harness({
         isAuthoritativeHistoryReady: true,
         onNearBottomChange: () => {},
         onNearHistoryStartChange: () => {},
-        onReadingPositionChange: stickyLastPrompt.reportReadingPosition,
         onNearHistoryStart: () => true,
         isLoadingOlderHistory: false,
         hasOlderHistory: false,
@@ -99,7 +97,7 @@ describe("sticky last prompt at the mobile breakpoint", () => {
     container = null;
   });
 
-  it("shows the bar once the prompt scrolls off at a phone-width viewport", async () => {
+  it("finds the user's prompt at a phone-width viewport", async () => {
     const tail: StreamItem[] = [
       userMessage("prompt-1", 1),
       assistantMessage("tail-assistant-1", 2),
@@ -131,14 +129,13 @@ describe("sticky last prompt at the mobile breakpoint", () => {
       scrollContainer.scrollTop = scrollContainer.scrollHeight;
     });
 
-    const expected = { prompt: tail[0], barVisible: true };
+    const expected = { prompt: tail[0] };
     expect(await waitForState(apiRef, expected)).toEqual(expected);
   });
 
-  it("shows the bar for an already-finished conversation with no further interaction", async () => {
+  it("finds the user's prompt for an already-finished conversation with no further interaction", async () => {
     // Mirrors a phone user opening an already-scrolled-to-bottom, finished conversation and
-    // never touching the screen -- no live head, no extra scroll gesture beyond the initial
-    // mount-time settle.
+    // never touching the screen -- no live head, no scroll gesture beyond the initial mount.
     const tail: StreamItem[] = [
       userMessage("prompt-1", 1),
       assistantMessage("tail-assistant-1", 2),
@@ -160,7 +157,7 @@ describe("sticky last prompt at the mobile breakpoint", () => {
       throw new Error("Expected agent chat scroll container");
     }
 
-    const expected = { prompt: tail[0], barVisible: true };
+    const expected = { prompt: tail[0] };
     expect(await waitForState(apiRef, expected)).toEqual(expected);
   });
 });

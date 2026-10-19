@@ -43,8 +43,6 @@ interface HookProps {
 
 interface HookResult {
   source: StickyLastPromptSource;
-  reportReadingPosition: (rowId: string | null) => void;
-  reportVisibleRowIds: (visibleRowIds: ReadonlySet<string>) => void;
 }
 
 type UseHook = (input: HookProps) => HookResult;
@@ -87,9 +85,7 @@ function nextMacrotask(): Promise<void> {
 // visibility change re-renders only this leaf, and bails out via memo when props don't change.
 const Consumer = memo(function Consumer({ source }: { source: StickyLastPromptSource }) {
   const state = useSyncExternalStore(source.subscribe, source.getState);
-  return (
-    <div data-testid="sticky-prompt">{state.barVisible && state.prompt ? state.prompt.id : ""}</div>
-  );
+  return <div data-testid="sticky-prompt">{state.prompt ? state.prompt.id : ""}</div>;
 });
 
 function Harness({
@@ -133,15 +129,6 @@ describe.each([
       const promptText = () =>
         container.querySelector('[data-testid="sticky-prompt"]')?.textContent;
 
-      // Drive the bar visible for agent-1 via the hook's own public API, not an effect.
-      act(() => {
-        if (useHook === useStickyLastPromptWeb) {
-          apiRef.current?.result.reportReadingPosition("a1");
-        } else {
-          apiRef.current?.result.reportVisibleRowIds(new Set(["p1", "a1"]));
-          apiRef.current?.result.reportVisibleRowIds(new Set(["a1"]));
-        }
-      });
       expect(promptText()).toBe("p1");
 
       // Deliberately not wrapped in act(): a plain setState call outside React's batching context
@@ -153,7 +140,11 @@ describe.each([
       await nextMacrotask();
       expect(promptText()).toBe("");
 
-      // Let remaining passive effects settle; the agent-2 prompt stays hidden (items unchanged).
+      // Let remaining passive effects settle; the recompute effect's deps are `[items, publisher]`
+      // and `items` is deliberately the same reference across the switch, so it never re-fires --
+      // the agent-2 prompt stays cleared by the layout-effect reset alone. (In real usage a new
+      // agentId always comes with a new `items` array too, so this stays-empty case is this
+      // test's artificial isolation, not a real stuck state.)
       await act(async () => {});
       expect(promptText()).toBe("");
     });

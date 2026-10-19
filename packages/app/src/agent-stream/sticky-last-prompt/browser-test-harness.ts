@@ -42,14 +42,13 @@ export interface PromptStateHarnessApi {
   getState: () => StickyLastPromptState;
 }
 
-// The settle this waits for (the 'scroll' event's async dispatch, then reportReadingPosition's
-// layout read) has no fixed frame count -- a real browser's scroll event and the follow-output
-// settle timeout in strategy-web.tsx both land whenever the event loop gets to them, which
-// stretches out under machine load. Poll the actual state instead of guessing a frame count, so
-// the test passes as soon as the real condition lands rather than racing a fixed wait.
+// The settle this waits for (a 'scroll' event's async dispatch, or just React's passive-effect
+// flush after mount) has no fixed frame count -- it lands whenever the event loop gets to it,
+// which stretches out under machine load. Poll the actual state instead of guessing a frame
+// count, so the test passes as soon as the real condition lands rather than racing a fixed wait.
 export async function waitForState(
   apiRef: { current: PromptStateHarnessApi | null },
-  expected: { prompt: StreamItem; barVisible: boolean },
+  expected: { prompt: StreamItem },
   maxFrames = 120,
 ): Promise<StickyLastPromptState> {
   const getState = () => {
@@ -60,7 +59,7 @@ export async function waitForState(
   };
   let state = getState();
   for (let frame = 0; frame < maxFrames; frame++) {
-    if (state.barVisible === expected.barVisible && state.prompt?.id === expected.prompt?.id) {
+    if (state.prompt?.id === expected.prompt?.id) {
       return state;
     }
     await nextFrame();
