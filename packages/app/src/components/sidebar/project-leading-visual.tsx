@@ -1,6 +1,7 @@
-import { ActivityIndicator, View, type ViewStyle } from "react-native";
+import { ActivityIndicator, Text, View, type ViewStyle } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { ChevronDown, ChevronRight, CircleAlert } from "lucide-react-native";
+import { useTranslation } from "react-i18next";
 import { ProjectIconView } from "@/components/project-icon-view";
 import { STATUS_BUCKET_LABELS } from "@/hooks/sidebar-status-view-model";
 import { ICON_SIZE, type Theme } from "@/styles/theme";
@@ -19,6 +20,16 @@ import {
 import { StatusRing } from "@/components/status-ring";
 import { getStatusRingOffset } from "@/components/status-ring/geometry";
 import type { SidebarSurfaceBackdrop } from "@/styles/surface-backdrop";
+import type { CompletionState } from "@getpaseo/protocol/agent-labels";
+import { resolveRowCompletionIndicator } from "@/utils/completion-state";
+import {
+  CompletionIndicatorIcon,
+  formatCompletionIndicatorAccessibilityLabel,
+  getCompletionIndicatorColorMapping,
+  getCompletionIndicatorLabelKey,
+  getCompletionIndicatorTestIdSuffix,
+} from "@/utils/completion-indicator-content";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 // Every surfaced status shares one badge shell, so the badge never changes size or position
 // between states. Only the thing inside it changes.
@@ -33,7 +44,10 @@ const STATUS_BADGE_OFFSET = -4;
 // Even sizes divide the shell into whole pixels and land dead center with no correction.
 //
 // The filled alert occupies the full badge shell so needs-input remains more prominent than
-// the passive status dots.
+// the passive status dots. The completion glyphs (ready-to-merge, done) are more detailed
+// shapes than the alert triangle, so they run two sizes down from the shell to keep a visible
+// ring of knockout background around them instead of bleeding into the circular edge.
+const COMPLETION_BADGE_GLYPH_SIZE = 8;
 // Matches the workspace title's lineHeight (sidebar-workspace-row-content's
 // workspaceBranchText) so the icon centers on the title rather than floating above it.
 const LEADING_SLOT_HEIGHT = 20;
@@ -104,8 +118,11 @@ export function ProjectLeadingVisual({
 // The project icon (the lettered box) is what marks a row as a *project* rather than a
 // workspace, so it always stays and status annotates it instead of replacing it. Every
 // surfaced bucket lands in the identical corner badge — an amber alert glyph for needs_input,
-// a colored disc for the rest, nothing for done — so the badge reads as one fixed shell and
-// only its contents change.
+// a colored disc for the rest, the completion glyph (or nothing) for done — so the badge reads
+// as one fixed shell and only its contents change. This is the only place that renders a leading
+// project icon with a workspace's own status, so it is where a pinned or status-grouped row
+// (which has no project row of its own to carry the badge) picks up its completion glyph too —
+// see docs/completion-state.md.
 export function ProjectStatusIndicator({
   iconDataUri,
   displayName,
@@ -113,6 +130,8 @@ export function ProjectStatusIndicator({
   statusBucket,
   backdrop,
   loading = false,
+  completionState = null,
+  completionNote = null,
   testID,
 }: {
   iconDataUri: string | null;
@@ -122,6 +141,8 @@ export function ProjectStatusIndicator({
   /** The row's current background, so the status badge can knock out of it. */
   backdrop: SidebarSurfaceBackdrop;
   loading?: boolean;
+  completionState?: CompletionState | null;
+  completionNote?: string | null;
   testID?: string;
 }) {
   const placeholderInitial = projectIconPlaceholderLabelFromDisplayName(displayName)
@@ -131,7 +152,10 @@ export function ProjectStatusIndicator({
   // there's no room to draw the difference — so `loading` just resolves to the running bucket
   // and they share one badge.
   const badgeBucket = loading ? "running" : statusBucket;
-  const badgeContent = getProjectStatusBadgeContent(badgeBucket);
+  const completionIndicator = badgeBucket
+    ? resolveRowCompletionIndicator({ bucket: badgeBucket, completionState })
+    : null;
+  const badgeContent = completionIndicator ? null : getProjectStatusBadgeContent(badgeBucket);
 
   return (
     <View
@@ -149,15 +173,80 @@ export function ProjectStatusIndicator({
           placeholderInitial={placeholderInitial}
           projectViewKey={projectViewKey}
         />
-        {badgeContent === null || badgeBucket === null ? null : (
-          <ProjectStatusBadge
-            content={badgeContent}
-            statusBucket={badgeBucket}
-            backdrop={backdrop}
-          />
-        )}
+        {renderProjectCornerBadge({
+          completionIndicator,
+          completionNote,
+          badgeContent,
+          badgeBucket,
+          backdrop,
+        })}
       </View>
     </View>
+  );
+}
+
+function renderProjectCornerBadge({
+  completionIndicator,
+  completionNote,
+  badgeContent,
+  badgeBucket,
+  backdrop,
+}: {
+  completionIndicator: CompletionState | null;
+  completionNote: string | null;
+  badgeContent: ProjectStatusBadgeContent | null;
+  badgeBucket: SidebarStateBucket | null;
+  backdrop: SidebarSurfaceBackdrop;
+}) {
+  if (completionIndicator) {
+    return (
+      <ProjectCompletionBadge
+        completionState={completionIndicator}
+        completionNote={completionNote}
+        backdrop={backdrop}
+      />
+    );
+  }
+  if (badgeContent === null || badgeBucket === null) {
+    return null;
+  }
+  return (
+    <ProjectStatusBadge content={badgeContent} statusBucket={badgeBucket} backdrop={backdrop} />
+  );
+}
+
+function ProjectCompletionBadge({
+  completionState,
+  completionNote,
+  backdrop,
+}: {
+  completionState: CompletionState;
+  completionNote: string | null;
+  backdrop: SidebarSurfaceBackdrop;
+}) {
+  const { t } = useTranslation();
+  const label = t(getCompletionIndicatorLabelKey(completionState));
+  const accessibilityLabel = formatCompletionIndicatorAccessibilityLabel(label, completionNote);
+  const Icon = CompletionIndicatorIcon[completionState];
+  const colorMapping = getCompletionIndicatorColorMapping(completionState);
+  const testID = `project-completion-badge-${getCompletionIndicatorTestIdSuffix(completionState)}`;
+
+  return (
+    <Tooltip enabledOnDesktop delayDuration={200}>
+      <TooltipTrigger asChild>
+        <View
+          role="status"
+          accessibilityLabel={accessibilityLabel}
+          style={[styles.statusBadge, getStatusBadgeBackdropStyle(backdrop)]}
+          testID={testID}
+        >
+          <Icon size={COMPLETION_BADGE_GLYPH_SIZE} uniProps={colorMapping} />
+        </View>
+      </TooltipTrigger>
+      <TooltipContent side="top" align="center" offset={6}>
+        <Text style={styles.completionTooltipText}>{accessibilityLabel}</Text>
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -308,6 +397,12 @@ const styles = StyleSheet.create((theme) => {
       position: "absolute",
       right: getStatusRingOffset(STATUS_BADGE_OFFSET, STATUS_BADGE_SIZE),
       bottom: getStatusRingOffset(STATUS_BADGE_OFFSET, STATUS_BADGE_SIZE),
+    },
+    completionTooltipText: {
+      color: theme.colors.foreground,
+      fontSize: theme.fontSize.sm,
+      maxWidth: 240,
+      lineHeight: theme.fontSize.sm * 1.4,
     },
     statusBadgeOnSidebar: { backgroundColor: theme.colors.surfaceSidebar },
     statusBadgeOnSidebarHover: { backgroundColor: theme.colors.surfaceSidebarHover },

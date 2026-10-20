@@ -152,6 +152,8 @@ export const SidebarWorkspaceRowContent = memo(function SidebarWorkspaceRowConte
             statusBucket={workspace.statusBucket}
             backdrop={backdrop}
             loading={isLoading}
+            completionState={workspace.completionState}
+            completionNote={workspace.completionNote}
             testID={`sidebar-row-project-icon-${workspace.workspaceKey}`}
           />
         ) : (
