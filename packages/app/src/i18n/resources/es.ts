@@ -2235,12 +2235,12 @@ export const es: TranslationResources = {
     jevAllActivity: "Toda la actividad de JEV",
   },
   jevMarker: {
+    chipLabel: "JEV",
     accessibilityLabel: "Decisión de JEV",
     accessibilityLabelCount: "{{count}} decisiones de JEV",
-    wouldHaveAction: "Habría hecho: {{action}}",
     forAgent: 'Para "{{title}}"',
     watchingOnly: "Solo observando, no se cambió nada",
-    overflowMore: "+{{count}} más",
+    plusCount: "+{{count}}",
     purpose: {
       spawnHint: "Calculando cuánta ayuda necesita un agente nuevo",
       stallJudgment: "Comprobando si este agente sigue avanzando",

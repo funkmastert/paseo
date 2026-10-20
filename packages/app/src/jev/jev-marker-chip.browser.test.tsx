@@ -75,6 +75,7 @@ const DECISIONS: JevDecisionRecord[] = [
     subjectAgentId: "child-1",
     subjectAgentTitle: "rename helper",
     summary: "JEV suggested standard on Sonnet 5",
+    detail: "Picked standard tier over mechanical because the task names a rename across files",
   },
 ];
 
@@ -82,30 +83,26 @@ describe("JevMarkerChip", () => {
   it.each([
     { name: "phone", width: PHONE_WIDTH },
     { name: "desktop", width: DESKTOP_WIDTH },
-  ])("shows what JEV checked, decided, and whether it acted without a tap ($name)", ({ width }) => {
+  ])("shows a one-line row with only the newest summary and a count ($name)", ({ width }) => {
     const lines = buildJevMarkerLines(DECISIONS, null);
     const container = mount(<JevMarkerChip lines={lines} />, width);
     const text = container.textContent ?? "";
-    // The purpose line, per feature, with no tap.
-    expect(text).toContain("Checking whether this agent is still making progress");
-    expect(text).toContain("Sizing up how much help a new agent needs");
-    // What it decided and what happened, in plain words, no snake_case or raw scores.
-    expect(text).not.toMatch(/blocked_missing_info|\(0\.\d+\)/);
-    // Who the second decision was about.
-    expect(text).toContain("rename helper");
-    // Shadow mode reads as a sentence, not a bare "Shadow" badge.
-    expect(text).toContain("Watching only, nothing was changed");
+    // The newest decision's summary, "JEV"/"JEV:" prefix and raw score stripped.
+    expect(text).toContain("suggested standard on Sonnet 5");
+    expect(text).not.toContain("JEV suggested");
+    expect(text).not.toMatch(/\(0\.\d+\)/);
+    // The count of the rest, not the per-decision detail.
+    expect(text).toContain("+1");
+    expect(text).not.toContain("Checking whether this agent is still making progress");
+    expect(text).not.toContain("Watching only, nothing was changed");
+    expect(text).not.toContain("rename helper");
   });
 
-  it("collapses more than three decisions into the newest plus a count", () => {
-    const many = Array.from({ length: 5 }, (_, index) => ({
-      ...DECISIONS[0],
-      callId: `c${index}`,
-      at: at(`2026-10-19T12:0${index}:00.000Z`),
-    }));
-    const lines = buildJevMarkerLines(many, null);
+  it("omits the count for a single decision", () => {
+    const lines = buildJevMarkerLines([DECISIONS[0]], null);
     const container = mount(<JevMarkerChip lines={lines} />, DESKTOP_WIDTH);
-    expect(container.textContent).toContain("+2 more");
+    expect(container.textContent).not.toContain("+0");
+    expect(container.textContent).not.toMatch(/\+\d/);
   });
 
   it("keeps the row the same height for a group of 40 decisions as for 5", () => {
@@ -123,8 +120,55 @@ describe("JevMarkerChip", () => {
       <JevMarkerChip lines={buildJevMarkerLines(decisions(40), null)} />,
       PHONE_WIDTH,
     );
-    expect(forty.textContent).toContain("+37 more");
+    expect(forty.textContent).toContain("+39");
     expect(forty.getBoundingClientRect().height).toBe(five.getBoundingClientRect().height);
+  });
+
+  it("opens the popover with the purpose, detail, subject and watching-only text on hover", async () => {
+    const lines = buildJevMarkerLines(DECISIONS, null);
+    const container = mount(<JevMarkerChip lines={lines} />, DESKTOP_WIDTH);
+    const trigger = container.querySelector('[role="button"]') as HTMLElement;
+    act(() => {
+      trigger.dispatchEvent(new PointerEvent("pointerenter", { bubbles: true }));
+      trigger.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    });
+    await vi.waitFor(() => {
+      const body = document.body.textContent ?? "";
+      expect(body).toContain("Checking whether this agent is still making progress");
+      expect(body).toContain("Sizing up how much help a new agent needs");
+      expect(body).toContain("Picked standard tier over mechanical");
+      expect(body).toContain("rename helper");
+      expect(body).toContain("Watching only, nothing was changed");
+      expect(body).toContain("standard (0.9)");
+      expect(body).toContain("$0.0001");
+    });
+  });
+
+  it("keeps the row plain and renders the verdict once in the popover for a record without a summary (old daemon)", async () => {
+    const old: JevDecisionRecord = {
+      ...DECISIONS[0],
+      callId: "c-old",
+      summary: undefined,
+      detail: undefined,
+    };
+    const lines = buildJevMarkerLines([old], null);
+    const container = mount(<JevMarkerChip lines={lines} />, DESKTOP_WIDTH);
+    // The row itself names the feature and the plain verdict: no raw score, no snake_case.
+    const row = container.textContent ?? "";
+    expect(row).toContain("blocked missing info");
+    expect(row).not.toContain("blocked_missing_info");
+    expect(row).not.toMatch(/\(0\.\d+\)/);
+    expect(row).not.toContain(old.action);
+    const trigger = container.querySelector('[role="button"]') as HTMLElement;
+    act(() => {
+      trigger.dispatchEvent(new PointerEvent("pointerenter", { bubbles: true }));
+      trigger.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    });
+    await vi.waitFor(() => {
+      const popover = document.getElementById("overlay-root")?.textContent ?? "";
+      expect(popover).toContain(old.action);
+      expect(popover.match(/blocked_missing_info \(0\.82\)/g)).toHaveLength(1);
+    });
   });
 
   it.each([

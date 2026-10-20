@@ -2159,12 +2159,12 @@ export const zhCN: TranslationResources = {
     jevAllActivity: "所有 JEV 活动",
   },
   jevMarker: {
+    chipLabel: "JEV",
     accessibilityLabel: "JEV 决策",
     accessibilityLabelCount: "{{count}} 条 JEV 决策",
-    wouldHaveAction: "本会执行：{{action}}",
     forAgent: "针对“{{title}}”",
     watchingOnly: "仅观察，未做任何更改",
-    overflowMore: "另外 {{count}} 条",
+    plusCount: "+{{count}}",
     purpose: {
       spawnHint: "评估新代理需要多少帮助",
       stallJudgment: "检查该代理是否仍在推进",

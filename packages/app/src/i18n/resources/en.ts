@@ -2195,12 +2195,12 @@ export const en = {
     jevAllActivity: "All JEV activity",
   },
   jevMarker: {
+    chipLabel: "JEV",
     accessibilityLabel: "JEV decision",
     accessibilityLabelCount: "{{count}} JEV decisions",
-    wouldHaveAction: "Would have: {{action}}",
     forAgent: 'For "{{title}}"',
     watchingOnly: "Watching only, nothing was changed",
-    overflowMore: "+{{count}} more",
+    plusCount: "+{{count}}",
     purpose: {
       spawnHint: "Sizing up how much help a new agent needs",
       stallJudgment: "Checking whether this agent is still making progress",

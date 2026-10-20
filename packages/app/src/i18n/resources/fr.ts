@@ -2239,12 +2239,12 @@ export const fr: TranslationResources = {
     jevAllActivity: "Toute l'activité JEV",
   },
   jevMarker: {
+    chipLabel: "JEV",
     accessibilityLabel: "Décision JEV",
     accessibilityLabelCount: "{{count}} décisions JEV",
-    wouldHaveAction: "Aurait fait : {{action}}",
     forAgent: "Pour « {{title}} »",
     watchingOnly: "Observation seulement, rien n'a changé",
-    overflowMore: "+{{count}} de plus",
+    plusCount: "+{{count}}",
     purpose: {
       spawnHint: "Évaluation de l'aide dont un nouvel agent a besoin",
       stallJudgment: "Vérification que cet agent progresse toujours",
