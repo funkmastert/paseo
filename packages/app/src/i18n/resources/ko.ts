@@ -2197,12 +2197,12 @@ export const ko: TranslationResources = {
     jevAllActivity: "모든 JEV 활동",
   },
   jevMarker: {
+    chipLabel: "JEV",
     accessibilityLabel: "JEV 결정",
     accessibilityLabelCount: "JEV 결정 {{count}}건",
-    wouldHaveAction: "실행했다면: {{action}}",
     forAgent: '"{{title}}" 에 대해',
     watchingOnly: "지켜보기만 하며, 아무것도 변경되지 않았습니다",
-    overflowMore: "+{{count}}개 더",
+    plusCount: "+{{count}}",
     purpose: {
       spawnHint: "새 에이전트에 필요한 도움의 정도를 가늠하는 중",
       stallJudgment: "이 에이전트가 계속 진행 중인지 확인하는 중",

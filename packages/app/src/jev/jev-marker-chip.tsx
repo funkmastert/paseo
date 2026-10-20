@@ -6,34 +6,37 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { FloatingScrollView } from "@/components/ui/floating";
 import { StatusBadge } from "@/components/ui/status-badge";
-import type { JevDecisionLine, JevDecisionTag } from "./jev-decisions-model";
+import type { JevDecisionLine } from "./jev-decisions-model";
 
 const ThemedGauge = withUnistyles(Gauge);
-const LEADING_ICON_SIZE = 14;
-
-const TAG_KEYS: Record<JevDecisionTag, string> = {
-  shadow: "contextWindow.jevShadow",
-  dryRun: "contextWindow.jevDryRun",
-};
+const LEADING_ICON_SIZE = 10;
 
 const MARKER_POPOVER_MAX_HEIGHT = 320;
 
-/** Decisions shown directly in the row, newest first; the rest collapse into "+N more". */
-const INLINE_VISIBLE_MAX = 3;
+/** `progressing (0.99)` reads `progressing`: a raw score never reaches the always-visible row. */
+function withoutRawScore(text: string): string {
+  return text.replace(/\s*\([\d.]+\)\s*$/, "");
+}
+
+/** `JEV: progressing` reads `progressing`: the leading "JEV"/"JEV:" is redundant with the pill. */
+function rowSummary(line: JevDecisionLine): string {
+  const text = line.summary ?? `${line.verdict} → ${line.action}`;
+  return withoutRawScore(text).replace(/^JEV:?\s*/, "");
+}
 
 /**
- * One or more JEV decisions collapsed onto a single stream position. Quiet by design
- * (docs/design.md), but no longer a bare pill: the newest decisions read in the row itself
- * (docs/jev.md, "Feature 11" — O8), each with what JEV was checking, what it decided and what
- * happened, who it was about, and whether it only watched. A tap still opens every decision in
- * the group with its raw question, verdict and cost, reusing the same tap-triggered `Tooltip`
- * pattern as `TokenBurnBadge`/`ContextWindowMeter`, so it stays cross-platform and hover-free
- * without any `isWeb` branch.
+ * One or more JEV decisions collapsed onto a single stream position: a one-line pill (quiet by
+ * design, docs/design.md) plus the newest decision's plain-words summary and a "+N" for the rest.
+ * Hover on desktop, tap on phone (the same tap-triggered `Tooltip` pattern as
+ * `TokenBurnBadge`/`ContextWindowMeter`, cross-platform and hover-free on native) opens the
+ * popover with every decision's full explanation: purpose, summary, detail, subject, watching-only,
+ * and the raw verdict and cost.
  */
 export function JevMarkerChip({ lines }: { lines: JevDecisionLine[] }) {
   const { t } = useTranslation();
-  const newest = useMemo(() => [...lines].slice(-INLINE_VISIBLE_MAX).reverse(), [lines]);
-  const hiddenCount = lines.length - newest.length;
+  const newest = lines[lines.length - 1];
+  const moreCount = lines.length - 1;
+  const reversedLines = useMemo(() => lines.toReversed(), [lines]);
   const accessibilityLabel =
     lines.length > 1
       ? t("jevMarker.accessibilityLabelCount", { count: lines.length })
@@ -50,23 +53,19 @@ export function JevMarkerChip({ lines }: { lines: JevDecisionLine[] }) {
             hitSlop={4}
             style={styles.trigger}
           >
-            <View style={styles.iconWrap}>{leadingIcon}</View>
-            <View style={styles.inlineList}>
-              {newest.map((line) => (
-                <JevMarkerInlineLine key={line.key} line={line} />
-              ))}
-              {hiddenCount > 0 ? (
-                <Text style={styles.overflow}>
-                  {t("jevMarker.overflowMore", { count: hiddenCount })}
-                </Text>
-              ) : null}
-            </View>
+            <StatusBadge label={t("jevMarker.chipLabel")} leading={leadingIcon} />
+            <Text style={styles.summary} numberOfLines={1}>
+              {rowSummary(newest)}
+            </Text>
+            {moreCount > 0 ? (
+              <Text style={styles.overflow}>{t("jevMarker.plusCount", { count: moreCount })}</Text>
+            ) : null}
           </Pressable>
         </TooltipTrigger>
         <TooltipContent side="top" align="start" offset={8}>
           <FloatingScrollView style={styles.popoverScroll} showsVerticalScrollIndicator={false}>
             <View style={styles.popoverContent}>
-              {lines.map((line) => (
+              {reversedLines.map((line) => (
                 <JevMarkerDetailRow key={line.key} line={line} />
               ))}
             </View>
@@ -77,19 +76,15 @@ export function JevMarkerChip({ lines }: { lines: JevDecisionLine[] }) {
   );
 }
 
-/** `progressing (0.99)` reads `progressing`: a raw score never reaches the always-visible row. */
-function withoutRawScore(text: string): string {
-  return text.replace(/\s*\([\d.]+\)\s*$/, "");
-}
-
-/** The row's content without a tap: purpose, decision and result, subject, and watching-only. */
-function JevMarkerInlineLine({ line }: { line: JevDecisionLine }) {
+/** Every decision's full explanation, opened by hover (desktop) or a tap (phone) on the row. */
+function JevMarkerDetailRow({ line }: { line: JevDecisionLine }) {
   const { t } = useTranslation();
   const purpose = t(`jevMarker.purpose.${line.featureId}`, { defaultValue: line.feature });
-  // An older daemon sends no summary: fall back to the verdict and action, scores stripped.
-  const primary = line.summary ?? `${withoutRawScore(line.verdict)} → ${line.action}`;
+  // An older daemon sends no summary: fall back to the action alone, since the footer below
+  // already shows the raw verdict — embedding it here too would print it twice.
+  const primary = line.summary ?? line.action;
   return (
-    <View style={styles.inlineLine}>
+    <View style={styles.detailRow}>
       <Text style={styles.purpose} numberOfLines={1}>
         {purpose}
       </Text>
@@ -101,56 +96,12 @@ function JevMarkerInlineLine({ line }: { line: JevDecisionLine }) {
         <Text style={styles.muted}>{t("jevMarker.forAgent", { title: line.subjectLabel })}</Text>
       ) : null}
       {line.tag ? <Text style={styles.muted}>{t("jevMarker.watchingOnly")}</Text> : null}
-    </View>
-  );
-}
-
-/** The tag badge and cost, shown only in the tap-opened full detail. */
-function JevMarkerMeta({ tag, cost }: { tag: JevDecisionTag | null; cost: string | null }) {
-  const { t } = useTranslation();
-  return (
-    <>
-      {tag ? <StatusBadge label={t(TAG_KEYS[tag])} /> : null}
-      {cost ? <Text style={styles.cost}>{cost}</Text> : null}
-    </>
-  );
-}
-
-/** Every decision's full detail: question, raw verdict and cost, opened by a tap on the row. */
-function JevMarkerDetailRow({ line }: { line: JevDecisionLine }) {
-  const { t } = useTranslation();
-  // An older daemon sends no summary; render exactly as before this field existed.
-  if (!line.summary) {
-    return (
-      <View style={styles.detailRow}>
-        <View style={styles.detailHeader}>
-          <Text style={styles.feature} numberOfLines={1}>
-            {line.feature}
-          </Text>
-          <JevMarkerMeta tag={line.tag} cost={line.cost} />
-        </View>
-        <Text style={styles.question}>{line.question}</Text>
-        <Text style={styles.muted}>
-          {line.verdict} →{" "}
-          {line.tag ? t("jevMarker.wouldHaveAction", { action: line.action }) : line.action}
+      <View style={styles.detailFooter}>
+        <Text style={styles.muted} numberOfLines={1}>
+          {line.verdict}
         </Text>
+        {line.cost ? <Text style={styles.cost}>{line.cost}</Text> : null}
       </View>
-    );
-  }
-  return (
-    <View style={styles.detailRow}>
-      <View style={styles.detailHeader}>
-        <Text style={styles.summary} numberOfLines={2}>
-          {line.summary}
-        </Text>
-        <JevMarkerMeta tag={line.tag} cost={line.cost} />
-      </View>
-      {line.subjectLabel ? (
-        <Text style={styles.muted}>{t("jevMarker.forAgent", { title: line.subjectLabel })}</Text>
-      ) : null}
-      <Text style={styles.muted}>
-        {line.feature} · {line.verdict}
-      </Text>
     </View>
   );
 }
@@ -161,29 +112,16 @@ const styles = StyleSheet.create((theme) => ({
   },
   trigger: {
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
     gap: theme.spacing[2],
   },
-  iconWrap: {
-    paddingTop: theme.spacing[0.5],
-  },
-  inlineList: {
+  summary: {
     flexShrink: 1,
-    gap: theme.spacing[2],
-  },
-  inlineLine: {
-    gap: theme.spacing[0.5],
-  },
-  purpose: {
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
   },
-  primary: {
-    color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
-    lineHeight: theme.fontSize.sm * 1.4,
-  },
   overflow: {
+    flexShrink: 0,
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
   },
@@ -195,38 +133,28 @@ const styles = StyleSheet.create((theme) => ({
     minWidth: 220,
   },
   detailRow: {
-    gap: theme.spacing[1],
+    gap: theme.spacing[0.5],
   },
-  detailHeader: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
-    columnGap: theme.spacing[2],
-    rowGap: theme.spacing[1],
-  },
-  feature: {
-    flexShrink: 1,
-    color: theme.colors.foreground,
+  purpose: {
+    color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
-    fontWeight: theme.fontWeight.medium,
   },
-  summary: {
-    flexShrink: 1,
+  primary: {
     color: theme.colors.foreground,
     fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.medium,
     lineHeight: theme.fontSize.sm * 1.4,
+  },
+  detailFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    columnGap: theme.spacing[2],
   },
   cost: {
     marginLeft: "auto",
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
     fontVariant: ["tabular-nums"],
-  },
-  question: {
-    color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
-    lineHeight: theme.fontSize.sm * 1.4,
   },
   muted: {
     color: theme.colors.foregroundMuted,

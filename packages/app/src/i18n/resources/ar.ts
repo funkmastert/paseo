@@ -2186,12 +2186,12 @@ export const ar: TranslationResources = {
     jevAllActivity: "كل نشاط JEV",
   },
   jevMarker: {
+    chipLabel: "JEV",
     accessibilityLabel: "قرار JEV",
     accessibilityLabelCount: "{{count}} قرارات JEV",
-    wouldHaveAction: "كان سيصبح: {{action}}",
     forAgent: 'لـ "{{title}}"',
     watchingOnly: "للمراقبة فقط، لم يتغير شيء",
-    overflowMore: "+{{count}} أخرى",
+    plusCount: "+{{count}}",
     purpose: {
       spawnHint: "تقدير مقدار المساعدة التي يحتاجها عامل جديد",
       stallJudgment: "التحقق مما إذا كان هذا العامل لا يزال يحرز تقدمًا",

@@ -2219,12 +2219,12 @@ export const ru: TranslationResources = {
     jevAllActivity: "Вся активность JEV",
   },
   jevMarker: {
+    chipLabel: "JEV",
     accessibilityLabel: "Решение JEV",
     accessibilityLabelCount: "{{count}} решений JEV",
-    wouldHaveAction: "Сделал бы: {{action}}",
     forAgent: "Для «{{title}}»",
     watchingOnly: "Только наблюдение, ничего не изменилось",
-    overflowMore: "+{{count}} ещё",
+    plusCount: "+{{count}}",
     purpose: {
       spawnHint: "Оценка того, сколько помощи нужно новому агенту",
       stallJudgment: "Проверка, продолжает ли этот агент продвигаться",

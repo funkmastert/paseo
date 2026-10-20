@@ -2206,12 +2206,12 @@ export const ja: TranslationResources = {
     jevAllActivity: "すべての JEV アクティビティ",
   },
   jevMarker: {
+    chipLabel: "JEV",
     accessibilityLabel: "JEV の判断",
     accessibilityLabelCount: "JEV の判断 {{count}} 件",
-    wouldHaveAction: "実行していた場合: {{action}}",
     forAgent: "「{{title}}」について",
     watchingOnly: "見ているだけで、何も変更されていません",
-    overflowMore: "他 {{count}} 件",
+    plusCount: "+{{count}}",
     purpose: {
       spawnHint: "新しいエージェントに必要な支援の度合いを見極め中",
       stallJudgment: "このエージェントがまだ進んでいるか確認中",
