@@ -144,7 +144,7 @@ describe("JevMarkerChip", () => {
     });
   });
 
-  it("renders the verdict once in the popover for a record without a summary (old daemon)", async () => {
+  it("keeps the row plain and renders the verdict once in the popover for a record without a summary (old daemon)", async () => {
     const old: JevDecisionRecord = {
       ...DECISIONS[0],
       callId: "c-old",
@@ -153,6 +153,12 @@ describe("JevMarkerChip", () => {
     };
     const lines = buildJevMarkerLines([old], null);
     const container = mount(<JevMarkerChip lines={lines} />, DESKTOP_WIDTH);
+    // The row itself names the feature and the plain verdict: no raw score, no snake_case.
+    const row = container.textContent ?? "";
+    expect(row).toContain("blocked missing info");
+    expect(row).not.toContain("blocked_missing_info");
+    expect(row).not.toMatch(/\(0\.\d+\)/);
+    expect(row).not.toContain(old.action);
     const trigger = container.querySelector('[role="button"]') as HTMLElement;
     act(() => {
       trigger.dispatchEvent(new PointerEvent("pointerenter", { bubbles: true }));

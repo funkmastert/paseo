@@ -18,10 +18,31 @@ function withoutRawScore(text: string): string {
   return text.replace(/\s*\([\d.]+\)\s*$/, "");
 }
 
-/** `JEV: progressing` reads `progressing`: the leading "JEV"/"JEV:" is redundant with the pill. */
+/**
+ * The first typed answer, scores and underscores dropped: `blocked_on_person 0.08, reply_kind
+ * confirm 0.86` reads `blocked on person`. Only an older daemon, which sends no `summary`, needs it.
+ */
+function plainVerdict(verdict: string): string {
+  const [first = ""] = verdict.split(",");
+  return first
+    .replace(/\(\s*[\d.]+\s*\)/g, "")
+    .replace(/(^|\s)[\d.]+(?=\s|$)/g, " ")
+    .replaceAll("_", " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * `JEV: progressing` reads `progressing`: the leading "JEV"/"JEV:" is redundant with the pill. A
+ * record from an older daemon has no `summary`, so the row names the feature and the plain verdict
+ * instead of the raw verdict and action, which carry scores and snake_case.
+ */
 function rowSummary(line: JevDecisionLine): string {
-  const text = line.summary ?? `${line.verdict} → ${line.action}`;
-  return withoutRawScore(text).replace(/^JEV:?\s*/, "");
+  if (!line.summary) {
+    const verdict = plainVerdict(line.verdict);
+    return verdict ? `${line.feature}: ${verdict}` : line.feature;
+  }
+  return withoutRawScore(line.summary).replace(/^JEV:?\s*/, "");
 }
 
 /**
