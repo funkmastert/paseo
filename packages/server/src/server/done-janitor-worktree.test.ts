@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   statSync,
   truncateSync,
@@ -1454,6 +1455,13 @@ describe("checkNestedRepositorySafety", () => {
     ["ssh://[::1]/path/to/repo.git", "ipv6-loopback"],
     [`git@${hostname()}:owner/repo.git`, "this-machine's-own-hostname"],
     ["ssh://git.example.org/owner/repo.git", "a-host-the-registry-does-not-know"],
+    // git reads a scheme-less URL with a "/" before its first ":" as a local path, whatever the
+    // part after "@" looks like; a parser that saw host github.com here would trust a bare repo
+    // sitting inside the worktree.
+    ["/tmp/wt/node_modules/x@github.com:acme/up.git", "scp-shaped-absolute-local-path"],
+    ["./x@github.com:acme/up.git", "scp-shaped-relative-local-path"],
+    ["https://github.com\\@evil.example/owner/repo.git", "backslash-userinfo"],
+    ["ext::https://github.com/owner/repo.git", "remote-helper-form"],
   ])("a remote url naming an untrusted host (%s) is not safe", async (url, label) => {
     const worktree = addWorktree(`nested-untrusted-${label}`, "feature");
     const nested = initNested(worktree, "vendor/tool");
@@ -1462,6 +1470,20 @@ describe("checkNestedRepositorySafety", () => {
     git(nested, "update-ref", "refs/remotes/origin/main", git(nested, "rev-parse", "HEAD").trim());
 
     await expect(checkNestedRepositorySafety(worktree, nested)).resolves.toBe(false);
+  });
+
+  test.each([
+    ["git@github.com:owner/repo.git", "scp-syntax"],
+    ["ssh://git@github.com/owner/repo.git", "ssh-scheme"],
+    ["https://github.com/owner/repo.git", "https-scheme"],
+  ])("a remote url naming an allowlisted host (%s) is safe", async (url, label) => {
+    const worktree = addWorktree(`nested-trusted-${label}`, "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    commit(nested, "f.txt", "content\n");
+    git(nested, "remote", "add", "origin", url);
+    git(nested, "update-ref", "refs/remotes/origin/main", git(nested, "rev-parse", "HEAD").trim());
+
+    await expect(checkNestedRepositorySafety(worktree, nested)).resolves.toBe(true);
   });
 
   // #2: agents.doneJanitor.trustedRemoteHosts extends the allowlist past the forge registry's own
@@ -1765,6 +1787,35 @@ describe("checkNestedRepositorySafety", () => {
     expect(gitDir).toBe(commonDir); // the shape the P0 shortcut must reject, not take
 
     await expect(checkNestedRepositorySafety(worktree, sub)).resolves.toBe(false);
+  });
+
+  // A real submodule of a linked worktree: `git worktree list` inside it names its own git dir
+  // (<repo>/.git/worktrees/<wt>/modules/<name>) as its main worktree, which once read as an
+  // external worktree and kept every submodule. Fully pushed, clean and with no stash, it is safe.
+  test("a fully pushed submodule of a linked worktree is safe", async () => {
+    const worktree = addWorktree("nested-real-submodule", "feature");
+    const subSeed = join(root, "real-sub-seed");
+    mkdirSync(subSeed, { recursive: true });
+    git(subSeed, "init", "-q", "-b", "main");
+    commit(subSeed, "f.txt", "content\n");
+    git(
+      worktree,
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "-q",
+      subSeed,
+      "vendor/sub",
+    );
+    const sub = join(worktree, "vendor", "sub");
+    git(sub, "remote", "set-url", "origin", "https://github.com/acme/sub.git");
+
+    const gitDir = git(sub, "rev-parse", "--path-format=absolute", "--git-dir").trim();
+    const outerGitDir = git(worktree, "rev-parse", "--path-format=absolute", "--git-dir").trim();
+    expect(realpathSync(gitDir).startsWith(realpathSync(outerGitDir))).toBe(true);
+
+    await expect(checkNestedRepositorySafety(worktree, sub)).resolves.toBe(true);
   });
 
   // #4: a nested repository that is itself the main checkout of a linked worktree living outside

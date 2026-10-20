@@ -996,8 +996,29 @@ function isTrustedForgeHost(host: string, trustedRemoteHosts: ReadonlySet<string
  * never as a host to compare against the allowlist.
  */
 function isTrustedRemoteUrl(url: string, trustedRemoteHosts: ReadonlySet<string>): boolean {
+  if (isLocalOrAmbiguousRemoteUrl(url)) return false;
   const location = parseGitRemoteLocation(url);
   return location !== null && isTrustedForgeHost(location.host, trustedRemoteHosts);
+}
+
+/**
+ * URLs git itself would treat as a local path, or that a URL parser and git's transport could
+ * read differently, so no host in them can be trusted. Without a scheme, git reads a URL as a
+ * local path when it has no `:` or a `/` comes before the first `:` (`url_is_local_not_ssh` in
+ * git's connect.c): `/wt/node_modules/x@github.com:acme/up.git` is a directory, not github.com. A
+ * `<helper>::<address>` URL runs a remote helper, and a backslash, whitespace or control
+ * character can make the WHATWG host (`https://github.com\@evil.example/x` reads github.com)
+ * differ from the one curl connects to.
+ */
+function isLocalOrAmbiguousRemoteUrl(url: string): boolean {
+  if (/[\\\s\p{Cc}]/u.test(url)) return true;
+  const schemeAt = url.indexOf("://");
+  if (url.slice(0, schemeAt === -1 ? url.length : schemeAt).includes("::")) return true;
+  if (schemeAt !== -1) return false;
+  const colon = url.indexOf(":");
+  if (colon === -1) return true;
+  const slash = url.indexOf("/");
+  return slash !== -1 && slash < colon;
 }
 
 interface FetchRefspecEntry {
@@ -1251,29 +1272,27 @@ async function isGenuineSurvivingLinkedWorktree(
   return !isPathInsideRoot(commonDir, outerGitDir);
 }
 
-/** The `worktree <path>` lines of `git worktree list --porcelain`, one per entry. */
-function parseWorktreeListPaths(porcelain: string): string[] {
-  return porcelain
-    .split("\n")
-    .filter((line) => line.startsWith("worktree "))
-    .map((line) => line.slice("worktree ".length).trim());
-}
-
 /**
- * Whether `nestedRepositoryPath` is the main checkout of any *other* linked worktree (#4): a
- * fully pushed, clean standalone clone can still be the shared repository behind a linked
- * worktree living somewhere else entirely. Deleting it would take that worktree's shared ref
- * store and admin directory with it, dangling the other worktree's own `.git` link and losing its
- * index, HEAD and per-worktree state. A null listing (git could not be asked) reads as unsafe.
+ * Whether the repository is the shared repository behind any *other* linked worktree (#4): a
+ * fully pushed, clean standalone clone can still hold the admin directory of a linked worktree
+ * living somewhere else entirely. Deleting it would take that worktree's shared ref store and
+ * admin directory with it, dangling the other worktree's own `.git` link and losing its index,
+ * HEAD and per-worktree state.
+ *
+ * Reads `<commonDir>/worktrees/` directly rather than `git worktree list`: the listing names a
+ * submodule's own git dir as its main worktree, so every submodule read as having an external
+ * worktree, and it skips an entry whose `gitdir` file was deleted by hand. Any entry other than
+ * this repository's own git dir counts; an unreadable directory reads as unsafe.
  */
-async function hasExternalLinkedWorktrees(
-  git: ReadOnlyGit,
-  nestedRepositoryPath: string,
-): Promise<boolean> {
-  const listing = await git(["worktree", "list", "--porcelain"]);
-  if (listing === null) return true;
-  const self = realpathOrSelf(nestedRepositoryPath);
-  return parseWorktreeListPaths(listing).some((path) => realpathOrSelf(path) !== self);
+async function hasExternalLinkedWorktrees(gitDir: string, commonDir: string): Promise<boolean> {
+  let entries: string[];
+  try {
+    entries = await readdir(join(commonDir, "worktrees"));
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+  const self = realpathOrSelf(gitDir);
+  return entries.some((entry) => realpathOrSelf(join(commonDir, "worktrees", entry)) !== self);
 }
 
 export async function checkNestedRepositorySafety(
@@ -1308,7 +1327,7 @@ export async function checkNestedRepositorySafety(
     return true;
   }
 
-  if (await hasExternalLinkedWorktrees(git, nestedRepositoryPath)) return false;
+  if (await hasExternalLinkedWorktrees(preflight.gitDir, preflight.commonDir)) return false;
   if (await hasUnsafeUnreachableCommits(git, ["--all", "--not", ...survivors])) return false;
 
   // Non-null means refs/stash resolved: a stash entry exists. `--all` above already reaches any
