@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import {
   createForgeCliRunner,
   probeHostViaCliAuthStatus,
 } from "./forge-cli-command.js";
+import { isForgeCliChildPidLive } from "../server/agent/daemon-forge-cli-pids.js";
 import { isPlatform } from "../test-utils/platform.js";
 
 describe.skipIf(isPlatform("win32"))("probeHostViaCliAuthStatus", () => {
@@ -83,6 +84,19 @@ describe.skipIf(isPlatform("win32"))("createForgeCliRunner", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
+  /** Polls until the CLI script has written its own pid, up to a few seconds. */
+  async function readPidOnceWritten(pidFile: string): Promise<number> {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      if (existsSync(pidFile)) {
+        const content = readFileSync(pidFile, "utf8").trim();
+        if (content.length > 0) return Number.parseInt(content, 10);
+      }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+    }
+    throw new Error(`${pidFile} was never written`);
+  }
+
   function writeSlowCli(): string {
     const cliPath = join(tempDir, "slow-cli");
     writeFileSync(cliPath, "#!/bin/sh\nsleep 5\n");
@@ -115,6 +129,32 @@ describe.skipIf(isPlatform("win32"))("createForgeCliRunner", () => {
     });
 
     await expect(runner.run(["arg"], { cwd: tempDir })).rejects.toThrow();
+  });
+
+  it("registers the child pid as a live forge poll while it runs, and clears it once it exits", async () => {
+    const pidFile = join(tempDir, "pid");
+    const cli = join(tempDir, "pid-report-cli");
+    writeFileSync(cli, `#!/bin/sh\necho $$ > "${pidFile}"\nsleep 0.3\n`);
+    chmodSync(cli, 0o755);
+    const runner = createForgeCliRunner({
+      binary: cli,
+      envOverlay: {},
+      timeoutMs: 5_000,
+      isAuthFailureText: () => false,
+      errorClasses: {
+        isAlreadyClassified: () => false,
+        isCommandError: (error): error is FakeCommandError => error instanceof FakeCommandError,
+        createAuthError: (stderr) => new Error(`auth: ${stderr}`),
+        createMissingError: () => new Error("missing"),
+        createCommandError: (params) => new FakeCommandError(params),
+      },
+    });
+
+    const run = runner.run(["arg"], { cwd: tempDir });
+    const pid = await readPidOnceWritten(pidFile);
+    expect(isForgeCliChildPidLive(pid)).toBe(true);
+    await run;
+    expect(isForgeCliChildPidLive(pid)).toBe(false);
   });
 
   it("classifies a timed-out invocation through normalizeError", async () => {

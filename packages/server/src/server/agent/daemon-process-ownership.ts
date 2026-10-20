@@ -1,9 +1,13 @@
 /**
  * Tells the done janitor's idle-workspace sweep which processes inside a worktree are the
  * daemon's own — a forge poll it spawned directly, never an agent's (R4, docs/done-janitor.md)
- * — from the resource monitor's attributed `ps` sample it already takes once a minute
- * (`reportAttributedSample`), the same sharing `native-build-gate.ts` does for the device cap.
- * No second `ps` scan.
+ * — from two sources: the live forge-CLI pid registry (daemon-forge-cli-pids.ts), checked
+ * first and definitive while it holds the pid; otherwise the resource monitor's attributed `ps`
+ * sample it already takes once a minute (`reportAttributedSample`), the same sharing
+ * `native-build-gate.ts` does for the device cap. No second `ps` scan. The live registry exists
+ * because a sample this infrequent can miss a forge poll's whole lifetime — `tea pr list` often
+ * starts and exits between two samples — and a pid absent from every sample reads as a confident
+ * "not the daemon's own" from the sample path, not "unknown".
  *
  * The resource monitor's sweep that feeds `observeSample` is skipped entirely while
  * `resourceMonitor.enabled` is `false` (agent-resource-monitor.ts's `sweep()` returns before
@@ -12,6 +16,7 @@
  * config combination once at startup so it isn't a silent gap.
  */
 
+import { isForgeCliChildPidLive } from "./daemon-forge-cli-pids.js";
 import { isDaemonOwnChildPid, type AgentProcessTree } from "./process-attribution.js";
 import type { ProcessSampleRow } from "./process-sampler.js";
 
@@ -57,6 +62,10 @@ export function createDaemonProcessOwnershipTracker(
       };
     },
     isDaemonOwnProcess(pid) {
+      // A forge poll the daemon spawned directly and that is still running at this instant is
+      // the daemon's own whatever the last `ps` sample shows — it may be too short-lived to have
+      // ever appeared in one (the sample is taken roughly once a minute).
+      if (isForgeCliChildPidLive(pid)) return true;
       if (!latest) return "unknown";
       if (now() - latest.takenAtMs > MAX_SAMPLE_AGE_MS) return "unknown";
       return isDaemonOwnChildPid({

@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  clearForgeCliChildPid,
+  markForgeCliChildPidLive,
+} from "../server/agent/daemon-forge-cli-pids.js";
 import { findExecutable } from "../executable-resolution/executable-resolution.js";
 import { runGitCommand } from "../utils/run-git-command.js";
 import { execCommand } from "../utils/spawn.js";
@@ -102,13 +106,21 @@ export interface ForgeCliRunnerFactory {
  * trio. The three adapters differ only in the params passed here.
  */
 export function createForgeCliRunner(options: CreateForgeCliRunnerOptions): ForgeCliRunnerFactory {
-  const run: ForgeCliRunner = (args, runOptions) =>
-    execCommand(options.binary, args, {
+  const run: ForgeCliRunner = (args, runOptions) => {
+    let spawnedPid: number | undefined;
+    return execCommand(options.binary, args, {
       cwd: runOptions.cwd,
       envOverlay: { ...options.envOverlay, ...runOptions.envOverlay },
       maxBuffer: 10 * 1024 * 1024,
       timeout: options.timeoutMs,
+      onSpawn: (pid) => {
+        spawnedPid = pid;
+        if (pid !== undefined) markForgeCliChildPidLive(pid);
+      },
+    }).finally(() => {
+      if (spawnedPid !== undefined) clearForgeCliChildPid(spawnedPid);
     });
+  };
 
   function normalizeError(
     error: unknown,

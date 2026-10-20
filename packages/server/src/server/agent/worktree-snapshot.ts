@@ -33,6 +33,12 @@ import {
   type RepoVisibility,
 } from "./github-repo-visibility.js";
 import {
+  DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
+  DEFAULT_MAX_BACKUP_IGNORED_TOTAL_BYTES,
+  selectBackupEligibleIgnored,
+} from "./backup-eligible-ignored.js";
+import { isRegenerablePath } from "./workspace-sweep-detector.js";
+import {
   displayPath,
   findTokenKind,
   hasSecretName,
@@ -52,6 +58,15 @@ const VISIBILITY_TTL_MS = 5 * 60_000;
 const PUSH_SCAN_MAX_BYTES = 32 * 1024 * 1024;
 /** Findings a held-back push logs at most. */
 const MAX_PUSH_FINDINGS = 20;
+/**
+ * `isRegenerablePath`'s manifest-aware check needs the worktree's own manifest directories
+ * (readManifestDirectories, done-janitor-worktree.ts) to excuse a `build/` beside a
+ * `package.json`; that computation lives with the planning path, not here. An empty set still
+ * applies every anywhere-matching rule (REGENERABLE_MACHINE_CONFIG_FILES, extensions, `__pycache__`
+ * at the root): a conservative, cheaper filter that only ever stages *more* than the full version
+ * would, never less -- it cannot turn an unbacked file into a lost one.
+ */
+const NO_MANIFEST_DIRECTORIES: ReadonlySet<string> = new Set();
 
 const BASE_ENV = {
   GIT_OPTIONAL_LOCKS: "0",
@@ -244,7 +259,18 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
       };
     }
     const { worktreePath, head, branch } = assessment;
-    if (!assessment.atRisk) {
+    const backupIgnoredPaths = request.backupIgnoredPaths ?? [];
+    const maxBackupIgnoredFileBytes =
+      request.maxBackupIgnoredFileBytes ?? DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES;
+    const maxBackupIgnoredTotalBytes =
+      request.maxBackupIgnoredTotalBytes ?? DEFAULT_MAX_BACKUP_IGNORED_TOTAL_BYTES;
+    const backupEligibleFiles = await this.findBackupEligibleFiles(
+      worktreePath,
+      backupIgnoredPaths,
+      maxBackupIgnoredFileBytes,
+      maxBackupIgnoredTotalBytes,
+    );
+    if (!assessment.atRisk && backupEligibleFiles.length === 0) {
       return {
         result: { kind: "nothing-at-risk", worktreePath },
         branch,
@@ -254,7 +280,12 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
       };
     }
     try {
-      return await this.snapshotAtRisk(request, assessment);
+      return await this.snapshotAtRisk(
+        request,
+        assessment,
+        backupEligibleFiles,
+        maxBackupIgnoredFileBytes,
+      );
     } catch (error) {
       this.options.logger.warn(
         { err: error, worktreePath },
@@ -273,6 +304,8 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
   private async snapshotAtRisk(
     request: WorktreeSnapshotRequest,
     assessment: Extract<WorktreeAssessment, { kind: "assessed" }>,
+    backupEligibleFiles: readonly string[],
+    maxBackupIgnoredFileBytes: number,
   ): Promise<DetailedWorktreeSnapshot> {
     const { worktreePath, head, branch } = assessment;
     const config = this.options.readConfig();
@@ -282,6 +315,8 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
       worktreePath,
       head,
       config.maxUntrackedFileBytes,
+      backupEligibleFiles,
+      maxBackupIgnoredFileBytes,
     );
 
     const newest = await this.findNewestSnapshot(worktreePath, slug);
@@ -393,9 +428,14 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
     worktreePath: string,
     head: string | null,
     maxUntrackedFileBytes: number,
+    backupEligibleFiles: readonly string[],
+    maxBackupIgnoredFileBytes: number,
   ): Promise<{ tree: string; skippedFiles: string[]; possibleSecrets: string[] }> {
     const indexFile = join(tmpdir(), `paseo-snapshot-index-${process.pid}-${randomUUID()}`);
-    const env = { GIT_INDEX_FILE: indexFile };
+    // `--literal-pathspecs`: every path this method stages came from a real walk of the working
+    // tree, never a pattern meant to be a glob, and an eligible name that happens to look like one
+    // (`logs/run[1].log`) must not also pull in an unchecked sibling (`logs/run1.log`).
+    const env = { GIT_INDEX_FILE: indexFile, GIT_LITERAL_PATHSPECS: "1" };
     try {
       await this.seedSnapshotIndex(worktreePath, indexFile, head);
       await this.git(worktreePath, ["add", "-u"], env);
@@ -424,12 +464,76 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
       for (let index = 0; index < keep.length; index += ADD_BATCH) {
         await this.git(worktreePath, ["add", "--", ...keep.slice(index, index + ADD_BATCH)], env);
       }
+      // The eligibility walk (findBackupEligibleFiles, moments earlier) already confirmed each of
+      // these under the size cap and the secret filter, but moments is long enough for a file to
+      // grow or reappear: re-read each one right before staging rather than trust the walk. `-f`
+      // is only to get past `.gitignore`, which `git add` would otherwise refuse.
+      const freshBackupFiles: string[] = [];
+      for (const file of backupEligibleFiles) {
+        const path = join(worktreePath, file);
+        let stats: Stats;
+        try {
+          stats = lstatSync(path);
+        } catch {
+          continue; // Gone since the walk.
+        }
+        if (stats.isFile() && stats.size <= maxBackupIgnoredFileBytes) freshBackupFiles.push(file);
+      }
+      for (let index = 0; index < freshBackupFiles.length; index += ADD_BATCH) {
+        await this.git(
+          worktreePath,
+          ["add", "-f", "--", ...freshBackupFiles.slice(index, index + ADD_BATCH)],
+          env,
+        );
+      }
       const tree = (await this.git(worktreePath, ["write-tree"], env)).trim();
       return { tree, skippedFiles, possibleSecrets };
     } finally {
       rmSync(indexFile, { force: true });
       rmSync(`${indexFile}.lock`, { force: true });
     }
+  }
+
+  /**
+   * The exact files (never a directory) under an ignored path `agents.doneJanitor.backupIgnoredPaths`
+   * names, within the per-file and total caps, with nothing secret-shaped or regenerable by name
+   * among them (`selectBackupEligibleIgnored`, agent/backup-eligible-ignored.ts) -- the list
+   * `writeSnapshotTree` stages, re-checked there just before it does. Empty, with no git call,
+   * when no patterns are configured -- the default, unchanged behavior.
+   */
+  private async findBackupEligibleFiles(
+    worktreePath: string,
+    patterns: readonly string[],
+    maxFileBytes: number,
+    maxTotalBytes: number,
+  ): Promise<string[]> {
+    if (patterns.length === 0) return [];
+    const status = await this.git(worktreePath, [
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--no-renames",
+      "--ignored=matching",
+      "--untracked-files=all",
+    ]);
+    const ignored = status
+      .split("\0")
+      .filter((entry) => entry.startsWith("!! "))
+      .map((entry) => entry.slice(3));
+    // Mirrors the planning path's own pre-filter (`unregenerableIgnored`,
+    // done-janitor-worktree.ts): a pattern broad enough to also match a regenerable directory
+    // (node_modules/, dist/) should not force-add its contents.
+    const candidates = ignored.filter(
+      (entry) => !isRegenerablePath(entry, NO_MANIFEST_DIRECTORIES),
+    );
+    const { files } = await selectBackupEligibleIgnored({
+      worktreePath,
+      candidates,
+      patterns,
+      maxFileBytes,
+      maxTotalBytes,
+    });
+    return files;
   }
 
   private async findNewestSnapshot(

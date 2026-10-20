@@ -1,4 +1,5 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
+import { clearForgeCliChildPid, markForgeCliChildPidLive } from "./daemon-forge-cli-pids.js";
 import { createDaemonProcessOwnershipTracker } from "./daemon-process-ownership.js";
 import type { ProcessSampleRow } from "./process-sampler.js";
 
@@ -60,5 +61,35 @@ describe("createDaemonProcessOwnershipTracker", () => {
     });
     clock += 3 * 60_000 - 1;
     expect(tracker.isDaemonOwnProcess(999)).toBe(false);
+  });
+});
+
+describe("createDaemonProcessOwnershipTracker, the live forge-CLI pid registry", () => {
+  afterEach(() => {
+    clearForgeCliChildPid(300);
+  });
+
+  test("a pid the registry says is a live forge poll reads as daemon-owned before any sample arrives", () => {
+    const tracker = createDaemonProcessOwnershipTracker(daemonPid);
+    markForgeCliChildPidLive(300);
+    expect(tracker.isDaemonOwnProcess(300)).toBe(true);
+  });
+
+  test("overrides a confident false from a sample that never captured the short-lived child", () => {
+    const tracker = createDaemonProcessOwnershipTracker(daemonPid, () => 0);
+    // The only sample taken this sweep never saw pid 300 at all -- it started and exited
+    // between two `ps` samples -- so isDaemonOwnChildPid would read it as a confident "not the
+    // daemon's own" rather than "unknown". The live registry is the fix: it is checked first.
+    tracker.observeSample({ rows: [row({ pid: daemonPid, ppid: 1 })], agentTrees: [] });
+    markForgeCliChildPidLive(300);
+    expect(tracker.isDaemonOwnProcess(300)).toBe(true);
+  });
+
+  test("falls back to the sample once the registry no longer holds the pid (the poll exited)", () => {
+    const tracker = createDaemonProcessOwnershipTracker(daemonPid, () => 0);
+    tracker.observeSample({ rows: [row({ pid: daemonPid, ppid: 1 })], agentTrees: [] });
+    markForgeCliChildPidLive(300);
+    clearForgeCliChildPid(300);
+    expect(tracker.isDaemonOwnProcess(300)).toBe(false);
   });
 });

@@ -3,6 +3,7 @@ import { isAbsolute, resolve } from "node:path";
 import type { Logger } from "pino";
 
 import { buildDoneJanitorNotificationPayload } from "@getpaseo/protocol/done-janitor-notification";
+import { normalizeHost } from "@getpaseo/protocol/git-remote";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type {
   AgentManager,
@@ -32,11 +33,19 @@ import {
   type ProbeOutcome,
 } from "./agent/done-janitor-detector.js";
 import {
+  DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
+  DEFAULT_MAX_BACKUP_IGNORED_TOTAL_BYTES,
+  resolveBackupIgnoredPaths,
+} from "./agent/backup-eligible-ignored.js";
+import {
   checkDeletionInvariant,
   classifyWorkspace,
   idleProjectVerdict,
+  listNestedRepositories,
   resolveRegenerableIgnoredPaths,
   resolveWorkspaceSweepConfig,
+  type CoverageBasis,
+  type DeletionInvariant,
   type DoneJanitorWorkspaceSweepConfig,
   type IdleProjectVerdict,
   type ResolvedWorkspaceSweepConfig,
@@ -44,7 +53,11 @@ import {
   type WorkspaceSweepRule,
   type WorkspaceSweepVerdict,
 } from "./agent/workspace-sweep-detector.js";
-import type { WorktreeCoverage, WorktreeDeletionSafety } from "./done-janitor-worktree.js";
+import {
+  computeSafeNestedRepositories,
+  type WorktreeCoverage,
+  type WorktreeDeletionSafety,
+} from "./done-janitor-worktree.js";
 import type { PushNotificationSender } from "./push/index.js";
 import type {
   WorktreeSnapshotOffsite,
@@ -116,6 +129,31 @@ export interface DoneJanitorConfig {
    * dropped, never applied.
    */
   regenerableIgnoredPaths?: string[];
+  /**
+   * Ignored paths a work snapshot should also stage (size-capped, secret-filtered) so an
+   * otherwise-unbacked ignored file no longer keeps its worktree forever (docs/done-janitor.md,
+   * "Unbacked ignored files"). Each entry is a path suffix or a simple glob, same syntax as
+   * `regenerableIgnoredPaths`, but unlike that list a pattern here may match a directory. Default
+   * `[]`. A pattern that could match a secret is rejected with a warning and dropped.
+   */
+  backupIgnoredPaths?: string[];
+  /** Caps a file `backupIgnoredPaths` would otherwise stage. Default 5 MiB. */
+  maxBackupIgnoredFileBytes?: number;
+  /** Caps the combined size of every file staged across all eligible entries. Default 50 MiB. */
+  maxBackupIgnoredTotalBytes?: number;
+  /**
+   * Off by default. Excuses a nested repository, and an ignored container holding only safe
+   * nested repositories, from the deletion invariant once `checkNestedRepositorySafety`
+   * (done-janitor-worktree.ts) confirms its own HEAD is on a trusted remote and its own tree is
+   * clean. With this off, both read as before this unit existed: an unconditional keep.
+   */
+  releaseSafeNestedRepos?: boolean;
+  /**
+   * Extra hosts, beside the forge registry's own cloud hosts, trusted as a nested repository's
+   * remote while `releaseSafeNestedRepos` is on (docs/done-janitor.md, "The deletion invariant").
+   * Default `[]`.
+   */
+  trustedRemoteHosts?: string[];
 }
 
 interface ResolvedDoneJanitorConfig {
@@ -131,6 +169,13 @@ interface ResolvedDoneJanitorConfig {
   askFinished: boolean;
   /** Validated by `resolveRegenerableIgnoredPaths`; a pattern that could match a secret never lands here. */
   regenerableIgnoredPaths: string[];
+  /** Validated by `resolveBackupIgnoredPaths`; a pattern that could match a secret never lands here. */
+  backupIgnoredPaths: string[];
+  maxBackupIgnoredFileBytes: number;
+  maxBackupIgnoredTotalBytes: number;
+  releaseSafeNestedRepos: boolean;
+  /** Normalized (lowercased, trailing dot stripped) once here, not on every nested-repo check. */
+  trustedRemoteHosts: ReadonlySet<string>;
 }
 
 function resolveConfig(config: DoneJanitorConfig, logger: Logger): ResolvedDoneJanitorConfig {
@@ -153,6 +198,18 @@ function resolveConfig(config: DoneJanitorConfig, logger: Logger): ResolvedDoneJ
           "Done janitor: agents.doneJanitor.regenerableIgnoredPaths entry could match a secret-shaped path, ignoring it",
         ),
     ),
+    backupIgnoredPaths: resolveBackupIgnoredPaths(config.backupIgnoredPaths, (pattern) =>
+      logger.warn(
+        { pattern },
+        "Done janitor: agents.doneJanitor.backupIgnoredPaths entry could match a secret-shaped path, ignoring it",
+      ),
+    ),
+    maxBackupIgnoredFileBytes:
+      config.maxBackupIgnoredFileBytes ?? DEFAULT_MAX_BACKUP_IGNORED_FILE_BYTES,
+    maxBackupIgnoredTotalBytes:
+      config.maxBackupIgnoredTotalBytes ?? DEFAULT_MAX_BACKUP_IGNORED_TOTAL_BYTES,
+    releaseSafeNestedRepos: config.releaseSafeNestedRepos ?? false,
+    trustedRemoteHosts: new Set((config.trustedRemoteHosts ?? []).map(normalizeHost)),
   };
 }
 
@@ -278,6 +335,10 @@ export interface DoneJanitorDependencies {
     worktreePath: string;
     commit: string | null;
     mainRepoRoot?: string | null;
+    backupIgnoredPaths?: readonly string[];
+    maxBackupIgnoredFileBytes?: number;
+    maxBackupIgnoredTotalBytes?: number;
+    releaseSafeNestedRepos?: boolean;
   }): Promise<WorktreeCoverage | null>;
   /** Null when the snapshot is a backup a deletion may rely on; otherwise why it is not. */
   verifyBackup(input: {
@@ -356,7 +417,10 @@ type IdleWorkspacePlan =
  * A keep reason the sweep treats as unlikely to change within the hour (R5,
  * docs/done-janitor.md): a process that is not the daemon's own, or an ignored, non-regenerable
  * path no backup covers. Everything else may resolve on its own sooner — a push, a lock released
- * — so only these two earn the cooldown.
+ * — so only these two earn the cooldown. `"nested-repo"` (`DeletionInvariant`'s own category) is
+ * deliberately not one of them (#3, docs/done-janitor.md): it is `nestedRepositorySafetyCouldHelp`'s
+ * short-circuit signal, not a cooldown reason, so `toCooldownCategory` strips it before it ever
+ * reaches a `DeletionCheck` or `IdleWorkspacePlan`'s `keep`.
  */
 type KeptCooldownCategory = "process" | "ignored-path";
 
@@ -364,6 +428,18 @@ type KeptCooldownCategory = "process" | "ignored-path";
 type DeletionCheck =
   | { ok: true; invariant: string }
   | { ok: false; reason: string; category?: KeptCooldownCategory };
+
+/**
+ * `DeletionInvariant.category` as a cooldown reason (#3, docs/done-janitor.md): `"nested-repo"`
+ * maps to `undefined` rather than earning the cooldown. A nested-repo keep may clear itself (a
+ * push, a rebase) sooner than `keptCooldownHours` would allow re-checking, the same as every other
+ * uncategorized failure (an unreadable directory, a hidden change, an LFS file).
+ */
+function toCooldownCategory(
+  category: Extract<DeletionInvariant, { holds: false }>["category"],
+): KeptCooldownCategory | undefined {
+  return category === "nested-repo" ? undefined : category;
+}
 
 interface AskCandidate {
   root: DoneJanitorAgentView;
@@ -807,7 +883,7 @@ export class AgentDoneJanitor {
       plan.directory,
       `done janitor, before archiving idle workspace ${workspace.workspaceId}`,
       workspace.mainRepoRoot,
-      config.regenerableIgnoredPaths,
+      config,
     );
     if (!check.ok) {
       report.entries.push(describe("kept-idle-workspace", check.reason));
@@ -958,11 +1034,7 @@ export class AgentDoneJanitor {
       return { kind: "archive", deletesDirectory: false, detail: "its directory is gone" };
     }
     if (!safety.safe && !safety.atRisk) return keep(safety.reason);
-    const preview = await this.previewDeletion(
-      path,
-      workspace.mainRepoRoot,
-      config.regenerableIgnoredPaths,
-    );
+    const preview = await this.previewDeletion(path, workspace.mainRepoRoot, config);
     if (!preview.ok) return keep(preview.reason, preview.category);
     return {
       kind: "archive",
@@ -981,7 +1053,7 @@ export class AgentDoneJanitor {
   private async previewDeletion(
     path: string,
     mainRepoRoot: string | null,
-    regenerableIgnoredPaths: readonly string[],
+    config: ResolvedDoneJanitorConfig,
   ): Promise<DeletionCheck> {
     const occupied = await this.occupiedReason(path);
     if (occupied) return { ok: false, reason: occupied.reason, category: occupied.category };
@@ -989,11 +1061,60 @@ export class AgentDoneJanitor {
       worktreePath: path,
       commit: null,
       mainRepoRoot,
+      backupIgnoredPaths: config.backupIgnoredPaths,
+      maxBackupIgnoredFileBytes: config.maxBackupIgnoredFileBytes,
+      maxBackupIgnoredTotalBytes: config.maxBackupIgnoredTotalBytes,
+      releaseSafeNestedRepos: config.releaseSafeNestedRepos,
     });
-    const invariant = checkDeletionInvariant(coverage, "plan", regenerableIgnoredPaths);
+    const invariant = await this.evaluateDeletionInvariant(path, coverage, "plan", config);
     return invariant.holds
       ? { ok: true, invariant: invariant.detail }
-      : { ok: false, reason: invariant.reason, category: invariant.category };
+      : { ok: false, reason: invariant.reason, category: toCooldownCategory(invariant.category) };
+  }
+
+  /**
+   * `checkDeletionInvariant`, paying for nested-repository safety only when it is the one thing
+   * that could still change the verdict (#14, the review's perf finding): every cheaper check
+   * (unlisted content, an unrelated ignored path, dirty or unpushed work) already ran inside the
+   * cheap pass below, so a worktree kept for any of those never reaches a single git call here.
+   * Off entirely, with no git call at all, while `releaseSafeNestedRepos` is false (#7) -- the
+   * default, so a worktree with a nested repository or an ignored container of them is kept
+   * exactly as before this unit existed until the flag is turned on.
+   */
+  private async evaluateDeletionInvariant(
+    worktreePath: string,
+    coverage: WorktreeCoverage | null,
+    basis: CoverageBasis,
+    config: ResolvedDoneJanitorConfig,
+  ): Promise<DeletionInvariant> {
+    const cheap = checkDeletionInvariant(coverage, basis, config.regenerableIgnoredPaths);
+    if (cheap.holds || !config.releaseSafeNestedRepos || !coverage) return cheap;
+    if (!this.nestedRepositorySafetyCouldHelp(coverage, cheap)) return cheap;
+    const candidates = listNestedRepositories(coverage);
+    if (candidates.length === 0) return cheap;
+    const safeNested = await computeSafeNestedRepositories(worktreePath, candidates, {
+      trustedRemoteHosts: config.trustedRemoteHosts,
+    });
+    if (safeNested.size === 0) return cheap;
+    return checkDeletionInvariant(coverage, basis, config.regenerableIgnoredPaths, safeNested);
+  }
+
+  /**
+   * Whether re-running the invariant with nested-repository safety applied could still change a
+   * failed verdict: when the block is the nested-repo check itself (`category: "nested-repo"`),
+   * or an ignored-path block that names at least one container of only nested repositories.
+   * Anything else — unlisted content, an unrelated ignored file, dirty or unpushed work — is
+   * unaffected by it, so there is no reason to pay for the git calls. Reading the invariant's own
+   * category, rather than inferring "nested-repo" from the absence of one, means a future
+   * category added to some other failure can never silently widen this gate.
+   */
+  private nestedRepositorySafetyCouldHelp(
+    coverage: WorktreeCoverage,
+    invariant: DeletionInvariant,
+  ): boolean {
+    if (invariant.holds) return false;
+    if (coverage.ignoredDirectoriesHoldingOnlyNestedRepositories.length > 0) return true;
+    return invariant.category === "nested-repo";
   }
 
   /**
@@ -1008,11 +1129,18 @@ export class AgentDoneJanitor {
     path: string,
     reason: string,
     mainRepoRoot: string | null,
-    regenerableIgnoredPaths: readonly string[],
+    config: ResolvedDoneJanitorConfig,
   ): Promise<DeletionCheck> {
     const occupied = await this.occupiedReason(path);
     if (occupied) return { ok: false, reason: occupied.reason, category: occupied.category };
-    const snapshot = await this.takeSnapshot(report, path, reason);
+    const snapshot = await this.takeSnapshot({
+      report,
+      cwd: path,
+      reason,
+      backupIgnoredPaths: config.backupIgnoredPaths,
+      maxBackupIgnoredFileBytes: config.maxBackupIgnoredFileBytes,
+      maxBackupIgnoredTotalBytes: config.maxBackupIgnoredTotalBytes,
+    });
     if (snapshot.kind === "failed") {
       return {
         ok: false,
@@ -1024,11 +1152,15 @@ export class AgentDoneJanitor {
         worktreePath: path,
         commit: null,
         mainRepoRoot,
+        backupIgnoredPaths: config.backupIgnoredPaths,
+        maxBackupIgnoredFileBytes: config.maxBackupIgnoredFileBytes,
+        maxBackupIgnoredTotalBytes: config.maxBackupIgnoredTotalBytes,
+        releaseSafeNestedRepos: config.releaseSafeNestedRepos,
       });
-      const invariant = checkDeletionInvariant(coverage, "head", regenerableIgnoredPaths);
+      const invariant = await this.evaluateDeletionInvariant(path, coverage, "head", config);
       return invariant.holds
         ? { ok: true, invariant: invariant.detail }
-        : { ok: false, reason: invariant.reason, category: invariant.category };
+        : { ok: false, reason: invariant.reason, category: toCooldownCategory(invariant.category) };
     }
     const omitted = describeSnapshotOmissions(snapshot);
     if (omitted) return { ok: false, reason: omitted };
@@ -1038,14 +1170,15 @@ export class AgentDoneJanitor {
       worktreePath: path,
       commit: snapshot.commit,
       mainRepoRoot,
+      releaseSafeNestedRepos: config.releaseSafeNestedRepos,
     });
-    const invariant = checkDeletionInvariant(coverage, "snapshot", regenerableIgnoredPaths);
+    const invariant = await this.evaluateDeletionInvariant(path, coverage, "snapshot", config);
     return invariant.holds
       ? {
           ok: true,
           invariant: `${invariant.detail}; backed up at ${snapshot.ref}, ${describeOffsite(snapshot.offsite)}`,
         }
-      : { ok: false, reason: invariant.reason, category: invariant.category };
+      : { ok: false, reason: invariant.reason, category: toCooldownCategory(invariant.category) };
   }
 
   /**
@@ -1718,11 +1851,7 @@ export class AgentDoneJanitor {
       baseBranch: workspace.baseBranch,
     });
     if (!safety.safe) return keep(safety.reason);
-    const preview = await this.previewDeletion(
-      path,
-      workspace.mainRepoRoot,
-      config.regenerableIgnoredPaths,
-    );
+    const preview = await this.previewDeletion(path, workspace.mainRepoRoot, config);
     if (!preview.ok) return keep(preview.reason);
     return {
       kind: "reclaim",
@@ -1781,7 +1910,7 @@ export class AgentDoneJanitor {
       plan.path,
       `done janitor, before deleting workspace ${plan.workspace.workspaceId}`,
       plan.workspace.mainRepoRoot,
-      config.regenerableIgnoredPaths,
+      config,
     );
     if (!check.ok) return kept(check.reason);
     // The plan is minutes old now. Look again here, and archive-by-scope looks again inside,
@@ -1903,17 +2032,27 @@ export class AgentDoneJanitor {
     cwd: string,
     reason: string,
   ): Promise<string | null> {
-    const result = await this.takeSnapshot(report, cwd, reason);
+    const result = await this.takeSnapshot({ report, cwd, reason });
     return result.kind === "failed" && result.worktreePath ? result.error : null;
   }
 
   /** The snapshot itself, reported, with a failure on work at risk remembered for the sweep. */
-  private async takeSnapshot(
-    report: DoneJanitorSweepReport,
-    cwd: string,
-    reason: string,
-  ): Promise<WorktreeSnapshotResult> {
-    const result = await this.deps.snapshotWorktree({ cwd, reason });
+  private async takeSnapshot(options: {
+    report: DoneJanitorSweepReport;
+    cwd: string;
+    reason: string;
+    backupIgnoredPaths?: readonly string[];
+    maxBackupIgnoredFileBytes?: number;
+    maxBackupIgnoredTotalBytes?: number;
+  }): Promise<WorktreeSnapshotResult> {
+    const { report, cwd, reason } = options;
+    const result = await this.deps.snapshotWorktree({
+      cwd,
+      reason,
+      backupIgnoredPaths: options.backupIgnoredPaths ?? [],
+      maxBackupIgnoredFileBytes: options.maxBackupIgnoredFileBytes,
+      maxBackupIgnoredTotalBytes: options.maxBackupIgnoredTotalBytes,
+    });
     if (result.kind === "snapshotted") {
       report.entries.push({
         action: "snapshotted",

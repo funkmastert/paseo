@@ -550,6 +550,20 @@ const AgentDoneJanitorSchema = z
     // Extra ignored paths the deletion invariant treats as regenerable, beside the janitor's own
     // by-name rules. See docs/done-janitor.md, "Idle workspaces".
     regenerableIgnoredPaths: z.array(z.string()).optional(),
+    // Ignored paths a work snapshot should also stage, so an otherwise-unbacked ignored file no
+    // longer keeps its worktree forever. See docs/done-janitor.md, "Unbacked ignored files".
+    backupIgnoredPaths: z.array(z.string()).optional(),
+    maxBackupIgnoredFileBytes: z.number().int().positive().optional(),
+    maxBackupIgnoredTotalBytes: z.number().int().positive().optional(),
+    // Off by default: excuses a nested repository, and an ignored container holding only safe
+    // nested repositories, from the deletion invariant once its own HEAD is on a trusted remote
+    // and its own tree is clean. See docs/done-janitor.md, "The deletion invariant".
+    releaseSafeNestedRepos: z.boolean().optional(),
+    // Extra hosts, beside the forge registry's own cloud hosts (github.com, gitlab.com, ...),
+    // trusted as a nested repository's remote while releaseSafeNestedRepos is on: a self-hosted
+    // forge the registry does not probe for this check. Default []. See docs/done-janitor.md,
+    // "The deletion invariant".
+    trustedRemoteHosts: z.array(z.string()).optional(),
   })
   .strict();
 

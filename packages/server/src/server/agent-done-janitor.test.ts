@@ -2,7 +2,15 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino, { type Logger } from "pino";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+// A spy over the real implementation (#3, docs/done-janitor.md): every other test relies on its
+// real, git-backed behaviour, so this must forward to it by default. Only the
+// `releaseSafeNestedRepos` gate tests below swap in a one-time return value or assert on calls.
+vi.mock("./done-janitor-worktree.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./done-janitor-worktree.js")>();
+  return { ...actual, computeSafeNestedRepositories: vi.fn(actual.computeSafeNestedRepositories) };
+});
 
 import { AgentManager, type DoneJanitorAgentSummary } from "./agent/agent-manager.js";
 import type { AgentStreamEvent } from "./agent/agent-sdk-types.js";
@@ -22,7 +30,11 @@ import {
   type DoneJanitorWorkspace,
   type ProviderHealth,
 } from "./agent-done-janitor.js";
-import type { WorktreeCoverage, WorktreeDeletionSafety } from "./done-janitor-worktree.js";
+import {
+  computeSafeNestedRepositories,
+  type WorktreeCoverage,
+  type WorktreeDeletionSafety,
+} from "./done-janitor-worktree.js";
 import type { ProcessScan } from "./worktree-process-scan.js";
 import type { WorkspaceActivitySignals } from "./agent/workspace-sweep-detector.js";
 import type { PushPayload } from "./push/index.js";
@@ -85,6 +97,8 @@ function coverage(overrides: Partial<WorktreeCoverage> = {}): WorktreeCoverage {
     nestedRepositories: [],
     manifestDirectories: [],
     copiedFromMainCheckout: [],
+    backupEligibleIgnored: [],
+    ignoredDirectoriesHoldingOnlyNestedRepositories: [],
     ...overrides,
   };
 }
@@ -2684,6 +2698,120 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
       expect(h.archivedWorkspaces).toEqual([]);
     });
 
+    // #3, docs/done-janitor.md: these five pin the `releaseSafeNestedRepos` gate (default false)
+    // and the #14 short-circuit, so removing either would fail one of them.
+    afterEach(() => {
+      vi.mocked(computeSafeNestedRepositories).mockClear();
+    });
+
+    test("releaseSafeNestedRepos flag omitted: a worktree whose only blocker is a safe nested repository is kept, with zero nested git calls and the pre-branch reason", async () => {
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        nestedRepositories: ["vendor/tool/"],
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(computeSafeNestedRepositories).not.toHaveBeenCalled();
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason:
+            "1 submodule(s) or nested repositor(ies) a backup holds only as a pointer (vendor/tool/)",
+        }),
+      );
+    });
+
+    test("releaseSafeNestedRepos flag on: released once computeSafeNestedRepositories confirms the nested repository is safe", async () => {
+      vi.mocked(computeSafeNestedRepositories).mockResolvedValue(new Set(["vendor/tool/"]));
+      const h = sweepHarness({
+        config: { ...SWEEP, releaseSafeNestedRepos: true },
+        stored: [record()],
+        workspaces: [workspace()],
+        nestedRepositories: ["vendor/tool/"],
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(computeSafeNestedRepositories).toHaveBeenCalled();
+      expect(h.archivedWorkspaces).toEqual(["ws-1"]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({ action: "deleted", workspaceId: "ws-1" }),
+      );
+    });
+
+    test("releaseSafeNestedRepos flag omitted: a worktree whose only blocker is an ignored container of a nested repository is kept, with zero nested git calls", async () => {
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        coverage: () =>
+          coverage({
+            ignored: [".claude/worktrees/"],
+            nestedRepositories: [".claude/worktrees/sub/"],
+            ignoredDirectoriesHoldingOnlyNestedRepositories: [".claude/worktrees/"],
+          }),
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(computeSafeNestedRepositories).not.toHaveBeenCalled();
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason:
+            "1 ignored path(s) that are not regenerable and no backup holds (.claude/worktrees/)",
+        }),
+      );
+    });
+
+    test("releaseSafeNestedRepos flag on: an ignored container is released once computeSafeNestedRepositories confirms its nested repository is safe", async () => {
+      vi.mocked(computeSafeNestedRepositories).mockResolvedValue(
+        new Set([".claude/worktrees/sub/"]),
+      );
+      const h = sweepHarness({
+        config: { ...SWEEP, releaseSafeNestedRepos: true },
+        stored: [record()],
+        workspaces: [workspace()],
+        coverage: () =>
+          coverage({
+            ignored: [".claude/worktrees/"],
+            nestedRepositories: [".claude/worktrees/sub/"],
+            ignoredDirectoriesHoldingOnlyNestedRepositories: [".claude/worktrees/"],
+          }),
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(computeSafeNestedRepositories).toHaveBeenCalled();
+      expect(h.archivedWorkspaces).toEqual(["ws-1"]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({ action: "deleted", workspaceId: "ws-1" }),
+      );
+    });
+
+    test("releaseSafeNestedRepos flag on: an unrelated blocker keeps the worktree without a single nested git call", async () => {
+      const h = sweepHarness({
+        config: { ...SWEEP, releaseSafeNestedRepos: true },
+        stored: [record()],
+        workspaces: [workspace()],
+        coverage: () => coverage({ ignored: [".env"], gitlinks: ["vendor/tool/"] }),
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(computeSafeNestedRepositories).not.toHaveBeenCalled();
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: "1 ignored path(s) that are not regenerable and no backup holds (.env)",
+        }),
+      );
+    });
+
     test("unpushed with a backup of that exact state: archived after the snapshot", async () => {
       const h = sweepHarness({
         stored: [record()],
@@ -3198,6 +3326,40 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
       h.setNow(NOW + 7 * HOUR); // the cooldown has expired
       await h.janitor.tick();
       expect(reads).toBeGreaterThan(2);
+    });
+
+    // #3, docs/done-janitor.md: "nested-repo" is the deletion invariant's own category (it feeds
+    // nestedRepositorySafetyCouldHelp's short-circuit), but it must never reach the R5 cooldown --
+    // it may clear on its own (a push) sooner than keptCooldownHours would allow re-checking, the
+    // same as every other uncategorized failure. Default config (releaseSafeNestedRepos off), so
+    // this is the one keep the fix touches without the flag ever turning on.
+    test("a nested-repo keep does not start the R5 cooldown, unlike an unbacked ignored path", async () => {
+      let reads = 0;
+      const h = owned({
+        coverage: (_path, commit) => {
+          reads += 1;
+          return coverage({ commit: commit ?? "head", gitlinks: ["vendor/tool/"] });
+        },
+      });
+
+      const first = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(first?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: expect.stringContaining("submodule(s) or nested repositor(ies)"),
+        }),
+      );
+      const readsAfterFirstTick = reads;
+      expect(readsAfterFirstTick).toBeGreaterThan(0);
+
+      h.setNow(NOW + 3 * HOUR); // would still be inside a 6h cooldown, if one had started
+
+      await h.janitor.tick();
+
+      // No cooldown: coverage is read again rather than being skipped as already-known-kept.
+      expect(reads).toBeGreaterThan(readsAfterFirstTick);
     });
 
     test("the kept cooldown (R5): new activity in a cooled-down workspace makes it eligible again", async () => {

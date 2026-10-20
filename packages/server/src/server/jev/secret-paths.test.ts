@@ -1,6 +1,33 @@
 import { describe, expect, test } from "vitest";
 
-import { comparableName, isSecretShapedPath } from "./secret-paths.js";
+import { comparableName, isSecretShapedPath, resolveIgnoredPathPatterns } from "./secret-paths.js";
+
+describe("resolveIgnoredPathPatterns", () => {
+  test("without allowDirectory, a trailing slash names no file and is rejected", () => {
+    const rejected: string[] = [];
+    expect(
+      resolveIgnoredPathPatterns([".worker-logs/", "feature-flags.json"], (p) => rejected.push(p)),
+    ).toEqual(["feature-flags.json"]);
+    expect(rejected).toEqual([".worker-logs/"]);
+  });
+
+  test("with allowDirectory, a trailing slash is trimmed before checking for a real last segment", () => {
+    const fail = () => {
+      throw new Error("should not reject");
+    };
+    expect(resolveIgnoredPathPatterns([".worker-logs/"], fail, { allowDirectory: true })).toEqual([
+      ".worker-logs/",
+    ]);
+  });
+
+  test("a secret-shaped pattern is rejected regardless of allowDirectory", () => {
+    const rejected: string[] = [];
+    expect(
+      resolveIgnoredPathPatterns([".env"], (p) => rejected.push(p), { allowDirectory: true }),
+    ).toEqual([]);
+    expect(rejected).toEqual([".env"]);
+  });
+});
 
 describe("isSecretShapedPath: names built to look like secret ones", () => {
   test.each([

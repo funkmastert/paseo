@@ -521,6 +521,8 @@ describe("checkDeletionInvariant", () => {
       nestedRepositories: [],
       manifestDirectories: [],
       copiedFromMainCheckout: [],
+      backupEligibleIgnored: [],
+      ignoredDirectoriesHoldingOnlyNestedRepositories: [],
       ...overrides,
     };
   }
@@ -588,7 +590,7 @@ describe("checkDeletionInvariant", () => {
       ),
     ).toEqual({
       holds: true,
-      detail: `holds: every file is tracked and pushed; ignored only regenerable (node_modules/, ${entry})`,
+      detail: `holds: every file is tracked and pushed; ignored only regenerable (node_modules/); ignored path(s) copied from the main checkout (${entry})`,
     });
   });
 
@@ -634,6 +636,7 @@ describe("checkDeletionInvariant", () => {
       holds: false,
       reason:
         "1 submodule(s) or nested repositor(ies) a backup holds only as a pointer (vendor/tool)",
+      category: "nested-repo",
     });
     expect(checkDeletionInvariant(coverage({ untracked: ["vendor/other/"] }), "plan").holds).toBe(
       false,
@@ -685,6 +688,7 @@ describe("checkDeletionInvariant", () => {
       holds: false,
       reason:
         "1 submodule(s) or nested repositor(ies) a backup holds only as a pointer (.cache/tool/)",
+      category: "nested-repo",
     });
   });
 

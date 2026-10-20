@@ -193,3 +193,47 @@ export function isSecretShapedPath(filePath: string): boolean {
   const comparable = comparableName(filePath);
   return SECRET_NAME_RES.some((re) => re.test(normalized) || re.test(comparable));
 }
+
+/**
+ * Resolves a list of user-supplied ignored-path patterns -- a path suffix, or a simple glob with
+ * `*` standing for any run of characters within one path segment -- dropping any that could
+ * match a secret, whatever its extension, or that names no file at all (a last segment of only
+ * wildcards). Shared by every `agents.doneJanitor` config key that lets a pattern reach a by-name
+ * rule unreviewed (`regenerableIgnoredPaths`, `agent/workspace-sweep-detector.ts`;
+ * `backupIgnoredPaths`, `agent/backup-eligible-ignored.ts`): the janitor's own rules are a closed,
+ * reviewed list, and a pattern that could match a secret would make it delete, or back up, a
+ * secret unread. A pattern is rejected when it, or a copy with every `*` turned into a literal
+ * character, is itself secret-shaped. `onRejectedPattern` is called once per rejection so the
+ * caller can log it.
+ *
+ * `allowDirectory` lets a pattern end in `/` and still name a file: the regenerable list is
+ * files-only by design, but a backup-eligible pattern has to match a directory (`.worker-logs/`).
+ * Without it, a trailing slash leaves no last segment and the pattern is rejected as naming no
+ * file, same as `*` or `dir/*`.
+ */
+export function resolveIgnoredPathPatterns(
+  patterns: readonly string[] | undefined,
+  onRejectedPattern: (pattern: string) => void,
+  options: { allowDirectory?: boolean } = {},
+): string[] {
+  if (!patterns || patterns.length === 0) return [];
+  const accepted: string[] = [];
+  for (const pattern of patterns) {
+    const sample = pattern.replace(/\*/gu, "x");
+    const trimmed = options.allowDirectory ? pattern.trim().replace(/\/$/u, "") : pattern.trim();
+    const trimmedSample = trimmed.replace(/\*/gu, "x");
+    const lastSegment = trimmed.split("/").pop() ?? "";
+    if (
+      lastSegment.replace(/\*/gu, "") === "" ||
+      isSecretShapedPath(pattern) ||
+      isSecretShapedPath(sample) ||
+      isSecretShapedPath(trimmed) ||
+      isSecretShapedPath(trimmedSample)
+    ) {
+      onRejectedPattern(pattern);
+      continue;
+    }
+    accepted.push(pattern);
+  }
+  return accepted;
+}

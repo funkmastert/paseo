@@ -63,6 +63,12 @@ interface ExecCommandOptions extends ExternalEnvOptions {
   maxBuffer?: number;
   shell?: boolean | string;
   signal?: AbortSignal;
+  /**
+   * Called with the child's pid as soon as it is spawned, before the command finishes — the only
+   * way a caller can learn the pid of a short-lived child that may exit before the promise a
+   * caller awaits elsewhere ever resolves. `undefined` if the child failed to spawn at all.
+   */
+  onSpawn?: (pid: number | undefined) => void;
 }
 
 interface ExecCommandResult {
@@ -152,5 +158,6 @@ export async function execCommand(
     windowsHide: true,
   });
   lowerSpawnedPriority(pending.child.pid, options?.priority);
+  options?.onSpawn?.(pending.child.pid);
   return pending as Promise<ExecCommandResult>;
 }
