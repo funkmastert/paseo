@@ -217,6 +217,7 @@ export function topRows(rawRows: readonly LeaderboardRow[]): ArenaTopRow[] {
     const alias = arenaAliasFor(arenaName);
     rows.push({
       arenaName,
+      displayName: raw.model_name.trim(),
       ...(alias ? { ours: alias.ref, effort: alias.effort } : {}),
       rating: isAgentRow(raw) ? raw.score : raw.rating,
       ratingLower: isAgentRow(raw) ? raw.score_ci_lower : raw.rating_lower,

@@ -1078,7 +1078,7 @@ describe("leader boards: per-publish history and top rows", () => {
         agentRow("Claude Opus 5.5 (Max)", 0.2, "2026-10-19"),
       ]);
       expect(top.map((row) => row.arenaName)).toEqual(["claude-opus-5.5-max", "gpt-6-astra-max", "gemini-4-argon-high"]);
-      expect(top[0]).toMatchObject({ ours: "claude-opus-5-5", effort: "max", rating: 0.2 });
+      expect(top[0]).toMatchObject({ ours: "claude-opus-5-5", effort: "max", rating: 0.2, displayName: "Claude Opus 5.5 (Max)" });
       expect(top[2].ours).toBeUndefined();
       expect(top[2].effort).toBeUndefined();
     });
