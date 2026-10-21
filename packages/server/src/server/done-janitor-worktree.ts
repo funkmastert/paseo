@@ -1112,56 +1112,45 @@ function splitNonEmptyLines(output: string): string[] {
 }
 
 /**
- * `core.fsmonitor` values git itself treats as a plain on/off switch, never a hook command: git's
- * own bool parsing (`true`/`false`/`yes`/`no`/`on`/`off`/`1`/`0`, case-insensitive, or no value at
- * all for a bare key). Anything else is a path git executes as the fsmonitor hook.
+ * `core.fsmonitor` values git reads as off (`git_parse_maybe_bool`, case-insensitive; an explicit
+ * empty value is false too). Every other value either turns on git's built-in fsmonitor daemon
+ * (`true`/`yes`/`on`/`1`, or a bare key with no value at all) or is a hook path git runs through
+ * the shell.
  */
-const GIT_BOOLEAN_CONFIG_VALUES: ReadonlySet<string> = new Set([
-  "",
-  "true",
-  "false",
-  "yes",
-  "no",
-  "on",
-  "off",
-  "1",
-  "0",
-]);
+const GIT_FALSE_CONFIG_VALUES: ReadonlySet<string> = new Set(["", "false", "no", "off", "0"]);
 
 /**
  * Executable or config settings that would run code the daemon's user controls, read before any
  * `git status` call inside a nested repository (#5, #9, docs/done-janitor.md): a clean/smudge
- * filter, a diff driver, a custom ssh command, hooks, or an fsmonitor hook script, all of which a
- * nested repo's own tracked `.gitattributes`/local config can point at a script the janitor would
- * then execute as a side effect of a read-only safety check. `core.fsmonitor` is the one setting
- * here that is just as often a plain boolean (git, and Xcode's own SwiftPM package resolution,
- * both write `core.fsmonitor=false` routinely to turn the built-in watcher off) as it is a hook
- * path, so only a non-boolean value counts as dangerous; every other key is unsafe the moment it
- * is set, whatever its value. Reads `--worktree` scope first (local merged with
- * `config.worktree`, the file `extensions.worktreeConfig` points a per-worktree filter or hooks
- * path at), falling back to `--local` alone when that fails -- git itself already degrades
- * `--worktree` to `--local` when the extension is off, but the explicit fallback stays in case a
- * git version or wrapper ever makes `--worktree` a hard error instead. Reading config never
- * executes anything; only `git status`/`diff` invoking a filter or driver does, so this runs
- * first. True (unsafe) when git cannot be asked either way.
+ * filter, a diff driver, a custom ssh command, hooks, or fsmonitor, all of which a nested repo's
+ * own tracked `.gitattributes`/local config can point at a script the janitor would then execute
+ * as a side effect of a read-only safety check. `core.fsmonitor` is the one key excused by value:
+ * git, and Xcode's own SwiftPM package resolution, write `core.fsmonitor=false` routinely to turn
+ * the watcher off, so an off value (`GIT_FALSE_CONFIG_VALUES`) passes; every other key is unsafe
+ * the moment it is set, whatever its value. Read with `-z`: without it a value's embedded newline
+ * prints as a line break, so `false\n<command>` would read as `core.fsmonitor=false` plus an
+ * unkeyed line, while git runs the whole value as a hook. `runGitCommand` also passes
+ * `-c core.fsmonitor=false` to every git call; this check does not rely on that. Reads
+ * `--worktree` scope first (local merged with `config.worktree`, the file
+ * `extensions.worktreeConfig` points a per-worktree filter or hooks path at), falling back to
+ * `--local` alone when that fails -- git itself already degrades `--worktree` to `--local` when
+ * the extension is off, but the explicit fallback stays in case a git version or wrapper ever
+ * makes `--worktree` a hard error instead. Reading config never executes anything; only `git
+ * status`/`diff` invoking a filter or driver does, so this runs first. True (unsafe) when git
+ * cannot be asked either way.
  */
 async function hasDangerousLocalGitConfig(git: ReadOnlyGit): Promise<boolean> {
   const listing =
-    (await git(["config", "--worktree", "--list", "--includes"])) ??
-    (await git(["config", "--local", "--list", "--includes"]));
+    (await git(["config", "--worktree", "--list", "--includes", "-z"])) ??
+    (await git(["config", "--local", "--list", "--includes", "-z"]));
   if (listing === null) return true;
-  for (const line of listing.split("\n")) {
-    const separator = line.indexOf("=");
-    const key = (separator === -1 ? line : line.slice(0, separator)).trim().toLowerCase();
+  // `-z` prints each entry as `<key>\n<value>\0`, or `<key>\0` for a bare key with no value.
+  for (const entry of listing.split("\0")) {
+    const newline = entry.indexOf("\n");
+    const key = (newline === -1 ? entry : entry.slice(0, newline)).toLowerCase();
     if (!key) continue;
-    if (
-      key === "core.fsmonitor" &&
-      GIT_BOOLEAN_CONFIG_VALUES.has(
-        (separator === -1 ? "" : line.slice(separator + 1)).trim().toLowerCase(),
-      )
-    ) {
-      continue;
-    }
+    const value = newline === -1 ? null : entry.slice(newline + 1).toLowerCase();
+    if (key === "core.fsmonitor" && value !== null && GIT_FALSE_CONFIG_VALUES.has(value)) continue;
     if (
       key.startsWith("filter.") ||
       key === "core.fsmonitor" ||
@@ -1195,7 +1184,9 @@ async function hasDangerousLocalGitConfig(git: ReadOnlyGit): Promise<boolean> {
  *   worktree's own ignored-path rule, applied to this nested repository instead of bypassed.
  * - HEAD is reachable from a *trusted* remote-tracking ref (`readTrustedRemoteNames`, #1, #2, #6):
  *   a remote whose own URL — after `insteadOf`/`pushInsteadOf` — names a host on the trust
- *   allowlist, with no foreign fetch refspec writing into its namespace.
+ *   allowlist, with no foreign fetch refspec writing into its namespace. With no trusted remote at
+ *   all, a SwiftPM checkout pinned by a tracked `Package.resolved` can still be safe
+ *   ({@link isSafeSwiftPmCheckout}); nothing else can.
  * - when the repository is a **genuine linked worktree whose common dir survives the deletion**
  *   (`isGenuineSurvivingLinkedWorktree`, #1, #6): its `--git-dir` and `--git-common-dir` differ,
  *   the git-dir sits under `<common>/worktrees/`, and the common dir resolves outside both
@@ -1212,7 +1203,8 @@ async function hasDangerousLocalGitConfig(git: ReadOnlyGit): Promise<boolean> {
  *   and no stash entry exists (#2): nothing here has anywhere else to be.
  *
  * A git failure, a dirty tree, an unreachable ref, a stash entry, an external linked worktree, or
- * no trusted remote at all reads as unsafe: every check here refuses on doubt, same as
+ * no trusted remote at all (short of the SwiftPM pin) reads as unsafe: every check here refuses on
+ * doubt, same as
  * `checkWorktreeDeletionSafety`. Reflog-only commits are an accepted loss, the same as the outer
  * gate: nothing here, or in `checkWorktreeDeletionSafety`, reads the reflog.
  */
@@ -1349,36 +1341,61 @@ function resolveSwiftPmCheckoutShape(nestedRepositoryPath: string): SwiftPmCheck
   return { pkgDir: segments.join(sep), indexBuild, name };
 }
 
+/** A `git remote -v` fetch line: `<name>\t<url> (fetch)`. */
+const REMOTE_VERBOSE_FETCH_LINE_RE = /^(\S+)\t(.+)\s\(fetch\)$/u;
+
 /**
- * Whether one of the checkout's own remotes resolves, as a local path, into the sibling
+ * The checkout's own remotes whose fetch URL resolves, as a local path, into the sibling
  * `repositories/` mirror SwiftPM keeps inside the same `.build` tree -- the structural fact, beside
  * sitting next to a `Package.swift` ({@link checkSwiftPmCheckoutSafety}), that marks this as
  * SwiftPM's own cache layout rather than some other nested repository that happens to share a
- * `checkouts` directory name. Not a trust decision by itself: the mirror is inside the same
- * worktree and goes with the deletion too.
+ * `checkouts` directory name. Empty for anything else. Not a trust decision by itself: the mirror
+ * is inside the same worktree and goes with the deletion too. Its remote-tracking refs say which
+ * commits came from upstream ({@link hasLocalOnlySwiftPmCommits}).
  */
-/** A `git remote -v` line: `<name>\t<url> (fetch)` or `<name>\t<url> (push)`. */
-const REMOTE_VERBOSE_LINE_RE = /^\S+\t(.+)\s\((?:fetch|push)\)$/u;
-
-async function isSwiftPmMirrorRemote(
+async function readSwiftPmMirrorRemotes(
   git: ReadOnlyGit,
   nestedRepositoryPath: string,
   shape: SwiftPmCheckoutShape,
-): Promise<boolean> {
-  // One `remote -v` call lists every remote's fetch and push URL (with `insteadOf` applied, same
-  // as `remote get-url`) instead of one `get-url` call per remote.
+): Promise<string[]> {
+  // One `remote -v` call lists every remote's fetch URL (with `insteadOf` applied, same as
+  // `remote get-url`) instead of one `get-url` call per remote.
   const verbose = await git(["remote", "-v"]);
-  if (!verbose) return false;
+  if (!verbose) return [];
   const expectedMirrorRoot = realpathOrSelf(
     join(shape.pkgDir, ".build", ...(shape.indexBuild ? ["index-build"] : []), "repositories"),
   );
+  const names: string[] = [];
   for (const line of verbose.split("\n")) {
-    const url = REMOTE_VERBOSE_LINE_RE.exec(line.trim())?.[1];
-    if (!url) continue;
-    const resolved = realpathOrSelf(resolve(nestedRepositoryPath, url));
-    if (dirname(resolved) === expectedMirrorRoot) return true;
+    const match = REMOTE_VERBOSE_FETCH_LINE_RE.exec(line.trim());
+    if (!match?.[1] || !match[2]) continue;
+    const resolved = realpathOrSelf(resolve(nestedRepositoryPath, match[2]));
+    if (dirname(resolved) === expectedMirrorRoot) names.push(match[1]);
   }
-  return false;
+  return names;
+}
+
+/**
+ * Whether the checkout holds a commit that did not come from upstream: one reachable from HEAD,
+ * a local branch or any other ref (`refs/notes`, a custom namespace, a stash) but from none of
+ * the mirror remotes' remote-tracking refs. SwiftPM checks a pinned revision out detached and
+ * leaves the clone's own branches alone, so a branch someone committed on while debugging the
+ * dependency survives the next resolve, and the pin says nothing about it. Tags are left out:
+ * an upstream mirror routinely carries tags on commits no branch reaches, and a checkout carries
+ * every one. A commit pushed from the checkout into the mirror, or a local tag on a local commit,
+ * still reads as upstream's -- the mirror is inside the worktree and goes with it.
+ */
+async function hasLocalOnlySwiftPmCommits(
+  git: ReadOnlyGit,
+  mirrorRemotes: readonly string[],
+): Promise<boolean> {
+  return hasUnsafeUnreachableCommits(git, [
+    "--exclude=refs/tags/*",
+    "--all",
+    "HEAD",
+    "--not",
+    ...mirrorRemotes.map((name) => `--remotes=${name}`),
+  ]);
 }
 
 interface SwiftPmPin {
@@ -1439,13 +1456,7 @@ function findSwiftPmPin(packageResolvedContents: string, identity: string): Swif
  *   uses): `swift package resolve` clones from there and checks out the pinned revision, recreating
  *   this exact checkout from nothing.
  *
- * Deliberately skips the general path's "every other ref reachable from a trusted remote, no
- * stash entry" sweep over the checkout's own copy of the upstream repository: SwiftPM clones the
- * whole repository rather than a single commit, so a checkout routinely carries the upstream's
- * entire branch and tag list, none of which the project depends on or could lose anything
- * meaningful by -- the pinned revision is the only content the build ever reads, and the pin above
- * already proves that exact commit is the trusted host's. The caller still checks for a stash
- * entry itself (cheap, and worth keeping regardless of how trust was established).
+ * The pin proves only HEAD; {@link isSafeSwiftPmCheckout} checks the rest of the ref store.
  */
 async function checkSwiftPmCheckoutSafety(
   worktreePath: string,
@@ -1466,6 +1477,46 @@ async function checkSwiftPmCheckoutSafety(
   return isTrustedRemoteUrl(pin.location, trustedRemoteHosts);
 }
 
+interface SwiftPmCheckoutCandidate {
+  worktreePath: string;
+  nestedRepositoryPath: string;
+  git: ReadOnlyGit;
+  head: string;
+  preflight: { gitDir: string; commonDir: string };
+  trustedRemoteHosts: ReadonlySet<string>;
+  runGit: RunGitCommand;
+}
+
+/**
+ * The second way a nested repository with no trusted remote can be safe: it is a SwiftPM checkout
+ * whose HEAD a tracked `Package.resolved` pins at a trusted host ({@link
+ * checkSwiftPmCheckoutSafety}), and the rest of its ref store holds nothing of its own -- no
+ * commit the mirror never had ({@link hasLocalOnlySwiftPmCommits}), no linked worktree elsewhere
+ * sharing it, no stash entry. The same guards as the general path's standalone-clone branch, with
+ * the mirror's remote-tracking refs standing in for a trusted remote's and tags left out.
+ */
+async function isSafeSwiftPmCheckout(candidate: SwiftPmCheckoutCandidate): Promise<boolean> {
+  const { git, nestedRepositoryPath, preflight } = candidate;
+  const shape = resolveSwiftPmCheckoutShape(nestedRepositoryPath);
+  if (!shape) return false;
+  const mirrorRemotes = await readSwiftPmMirrorRemotes(git, nestedRepositoryPath, shape);
+  if (mirrorRemotes.length === 0) return false;
+  if (
+    !(await checkSwiftPmCheckoutSafety(
+      candidate.worktreePath,
+      shape,
+      candidate.head,
+      candidate.trustedRemoteHosts,
+      candidate.runGit,
+    ))
+  ) {
+    return false;
+  }
+  if (await hasExternalLinkedWorktrees(preflight.gitDir, preflight.commonDir)) return false;
+  if (await hasLocalOnlySwiftPmCommits(git, mirrorRemotes)) return false;
+  return (await git(["rev-parse", "--verify", "--quiet", "refs/stash"])) === null;
+}
+
 export async function checkNestedRepositorySafety(
   worktreePath: string,
   nestedRepositoryPath: string,
@@ -1483,14 +1534,15 @@ export async function checkNestedRepositorySafety(
 
   const trustedRemotes = await readTrustedRemoteNames(git, trustedRemoteHosts);
   if (trustedRemotes.length === 0) {
-    const shape = resolveSwiftPmCheckoutShape(nestedRepositoryPath);
-    if (!shape || !(await isSwiftPmMirrorRemote(git, nestedRepositoryPath, shape))) return false;
-    if (
-      !(await checkSwiftPmCheckoutSafety(worktreePath, shape, head, trustedRemoteHosts, runGit))
-    ) {
-      return false;
-    }
-    return (await git(["rev-parse", "--verify", "--quiet", "refs/stash"])) === null;
+    return isSafeSwiftPmCheckout({
+      worktreePath,
+      nestedRepositoryPath,
+      git,
+      head,
+      preflight,
+      trustedRemoteHosts,
+      runGit,
+    });
   }
   const survivors = trustedRemotes.map((name) => `--remotes=${name}`);
 

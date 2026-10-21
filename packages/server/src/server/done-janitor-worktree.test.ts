@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -1683,6 +1684,44 @@ describe("checkNestedRepositorySafety", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  // `git config --list` prints a value's embedded newline as a line break, so a hook command
+  // written after `true\n` would read as `core.fsmonitor=true` plus an unkeyed line. Git itself
+  // reads the whole value as a hook path and runs it through the shell.
+  test("a nested repository with a multi-line core.fsmonitor value is not safe", async () => {
+    const worktree = addWorktree("nested-fsmonitor-multiline", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    commit(nested, "f.txt", "content\n");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
+    git(nested, "config", "core.fsmonitor", `false\ntouch ${join(root, "fsmonitor-multiline")}`);
+
+    await expect(checkNestedRepositorySafety(worktree, nested)).resolves.toBe(false);
+  });
+
+  // `true`, or a bare key with no value, turns on git's built-in fsmonitor daemon: `git status`
+  // would start a long-lived watcher inside the worktree. Only the off spellings are excused.
+  test.each([["true"], ["yes"], ["1"]])(
+    "a nested repository with core.fsmonitor=%s is not safe",
+    async (value) => {
+      const worktree = addWorktree(`nested-fsmonitor-${value}`, "feature");
+      const nested = initNested(worktree, "vendor/tool");
+      commit(nested, "f.txt", "content\n");
+      fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
+      git(nested, "config", "core.fsmonitor", value);
+
+      await expect(checkNestedRepositorySafety(worktree, nested)).resolves.toBe(false);
+    },
+  );
+
+  test("a nested repository with a bare core.fsmonitor key is not safe", async () => {
+    const worktree = addWorktree("nested-fsmonitor-bare", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    commit(nested, "f.txt", "content\n");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
+    appendFileSync(join(nested, ".git", "config"), "[core]\n\tfsmonitor\n");
+
+    await expect(checkNestedRepositorySafety(worktree, nested)).resolves.toBe(false);
+  });
+
   // #SPM: a SwiftPM-managed checkout's own remote is always a local path into the sibling
   // `repositories/` mirror inside the same `.build` tree, so the general remote-trust check above
   // never passes it. Pinned exactly at a tracked `Package.resolved`'s revision, with that pin's
@@ -1702,12 +1741,32 @@ describe("checkNestedRepositorySafety", () => {
       const buildSegments = [".build", ...(indexBuild ? ["index-build"] : [])];
       const mirror = join(pkgDir, ...buildSegments, "repositories", `${input.name}-deadbeef`);
       mkdirSync(mirror, { recursive: true });
+      git(mirror, "init", "-q", "--bare");
       const checkout = join(pkgDir, ...buildSegments, "checkouts", input.name);
       mkdirSync(checkout, { recursive: true });
       git(checkout, "init", "-q");
       git(checkout, "remote", "add", "origin", mirror);
       commit(checkout, "f.txt", "content\n");
+      // As SwiftPM leaves it: the mirror holds the upstream history, the checkout's
+      // remote-tracking refs came from fetching it, and HEAD is detached at the pinned revision.
+      git(checkout, "push", "-q", "origin", "HEAD:refs/heads/main");
+      git(checkout, "fetch", "-q", "origin");
+      git(checkout, "checkout", "-q", "--detach");
       return { checkout, pkgDir, pkgRelative, head: git(checkout, "rev-parse", "HEAD").trim() };
+    }
+
+    function pinAtHead(input: { worktree: string; pkgRelative: string; head: string }): void {
+      writePackageResolved({
+        worktree: input.worktree,
+        pkgRelative: input.pkgRelative,
+        pins: [
+          {
+            identity: "amplitude-ios",
+            location: "https://github.com/amplitude/Amplitude-iOS.git",
+            revision: input.head,
+          },
+        ],
+      });
     }
 
     function writePackageResolved(input: {
@@ -1786,7 +1845,7 @@ describe("checkNestedRepositorySafety", () => {
           {
             identity: "amplitude-ios",
             location: "https://github.com/amplitude/Amplitude-iOS.git",
-            revision: `${head.slice(0, -4)}dead`,
+            revision: head === "0".repeat(40) ? "1".repeat(40) : "0".repeat(40),
           },
         ],
       });
@@ -1879,6 +1938,63 @@ describe("checkNestedRepositorySafety", () => {
       await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(false);
     });
 
+    // A commit made on a branch while debugging the dependency, after which SwiftPM checks the
+    // pinned revision out again: HEAD is back at the pin, the branch and its commit are left
+    // behind, and the mirror never had that commit.
+    test("a pinned checkout with a local branch holding a commit the mirror never had is not safe", async () => {
+      const worktree = addWorktree("spm-local-branch", "feature");
+      const { checkout, pkgRelative, head } = initSwiftPmCheckout({
+        worktree,
+        name: "Amplitude-iOS",
+      });
+      pinAtHead({ worktree, pkgRelative, head });
+      git(checkout, "checkout", "-q", "-b", "wip");
+      commit(checkout, "fix.txt", "local fix\n");
+      git(checkout, "checkout", "-q", "--detach", head);
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(false);
+    });
+
+    // A pin is only text in a tracked file: a revision the mirror never fetched, so never came
+    // from upstream, is a local commit whatever host the pin names.
+    test("a checkout pinned at a local commit the mirror never had is not safe", async () => {
+      const worktree = addWorktree("spm-local-head", "feature");
+      const { checkout, pkgRelative } = initSwiftPmCheckout({ worktree, name: "Amplitude-iOS" });
+      commit(checkout, "fix.txt", "local fix\n");
+      pinAtHead({ worktree, pkgRelative, head: git(checkout, "rev-parse", "HEAD").trim() });
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(false);
+    });
+
+    test("a pinned checkout that is the main repository of a linked worktree elsewhere is not safe", async () => {
+      const worktree = addWorktree("spm-external-worktree", "feature");
+      const { checkout, pkgRelative, head } = initSwiftPmCheckout({
+        worktree,
+        name: "Amplitude-iOS",
+      });
+      pinAtHead({ worktree, pkgRelative, head });
+      git(checkout, "worktree", "add", "-q", "--detach", join(root, "spm-linked-elsewhere"));
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(false);
+    });
+
+    // Tags are left out of the reachability sweep on purpose: an upstream mirror routinely
+    // carries tags on commits no branch reaches, and those came from upstream like the rest.
+    test("a pinned checkout carrying an upstream tag no branch reaches is safe", async () => {
+      const worktree = addWorktree("spm-tag-only-commit", "feature");
+      const { checkout, pkgRelative, head } = initSwiftPmCheckout({
+        worktree,
+        name: "Amplitude-iOS",
+      });
+      commit(checkout, "release.txt", "release\n");
+      git(checkout, "tag", "1.0.0");
+      git(checkout, "push", "-q", "origin", "refs/tags/1.0.0");
+      git(checkout, "checkout", "-q", "--detach", head);
+      pinAtHead({ worktree, pkgRelative, head });
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(true);
+    });
+
     // A checkout-shaped directory whose remote does *not* resolve into the sibling
     // `repositories/` mirror is not SwiftPM's own cache layout -- the general, remote-trust path
     // alone decides it, same as any other nested repository with a local-path remote.
@@ -1896,6 +2012,9 @@ describe("checkNestedRepositorySafety", () => {
       commit(checkout, "f.txt", "content\n");
       git(checkout, "remote", "add", "origin", elsewhere);
       git(checkout, "push", "-q", "origin", "HEAD:main");
+      git(checkout, "fetch", "-q", "origin");
+      // Everything else a pinned checkout needs is in place, so the remote is the only reason.
+      pinAtHead({ worktree, pkgRelative, head: git(checkout, "rev-parse", "HEAD").trim() });
 
       await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(false);
     });
