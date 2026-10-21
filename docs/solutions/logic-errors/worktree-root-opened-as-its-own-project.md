@@ -43,7 +43,7 @@ Fixed in funkmastert/paseo#68.
 
 ## What Didn't Work
 
-Removing idle projects by folder name. A path segment like `*-worktrees/` is not evidence of a worktree: a main checkout lived at `mobile-worktrees/main`, and one person's main project was itself a linked worktree. A name rule would have deleted real projects and kept impostors.
+Removing idle projects by folder name. A path segment like `*-worktrees/` is not evidence of a worktree: a main checkout lived at `mobile-worktrees/main`, and one main project was itself a linked worktree. A name rule would have deleted real projects and kept impostors.
 
 ## Solution
 
