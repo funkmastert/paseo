@@ -20,9 +20,14 @@ import { randomUUID } from "crypto";
 import {
   allBoardIds,
   arenaAliasFor,
+  isLeaderBoardId,
+  LEADER_BOARD_IDS,
+  LEADER_HISTORY_MAX_PUBLISHES,
+  type ArenaPublish,
   type ArenaRankingRow,
   type ArenaRankingsFile,
   ArenaRankingsFileSchema,
+  type ArenaTopRow,
 } from "../shared/arena-aliases";
 import { createIntervalPoller, type IntervalPoller } from "./interval-poller";
 
@@ -41,6 +46,8 @@ const MAX_FAILED_BOARD_RETRY_ATTEMPTS = 3;
 
 /** The minimum vote/observation count to include a row (KTD-10). */
 const VOTE_FLOOR = 5;
+/** How many top rows, matched or not, a leader board keeps for the unpooled-challenger alert. */
+const BOARD_TOP_SIZE = 10;
 
 /** The HF datasets-server API for LMArena (CC-BY-4.0; see docs/arena-ranking.md). */
 const HF_DATASETS_API = "https://datasets-server.huggingface.co";
@@ -181,6 +188,97 @@ export function normalizeBoardRows(rawRows: readonly LeaderboardRow[]): { rows: 
     }
   }
   return { rows, unmatched };
+}
+
+/** A board's own publish date: the newest `leaderboard_publish_date` among its rows. Pure. */
+export function boardPublishDate(rawRows: readonly LeaderboardRow[]): string | undefined {
+  let newest: string | undefined;
+  for (const row of rawRows) {
+    if (row.leaderboard_publish_date && (newest === undefined || row.leaderboard_publish_date > newest)) {
+      newest = row.leaderboard_publish_date;
+    }
+  }
+  return newest;
+}
+
+/**
+ * A board's top rows by rating, matched or not, above the vote floor. An
+ * unaliased model keeps its canonical name and no ref, so the alert can name a
+ * model nobody has mapped yet. Pure.
+ */
+export function topRows(rawRows: readonly LeaderboardRow[]): ArenaTopRow[] {
+  const rows: ArenaTopRow[] = [];
+  for (const raw of rawRows) {
+    const votes = isAgentRow(raw) ? raw.observation_count : raw.vote_count;
+    if (votes < VOTE_FLOOR) {
+      continue;
+    }
+    const arenaName = canonicalArenaName(raw.model_name);
+    const alias = arenaAliasFor(arenaName);
+    rows.push({
+      arenaName,
+      ...(alias ? { ours: alias.ref, effort: alias.effort } : {}),
+      rating: isAgentRow(raw) ? raw.score : raw.rating,
+      ratingLower: isAgentRow(raw) ? raw.score_ci_lower : raw.rating_lower,
+      ratingUpper: isAgentRow(raw) ? raw.score_ci_upper : raw.rating_upper,
+      votes,
+    });
+  }
+  return rows.sort((a, b) => b.rating - a.rating).slice(0, BOARD_TOP_SIZE);
+}
+
+/** What one fetch learned about a leader board: its matched rows, its own publish date, its top rows. */
+export interface FetchedLeaderBoard {
+  rows: ArenaRankingRow[];
+  publishDate: string | undefined;
+  top: ArenaTopRow[];
+}
+
+/** The leader-board fields of the rankings file, as `mergeLeaderBoards` writes them. */
+export interface LeaderBoardState {
+  leaderHistory: Record<string, ArenaPublish[]>;
+  boardTop: Record<string, ArenaTopRow[]>;
+}
+
+/** Newest publish first. ISO dates compare correctly as strings. */
+function newestFirst(a: ArenaPublish, b: ArenaPublish): number {
+  if (a.publishDate === b.publishDate) {
+    return 0;
+  }
+  return a.publishDate < b.publishDate ? 1 : -1;
+}
+
+/**
+ * Folds one fetch's leader boards into the previous file's history and top
+ * rows. A new publish is prepended (newest first, at most
+ * `LEADER_HISTORY_MAX_PUBLISHES`); a publish already recorded is left as it
+ * was, since a publish does not change. A board this fetch has nothing for
+ * (it failed) keeps what it had. Non-leader boards are ignored. Pure.
+ */
+export function mergeLeaderBoards(
+  previous: Pick<ArenaRankingsFile, "leaderHistory" | "boardTop"> | undefined,
+  fetched: Readonly<Record<string, FetchedLeaderBoard>>,
+): LeaderBoardState {
+  const leaderHistory: Record<string, ArenaPublish[]> = { ...previous?.leaderHistory };
+  const boardTop: Record<string, ArenaTopRow[]> = { ...previous?.boardTop };
+  for (const boardId of LEADER_BOARD_IDS) {
+    const board = fetched[boardId];
+    if (!board) {
+      continue;
+    }
+    boardTop[boardId] = board.top;
+    if (board.publishDate === undefined) {
+      continue;
+    }
+    const history = leaderHistory[boardId] ?? [];
+    if (history.some((entry) => entry.publishDate === board.publishDate)) {
+      continue;
+    }
+    leaderHistory[boardId] = [{ publishDate: board.publishDate, rows: board.rows }, ...history]
+      .sort(newestFirst)
+      .slice(0, LEADER_HISTORY_MAX_PUBLISHES);
+  }
+  return { leaderHistory, boardTop };
 }
 
 interface HfRowsPage {
@@ -333,14 +431,11 @@ async function fetchConfigCategoryRows(
  * — see `fetchConfigCategoryRows`). A board with no collected rows and no
  * error is a legitimately empty board, same as before this fix.
  */
-async function fetchBoardsGroupedByConfig(boardIds: readonly string[]): Promise<{
-  boards: Record<string, ArenaRankingRow[]>;
-  unmatched: Record<string, number>;
-  failedBoards: string[];
-}> {
+async function fetchBoardsGroupedByConfig(boardIds: readonly string[]): Promise<FetchedBoards> {
   const boards: Record<string, ArenaRankingRow[]> = {};
   const unmatched: Record<string, number> = {};
   const failedBoards: string[] = [];
+  const leaderBoards: Record<string, FetchedLeaderBoard> = {};
 
   const entriesByConfig = new Map<string, Array<{ category: string; boardId: string }>>();
   for (const boardId of boardIds) {
@@ -379,19 +474,26 @@ async function fetchBoardsGroupedByConfig(boardIds: readonly string[]): Promise<
       const { rows, unmatched: boardUnmatched } = normalizeBoardRows(categoryRows ?? []);
       boards[boardId] = rows;
       unmatched[boardId] = boardUnmatched;
+      if (isLeaderBoardId(boardId)) {
+        leaderBoards[boardId] = { rows, publishDate: boardPublishDate(categoryRows ?? []), top: topRows(categoryRows ?? []) };
+      }
     }
   }
 
-  return { boards, unmatched, failedBoards };
+  return { boards, unmatched, failedBoards, leaderBoards };
 }
 
-/** Fetch and normalize every board KTD-11's table references. */
-async function fetchAllBoards(): Promise<{
+interface FetchedBoards {
   boards: Record<string, ArenaRankingRow[]>;
   unmatched: Record<string, number>;
   failedBoards: string[];
-}> {
-  return fetchBoardsGroupedByConfig(allBoardIds());
+  /** The leader boards among `boards`, with what the leader pick and its alert need. */
+  leaderBoards: Record<string, FetchedLeaderBoard>;
+}
+
+/** Fetch and normalize every board KTD-11's table references, plus the leader boards. */
+async function fetchAllBoards(): Promise<FetchedBoards> {
+  return fetchBoardsGroupedByConfig([...new Set([...allBoardIds(), ...LEADER_BOARD_IDS])]);
 }
 
 function rankingsFilePath(paseoHome: string): string {
@@ -449,18 +551,21 @@ export async function refreshArenaRankings(
   paseoHome: string,
 ): Promise<{ status: "success"; boardCount: number; unmatched: Record<string, number> } | { status: "failed"; error: string }> {
   try {
-    const { boards, unmatched, failedBoards } = await fetchAllBoards();
+    const { boards, unmatched, failedBoards, leaderBoards } = await fetchAllBoards();
     const boardIds = Object.keys(boards);
     if (boardIds.length === 0) {
       return { status: "failed", error: `every board fetch failed: ${failedBoards.join(", ")}` };
     }
 
+    // History outlives freshness: a stale previous file still carries the publishes it recorded.
+    const previous = await readRankingsFile(paseoHome);
     const file: ArenaRankingsFile = {
       fetchedAt: Date.now(),
       publishDate: new Date().toISOString().slice(0, 10),
       boards,
       unmatched,
       failedBoards,
+      ...mergeLeaderBoards(previous ?? undefined, leaderBoards),
     };
 
     await writeRankingsFile(paseoHome, file);
@@ -523,7 +628,7 @@ export async function retryFailedBoards(
   }
   const retryStartedFromFetchedAt = file.fetchedAt;
 
-  const { boards, unmatched, failedBoards: stillFailed } = await fetchBoardsGroupedByConfig(file.failedBoards);
+  const { boards, unmatched, failedBoards: stillFailed, leaderBoards } = await fetchBoardsGroupedByConfig(file.failedBoards);
   const recovered = file.failedBoards.filter((id) => !stillFailed.includes(id));
   if (recovered.length === 0) {
     console.error(`arena-rankings: retry found ${stillFailed.length} board(s) still failing: ${stillFailed.join(", ")}`);
@@ -541,6 +646,7 @@ export async function retryFailedBoards(
     boards: { ...latest.boards, ...boards },
     unmatched: { ...latest.unmatched, ...unmatched },
     failedBoards: stillFailed,
+    ...mergeLeaderBoards(latest, leaderBoards),
   };
   await writeRankingsFile(paseoHome, merged);
   return { status: "merged", recovered, stillFailed };

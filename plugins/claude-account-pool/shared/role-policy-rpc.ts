@@ -8,6 +8,7 @@ import {
   ThinkingPolicyShapeSchema,
 } from "./role-policy-schema";
 import { defineRpc } from "@getpaseo/plugin";
+import { UnpooledChallengerSchema } from "./arena-unpooled";
 
 /**
  * The client-editable subset of a policy document: everything except
@@ -259,6 +260,13 @@ export const RoleModelPolicyExplainResultSchema = z.object({
       missingFromCatalog: z.boolean().optional(),
     })
     .optional(),
+  /**
+   * Models that would beat the leader pool's first entry on the first leader
+   * board by the leader pick's margin, but sit in no role's pool (see
+   * `shared/arena-unpooled.ts`). Omitted when there are none. Present on every
+   * explain, whatever role it asks about: it describes the fleet, not this create.
+   */
+  unpooledLeaderChallengers: z.array(UnpooledChallengerSchema).optional(),
 });
 export type RoleModelPolicyExplainResult = z.infer<typeof RoleModelPolicyExplainResultSchema>;
 

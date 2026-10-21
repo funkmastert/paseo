@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { DEFAULT_TOOL_PROFILE, ToolProfileSchema } from "./tool-profiles";
+import { LEADER_BOARD_IDS, LEADER_HISTORY_MAX_PUBLISHES } from "./arena-aliases";
+import { sameModel } from "./model-identity";
 
 /**
  * Label keys the role hook reads off `agent.create` requests. Mirrors the
@@ -390,6 +392,34 @@ const AgentTypeMappingsSchema = z
 export const CURRENT_SCHEMA_VERSION = 4;
 
 /**
+ * The leader pick (docs/arena-ranking.md, "Leaders"): which model the LMArena
+ * rankings would run a new leader on, from the leader role's own pool. Off by
+ * default and shadow when on, so turning it on records a would-be pick
+ * without changing which model a leader runs.
+ *
+ * - `boards`: walked in order; the first that ranks the incumbent and a usable
+ *   challenger decides. Only `LEADER_BOARD_IDS`, which keep history.
+ * - `marginCi`: widths of the challenger's own CI its lower bound must clear
+ *   the incumbent's upper bound by, beyond a plain non-overlap win.
+ * - `streakPublishes`: how many consecutive publishes the same challenger must
+ *   win before it becomes the pick. At most the history the job keeps.
+ */
+/** The leader pick's default margin in CI widths; also the unpooled alert's margin when no leader block exists. */
+export const DEFAULT_LEADER_MARGIN_CI = 1;
+
+export const ArenaLeaderPolicySchema = z.object({
+  enabled: z.boolean().default(false),
+  shadow: z.boolean().default(true),
+  boards: z
+    .array(z.enum(LEADER_BOARD_IDS))
+    .min(1)
+    .default([...LEADER_BOARD_IDS]),
+  marginCi: z.number().min(0).default(DEFAULT_LEADER_MARGIN_CI),
+  streakPublishes: z.number().int().min(1).max(LEADER_HISTORY_MAX_PUBLISHES).default(3),
+});
+export type ArenaLeaderPolicy = z.infer<typeof ArenaLeaderPolicySchema>;
+
+/**
  * KTD-13: an optional `arena` key on `agentModelPolicy`. Absent means exactly
  * today's order (R8) — the field is `.optional()`, not `.default()`, so a
  * config stored before this key existed parses to `arena: undefined`
@@ -410,6 +440,8 @@ export const CURRENT_SCHEMA_VERSION = 4;
  *   plain CI-non-overlap win. Default 0.
  * - `maxAgeHours`: how stale `arena-rankings.json` may be before ranking
  *   falls back to today's order. Default 72 (KTD-10).
+ * - `leader`: the leader pick, a separate rule with its own switch
+ *   (`ArenaLeaderPolicySchema`). `enabled`/`shadow` above never reach it.
  */
 export const ArenaPolicySchema = z.object({
   enabled: z.boolean().default(false),
@@ -418,6 +450,7 @@ export const ArenaPolicySchema = z.object({
   topTier: z.array(z.string().max(MAX_MODEL_REF_LENGTH).regex(MODEL_REF_RE)).default([]),
   topTierMarginCi: z.number().min(0).default(0),
   maxAgeHours: z.number().positive().default(72),
+  leader: ArenaLeaderPolicySchema.optional(),
 });
 export type ArenaPolicy = z.infer<typeof ArenaPolicySchema>;
 
@@ -660,6 +693,13 @@ export function splitModelRef(ref: string): ParsedModelRef | null {
 /** The provider family a ref's catalog entry lives under — POOL_FAMILY for bare refs. */
 export function modelRefFamily(parsed: ParsedModelRef): string {
   return parsed.provider ?? POOL_FAMILY;
+}
+
+/** Whether two model refs name the same model: same family, and `sameModel`'s dated/undated identity. */
+export function sameModelRef(a: string, b: string): boolean {
+  const left = splitModelRef(a);
+  const right = splitModelRef(b);
+  return left !== null && right !== null && modelRefFamily(left) === modelRefFamily(right) && sameModel(left.model, right.model);
 }
 
 /** Distinct provider-family ids referenced anywhere across the policy's roles, for catalog refresh scoping. */

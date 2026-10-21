@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { ArenaRankingsFile } from "../shared/arena-aliases";
+import { findUnpooledLeaderChallengers } from "../shared/arena-unpooled";
 import type { CodexGuardAvailabilitySnapshot } from "./codex-guard-availability";
 import { CURRENT_SCHEMA_VERSION, RoleModelPolicySchema, type RoleModelPolicy } from "../shared/role-policy-schema";
 import { roleModelPolicyRpc, type RoleModelPolicyExplainResult } from "../shared/role-policy-rpc";
@@ -177,6 +178,9 @@ async function performWrite(
     // Same again: Codex's budget reserve is not part of the settings screen's editable
     // surface yet, so an unrelated save must carry it through untouched.
     codex: current.policy.codex,
+    // Same again: arena ranking, the leader pick included, has no settings surface. Without this
+    // an unrelated save drops the whole block, which switches ranking off.
+    arena: current.policy.arena,
     revision: randomUUID(),
   };
   const parsed = RoleModelPolicySchema.safeParse(candidate);
@@ -333,6 +337,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
       const decision = classifyAgent(preview ? { ...classifierInput, jevHint: preview } : classifierInput, world);
 
       const { role, taskClass, model, tools, account, thinking, outputStyle, mcp } = decision;
+      const unpooledLeaderChallengers = findUnpooledLeaderChallengers({ rankings: world.arenaRanking, policy: freshPolicy });
       const mcpScopeLabel = mcpScopeLabelValue(mcp);
       const requestedModelOverride: RoleModelPolicyExplainResult["requestedModelOverride"] = model.override
         ? {
@@ -354,6 +359,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           : undefined;
 
       return {
+        ...(unpooledLeaderChallengers.length > 0 ? { unpooledLeaderChallengers } : {}),
         roleId: role.role.id,
         roleName: role.role.name,
         roleSource: role.source,

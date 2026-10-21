@@ -22,7 +22,13 @@ import {
   type ToolProfile,
 } from "../shared/tool-profiles";
 import { WORK_KINDS, type ArenaRankingsFile, type WorkKind } from "../shared/arena-aliases";
-import { decideArenaPick, moveRefToFront, type ArenaPickDecision } from "./arena-model-pick";
+import {
+  decideArenaPick,
+  decideLeaderPick,
+  moveRefToFront,
+  type ArenaPickDecision,
+  type LeaderPickDecision,
+} from "./arena-model-pick";
 import {
   clampThinkingOption,
   THINKING_LEVEL_LABELS,
@@ -383,12 +389,22 @@ export interface ModelDecision {
   /**
    * U8's arena-ranked pick (KTD-1, KTD-2, KTD-11, KTD-13), present whenever
    * `policy.arena` exists and the role/class/kind qualified for evaluation —
-   * including a fallback, so a leader, a declared class or a stale file is as
-   * visible in the decision line as a successful pick. Absent entirely when
+   * including a fallback, so a declared class or a stale file is as visible
+   * in the decision line as a successful pick. Never set for a leader, whose
+   * pick is `leaderRanking`. Absent entirely when
    * `policy.arena` is undefined (an old config): zero behavior change, zero
    * extra computation worth recording.
    */
   ranking?: ArenaPickDecision & { applied: boolean };
+  /**
+   * The leader pick (docs/arena-ranking.md, "Leaders"), present only for a
+   * create that resolved to the leader role while `policy.arena.leader.enabled`
+   * is on — fallbacks included. `applied` is true only when the challenger
+   * actually runs: live mode, a completed streak, and no request that kept
+   * another model. Kept apart from `ranking` so no worker consumer has to
+   * learn the leader shape.
+   */
+  leaderRanking?: LeaderPickDecision & { applied: boolean };
 }
 
 export interface ToolDecision {
@@ -735,6 +751,40 @@ function hasModelPinLabel(labels: Record<string, string> | undefined): boolean {
   return typeof value === "string" && value.length > 0;
 }
 
+/** The failover import successor label (`packages/server/src/server/agent/account-failover-detector.ts`'s `HANDOFF_FROM_LABEL`). */
+const HANDOFF_FROM_LABEL = "handoff-from";
+
+function hasHandoffFromLabel(labels: Record<string, string> | undefined): boolean {
+  const value = labels?.[HANDOFF_FROM_LABEL];
+  return typeof value === "string" && value.length > 0;
+}
+
+/** Whether a pool ref names the same model (family plus dated/undated identity) as an explicit request. */
+function refMatchesRequestedModel(ref: string, requestedFamily: string, requestedModel: string): boolean {
+  const parsed = splitModelRef(ref);
+  return parsed !== null && modelRefFamily(parsed) === requestedFamily && sameModel(parsed.model, requestedModel);
+}
+
+/** The leader pick's sentence on the model decision's reason, so the settings preview and the log show it. */
+function leaderPickNote(leaderRanking: NonNullable<ModelDecision["leaderRanking"]>, shadow: boolean): string {
+  const mode = shadow ? "shadow" : "live";
+  if (leaderRanking.outcome === "fallback") {
+    return ` LMArena leader pick (${mode}): no pick (${leaderRanking.reason}).`;
+  }
+  const { incumbent, challenger, streak, board, publishDate } = leaderRanking;
+  const verdict =
+    leaderRanking.holds === "challenger"
+      ? `${challenger.ref} would replace ${incumbent.ref}`
+      : `${incumbent.ref} holds`;
+  let ran = "";
+  if (leaderRanking.applied) {
+    ran = " It runs.";
+  } else if (shadow) {
+    ran = " Recorded only.";
+  }
+  return ` LMArena leader pick (${mode}): ${verdict} on ${board} (${publishDate}); best challenger ${challenger.ref}, ${streak.won}/${streak.needed} publishes.${ran}`;
+}
+
 /**
  * Whether U8's ranked ref names the SAME model (by family and `sameModel`'s
  * dated/undated identity) as an explicit request — `decideArenaPick` ranks
@@ -752,8 +802,7 @@ function rankingMatchesRequestedModel(
   if (ranking?.outcome !== "ranked") {
     return false;
   }
-  const parsed = splitModelRef(ranking.ref);
-  return parsed !== null && modelRefFamily(parsed) === requestedFamily && sameModel(parsed.model, requestedModel);
+  return refMatchesRequestedModel(ranking.ref, requestedFamily, requestedModel);
 }
 
 /**
@@ -762,12 +811,19 @@ function rankingMatchesRequestedModel(
  * instead of one more nesting level with no test pinning the existing
  * branches' exact wording.
  */
-function describeOverrideNote(override: NonNullable<ModelDecision["override"]>, slot: ModelPoolSlot, fellBack: boolean): string {
+function describeOverrideNote(
+  override: NonNullable<ModelDecision["override"]>,
+  slot: ModelPoolSlot,
+  fellBack: boolean,
+  leaderPick: boolean,
+): string {
   switch (override.reason) {
     case "not-approved":
       return ` ${override.requestedRef} was asked for, but ${poolPhrase(slot, fellBack)} does not approve it, so policy chose instead.`;
     case "arena-ranked":
-      return ` ${override.requestedRef} was asked for and is approved, but ${override.effectiveRef} ranks higher for this kind of work on LMArena, so it runs instead. Label the create with paseo.model-pin to keep the requested model.`;
+      return leaderPick
+        ? ` ${override.requestedRef} was asked for and is the leader pool's default, but ${override.effectiveRef} has cleared it on LMArena by the leader pick's margin for enough consecutive publishes, so it runs instead. Label the create with paseo.model-pin to keep the requested model.`
+        : ` ${override.requestedRef} was asked for and is approved, but ${override.effectiveRef} ranks higher for this kind of work on LMArena, so it runs instead. Label the create with paseo.model-pin to keep the requested model.`;
     case "not-currently-selectable":
       return override.missingFromCatalog
         ? ` ${override.requestedRef} was asked for and is approved, but the provider's catalog does not list it and allowUnlistedModels does not name it, so policy chose instead. Add it there if the provider does accept the id.`
@@ -784,6 +840,20 @@ function describeOverrideNote(override: NonNullable<ModelDecision["override"]>, 
  * failure this checks for, rather than just asking "is it in the list".
  */
 function decideModel(
+  input: ClassifierInput,
+  world: ClassifierWorld,
+  role: RoleRecord,
+  taskClass: TaskClassId | undefined,
+  taskClassDeclared: boolean,
+): ModelDecision {
+  const decision = decideModelCore(input, world, role, taskClass, taskClassDeclared);
+  const leaderPolicy = world.policy.arena?.leader;
+  return decision.leaderRanking && leaderPolicy
+    ? { ...decision, reason: `${decision.reason}${leaderPickNote(decision.leaderRanking, leaderPolicy.shadow)}` }
+    : decision;
+}
+
+function decideModelCore(
   input: ClassifierInput,
   world: ClassifierWorld,
   role: RoleRecord,
@@ -835,11 +905,17 @@ function decideModel(
 
   // U8's arena-ranked pick (KTD-1, KTD-2, KTD-11, KTD-13): evaluated whenever `policy.arena` exists
   // AND the role isn't the leader, so a fallback is as visible in the decision line as a successful
-  // pick (R8) — except for a leader, which never carries a ranking at all (not even a "leader"
-  // fallback note): leaders are never a candidate for this feature, policy or no policy. Absent
+  // pick (R8) — except for a leader, which never carries `ranking` at all (not even a "leader"
+  // fallback note): its pick is the separate leader rule below, recorded as `leaderRanking`. Absent
   // `policy.arena` (an old config) skips this entirely — zero extra computation. Explicit beats
   // inferred (the file header's own rule): an honored explicit request below never consults this,
   // and ranking only ever reorders the SAME operator-approved pool, never adds to it.
+  const usabilityOptions = {
+    modelBudgetThresholdPct: world.policy.modelBudgetThresholdPct,
+    allowUnlistedModels: world.policy.allowUnlistedModels,
+    codex: codexAvailability,
+  };
+  const isUsable = (ref: string) => isModelRefUsable(ref, world.catalog, world.pool, world.health, usabilityOptions);
   let ranking: ModelDecision["ranking"];
   let selectionRole = role;
   if (world.policy.arena && role.id !== LEADER_ROLE_ID) {
@@ -851,18 +927,38 @@ function decideModel(
       taskClassDeclared,
       kind: resolveWorkKind(input.jevHint, role),
       pool,
-      isUsable: (ref) =>
-        isModelRefUsable(ref, world.catalog, world.pool, world.health, {
-          modelBudgetThresholdPct: world.policy.modelBudgetThresholdPct,
-          allowUnlistedModels: world.policy.allowUnlistedModels,
-          codex: codexAvailability,
-        }),
+      isUsable,
       arena,
       rankings: world.arenaRanking,
       plannedEffort: world.policy.thinking.byTaskClass[taskClass ?? "standard"],
     });
     const applied = decision.outcome === "ranked" && !arena.shadow;
     ranking = { ...decision, applied };
+    if (applied && decision.outcome === "ranked") {
+      selectionRole = roleWithReorderedPool(role, slot, fellBack, moveRefToFront(pool, decision.ref));
+    }
+  }
+
+  // The leader pick (docs/arena-ranking.md, "Leaders"): only with `arena.leader.enabled`, so an
+  // absent or disabled block leaves a leader decision exactly as it was. It runs in this create
+  // hook alone — resume, reload and account moves never call it — so a running leader's model,
+  // and with it its prompt cache, never changes.
+  let leaderRanking: ModelDecision["leaderRanking"];
+  const leaderPolicy = world.policy.arena?.leader;
+  if (role.id === LEADER_ROLE_ID && leaderPolicy?.enabled) {
+    const decision = decideLeaderPick({
+      pool,
+      isUsable,
+      leader: leaderPolicy,
+      rankings: world.arenaRanking,
+      // The level the leader will run at, resolved as `resolveWantedThinkingLevel` does for the leader
+      // tier: the leader rule, else (rule off) the request, else the task class default.
+      plannedEffort:
+        world.policy.thinking.leader ?? input.requestedThinkingOptionId ?? world.policy.thinking.byTaskClass[taskClass ?? "standard"],
+      isSuccessor: hasHandoffFromLabel(input.labels),
+    });
+    const applied = decision.outcome === "ranked" && decision.holds === "challenger" && !leaderPolicy.shadow;
+    leaderRanking = { ...decision, applied };
     if (applied && decision.outcome === "ranked") {
       selectionRole = roleWithReorderedPool(role, slot, fellBack, moveRefToFront(pool, decision.ref));
     }
@@ -877,6 +973,7 @@ function decideModel(
     unadvertisedPoolEntries: unadvertisedPoolEntries(role, world.catalog, taskClass, world.policy.allowUnlistedModels),
     ...(requestedRef !== undefined ? { requestedRef } : {}),
     ...(ranking ? { ranking } : {}),
+    ...(leaderRanking ? { leaderRanking } : {}),
   } as const;
 
   if (pool.length === 0) {
@@ -909,7 +1006,13 @@ function decideModel(
       // it always meant for this one request.
       const pinned = hasModelPinLabel(input.labels);
       const selfMatch = rankingMatchesRequestedModel(ranking, requestedFamily, input.requestedModel);
-      if (ranking?.outcome === "ranked" && ranking.applied && !pinned && !selfMatch) {
+      // KTD9: a live leader pick overrides a request only when the request names the incumbent
+      // (pool[0], the model the app remembers by default). Any other model a person picked is kept.
+      const leaderSelfMatch =
+        leaderRanking?.outcome === "ranked" && refMatchesRequestedModel(leaderRanking.ref, requestedFamily, input.requestedModel);
+      const requestIsIncumbent = pool[0] !== undefined && refMatchesRequestedModel(pool[0], requestedFamily, input.requestedModel);
+      const leaderOverrides = leaderRanking?.applied === true && requestIsIncumbent && !pinned && !leaderSelfMatch;
+      if ((ranking?.outcome === "ranked" && ranking.applied && !pinned && !selfMatch) || leaderOverrides) {
         overrideReason = "arena-ranked";
       } else {
         const unverified = evaluation.unadvertised === true;
@@ -919,6 +1022,9 @@ function decideModel(
         // genuinely different request — is a RECORD, never a model that is actually running instead,
         // which is the exact corruption PR B's review fix existed to prevent.
         const requestRanking = ranking ? { ...ranking, applied: selfMatch ? ranking.applied : false } : undefined;
+        const requestLeaderRanking = leaderRanking
+          ? { ...leaderRanking, applied: leaderSelfMatch ? leaderRanking.applied : false }
+          : undefined;
         const pinNote =
           pinned && !selfMatch && ranking?.outcome === "ranked"
             ? ` paseo.model-pin keeps it over the arena-ranked ${ranking.ref}.`
@@ -926,6 +1032,7 @@ function decideModel(
         return {
           ...base,
           ...(requestRanking ? { ranking: requestRanking } : {}),
+          ...(requestLeaderRanking ? { leaderRanking: requestLeaderRanking } : {}),
           outcome: "honored-request",
           provider: input.requestedProvider ?? null,
           model: input.requestedModel,
@@ -959,7 +1066,7 @@ function decideModel(
       ? { requestedRef, effectiveRef, reason: overrideReason, ...(missingFromCatalog ? { missingFromCatalog: true as const } : {}) }
       : undefined;
 
-  const overrideNote = override ? describeOverrideNote(override, slot, fellBack) : "";
+  const overrideNote = override ? describeOverrideNote(override, slot, fellBack, leaderRanking?.applied === true) : "";
 
   // A bare pool entry (`outcome.provider === null`) implicitly means POOL_FAMILY, not "whatever
   // family the request came in on" -- resolve it before comparing, or a non-claude request

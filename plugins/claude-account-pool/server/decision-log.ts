@@ -229,6 +229,29 @@ function describeRanking(ranking: NonNullable<AgentDecision["model"]["ranking"]>
   };
 }
 
+/**
+ * The leader pick (docs/arena-ranking.md, "Leaders"): a reason on a fallback;
+ * on a ranked decision the pick, which side holds, both snapshots and the
+ * streak, so a shadow week can be read straight off the log.
+ */
+function describeLeaderRanking(ranking: NonNullable<AgentDecision["model"]["leaderRanking"]>): Record<string, unknown> {
+  if (ranking.outcome === "fallback") {
+    return { outcome: "fallback", reason: ranking.reason, applied: false };
+  }
+  return {
+    outcome: "ranked",
+    applied: ranking.applied,
+    ref: echoed(ranking.ref),
+    holds: ranking.holds,
+    board: ranking.board,
+    publishDate: ranking.publishDate,
+    credit: ranking.credit,
+    incumbent: ranking.incumbent,
+    challenger: ranking.challenger,
+    streak: ranking.streak,
+  };
+}
+
 function describe(decision: AgentDecision, result: LoggedRequest | undefined): Record<string, unknown> {
   const { role, taskClass, model, thinking, outputStyle, mcp } = decision;
   return {
@@ -250,6 +273,7 @@ function describe(decision: AgentDecision, result: LoggedRequest | undefined): R
       ...(model.ranking && !(model.outcome === "honored-request" && model.ranking.applied)
         ? { ranking: describeRanking(model.ranking) }
         : {}),
+      ...(model.leaderRanking ? { leaderRanking: describeLeaderRanking(model.leaderRanking) } : {}),
       // What the request actually carries after every hook ran, for the case a hook skipped the rewrite.
       ...finalModel(result),
     },

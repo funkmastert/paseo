@@ -3467,6 +3467,72 @@ describe("JEV's labels", () => {
       expect(result?.labels?.[ARENA_PICK_LABEL]).toBeUndefined();
     });
 
+    describe("the leader pick", () => {
+      const opusRow = { arenaName: "claude-opus-5.5-max", ours: "claude-opus-5-5", effort: "max", rating: 0.2, ratingLower: 0.18, ratingUpper: 0.22, votes: 1000 };
+      const sonnetRow = { arenaName: "claude-sonnet-5-max", ours: "claude-sonnet-5", effort: "max", rating: 0.32, ratingLower: 0.3, ratingUpper: 0.34, votes: 1000 };
+
+      function leaderOptions(withFile: boolean, shadow = true): RoleRouterOptions {
+        const policy: RoleModelPolicy = {
+          ...DEFAULT_POLICY,
+          roles: DEFAULT_POLICY.roles.map((role) => (role.id === "leader" ? { ...role, models: ["claude-opus-5-5", "claude-sonnet-5"] } : role)),
+          arena: {
+            enabled: false,
+            shadow: true,
+            roles: ["worker", "reviewer"],
+            topTier: [],
+            topTierMarginCi: 0,
+            maxAgeHours: 72,
+            leader: { enabled: true, shadow, boards: ["agent/overall"], marginCi: 1, streakPublishes: 3 },
+          },
+        };
+        return baseOptions({
+          policyCache: fakePolicyCache(policy),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-opus-5-5", "claude-sonnet-5"] })),
+          poolCache: fakePoolCache({ workers: [{ providerId: "claude-backup", priority: 1 }], leader: { providerId: "leader" } }),
+          arenaRankingCache: {
+            get: () =>
+              withFile
+                ? {
+                    fetchedAt: Date.now(),
+                    publishDate: "2026-10-20",
+                    boards: { "agent/overall": [opusRow, sonnetRow] },
+                    unmatched: {},
+                    failedBoards: [],
+                    leaderHistory: {
+                      "agent/overall": ["2026-10-19", "2026-10-16", "2026-10-14"].map((publishDate) => ({
+                        publishDate,
+                        rows: [opusRow, sonnetRow],
+                      })),
+                    },
+                  }
+                : undefined,
+          },
+        });
+      }
+
+      it("shadow: the leader runs the incumbent, and the label records the would-be pick with role, incumbent and streak", () => {
+        const result = createRoleRouter(leaderOptions(true))(request({ initialPrompt: "lead this" }), fakeContext);
+
+        expect(result?.config.model).toBe("claude-opus-5-5");
+        expect(result?.labels?.[ARENA_PICK_LABEL]).toBe(
+          "v1;ref=claude-sonnet-5;tier=top;board=agent/overall;date=2026-10-19;applied=0;proxy=1;role=leader;incumbent=claude-opus-5-5;streak=3/3",
+        );
+      });
+
+      it("live: the challenger runs and the label says applied=1", () => {
+        const result = createRoleRouter(leaderOptions(true, false))(request({ initialPrompt: "lead this" }), fakeContext);
+
+        expect(result?.config.model).toBe("claude-sonnet-5");
+        expect(result?.labels?.[ARENA_PICK_LABEL]).toContain("applied=1;proxy=1;role=leader");
+      });
+
+      it("writes nothing for a leader fallback (no rankings file)", () => {
+        const result = createRoleRouter(leaderOptions(false))(request({ initialPrompt: "lead this" }), fakeContext);
+
+        expect(result?.labels?.[ARENA_PICK_LABEL]).toBeUndefined();
+      });
+    });
+
     it("live, no pin: an eligible explicit request is overridden by the ranked pick, and the label says applied=1", () => {
       const result = createRoleRouter(arenaOptions())(
         {

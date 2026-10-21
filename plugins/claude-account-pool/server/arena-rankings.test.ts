@@ -14,9 +14,12 @@ vi.mock("fs/promises", async (importOriginal) => {
 });
 
 import {
+  boardPublishDate,
   canonicalArenaName,
   loadArenaRankings,
+  mergeLeaderBoards,
   normalizeBoardRows,
+  topRows,
   normalizeRow,
   refreshArenaRankings,
   retryFailedBoards,
@@ -1042,4 +1045,179 @@ describe("fetching a config shared by several categories", () => {
     expect(written?.boards["text_style_control/instruction_following"]).toBeUndefined();
     expect(written?.failedBoards).toContain("text_style_control/instruction_following");
   }, 15_000);
+});
+
+describe("leader boards: per-publish history and top rows", () => {
+  const agentRow = (model_name: string, score: number, date: string, observation_count = 1000): AgentRow => ({
+    model_name,
+    category: "overall",
+    score,
+    score_ci_lower: score - 0.02,
+    score_ci_upper: score + 0.02,
+    observation_count,
+    leaderboard_publish_date: date,
+  });
+
+  describe("boardPublishDate", () => {
+    it("reads the board's own publish date, the newest when rows disagree", () => {
+      expect(boardPublishDate([agentRow("Claude Opus 5.5 (Max)", 0.2, "2026-10-16"), agentRow("GPT-6 Astra (Max)", 0.15, "2026-10-19")])).toBe(
+        "2026-10-19",
+      );
+    });
+
+    it("is undefined for an empty board", () => {
+      expect(boardPublishDate([])).toBeUndefined();
+    });
+  });
+
+  describe("topRows", () => {
+    it("keeps matched and unmatched rows, highest first, with an unaliased row carrying no ref", () => {
+      const top = topRows([
+        agentRow("GPT-6 Astra (Max)", 0.15, "2026-10-19"),
+        agentRow("Gemini 4 Argon (High)", 0.12, "2026-10-19"),
+        agentRow("Claude Opus 5.5 (Max)", 0.2, "2026-10-19"),
+      ]);
+      expect(top.map((row) => row.arenaName)).toEqual(["claude-opus-5.5-max", "gpt-6-astra-max", "gemini-4-argon-high"]);
+      expect(top[0]).toMatchObject({ ours: "claude-opus-5-5", effort: "max", rating: 0.2 });
+      expect(top[2].ours).toBeUndefined();
+      expect(top[2].effort).toBeUndefined();
+    });
+
+    it("drops rows below the vote floor and caps at ten", () => {
+      const rows = Array.from({ length: 14 }, (_, i) => agentRow(`Model ${i}`, 0.3 - i * 0.01, "2026-10-19"));
+      rows.push(agentRow("Tiny Sample", 0.9, "2026-10-19", 2));
+      const top = topRows(rows);
+      expect(top).toHaveLength(10);
+      expect(top.some((row) => row.arenaName === "tiny-sample")).toBe(false);
+    });
+  });
+
+  describe("mergeLeaderBoards", () => {
+    const opus = { arenaName: "claude-opus-5.5-max", ours: "claude-opus-5-5", effort: "max", rating: 0.2, ratingLower: 0.18, ratingUpper: 0.22, votes: 1000 };
+    const fetched = (publishDate: string | undefined, rows = [opus]) => ({
+      "agent/overall": { rows, publishDate, top: [{ ...opus }] },
+    });
+
+    it("starts a leader board's history with one entry when there is no previous file", () => {
+      const merged = mergeLeaderBoards(undefined, fetched("2026-10-19"));
+      expect(merged.leaderHistory?.["agent/overall"]).toEqual([{ publishDate: "2026-10-19", rows: [opus] }]);
+      expect(merged.boardTop?.["agent/overall"]).toEqual([opus]);
+    });
+
+    it("prepends a new publish and leaves history unchanged for a publish it already has", () => {
+      const first = mergeLeaderBoards(undefined, fetched("2026-10-16"));
+      const second = mergeLeaderBoards(first, fetched("2026-10-19"));
+      expect(second.leaderHistory?.["agent/overall"]?.map((entry) => entry.publishDate)).toEqual(["2026-10-19", "2026-10-16"]);
+      const again = mergeLeaderBoards(second, fetched("2026-10-19", [{ ...opus, rating: 0.5 }]));
+      expect(again.leaderHistory).toEqual(second.leaderHistory);
+    });
+
+    it("caps history at ten publishes, dropping the oldest", () => {
+      let state: ReturnType<typeof mergeLeaderBoards> | undefined;
+      for (let day = 1; day <= 12; day++) {
+        state = mergeLeaderBoards(state, fetched(`2026-10-${String(day).padStart(2, "0")}`));
+      }
+      const dates = state?.leaderHistory?.["agent/overall"]?.map((entry) => entry.publishDate) ?? [];
+      expect(dates).toHaveLength(10);
+      expect(dates[0]).toBe("2026-10-12");
+      expect(dates.at(-1)).toBe("2026-10-03");
+    });
+
+    it("keeps a board's previous history and top rows when this fetch has nothing for it", () => {
+      const first = mergeLeaderBoards(undefined, fetched("2026-10-19"));
+      const next = mergeLeaderBoards(first, {});
+      expect(next).toEqual(first);
+    });
+
+    it("records no history entry for a board whose rows carry no publish date", () => {
+      const merged = mergeLeaderBoards(undefined, fetched(undefined));
+      expect(merged.leaderHistory?.["agent/overall"]).toBeUndefined();
+      expect(merged.boardTop?.["agent/overall"]).toEqual([opus]);
+    });
+
+    it("ignores non-leader boards", () => {
+      const merged = mergeLeaderBoards(undefined, { "webdev/overall": { rows: [opus], publishDate: "2026-10-19", top: [opus] } });
+      expect(merged.leaderHistory).toEqual({});
+      expect(merged.boardTop).toEqual({});
+    });
+  });
+
+  describe("through refresh and retry", () => {
+    let tempDir: string;
+    let originalFetch: typeof fetch;
+
+    beforeEach(async () => {
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "arena-rankings-leader-test-"));
+      originalFetch = global.fetch;
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    });
+
+    afterEach(async () => {
+      vi.useRealTimers();
+      global.fetch = originalFetch;
+      await fs.rm(tempDir, { recursive: true }).catch(() => undefined);
+    });
+
+    /** Every config answers with one page; `agent` with the Opus 5.5 row dated `agentDate`. */
+    function fetchMock(agentDate: string, failConfig?: string) {
+      return vi.fn().mockImplementation(async (url: string) => {
+        const u = new URL(url);
+        const config = u.searchParams.get("config");
+        if (config === failConfig) {
+          return new Response("nope", { status: 404 });
+        }
+        if (Number(u.searchParams.get("offset")) > 0) {
+          return new Response(JSON.stringify({ rows: [], num_rows_total: 1 }), { status: 200 });
+        }
+        const rows =
+          config === "agent"
+            ? [agentRow("Claude Opus 5.5 (Max)", 0.2, agentDate), agentRow("Gemini 4 Argon (High)", 0.12, agentDate)]
+            : config === "text_style_control"
+              ? [
+                  {
+                    model_name: "Claude Opus 5.5 (High)",
+                    category: "hard_prompts",
+                    rating: 1533,
+                    rating_lower: 1524,
+                    rating_upper: 1542,
+                    vote_count: 5157,
+                    leaderboard_publish_date: "2026-10-15",
+                  } satisfies TextRow,
+                ]
+              : [];
+        return new Response(JSON.stringify({ rows: rows.map((row) => ({ row })), num_rows_total: rows.length }), { status: 200 });
+      }) as unknown as typeof fetch;
+    }
+
+    it("dedupes on the board's own publish date, not the fetch date", async () => {
+      global.fetch = fetchMock("2026-10-19");
+      await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+      await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+      const written = await loadArenaRankings(tempDir);
+      expect(written?.leaderHistory?.["agent/overall"]?.map((entry) => entry.publishDate)).toEqual(["2026-10-19"]);
+      expect(written?.leaderHistory?.["text_style_control/hard_prompts"]?.map((entry) => entry.publishDate)).toEqual(["2026-10-15"]);
+      expect(written?.boardTop?.["agent/overall"]?.map((row) => row.arenaName)).toEqual(["claude-opus-5.5-max", "gemini-4-argon-high"]);
+
+      global.fetch = fetchMock("2026-10-21");
+      await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+      const later = await loadArenaRankings(tempDir);
+      expect(later?.leaderHistory?.["agent/overall"]?.map((entry) => entry.publishDate)).toEqual(["2026-10-21", "2026-10-19"]);
+    });
+
+    it("gives a leader board recovered on retry its history entry and top rows", async () => {
+      global.fetch = fetchMock("2026-10-19", "agent");
+      await runWithFakeTimers(() => refreshArenaRankings(tempDir));
+      const degraded = await loadArenaRankings(tempDir);
+      expect(degraded?.failedBoards).toContain("agent/overall");
+      expect(degraded?.leaderHistory?.["agent/overall"]).toBeUndefined();
+
+      global.fetch = fetchMock("2026-10-19");
+      const result = await runWithFakeTimers(() => retryFailedBoards(tempDir));
+      expect(result.status).toBe("merged");
+      const recovered = await loadArenaRankings(tempDir);
+      expect(recovered?.leaderHistory?.["agent/overall"]?.map((entry) => entry.publishDate)).toEqual(["2026-10-19"]);
+      expect(recovered?.boardTop?.["agent/overall"]).toHaveLength(2);
+      expect(recovered?.leaderHistory?.["text_style_control/hard_prompts"]).toHaveLength(1);
+    });
+  });
 });

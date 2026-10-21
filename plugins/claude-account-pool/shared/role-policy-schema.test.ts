@@ -111,6 +111,40 @@ describe("RoleModelPolicySchema", () => {
     it("rejects a negative topTierMarginCi", () => {
       expect(RoleModelPolicySchema.safeParse({ ...policy({}), arena: { topTierMarginCi: -1 } }).success).toBe(false);
     });
+
+    describe("leader", () => {
+      const parseLeader = (leader: unknown) => RoleModelPolicySchema.safeParse({ ...policy({}), arena: { enabled: true, leader } });
+
+      it("leaves arena.leader undefined when the arena block has no leader key", () => {
+        const result = RoleModelPolicySchema.safeParse({ ...policy({}), arena: { enabled: true } });
+        expect(result.success && result.data.arena?.leader).toBeUndefined();
+      });
+
+      it("fills in the shadow-first defaults for an empty leader block", () => {
+        const result = parseLeader({});
+        expect(result.success && result.data.arena?.leader).toEqual({
+          enabled: false,
+          shadow: true,
+          boards: ["agent/overall", "text_style_control/hard_prompts"],
+          marginCi: 1,
+          streakPublishes: 3,
+        });
+      });
+
+      it("rejects a streak of zero or past the history bound, and a negative margin", () => {
+        expect(parseLeader({ streakPublishes: 0 }).success).toBe(false);
+        expect(parseLeader({ streakPublishes: 11 }).success).toBe(false);
+        expect(parseLeader({ streakPublishes: 2.5 }).success).toBe(false);
+        expect(parseLeader({ marginCi: -1 }).success).toBe(false);
+      });
+
+      it("rejects a typo'd board and a real board that keeps no leader history", () => {
+        expect(parseLeader({ boards: ["agent/overal"] }).success).toBe(false);
+        expect(parseLeader({ boards: ["webdev/overall"] }).success).toBe(false);
+        expect(parseLeader({ boards: [] }).success).toBe(false);
+        expect(parseLeader({ boards: ["text_style_control/hard_prompts"] }).success).toBe(true);
+      });
+    });
   });
 
   describe("thinking", () => {
