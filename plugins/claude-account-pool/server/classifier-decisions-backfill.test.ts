@@ -94,6 +94,37 @@ describe("classifier-decisions backfill", () => {
     expect(ledger.all().map((row) => row.agentId)).toEqual(["a1"]);
   });
 
+  it("tolerates a leader pick's extra role/incumbent/streak keys without failing to parse", async () => {
+    const leaderPick = agentEntry("leader-1", {
+      labels: {
+        "paseo.arena-pick":
+          "v1;ref=claude-opus-5-5;tier=top;board=agent/overall;date=2026-10-20;applied=0;proxy=0;role=leader;incumbent=claude-opus-5-5;streak=2/3",
+      },
+    });
+
+    const result = await runClassifierDecisionsBackfill(fakeAgentsApi([[leaderPick]]), ledger);
+
+    // Not malformed/skipped -- it parses fine. It just never becomes a row (next test).
+    expect(result).toMatchObject({ scanned: 1, skipped: 0 });
+  });
+
+  it("skips a leader pick (role=leader) entirely, rather than mixing a leader-rule decision into worker/reviewer stats", async () => {
+    const leaderPick = agentEntry("leader-1", {
+      labels: {
+        "paseo.arena-pick":
+          "v1;ref=claude-sonnet-5-5;tier=top;board=agent/overall;date=2026-10-20;applied=1;proxy=0;role=leader;incumbent=claude-opus-5-5;streak=3/3",
+        "paseo.agent-role": "leader",
+      },
+    });
+    const workerPick = agentEntry("worker-1");
+    const paseo = fakeAgentsApi([[leaderPick, workerPick]]);
+
+    const result = await runClassifierDecisionsBackfill(paseo, ledger);
+
+    expect(result).toMatchObject({ scanned: 2, backfilled: 1, skipped: 0 });
+    expect(ledger.all().map((row) => row.agentId)).toEqual(["worker-1"]);
+  });
+
   it("pages through every page, including archived agents (includeArchived: true is what the sweep asks for)", async () => {
     const paseo = fakeAgentsApi([[agentEntry("a1")], [agentEntry("a2")], [agentEntry("a3")]]);
 

@@ -34,14 +34,30 @@ export interface ClassifierDecisionsBackfillResult {
   skipped: number;
 }
 
-/** `v1;ref=<ref>;tier=<top|mid>;board=<board>;date=<publishDate>;applied=<0|1>;proxy=<0|1>` (`role-router.ts`'s `formatArenaPickLabel`). */
-function parseArenaPickLabel(value: string): Omit<Extract<ClassifierDecisionRow["arena"], { outcome: "ranked" }>, "outcome"> | undefined {
+/**
+ * Splits `v1;key=value;key=value;...` into its fields, reading by key and ignoring any this
+ * build doesn't recognize — a leader pick (`role-router.ts`'s `formatLeaderPickLabel`) appends
+ * `;role=leader;incumbent=<ref>;streak=<won>/<needed>` to the same v1 shape a worker/reviewer
+ * pick writes, and must never break parsing just because this plugin doesn't look for those keys.
+ */
+function arenaPickFields(value: string): Map<string, string> {
   const fields = new Map<string, string>();
   for (const part of value.split(";").slice(1)) {
     const eq = part.indexOf("=");
     if (eq === -1) continue;
     fields.set(part.slice(0, eq), part.slice(eq + 1));
   }
+  return fields;
+}
+
+/** A leader pick's `paseo.arena-pick` carries `role=leader` (docs/arena-ranking.md, "Leaders"). */
+function isLeaderPickLabel(value: string): boolean {
+  return arenaPickFields(value).get("role") === "leader";
+}
+
+/** `v1;ref=<ref>;tier=<top|mid>;board=<board>;date=<publishDate>;applied=<0|1>;proxy=<0|1>` (`role-router.ts`'s `formatArenaPickLabel`). */
+function parseArenaPickLabel(value: string): Omit<Extract<ClassifierDecisionRow["arena"], { outcome: "ranked" }>, "outcome"> | undefined {
+  const fields = arenaPickFields(value);
   const ref = fields.get("ref");
   const tier = fields.get("tier");
   const board = fields.get("board");
@@ -110,6 +126,14 @@ export async function runClassifierDecisionsBackfill(
     // (account-failover-migration.ts), so it copies the predecessor's `paseo.arena-pick` verbatim —
     // backfilling it too would count the one decision the predecessor made twice.
     if (agent.labels?.[HANDOFF_FROM_LABEL]) {
+      continue;
+    }
+    const pickLabel = agent.labels?.[ARENA_PICK_LABEL];
+    // A leader pick (docs/arena-ranking.md, "Leaders") is the leader rule's own
+    // incumbent-vs-challenger decision, not the worker/reviewer ranking this dashboard's
+    // agreement and pick-distribution stats are about — and its `tier` is always `top` by
+    // construction, which would otherwise skew `topTierRate`. Skip it rather than mixing it in.
+    if (pickLabel && isLeaderPickLabel(pickLabel)) {
       continue;
     }
     const row = backfillRowFor(agent);
