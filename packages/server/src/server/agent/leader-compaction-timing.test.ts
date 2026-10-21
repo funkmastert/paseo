@@ -63,6 +63,7 @@ const RESTORE = formatRestoreMessage({
   note: "GOAL: ship the export screen. NEXT: CSV download.",
   compactedFromTokens: 612_000,
   compactedToTokens: 31_000,
+  carriedPrompts: [],
 });
 
 /** A leader compacted once, then three requests: CSV work, a child's finish, a new bug. */

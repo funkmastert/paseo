@@ -10,6 +10,8 @@ import type { AgentLifecycleStatus } from "@getpaseo/protocol/agent-lifecycle";
 const DEFAULT_PREPARE_AT_TOKENS = 400_000;
 const DEFAULT_RETRY_AFTER_MINUTES = 30;
 const DEFAULT_MAX_ATTEMPTS = 3;
+const DEFAULT_QUIET_MINUTES = 10;
+const DEFAULT_CEILING_TOKENS = 550_000;
 
 /**
  * How every message the monitor sends begins, inside its `<paseo-system>` envelope. The timing
@@ -29,6 +31,8 @@ export interface LeaderCompactionSettings {
   prepareAtTokens?: number;
   retryAfterMinutes?: number;
   maxAttempts?: number;
+  quietMinutes?: number;
+  ceilingTokens?: number;
 }
 
 export interface LeaderCompactionConfig {
@@ -37,6 +41,11 @@ export interface LeaderCompactionConfig {
   prepareAtTokens: number;
   retryAfterMs: number;
   maxAttempts: number;
+  /** The quiet gate: how long since the leader's last human prompt before an episode may start. */
+  quietMs: number;
+  /** The quiet gate's override: at or over this, an episode starts regardless of how recently the
+   * leader heard from a person. */
+  ceilingTokens: number;
 }
 
 export function resolveLeaderCompactionConfig(
@@ -48,6 +57,8 @@ export function resolveLeaderCompactionConfig(
     prepareAtTokens: settings.prepareAtTokens ?? DEFAULT_PREPARE_AT_TOKENS,
     retryAfterMs: (settings.retryAfterMinutes ?? DEFAULT_RETRY_AFTER_MINUTES) * 60_000,
     maxAttempts: settings.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+    quietMs: (settings.quietMinutes ?? DEFAULT_QUIET_MINUTES) * 60_000,
+    ceilingTokens: settings.ceilingTokens ?? DEFAULT_CEILING_TOKENS,
   };
 }
 
@@ -76,6 +87,12 @@ export type LeaderCompactionTiming =
 /** Why an episode started: the line, or the clean break JEV saw before it. */
 export type LeaderCompactionTrigger = { kind: "line" } | { kind: "early"; reason: string };
 
+/** A human prompt the leader received, as the quiet gate and carry-prompts need it. */
+export interface LeaderCompactionCarriedPrompt {
+  atMs: number;
+  text: string;
+}
+
 /** Everything one compaction carries from the crossing to the restore prompt. */
 export interface LeaderCompactionEpisode {
   triggeredAtTokens: number;
@@ -91,6 +108,11 @@ export interface LeaderCompactionEpisode {
   note: string | null;
   compactedFromTokens: number | null;
   compactedToTokens: number | null;
+  /**
+   * Human prompts from shortly before `prepare` (the last one, if the quiet gate let it through)
+   * through to the start of `restore`. Quoted verbatim in the restore message.
+   */
+  carriedPrompts: LeaderCompactionCarriedPrompt[];
 }
 
 export type LeaderCompactionState =
@@ -117,9 +139,12 @@ export type LeaderCompactionAction =
       usedTokens: number;
       startsNow: boolean;
       trigger: LeaderCompactionTrigger;
+      recentPrompt: LeaderCompactionCarriedPrompt | null;
     }
   /** Over the line, held by a `defer` verdict. The agent stays armed. */
   | { kind: "defer"; usedTokens: number; reason: string }
+  /** The quiet gate held a would-be start. Not an attempt: the agent stays armed. */
+  | { kind: "quietHold"; usedTokens: number; quietUntilMs: number }
   | { kind: "startTurn"; step: LeaderCompactionStep; episode: LeaderCompactionEpisode };
 
 export interface LeaderCompactionPlan {
@@ -217,6 +242,56 @@ function armedTrigger(
   return null;
 }
 
+/**
+ * A trigger fired; whether the quiet gate holds it, and what it carries if not (docs/leader-
+ * compaction.md, "Quiet gate and carried prompts"). Not an attempt either way: a hold leaves the
+ * agent armed, same as `armedTrigger` returning null.
+ */
+function planArmedStart(
+  agent: LeaderCompactionAgentInput,
+  config: LeaderCompactionConfig,
+  start: { trigger: LeaderCompactionTrigger; lineTokens: number },
+  lastHumanPrompt: LeaderCompactionCarriedPrompt | null,
+  nowMs: number,
+): LeaderCompactionPlan {
+  const usedTokens = agent.contextWindowUsedTokens ?? 0;
+  const quietUntilMs = lastHumanPrompt ? lastHumanPrompt.atMs + config.quietMs : null;
+  // Checked twice rather than hoisted to a boolean: TS only narrows `quietUntilMs` to `number`
+  // inline, and the first use needs that narrowing to put it on the `quietHold` action.
+  if (quietUntilMs !== null && nowMs < quietUntilMs && usedTokens < config.ceilingTokens) {
+    return { state: ARMED, action: { kind: "quietHold", usedTokens, quietUntilMs } };
+  }
+  // A prompt recent enough to have held the gate, were it not for the ceiling, is still live:
+  // carry it into the episode so prepare and restore both account for it.
+  const recentPrompt = quietUntilMs !== null && nowMs < quietUntilMs ? lastHumanPrompt : null;
+  if (config.dryRun) {
+    return {
+      state: { phase: "settled", reason: "dryRun" },
+      action: {
+        kind: "reportDryRun",
+        usedTokens,
+        startsNow: canStartTurn(agent),
+        trigger: start.trigger,
+        recentPrompt,
+      },
+    };
+  }
+  return planWaiting(
+    "prepare",
+    {
+      triggeredAtTokens: usedTokens,
+      lineTokens: start.lineTokens,
+      trigger: start.trigger,
+      attempts: 0,
+      note: null,
+      compactedFromTokens: null,
+      compactedToTokens: null,
+      carriedPrompts: recentPrompt ? [recentPrompt] : [],
+    },
+    agent,
+  );
+}
+
 /** One agent, one sweep. A state the monitor has no record of is `armed`. */
 export function planLeaderCompactionStep(input: {
   state: LeaderCompactionState | undefined;
@@ -225,6 +300,9 @@ export function planLeaderCompactionStep(input: {
   nowMs: number;
   /** Feature 9's verdict, read only in `armed`. Absent or null: today's plan. */
   timing?: LeaderCompactionTiming | null;
+  /** The leader's most recent human prompt the daemon has seen, read only in `armed`. Absent or
+   * null: no quiet gate, same as today. */
+  lastHumanPrompt?: LeaderCompactionCarriedPrompt | null;
 }): LeaderCompactionPlan {
   const { agent, config, nowMs } = input;
   const state = input.state ?? ARMED;
@@ -244,34 +322,11 @@ export function planLeaderCompactionStep(input: {
       if (!start) {
         return { state, action: NO_ACTION };
       }
-      const usedTokens = agent.contextWindowUsedTokens ?? 0;
       if ("defer" in start) {
+        const usedTokens = agent.contextWindowUsedTokens ?? 0;
         return { state, action: { kind: "defer", usedTokens, reason: start.defer } };
       }
-      if (config.dryRun) {
-        return {
-          state: { phase: "settled", reason: "dryRun" },
-          action: {
-            kind: "reportDryRun",
-            usedTokens,
-            startsNow: canStartTurn(agent),
-            trigger: start.trigger,
-          },
-        };
-      }
-      return planWaiting(
-        "prepare",
-        {
-          triggeredAtTokens: usedTokens,
-          lineTokens: start.lineTokens,
-          trigger: start.trigger,
-          attempts: 0,
-          note: null,
-          compactedFromTokens: null,
-          compactedToTokens: null,
-        },
-        agent,
-      );
+      return planArmedStart(agent, config, start, input.lastHumanPrompt ?? null, nowMs);
     }
     case "waiting":
       return planWaiting(state.step, state.episode, agent);

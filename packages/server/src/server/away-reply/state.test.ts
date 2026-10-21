@@ -44,6 +44,7 @@ describe("AwayReplyState", () => {
       agentId: "a",
       at: new Date(T0),
       clientMessageId: "m1",
+      text: "hello",
     });
     state.recordReply("a", { at: T0 + 1, episodeKey: "a:turn:1", textHash: "h1" });
     state.recordOptOut("b");

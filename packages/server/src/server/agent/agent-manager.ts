@@ -654,7 +654,13 @@ export type AgentCancelReason =
  * turn looks like a finished one. Live-only; a listener persists what it needs.
  */
 export type AgentOperatorSignal =
-  | { kind: "human-prompt"; agentId: string; at: Date; clientMessageId: string | null }
+  | {
+      kind: "human-prompt";
+      agentId: string;
+      at: Date;
+      clientMessageId: string | null;
+      text: string;
+    }
   | {
       kind: "human-permission-response";
       agentId: string;
@@ -2217,8 +2223,14 @@ export class AgentManager {
   }
 
   /** A person at an app client sent this agent a message. Called by the session. */
-  recordHumanPrompt(agentId: string, clientMessageId: string | null): void {
-    this.emitOperatorSignal({ kind: "human-prompt", agentId, at: new Date(), clientMessageId });
+  recordHumanPrompt(agentId: string, clientMessageId: string | null, text: string): void {
+    this.emitOperatorSignal({
+      kind: "human-prompt",
+      agentId,
+      at: new Date(),
+      clientMessageId,
+      text,
+    });
   }
 
   /** A person at an app client answered one of this agent's requests. Called by the session. */
