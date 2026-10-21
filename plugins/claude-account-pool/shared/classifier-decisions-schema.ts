@@ -8,14 +8,20 @@
 
 import { z } from "zod";
 
+/**
+ * `rating`/`ratingLower`/`ratingUpper`/`votes`/`effort` are optional: a live
+ * row (from `decision-log.ts`) always has them, but a backfilled row (U3)
+ * only has what `paseo.arena-pick`'s compact label carries — `ref` and
+ * `proxy`, never the score itself.
+ */
 export const ArenaPickSnapshotSchema = z.object({
   ref: z.string(),
-  rating: z.number(),
-  ratingLower: z.number(),
-  ratingUpper: z.number(),
-  votes: z.number(),
-  effort: z.string(),
   proxy: z.boolean(),
+  rating: z.number().optional(),
+  ratingLower: z.number().optional(),
+  ratingUpper: z.number().optional(),
+  votes: z.number().optional(),
+  effort: z.string().optional(),
 });
 export type ArenaPickSnapshot = z.infer<typeof ArenaPickSnapshotSchema>;
 

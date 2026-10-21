@@ -24,6 +24,7 @@ import { createPolicyCache, type PolicyCache } from "./server/role-policy";
 import { createRoleModelPolicyRpcHandlers } from "./server/role-policy-rpc-handlers";
 import { createDecisionLog, type LoggedRequest } from "./server/decision-log";
 import { buildPendingRowFromDecisionLine, loadClassifierDecisionsLedger } from "./server/classifier-decisions-ledger";
+import { runClassifierDecisionsBackfill } from "./server/classifier-decisions-backfill";
 import { placesRootAsChild } from "./server/role-resolve";
 import { classifierInputFor, createRoleRouter, type RoleCreateRouter } from "./server/role-router";
 import { createProviderIdCache, createRouter, type AgentCreateRouter, type ProviderIdCache } from "./server/router";
@@ -147,6 +148,11 @@ export default function contribute(server: PluginServerContext) {
     // fetch must never delay a create, and the classifier treats a missing
     // or stale file as today's order regardless of why.
     arenaRankingsPoller = startArenaRankingsPoller(resolvePaseoHome());
+    // U3's one-time historical backfill (docs/arena-ranking.md): fire-and-forget, like the arena
+    // rankings poller above -- it reads agents, not a create's hot path, and must never delay one.
+    // `runClassifierDecisionsBackfill` itself no-ops once the ledger's `backfilledAt` is set, so a
+    // reload or restart after the first successful run costs nothing beyond the no-op check.
+    void classifierDecisionsLedgerPromise.then((ledger) => runClassifierDecisionsBackfill(paseo, ledger));
     // The plugin cache that feeds `ClassifierWorld.arenaRanking`, beside catalogCache/poolCache
     // above (U8). Reads `arena.maxAgeHours` fresh off the policy cache on every poll.
     arenaRankingCache = createArenaRankingCache(resolvePaseoHome(), {
