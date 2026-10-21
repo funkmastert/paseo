@@ -78,6 +78,31 @@ export const ArenaRankingRowSchema = z.object({
 
 export type ArenaRankingRow = z.infer<typeof ArenaRankingRowSchema>;
 
+/**
+ * One of a leader board's top rows, matched or not (docs/arena-ranking.md,
+ * "Leaders"). An unaliased model has no `ours` or `effort`: it is kept so the
+ * unpooled-challenger alert can name a model nobody has added to a pool yet.
+ */
+export const ArenaTopRowSchema = z.object({
+  arenaName: z.string(),
+  ours: z.string().optional(),
+  effort: z.string().optional(),
+  rating: z.number(),
+  ratingLower: z.number(),
+  ratingUpper: z.number(),
+  votes: z.number(),
+});
+
+export type ArenaTopRow = z.infer<typeof ArenaTopRowSchema>;
+
+/** One publish of a leader board: the board's own `leaderboard_publish_date` and its matched rows. */
+export const ArenaPublishSchema = z.object({
+  publishDate: z.string(),
+  rows: z.array(ArenaRankingRowSchema),
+});
+
+export type ArenaPublish = z.infer<typeof ArenaPublishSchema>;
+
 /** The full rankings file persisted to disk. */
 export const ArenaRankingsFileSchema = z.object({
   /** When the file was written. */
@@ -99,6 +124,15 @@ export const ArenaRankingsFileSchema = z.object({
    * itself, not only from a `daemon.log` line that may have rotated out.
    */
   failedBoards: z.array(z.string()).default([]),
+  /**
+   * Per leader board (`LEADER_BOARD_IDS`), its recent publishes, newest first,
+   * deduped on the board's own publish date (not `publishDate` above, which is
+   * the fetch date). The leader pick's streak reads this. Absent in a file
+   * written before leader picks existed.
+   */
+  leaderHistory: z.record(z.string(), z.array(ArenaPublishSchema)).optional(),
+  /** Per leader board, its top rows from the latest fetch, matched or not. */
+  boardTop: z.record(z.string(), z.array(ArenaTopRowSchema)).optional(),
 });
 
 export type ArenaRankingsFile = z.infer<typeof ArenaRankingsFileSchema>;
@@ -134,6 +168,9 @@ export const KIND_BOARD_PREFERENCE: Record<RankedWorkKind, readonly string[]> = 
  */
 export const LEADER_BOARD_IDS = ["agent/overall", "text_style_control/hard_prompts"] as const;
 export type LeaderBoardId = (typeof LEADER_BOARD_IDS)[number];
+
+/** How many distinct publishes of history the daily job keeps per leader board (`arena-rankings.ts`). */
+export const LEADER_HISTORY_MAX_PUBLISHES = 10;
 
 /** Every distinct board id referenced by `KIND_BOARD_PREFERENCE`, fetched once each. */
 export function allBoardIds(): readonly string[] {

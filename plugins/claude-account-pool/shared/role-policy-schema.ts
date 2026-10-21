@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { DEFAULT_TOOL_PROFILE, ToolProfileSchema } from "./tool-profiles";
-import { LEADER_BOARD_IDS } from "./arena-aliases";
+import { LEADER_BOARD_IDS, LEADER_HISTORY_MAX_PUBLISHES } from "./arena-aliases";
 
 /**
  * Label keys the role hook reads off `agent.create` requests. Mirrors the
@@ -389,9 +389,6 @@ const AgentTypeMappingsSchema = z
   });
 
 export const CURRENT_SCHEMA_VERSION = 4;
-
-/** How many distinct publishes of history the daily job keeps per leader board (`arena-rankings.ts`). */
-export const LEADER_HISTORY_MAX_PUBLISHES = 10;
 
 /**
  * The leader pick (docs/arena-ranking.md, "Leaders"): which model the LMArena
