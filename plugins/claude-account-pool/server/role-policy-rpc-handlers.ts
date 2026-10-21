@@ -177,6 +177,9 @@ async function performWrite(
     // Same again: Codex's budget reserve is not part of the settings screen's editable
     // surface yet, so an unrelated save must carry it through untouched.
     codex: current.policy.codex,
+    // Same again: arena ranking, the leader pick included, has no settings surface. Without this
+    // an unrelated save drops the whole block, which switches ranking off.
+    arena: current.policy.arena,
     revision: randomUUID(),
   };
   const parsed = RoleModelPolicySchema.safeParse(candidate);

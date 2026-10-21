@@ -126,6 +126,15 @@ export const KIND_BOARD_PREFERENCE: Record<RankedWorkKind, readonly string[]> = 
   ops: ["agent_bash_recovery_steps/overall", "agent/overall"],
 };
 
+/**
+ * The boards a leader pick may rank on (docs/arena-ranking.md, "Leaders"). The
+ * daily job keeps per-publish history and the top rows, matched or not, for
+ * these alone, so `arena.leader.boards` may name only these: a board without
+ * history could never let a challenger build a streak.
+ */
+export const LEADER_BOARD_IDS = ["agent/overall", "text_style_control/hard_prompts"] as const;
+export type LeaderBoardId = (typeof LEADER_BOARD_IDS)[number];
+
 /** Every distinct board id referenced by `KIND_BOARD_PREFERENCE`, fetched once each. */
 export function allBoardIds(): readonly string[] {
   const ids = new Set<string>();

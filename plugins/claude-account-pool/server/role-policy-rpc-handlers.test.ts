@@ -208,6 +208,39 @@ describe("role-model-policy RPC handlers", () => {
       expect(patch).toHaveBeenCalledWith({ agentModelPolicy: expect.objectContaining({ childOutputStyle: null }) });
     });
 
+    it("carries the arena block, leader settings included, through an unrelated save", async () => {
+      const arena: NonNullable<RoleModelPolicy["arena"]> = {
+        enabled: true,
+        shadow: true,
+        roles: ["worker", "reviewer"],
+        topTier: ["claude-opus-5-5"],
+        topTierMarginCi: 0,
+        maxAgeHours: 72,
+        leader: {
+          enabled: true,
+          shadow: true,
+          boards: ["agent/overall", "text_style_control/hard_prompts"],
+          marginCi: 1,
+          streakPublishes: 3,
+        },
+      };
+      const stored: RoleModelPolicy = { ...VALID_POLICY, arena };
+      const handlers = createRoleModelPolicyRpcHandlers(baseDeps({ policyCache: fakePolicyCache(stored) }));
+      const patch = vi.fn().mockResolvedValue({ requestId: "p1", config: {} });
+      const paseo = fakePaseo({ config: { agentModelPolicy: stored }, patch });
+
+      const result = await handlers.write(
+        {
+          revision: stored.revision,
+          patch: { roles: stored.roles, agentTypeMappings: { worker: "worker", scout: "worker" }, modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT },
+        },
+        context(paseo),
+      );
+
+      expect(result.status).toBe("saved");
+      expect(patch).toHaveBeenCalledWith({ agentModelPolicy: expect.objectContaining({ arena }) });
+    });
+
     it("saves the patch's own thinking field when the caller supplies one", async () => {
       const handlers = createRoleModelPolicyRpcHandlers(baseDeps());
       const patch = vi.fn().mockResolvedValue({ requestId: "p1", config: {} });
