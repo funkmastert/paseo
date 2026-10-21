@@ -61,6 +61,10 @@ State is in memory. After a daemon restart, a leader still over the line starts 
 
 Opus 5.5 ties each thinking block to the exact history before it. Accounts created on or after 2026-08-31 get a 400 when replayed thinking follows an edited prefix. Claude Code's compaction keeps the last few messages verbatim after the summary, which is the "keep-tail" shape that check rejects. The CLI handles it: it can send `thinking.block_binding.prefix_mismatch_behavior` and reads `input_transformations`/`thinking_dropped` from the response. At worst the retained turns' thinking is dropped once, at the compaction boundary. Measured on 2.1.280: `/compact` on an Opus 5.5 session with thinking and a tool call went from 30K to 1.8K tokens, and the next turn answered from before the compaction correctly with no error.
 
+## The ledger
+
+Every episode is recorded: an optional `episodeObserver` on `AgentLeaderCompactionMonitor` fires around each step, and `CompactionLedgerService` turns that into a durable row with the episode's cost (`agent.totalTokens`, [docs/token-burn.md](token-burn.md), snapshotted at each step's start and end) and an estimated payback. See [docs/insights.md](insights.md) for the ledger, the RPC, and where it surfaces in the app — this doc stays about the compaction sequence itself.
+
 ## Config
 
 `agents.leaderCompaction` in `$PASEO_HOME/config.json`. It is live-toggleable, like the other monitors.
