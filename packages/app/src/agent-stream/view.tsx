@@ -121,6 +121,8 @@ import { useStreamHistoryWindow } from "./use-stream-history-window";
 import { PluginTimelineItemView, useInstalledTimelineTransform } from "@/plugins/timeline";
 import { projectPluginTimelineItems } from "@/plugins/timeline/projection";
 import { useAgentJevDecisions } from "@/jev/use-agent-jev-decisions";
+import { useAgentCompactionEpisodes } from "@/compactions/use-agent-compaction-episodes";
+import { findMatchingCompactionEpisode } from "@/compactions/compaction-insights-model";
 import { buildJevMarkerLines, placeJevMarkers, splitJevMarkerLines } from "@/jev/jev-marker-model";
 import { JevMarkerChip } from "@/jev/jev-marker-chip";
 import type { JevDecisionRecord } from "@getpaseo/protocol/jev/rpc-schemas";
@@ -607,6 +609,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const { data: jevDecisionsData } = useAgentJevDecisions(resolvedServerId, agentId, {
       includeChildren: true,
     });
+    const { episodes: compactionEpisodes } = useAgentCompactionEpisodes(resolvedServerId, agentId);
     const jevMarkerLines = useMemo(
       () =>
         buildJevMarkerLines(
@@ -1013,6 +1016,10 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
                 status={item.status}
                 trigger={item.trigger}
                 preTokens={item.preTokens}
+                episode={findMatchingCompactionEpisode(
+                  compactionEpisodes,
+                  item.timestamp.getTime(),
+                )}
               />
             );
 
@@ -1035,6 +1042,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         renderThoughtItem,
         renderToolCallItem,
         resolvedServerId,
+        compactionEpisodes,
       ],
     );
 

@@ -87,6 +87,46 @@ export function compactionOutcomeVariant(
   }
 }
 
+/** A few minutes either side covers prepare->compact->restore's real wall-clock spread. */
+export const COMPACTION_MARKER_MATCH_TOLERANCE_MS = 10 * 60 * 1000;
+
+function distanceToEpisodeMs(episode: CompactionEpisode, timestampMs: number): number {
+  const startMs = episode.startedAtMs;
+  const endMs = episode.endedAtMs ?? episode.startedAtMs;
+  if (timestampMs < startMs) return startMs - timestampMs;
+  if (timestampMs > endMs) return timestampMs - endMs;
+  return 0;
+}
+
+/**
+ * The episode whose span is closest to `timestampMs`, within tolerance -- for joining a
+ * timeline `CompactionItem` to its ledger row by agent + time (docs/insights.md). Null when
+ * nothing in range, which degrades the marker back to its plain, unjoined rendering.
+ */
+export function findMatchingCompactionEpisode(
+  episodes: readonly CompactionEpisode[],
+  timestampMs: number,
+  toleranceMs: number = COMPACTION_MARKER_MATCH_TOLERANCE_MS,
+): CompactionEpisode | null {
+  let best: CompactionEpisode | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const episode of episodes) {
+    const distance = distanceToEpisodeMs(episode, timestampMs);
+    if (distance <= toleranceMs && distance < bestDistance) {
+      best = episode;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+/** The timeline marker's one-line summary once joined to its episode. */
+export function formatEpisodeMarkerLine(episode: CompactionEpisode): string {
+  return `${formatEpisodeContext(episode)}, ${formatEpisodeTrigger(episode)}, cost ${formatEpisodeCost(
+    episode,
+  )}`;
+}
+
 export interface CompactionInsightsTile {
   id: "count" | "total-cost" | "average-cost" | "estimated-saved";
   label: string;

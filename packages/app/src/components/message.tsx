@@ -91,6 +91,8 @@ import {
   useAssistantLinkPress,
 } from "@/assistant-file-links";
 import { getCompactionMarkerLabel } from "./message-compaction-label";
+import { CompactionMarkerPopover } from "@/compactions/compaction-marker-popover";
+import type { CompactionEpisode } from "@/compactions/use-compaction-episodes";
 import { useAssistantImage } from "@/assistant-image/use-assistant-image";
 import {
   AttachmentFrame,
@@ -2163,6 +2165,8 @@ interface CompactionMarkerProps {
   status: "loading" | "completed";
   trigger?: "auto" | "manual";
   preTokens?: number;
+  /** The ledger episode this marker joined to (docs/insights.md), when one was found. */
+  episode?: CompactionEpisode | null;
 }
 
 const compactionStylesheet = StyleSheet.create((theme) => ({
@@ -2194,10 +2198,11 @@ export const CompactionMarker = memo(function CompactionMarker({
   status,
   trigger,
   preTokens,
+  episode,
 }: CompactionMarkerProps) {
-  const label = getCompactionMarkerLabel({ status, trigger, preTokens });
+  const label = getCompactionMarkerLabel({ status, trigger, preTokens, episode });
 
-  return (
+  const row = (
     <View style={compactionStylesheet.container}>
       <View style={compactionStylesheet.line} />
       <View style={compactionStylesheet.label}>
@@ -2211,6 +2216,10 @@ export const CompactionMarker = memo(function CompactionMarker({
       <View style={compactionStylesheet.line} />
     </View>
   );
+
+  // No popover trigger when nothing joined -- not a dead tap target.
+  if (!episode) return row;
+  return <CompactionMarkerPopover episode={episode}>{row}</CompactionMarkerPopover>;
 });
 
 interface TodoListCardProps {

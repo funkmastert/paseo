@@ -4,9 +4,11 @@ import {
   buildCompactionInsightsTiles,
   compactionOutcomeLabel,
   compactionOutcomeVariant,
+  findMatchingCompactionEpisode,
   formatCompactionTokens,
   formatEpisodeContext,
   formatEpisodeCost,
+  formatEpisodeMarkerLine,
   formatEpisodePayback,
   formatEpisodeTrigger,
 } from "./compaction-insights-model";
@@ -163,5 +165,50 @@ describe("buildCompactionInsightsTiles", () => {
     expect(tiles.find((tile) => tile.id === "count")).toMatchObject({
       caption: "3 of 4 measured",
     });
+  });
+});
+
+describe("findMatchingCompactionEpisode", () => {
+  it("matches a timestamp that falls inside an episode's span", () => {
+    const target = episode({ id: "a", startedAtMs: 1000, endedAtMs: 2000 });
+    expect(findMatchingCompactionEpisode([target], 1500)).toBe(target);
+  });
+
+  it("matches a timestamp just outside the span, within tolerance", () => {
+    const target = episode({ id: "a", startedAtMs: 1000, endedAtMs: 2000 });
+    expect(findMatchingCompactionEpisode([target], 2000 + 60_000)).toBe(target);
+  });
+
+  it("returns null when nothing is within tolerance", () => {
+    const target = episode({ id: "a", startedAtMs: 1000, endedAtMs: 2000 });
+    expect(findMatchingCompactionEpisode([target], 2000 + 60 * 60_000, 10 * 60_000)).toBeNull();
+  });
+
+  it("picks the closest episode among several for the same agent, not the first or last", () => {
+    const early = episode({ id: "early", startedAtMs: 1000, endedAtMs: 1100 });
+    const middle = episode({ id: "middle", startedAtMs: 500_000, endedAtMs: 500_100 });
+    const late = episode({ id: "late", startedAtMs: 900_000, endedAtMs: 900_100 });
+
+    expect(findMatchingCompactionEpisode([early, middle, late], 500_050, 10 * 60_000)).toBe(middle);
+  });
+
+  it("returns null for an empty episode list", () => {
+    expect(findMatchingCompactionEpisode([], 1000)).toBeNull();
+  });
+});
+
+describe("formatEpisodeMarkerLine", () => {
+  it("composes context, trigger and cost into one line", () => {
+    expect(
+      formatEpisodeMarkerLine(
+        episode({ contextBeforeTokens: 612_000, contextAfterTokens: 31_000, trigger: "line" }),
+      ),
+    ).toBe("612.0k → 31.0k tokens, crossed the line, cost 175");
+  });
+
+  it("says a cost is not measured rather than fabricating one", () => {
+    expect(
+      formatEpisodeMarkerLine(episode({ costBasis: "unmeasured", costWeightedTokens: null })),
+    ).toContain("cost not measured");
   });
 });
