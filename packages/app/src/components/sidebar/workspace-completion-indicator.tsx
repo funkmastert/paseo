@@ -1,17 +1,16 @@
 import { Text, View } from "react-native";
-import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import { CircleCheckBig, GitPullRequestArrow } from "lucide-react-native";
+import { StyleSheet } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { Theme } from "@/styles/theme";
 import type { CompletionState } from "@getpaseo/protocol/agent-labels";
 import { STATUS_INDICATOR_ALERT_SIZE } from "@/utils/status-indicator-geometry";
-
-const readyToMergeColorMapping = (theme: Theme) => ({ color: theme.colors.accent });
-const completionDoneColorMapping = (theme: Theme) => ({ color: theme.colors.statusSuccess });
-
-const ThemedGitPullRequestArrow = withUnistyles(GitPullRequestArrow);
-const ThemedCircleCheckBig = withUnistyles(CircleCheckBig);
+import {
+  CompletionIndicatorIcon,
+  formatCompletionIndicatorAccessibilityLabel,
+  getCompletionIndicatorColorMapping,
+  getCompletionIndicatorLabelKey,
+  getCompletionIndicatorTestIdSuffix,
+} from "@/utils/completion-indicator-content";
 
 /**
  * What the sidebar row's leading slot shows once a workspace carries a `paseo.completion`
@@ -28,19 +27,11 @@ export function WorkspaceCompletionIndicator({
   completionNote: string | null;
 }) {
   const { t } = useTranslation();
-  const label =
-    completionState === "ready-to-merge"
-      ? t("agentList.completion.readyToMerge")
-      : t("agentList.completion.done");
-  const accessibilityLabel = completionNote ? `${label} — ${completionNote}` : label;
-  const Icon =
-    completionState === "ready-to-merge" ? ThemedGitPullRequestArrow : ThemedCircleCheckBig;
-  const colorMapping =
-    completionState === "ready-to-merge" ? readyToMergeColorMapping : completionDoneColorMapping;
-  const testID =
-    completionState === "ready-to-merge"
-      ? "workspace-status-indicator-ready-to-merge"
-      : "workspace-status-indicator-completion-done";
+  const label = t(getCompletionIndicatorLabelKey(completionState));
+  const accessibilityLabel = formatCompletionIndicatorAccessibilityLabel(label, completionNote);
+  const Icon = CompletionIndicatorIcon[completionState];
+  const colorMapping = getCompletionIndicatorColorMapping(completionState);
+  const testID = `workspace-status-indicator-${getCompletionIndicatorTestIdSuffix(completionState)}`;
 
   return (
     <View style={styles.slot} testID={testID} accessibilityLabel={accessibilityLabel}>
