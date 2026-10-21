@@ -13,7 +13,8 @@ import {
   type ArenaRankingsFile,
   type WorkKind,
 } from "../shared/arena-aliases";
-import type { ArenaPolicy, TaskClassId } from "../shared/role-policy-schema";
+import { clearsLeaderBar } from "../shared/arena-leader-rule";
+import type { ArenaLeaderPolicy, ArenaPolicy, TaskClassId } from "../shared/role-policy-schema";
 
 /** Carried on every ranked decision (CC-BY-4.0). */
 export const ARENA_CREDIT = "LMArena leaderboard dataset (CC-BY-4.0)";
@@ -307,4 +308,131 @@ export function decideArenaPick(input: ArenaPickInput): ArenaPickDecision {
   }
 
   return fallback("no-ranked-board");
+}
+
+/** Why the leader pick recorded no ranked decision (docs/arena-ranking.md, "Leaders"). */
+export type LeaderFallbackReason =
+  | "disabled"
+  /** An import successor keeps its predecessor's model: a running conversation is never re-picked. */
+  | "successor"
+  | "no-file"
+  | "no-ranked-board";
+
+export type LeaderPickDecision =
+  | { outcome: "fallback"; reason: LeaderFallbackReason }
+  | {
+      outcome: "ranked";
+      /** The model the rule picks: the incumbent unless the challenger's streak is complete. */
+      ref: string;
+      holds: "incumbent" | "challenger";
+      board: string;
+      /** The board's own publish date for the newest publish ranked, not the file's fetch date. */
+      publishDate: string;
+      credit: string;
+      incumbent: ArenaScoreSnapshot;
+      /** The best-rated usable challenger on the newest publish, fixed for the whole streak. */
+      challenger: ArenaScoreSnapshot;
+      /** Consecutive newest-first publishes the challenger cleared the bar on, capped at `needed`. */
+      streak: { won: number; needed: number };
+    };
+
+export interface LeaderPickInput {
+  /** The leader role's pool in operator order. `pool[0]` is the incumbent. */
+  pool: readonly string[];
+  /** The same usability bar `selectModel` applies. Only challengers are filtered by it. */
+  isUsable: (ref: string) => boolean;
+  leader: ArenaLeaderPolicy | undefined;
+  /** Undefined covers both "no file" and "stale", as for `decideArenaPick`. */
+  rankings: ArenaRankingsFile | undefined;
+  /** `policy.thinking.leader`: the effort a leader runs at (xhigh). */
+  plannedEffort: string;
+  /** The create carries `handoff-from`: an import successor of an existing agent. */
+  isSuccessor: boolean;
+}
+
+/**
+ * The leader pick (docs/arena-ranking.md, "Leaders"): whether a challenger
+ * from the leader pool has beaten the incumbent clearly enough, for long
+ * enough, to take a new leader. The incumbent is `pool[0]`, so every tie,
+ * near-miss and short streak keeps the operator's order.
+ *
+ * Per board in `leader.boards` order, the newest publish (the board's history
+ * head, or today's rows for a file written before history existed) must rank
+ * the incumbent and at least one usable challenger. The best-rated challenger
+ * there is fixed; the streak counts consecutive newest-first publishes where
+ * that same ref clears `clearsLeaderBar` by `marginCi` widths, plus one when
+ * only the challenger's row is an effort proxy. A publish missing either row
+ * ends the count. Pure: no clock, no I/O.
+ */
+export function decideLeaderPick(input: LeaderPickInput): LeaderPickDecision {
+  const leader = input.leader;
+  if (!leader || !leader.enabled) {
+    return { outcome: "fallback", reason: "disabled" };
+  }
+  if (input.isSuccessor) {
+    return { outcome: "fallback", reason: "successor" };
+  }
+  if (!input.rankings) {
+    return { outcome: "fallback", reason: "no-file" };
+  }
+  const incumbentRef = input.pool[0];
+  if (incumbentRef === undefined) {
+    return { outcome: "fallback", reason: "no-ranked-board" };
+  }
+  const challengerRefs = input.pool.filter((ref, index) => index > 0 && ref !== incumbentRef && input.isUsable(ref));
+
+  for (const boardId of leader.boards) {
+    const history = input.rankings.leaderHistory?.[boardId] ?? [];
+    const newestRows = history[0]?.rows ?? input.rankings.boards[boardId] ?? [];
+    const publishDate = history[0]?.publishDate ?? input.rankings.publishDate;
+
+    const incumbent = bestRowFor(incumbentRef, newestRows, input.plannedEffort);
+    if (!incumbent) {
+      continue;
+    }
+    let best: { ref: string; row: ArenaRankingRow; proxy: boolean } | undefined;
+    for (const ref of challengerRefs) {
+      const found = bestRowFor(ref, newestRows, input.plannedEffort);
+      // Strictly greater: an equal rating keeps the earlier pool entry, pool order settling ties.
+      if (found && (!best || found.row.rating > best.row.rating)) {
+        best = { ref, ...found };
+      }
+    }
+    if (!best) {
+      continue;
+    }
+
+    const needed = leader.streakPublishes;
+    let won = 0;
+    for (const publish of history) {
+      if (won >= needed) {
+        break;
+      }
+      const incumbentRow = bestRowFor(incumbentRef, publish.rows, input.plannedEffort);
+      const challengerRow = bestRowFor(best.ref, publish.rows, input.plannedEffort);
+      if (!incumbentRow || !challengerRow) {
+        break;
+      }
+      const extra = challengerRow.proxy && !incumbentRow.proxy ? PROXY_EXTRA_MARGIN : 0;
+      if (!clearsLeaderBar(challengerRow.row, incumbentRow.row, leader.marginCi + extra)) {
+        break;
+      }
+      won++;
+    }
+
+    const challengerWins = won >= needed;
+    return {
+      outcome: "ranked",
+      ref: challengerWins ? best.ref : incumbentRef,
+      holds: challengerWins ? "challenger" : "incumbent",
+      board: boardId,
+      publishDate,
+      credit: ARENA_CREDIT,
+      incumbent: toSnapshot({ ref: incumbentRef, poolIndex: 0, row: incumbent.row, proxy: incumbent.proxy }),
+      challenger: toSnapshot({ ref: best.ref, poolIndex: input.pool.indexOf(best.ref), row: best.row, proxy: best.proxy }),
+      streak: { won, needed },
+    };
+  }
+
+  return { outcome: "fallback", reason: "no-ranked-board" };
 }
