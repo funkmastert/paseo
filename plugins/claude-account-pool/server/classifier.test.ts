@@ -1992,6 +1992,149 @@ describe("classifyAgent — arena-ranked model pick (U8)", () => {
   });
 });
 
+describe("classifyAgent — arena leader pick (shadow first)", () => {
+  const OPUS = "claude-opus-5-5";
+  const SONNET = "claude-sonnet-5";
+  const OPUS5 = "claude-opus-5";
+
+  function agentRow(ours: string, rating: number): ArenaRankingRow {
+    return { arenaName: ours, ours, effort: "max", rating, ratingLower: rating - 0.02, ratingUpper: rating + 0.02, votes: 1000 };
+  }
+
+  /** Sonnet clears Opus 5.5 by more than one width on three straight publishes. */
+  const sonnetWins: ArenaRankingsFile = {
+    fetchedAt: Date.now(),
+    publishDate: "2026-10-20",
+    boards: { "agent/overall": [agentRow(OPUS, 0.2), agentRow(SONNET, 0.32), agentRow(OPUS5, 0.08)] },
+    unmatched: {},
+    failedBoards: [],
+    leaderHistory: {
+      "agent/overall": ["2026-10-19", "2026-10-16", "2026-10-14"].map((publishDate) => ({
+        publishDate,
+        rows: [agentRow(OPUS, 0.2), agentRow(SONNET, 0.32), agentRow(OPUS5, 0.08)],
+      })),
+    },
+  };
+
+  const leaderPool = withRole(DEFAULT_POLICY, "leader", { models: [OPUS, SONNET, OPUS5] });
+
+  function leaderWorld(leader: Partial<NonNullable<NonNullable<RoleModelPolicy["arena"]>["leader"]>> | undefined, overrides: Partial<ClassifierWorld> = {}) {
+    const arena: NonNullable<RoleModelPolicy["arena"]> = {
+      enabled: false,
+      shadow: true,
+      roles: ["worker", "reviewer"],
+      topTier: [],
+      topTierMarginCi: 0,
+      maxAgeHours: 72,
+      ...(leader
+        ? {
+            leader: {
+              enabled: true,
+              shadow: true,
+              boards: ["agent/overall", "text_style_control/hard_prompts"],
+              marginCi: 1,
+              streakPublishes: 3,
+              ...leader,
+            },
+          }
+        : {}),
+    };
+    return world({ policy: { ...leaderPool, arena }, arenaRanking: sonnetWins, ...overrides } as Partial<ClassifierWorld>);
+  }
+
+  it("no arena.leader block: a root create carries no leader ranking (AE1)", () => {
+    const decision = classifyAgent({ title: "lead this" }, leaderWorld(undefined));
+    expect(decision.model.leaderRanking).toBeUndefined();
+    expect(decision.model.ranking).toBeUndefined();
+    expect(decision.model.model).toBe(OPUS);
+  });
+
+  it("shadow, challenger winning: the leader runs the incumbent and records the would-be pick", () => {
+    const decision = classifyAgent({ title: "lead this" }, leaderWorld({}));
+    expect(decision.model.model).toBe(OPUS);
+    expect(decision.model.leaderRanking).toMatchObject({
+      outcome: "ranked",
+      ref: SONNET,
+      holds: "challenger",
+      applied: false,
+      streak: { won: 3, needed: 3 },
+    });
+    expect(decision.model.reason).toContain("LMArena leader pick (shadow)");
+  });
+
+  it("shadow with an explicit incumbent request: honored, pick recorded at applied false", () => {
+    const decision = classifyAgent({ title: "lead this", requestedProvider: "claude", requestedModel: OPUS }, leaderWorld({}));
+    expect(decision.model.outcome).toBe("honored-request");
+    expect(decision.model.model).toBe(OPUS);
+    expect(decision.model.leaderRanking).toMatchObject({ ref: SONNET, applied: false });
+  });
+
+  it("live, no request: the challenger runs", () => {
+    const decision = classifyAgent({ title: "lead this" }, leaderWorld({ shadow: false }));
+    expect(decision.model.model).toBe(SONNET);
+    expect(decision.model.leaderRanking).toMatchObject({ ref: SONNET, holds: "challenger", applied: true });
+  });
+
+  it("live, the request names the incumbent: it follows the pick, recorded as an arena-ranked override (KTD9)", () => {
+    const decision = classifyAgent({ title: "lead this", requestedProvider: "claude", requestedModel: OPUS }, leaderWorld({ shadow: false }));
+    expect(decision.model.outcome).toBe("selected");
+    expect(decision.model.model).toBe(SONNET);
+    expect(decision.model.override).toMatchObject({ requestedRef: `claude/${OPUS}`, reason: "arena-ranked" });
+    expect(decision.model.leaderRanking).toMatchObject({ applied: true });
+  });
+
+  it("live, the request names another pool model: honored, the pick not applied (KTD9)", () => {
+    const decision = classifyAgent({ title: "lead this", requestedProvider: "claude", requestedModel: OPUS5 }, leaderWorld({ shadow: false }));
+    expect(decision.model.outcome).toBe("honored-request");
+    expect(decision.model.model).toBe(OPUS5);
+    expect(decision.model.leaderRanking).toMatchObject({ ref: SONNET, applied: false });
+  });
+
+  it("live with paseo.model-pin: the incumbent request is honored", () => {
+    const decision = classifyAgent(
+      { title: "lead this", requestedProvider: "claude", requestedModel: OPUS, labels: { [MODEL_PIN_LABEL]: "1" } },
+      leaderWorld({ shadow: false }),
+    );
+    expect(decision.model.outcome).toBe("honored-request");
+    expect(decision.model.model).toBe(OPUS);
+    expect(decision.model.leaderRanking).toMatchObject({ applied: false });
+  });
+
+  it("live, incumbent holding: the incumbent runs and nothing is overridden", () => {
+    const decision = classifyAgent({ title: "lead this", requestedProvider: "claude", requestedModel: OPUS }, leaderWorld({ shadow: false, streakPublishes: 10 }));
+    expect(decision.model.outcome).toBe("honored-request");
+    expect(decision.model.model).toBe(OPUS);
+    expect(decision.model.leaderRanking).toMatchObject({ ref: OPUS, holds: "incumbent", applied: false, streak: { won: 3, needed: 10 } });
+  });
+
+  it("thinking stays the leader rule's Extra High, shadow or live", () => {
+    for (const shadow of [true, false]) {
+      const decision = classifyAgent({ title: "lead this" }, leaderWorld({ shadow }));
+      expect(decision.thinking).toMatchObject({ outcome: "leader-rule", optionId: "xhigh" });
+    }
+  });
+
+  it("an import successor (handoff-from) is never re-picked (AE5)", () => {
+    const decision = classifyAgent({ title: "lead this", labels: { "handoff-from": "agent-old" } }, leaderWorld({ shadow: false }));
+    expect(decision.model.leaderRanking).toMatchObject({ outcome: "fallback", reason: "successor", applied: false });
+    expect(decision.model.model).toBe(OPUS);
+  });
+
+  it("a worker's decision is identical with and without the leader block", () => {
+    const create = child({ labels: { "paseo.agent-type": "worker" } });
+    const withLeader = classifyAgent(create, leaderWorld({ shadow: false }));
+    const without = classifyAgent(create, leaderWorld(undefined));
+    expect(withLeader.model).toEqual(without.model);
+    expect(withLeader.model.leaderRanking).toBeUndefined();
+  });
+
+  it("a stale or missing rankings file is a no-file fallback, today's model", () => {
+    const decision = classifyAgent({ title: "lead this" }, leaderWorld({ shadow: false }, { arenaRanking: undefined }));
+    expect(decision.model.leaderRanking).toMatchObject({ outcome: "fallback", reason: "no-file" });
+    expect(decision.model.model).toBe(OPUS);
+  });
+});
+
 describe("classifyAgent — Codex's usability gates reach ordered selection (U5, KTD-9)", () => {
   function codexFirstPool(): RoleModelPolicy {
     return withRole(DEFAULT_POLICY, "worker", { models: ["codex/gpt-6-sol", "claude-sonnet-5"] });

@@ -890,18 +890,35 @@ function formatArenaPickLabel(ranking: NonNullable<AgentDecision["model"]["ranki
 }
 
 /**
+ * The leader pick's `paseo.arena-pick`: the v1 fields a worker pick carries, then
+ * `role=leader;incumbent=<ref>;streak=<won>/<needed>`. `ref` is the rule's pick, the
+ * incumbent unless the challenger's streak is complete; `date` is the board's own
+ * publish date. Leader pools hold top-tier models only, so `tier` is always `top`.
+ */
+function formatLeaderPickLabel(ranking: NonNullable<AgentDecision["model"]["leaderRanking"]> & { outcome: "ranked" }): string {
+  const pick = ranking.holds === "challenger" ? ranking.challenger : ranking.incumbent;
+  return `v1;ref=${ranking.ref};tier=top;board=${ranking.board};date=${ranking.publishDate};applied=${ranking.applied ? 1 : 0};proxy=${pick.proxy ? 1 : 0};role=leader;incumbent=${ranking.incumbent.ref};streak=${ranking.streak.won}/${ranking.streak.needed}`;
+}
+
+/**
  * U8's `paseo.arena-pick` label (KTD-1, KTD-2, KTD-11, KTD-13): written only
  * for a `"ranked"` outcome, whether applied, shadowed, or recorded against an
  * honored explicit request (shadow, or a `paseo.model-pin`'d live request) —
  * a fallback writes nothing here, since the decision log alone records its
- * reason. A leader never reaches this: `decideModel` never evaluates ranking
- * for one, so `decision.model.ranking` is undefined.
+ * reason. A leader's decision carries `leaderRanking` instead of `ranking`
+ * (the leader pick, docs/arena-ranking.md "Leaders"), written here in the
+ * same label with `role=leader` appended.
  */
 function applyArenaPickLabel(
   request: PluginBeforeRequests["agent.create"],
   routed: PluginBeforeRequests["agent.create"] | void,
   decision: AgentDecision | undefined,
 ): PluginBeforeRequests["agent.create"] | void {
+  const leaderRanking = decision?.model.leaderRanking;
+  if (leaderRanking?.outcome === "ranked") {
+    const base = (routed ?? request) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
+    return { ...base, labels: { ...base.labels, [ARENA_PICK_LABEL]: formatLeaderPickLabel(leaderRanking) } };
+  }
   const ranking = decision?.model.ranking;
   // Second layer, belt-and-suspenders: `decideModel` never returns `honored-request` with
   // `ranking.applied` true (the exact corruption PR B's review fix exists to prevent — the label

@@ -402,6 +402,69 @@ describe("decision log", () => {
       expect(parse(lines[0]).model.ranking).toBeUndefined();
     });
 
+    describe("the leader pick", () => {
+      const opusRow = { arenaName: "claude-opus-5.5-max", ours: "claude-opus-5-5", effort: "max", rating: 0.2, ratingLower: 0.18, ratingUpper: 0.22, votes: 1000 };
+      const sonnetRow = { arenaName: "claude-sonnet-5-max", ours: "claude-sonnet-5", effort: "max", rating: 0.32, ratingLower: 0.3, ratingUpper: 0.34, votes: 1000 };
+      const leaderWorld = (history: boolean): ClassifierWorld => ({
+        ...world,
+        policy: {
+          ...world.policy,
+          roles: world.policy.roles.map((role) => (role.id === "leader" ? { ...role, models: ["claude-opus-5-5", "claude-sonnet-5"] } : role)),
+          arena: {
+            enabled: false,
+            shadow: true,
+            roles: ["worker", "reviewer"],
+            topTier: [],
+            topTierMarginCi: 0,
+            maxAgeHours: 72,
+            leader: { enabled: true, shadow: true, boards: ["agent/overall"], marginCi: 1, streakPublishes: 3 },
+          },
+        },
+        arenaRanking: history
+          ? {
+              fetchedAt: Date.now(),
+              publishDate: "2026-10-20",
+              boards: { "agent/overall": [opusRow, sonnetRow] },
+              unmatched: {},
+              failedBoards: [],
+              leaderHistory: {
+                "agent/overall": ["2026-10-19", "2026-10-16"].map((publishDate) => ({ publishDate, rows: [opusRow, sonnetRow] })),
+              },
+            }
+          : undefined,
+      });
+
+      it("records the leader pick under leaderRanking: incumbent, challenger, streak, applied", () => {
+        const { lines, log } = harness();
+        const root = request({ callerAgentId: undefined, labels: undefined });
+        log.note(root, classifyAgent({ title: root.config.title }, leaderWorld(true)));
+        log.finish(tokenOf(log, root), root, root);
+
+        const model = parse(lines[0]).model;
+        expect(model.ranking).toBeUndefined();
+        expect(model.leaderRanking).toMatchObject({
+          outcome: "ranked",
+          applied: false,
+          ref: "claude-opus-5-5",
+          holds: "incumbent",
+          board: "agent/overall",
+          publishDate: "2026-10-19",
+          streak: { won: 2, needed: 3 },
+          incumbent: { ref: "claude-opus-5-5" },
+          challenger: { ref: "claude-sonnet-5" },
+        });
+      });
+
+      it("records a leader fallback with its reason", () => {
+        const { lines, log } = harness();
+        const root = request({ callerAgentId: undefined, labels: undefined });
+        log.note(root, classifyAgent({ title: root.config.title }, leaderWorld(false)));
+        log.finish(tokenOf(log, root), root, root);
+
+        expect(parse(lines[0]).model.leaderRanking).toEqual({ outcome: "fallback", reason: "no-file", applied: false });
+      });
+    });
+
     it("an honored explicit request in shadow mode still records the would-be pick, at applied 0", () => {
       const { lines, log } = harness();
       const asked = request({
