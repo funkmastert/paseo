@@ -19,10 +19,17 @@ import {
 import type { ClassifierDecisionsLedger } from "./classifier-decisions-ledger";
 import { listAllAgents, type ListAllAgentsResult } from "./classifier-decisions-agents";
 import { classifierDecisionsRpc } from "../shared/classifier-decisions-rpc";
+import { findUnpooledLeaderChallengers, unpooledChallengerMessage } from "../shared/arena-unpooled";
+import type { ArenaRankingsFile } from "../shared/arena-aliases";
+import type { RoleModelPolicy } from "../shared/role-policy-schema";
 
 export interface ClassifierDecisionsRpcDeps {
   ledger: Pick<ClassifierDecisionsLedger, "all">;
   now?: () => number;
+  /** The live policy, for the unpooled-challenger line. Absent (or undefined) leaves the line out. */
+  policy?: () => RoleModelPolicy | undefined;
+  /** The cached rankings file, the same one the classifier reads. Absent (or undefined) leaves the line out. */
+  arenaRanking?: () => ArenaRankingsFile | undefined;
 }
 
 export interface ClassifierDecisionsRpcHandlers {
@@ -103,7 +110,10 @@ export function createClassifierDecisionsRpcHandlers(deps: ClassifierDecisionsRp
     },
     async summary(input, context) {
       const entries = await joinedEntries(context, input);
-      return summarize(entries);
+      const summary = summarize(entries);
+      const policy = deps.policy?.();
+      const [top] = policy ? findUnpooledLeaderChallengers({ rankings: deps.arenaRanking?.(), policy }) : [];
+      return top ? { ...summary, unpooledLeaderChallenger: { message: unpooledChallengerMessage(top), challenger: top } } : summary;
     },
   };
 }

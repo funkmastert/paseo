@@ -276,9 +276,12 @@ entirely), `successor`, `no-file`, `no-ranked-board`.
 (`shared/arena-unpooled.ts`) lists models that clear the incumbent on the first
 leader board by the same bar, with no streak, but match no role's pool,
 including models the alias table doesn't map. The settings explain RPC returns
-them as `unpooledLeaderChallengers`. (The classifier dashboard surfacing these
-as a summary line is not built yet; its `paseo.arena-pick` backfill parser
-does already accept the leader keys — see "Decisions ledger and dashboard".)
+them as `unpooledLeaderChallengers`. The Decisions summary shows the top one
+as a single line ("GPT-7 ranks above Claude Opus 5.5 on the agent board and is
+in no pool."), fleet-wide whatever the filters, and nothing when there is
+none. Names come from the rows' Arena display names (`boardTop[].displayName`,
+effort suffix dropped); a file written before that field falls back to the
+canonical name and our ref.
 
 ## Decisions ledger and dashboard
 

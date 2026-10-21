@@ -85,6 +85,8 @@ export type ArenaRankingRow = z.infer<typeof ArenaRankingRowSchema>;
  */
 export const ArenaTopRowSchema = z.object({
   arenaName: z.string(),
+  /** Arena's own display name ("GPT-6 Astra (Max)"), for text a person reads. Absent in older files. */
+  displayName: z.string().optional(),
   ours: z.string().optional(),
   effort: z.string().optional(),
   rating: z.number(),

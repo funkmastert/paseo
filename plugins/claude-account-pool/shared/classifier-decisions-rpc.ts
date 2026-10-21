@@ -8,6 +8,7 @@
 
 import { z } from "zod";
 import { defineRpc } from "@getpaseo/plugin";
+import { UnpooledChallengerSchema } from "./arena-unpooled";
 import { ClassifierDecisionRowSchema } from "./classifier-decisions-schema";
 
 export const ClassifierDecisionOutcomeSchema = z.object({
@@ -60,6 +61,14 @@ export const ClassifierDecisionsSummarySchema = z.object({
   byWorkKind: z.record(z.string(), ClassifierDecisionsWorkKindSummarySchema),
   outcomesByModelAndWorkKind: z.array(ClassifierDecisionsOutcomeBucketSchema),
   caveat: z.string(),
+  /**
+   * The best-ranked model that beats the leader pool's first entry on the first
+   * leader board by the leader pick's margin but sits in no pool
+   * (`shared/arena-unpooled.ts`), with the sentence the dashboard shows.
+   * Omitted when there is none. Fleet-wide: the role and work-kind filters
+   * don't apply to it.
+   */
+  unpooledLeaderChallenger: z.object({ message: z.string(), challenger: UnpooledChallengerSchema }).optional(),
 });
 
 /**

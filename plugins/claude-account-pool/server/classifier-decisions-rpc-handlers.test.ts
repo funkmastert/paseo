@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import { createClassifierDecisionsRpcHandlers } from "./classifier-decisions-rpc-handlers";
 import type { ClassifierDecisionsLedger } from "./classifier-decisions-ledger";
 import type { ClassifierDecisionRow } from "../shared/classifier-decisions-schema";
+import type { ArenaRankingsFile } from "../shared/arena-aliases";
+import { DEFAULT_POLICY, type RoleModelPolicy } from "../shared/role-policy-schema";
 
 function row(overrides: Partial<ClassifierDecisionRow> = {}): ClassifierDecisionRow {
   return {
@@ -85,6 +87,48 @@ describe("classifier-decisions RPC handlers", () => {
     expect(listResult.rows).toEqual([]);
     expect(summaryResult.totalRows).toBe(0);
     expect(summaryResult.agreementRate).toBeNull();
+  });
+
+  describe("the unpooled leader challenger line", () => {
+    const policy: RoleModelPolicy = {
+      ...DEFAULT_POLICY,
+      roles: DEFAULT_POLICY.roles.map((role) => (role.id === "leader" ? { ...role, models: ["claude-opus-5-5"] } : role)),
+    };
+    const rankings = (challengerRating: number): ArenaRankingsFile => ({
+      fetchedAt: Date.now(),
+      publishDate: "2026-10-21",
+      boards: {},
+      unmatched: {},
+      failedBoards: [],
+      boardTop: {
+        "agent/overall": [
+          { arenaName: "gpt-7-max", displayName: "GPT-7 (Max)", rating: challengerRating, ratingLower: challengerRating - 0.02, ratingUpper: challengerRating + 0.02, votes: 1000 },
+          { arenaName: "claude-opus-5.5-max", displayName: "Claude Opus 5.5 (Max)", ours: "claude-opus-5-5", effort: "max", rating: 0.2, ratingLower: 0.18, ratingUpper: 0.22, votes: 1000 },
+        ],
+      },
+    });
+
+    it("carries the top unpooled challenger and its plain sentence, whatever the filters", async () => {
+      const handlers = createClassifierDecisionsRpcHandlers({ ledger: fakeLedger([]), policy: () => policy, arenaRanking: () => rankings(0.35) });
+      const { context } = fakeContext([]);
+
+      const summaryResult = await handlers.summary({ role: "worker" }, context);
+
+      expect(summaryResult.unpooledLeaderChallenger).toMatchObject({
+        message: "GPT-7 ranks above Claude Opus 5.5 on the agent board and is in no pool.",
+        challenger: { arenaName: "gpt-7-max", board: "agent/overall" },
+      });
+    });
+
+    it("leaves the field out when nothing qualifies, or when there is no rankings file or policy", async () => {
+      const { context } = fakeContext([]);
+      const none = createClassifierDecisionsRpcHandlers({ ledger: fakeLedger([]), policy: () => policy, arenaRanking: () => rankings(0.21) });
+      expect((await none.summary({}, context)).unpooledLeaderChallenger).toBeUndefined();
+      const noFile = createClassifierDecisionsRpcHandlers({ ledger: fakeLedger([]), policy: () => policy, arenaRanking: () => undefined });
+      expect((await noFile.summary({}, context)).unpooledLeaderChallenger).toBeUndefined();
+      const noDeps = createClassifierDecisionsRpcHandlers({ ledger: fakeLedger([]) });
+      expect((await noDeps.summary({}, context)).unpooledLeaderChallenger).toBeUndefined();
+    });
   });
 
   it("summary's agreement rate matches an independent computation over the same filtered rows", async () => {

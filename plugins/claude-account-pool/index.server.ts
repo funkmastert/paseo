@@ -686,7 +686,12 @@ export default function contribute(server: PluginServerContext) {
   // Built once the ledger has loaded; a dashboard open before that finishes waits on the same
   // promise rather than racing a second load.
   const classifierDecisionsRpcHandlersPromise = classifierDecisionsLedgerPromise.then((ledger) =>
-    createClassifierDecisionsRpcHandlers({ ledger }),
+    createClassifierDecisionsRpcHandlers({
+      ledger,
+      // Read at call time: both caches start with the plugin, after this promise may already have resolved.
+      policy: () => policyCache?.get(),
+      arenaRanking: () => arenaRankingCache?.get(),
+    }),
   );
   server.handle(classifierDecisionsRpc.list, async (input, context) => {
     const handlers = await classifierDecisionsRpcHandlersPromise;

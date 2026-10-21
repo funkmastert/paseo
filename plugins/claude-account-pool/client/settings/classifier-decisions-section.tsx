@@ -63,6 +63,11 @@ export function ClassifierDecisionsSection({ theme, layout, navigation }: Plugin
       {load.status === "ready" ? (
         <>
           <View style={{ gap: 4, paddingBottom: 8 }} testID="classifier-decisions-summary">
+            {load.summary.unpooledLeaderChallenger ? (
+              <Text style={{ color: theme.colors.foreground }} testID="classifier-decisions-unpooled-leader-challenger">
+                {load.summary.unpooledLeaderChallenger.message}
+              </Text>
+            ) : null}
             <Text style={{ color: theme.colors.foreground }}>
               Agreement rate: {formatPct(load.summary.agreementRate)} ({load.summary.rankedCount} ranked,{" "}
               {load.summary.fallbackCount} fallback) · Top tier: {formatPct(load.summary.topTierRate)}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ArenaRankingsFile, ArenaTopRow } from "./arena-aliases";
-import { findUnpooledLeaderChallengers } from "./arena-unpooled";
+import { findUnpooledLeaderChallengers, unpooledChallengerMessage } from "./arena-unpooled";
 import { DEFAULT_POLICY, type RoleModelPolicy } from "./role-policy-schema";
 
 const OPUS = "claude-opus-5-5";
@@ -103,5 +103,36 @@ describe("findUnpooledLeaderChallengers", () => {
     expect(findUnpooledLeaderChallengers({ rankings: file(undefined), policy })).toEqual([]);
     expect(findUnpooledLeaderChallengers({ rankings: undefined, policy })).toEqual([]);
     expect(findUnpooledLeaderChallengers({ rankings: file(today), policy: DEFAULT_POLICY })).toEqual([]);
+  });
+});
+
+describe("unpooledChallengerMessage", () => {
+  it("says it plainly with Arena's display names, effort dropped, for the agent board", () => {
+    const rows = [
+      { ...top("gpt-7-max", 0.35), displayName: "GPT-7 (Max)" },
+      { ...top("claude-opus-5.5-max", 0.2, OPUS), displayName: "Claude Opus 5.5 (Max)" },
+    ];
+    const [challenger] = findUnpooledLeaderChallengers({ rankings: file(rows), policy });
+    expect(challenger).toMatchObject({ displayName: "GPT-7 (Max)", incumbentRef: OPUS, incumbentName: "Claude Opus 5.5 (Max)" });
+    expect(unpooledChallengerMessage(challenger)).toBe("GPT-7 ranks above Claude Opus 5.5 on the agent board and is in no pool.");
+  });
+
+  it("falls back to the canonical name and our ref when a file predates display names", () => {
+    const [challenger] = findUnpooledLeaderChallengers({ rankings: file([top("gpt-7-max", 0.35), top("claude-opus-5.5-max", 0.2, OPUS)]), policy });
+    expect(unpooledChallengerMessage(challenger)).toBe("gpt-7-max ranks above claude-opus-5-5 on the agent board and is in no pool.");
+  });
+
+  it("names the hard-prompts board when that is the first leader board", () => {
+    expect(
+      unpooledChallengerMessage({
+        arenaName: "gpt-7-max",
+        rating: 1600,
+        ratingLower: 1590,
+        ratingUpper: 1610,
+        marginWidths: 2,
+        board: "text_style_control/hard_prompts",
+        incumbentRef: OPUS,
+      }),
+    ).toBe("gpt-7-max ranks above claude-opus-5-5 on the hard-prompts board and is in no pool.");
   });
 });
