@@ -8,11 +8,41 @@
  */
 
 import { getCompletionStateFromLabels, ACCOUNT_FAILOVER_MIGRATED_TO_LABEL } from "@getpaseo/protocol/agent-labels";
+import { sameModel } from "./model-identity";
+import { splitModelRef } from "./role-policy-schema";
 import type { ClassifierDecisionRow } from "./classifier-decisions-schema";
 
-/** The subset of an agent snapshot (`paseo.agents.list()`'s per-entry `agent`) the join needs. */
+export type RowAgreement = "agree" | "disagree" | "unknown";
+
+/**
+ * Whether a row's would-be pick names the same model as the one that ran. `arena.ref` keeps the
+ * pool's own spelling, which can carry a provider prefix (e.g. `codex/gpt-6.1-sol`), while
+ * `modelRan` is `decision-log.ts`'s `config.model` after the provider split — always bare. Resolved
+ * through the same identity helpers `classifier.ts`'s `rankingMatchesRequestedModel` uses
+ * (`splitModelRef` to drop the prefix, `sameModel` for dated/undated aliasing), per
+ * docs/solutions/logic-errors/bare-pool-ref-family-resolves-before-compare.md.
+ *
+ * "unknown" — not "disagree" — for a fallback row (nothing was picked) or a ranked row with no
+ * `modelRan` (every backfilled row: the compact `paseo.arena-pick` label doesn't carry it). The
+ * one place this is computed, shared by the summary, the `disagreementsOnly` filter, and the row
+ * pill, so the three never disagree with each other about what counts as a disagreement.
+ */
+export function rowAgreement(row: Pick<ClassifierDecisionRow, "modelRan" | "arena">): RowAgreement {
+  if (row.arena.outcome !== "ranked" || row.modelRan === null) {
+    return "unknown";
+  }
+  const pickModel = splitModelRef(row.arena.ref)?.model ?? row.arena.ref;
+  return sameModel(pickModel, row.modelRan) ? "agree" : "disagree";
+}
+
+/**
+ * The subset of an agent snapshot (`paseo.agents.list()`'s per-entry `agent`, `AgentSnapshotPayload`
+ * in `packages/protocol/src/messages.ts`) the join needs. The field is `status`, not `lastStatus` —
+ * `AgentSnapshotPayload` has no `lastStatus` at all, which is how that name shipped and typechecked:
+ * every field here is optional, so a renamed field is just always `undefined` instead of a type error.
+ */
 export interface AgentOutcomeSnapshot {
-  lastStatus?: string;
+  status?: string;
   archivedAt?: string | null;
   labels?: Record<string, string>;
   /** Cost-weighted total, as the snapshot's own `totalTokens` reports it. */
@@ -53,21 +83,26 @@ function durationMsFor(agent: AgentOutcomeSnapshot): number | null {
   return end >= start ? end - start : null;
 }
 
+function outcomeStateFor(agent: AgentOutcomeSnapshot): ClassifierDecisionOutcomeState {
+  if (agent.archivedAt != null) {
+    return "archived";
+  }
+  if (agent.status === "error") {
+    return "errored";
+  }
+  if (agent.status === "running" || agent.status === "initializing") {
+    return "running";
+  }
+  return "finished";
+}
+
 /** An agent the sweep could no longer find (deleted project dir) reads as `state: "unknown"` rather than failing the response. */
 export function joinOutcome(agent: AgentOutcomeSnapshot | undefined): ClassifierDecisionOutcome {
   if (!agent) {
     return UNKNOWN_OUTCOME;
   }
-  const state: ClassifierDecisionOutcomeState =
-    agent.archivedAt != null
-      ? "archived"
-      : agent.lastStatus === "error"
-        ? "errored"
-        : agent.lastStatus === "running" || agent.lastStatus === "initializing"
-          ? "running"
-          : "finished";
   return {
-    state,
+    state: outcomeStateFor(agent),
     completion: getCompletionStateFromLabels(agent.labels),
     moved: agent.labels?.[ACCOUNT_FAILOVER_MIGRATED_TO_LABEL] !== undefined,
     tokens: typeof agent.totalTokens === "number" ? agent.totalTokens : null,
@@ -102,8 +137,10 @@ function increment(record: Record<string, number>, key: string): void {
 export interface ClassifierDecisionsWorkKindSummary {
   rankedCount: number;
   fallbackCount: number;
-  /** Ranked rows where the would-be pick's ref equals the model that ran, over ranked rows in this bucket. `null` when there are none. */
+  /** Agreeing over (agreeing + disagreeing) ranked rows in this bucket — `unknown` rows excluded from both. `null` when there are none. */
   agreementRate: number | null;
+  /** Ranked rows in this bucket with no `modelRan` to compare (every backfilled row) — excluded from `agreementRate`'s denominator, not counted as disagreeing. */
+  agreementUnknownCount: number;
   fallbackReasonCounts: Record<string, number>;
 }
 
@@ -125,6 +162,8 @@ export interface ClassifierDecisionsSummary {
   rankedCount: number;
   fallbackCount: number;
   agreementRate: number | null;
+  /** Ranked rows with no `modelRan` to compare — excluded from `agreementRate`'s denominator, not counted as disagreeing. */
+  agreementUnknownCount: number;
   pickDistributionByModel: Record<string, number>;
   pickDistributionByTier: { top: number; mid: number };
   /** Share of ranked rows whose pick was a `topTier` ref. `null` when there are no ranked rows. */
@@ -144,18 +183,30 @@ export function summarize(entries: readonly ClassifierDecisionWithOutcome[]): Cl
   let rankedCount = 0;
   let fallbackCount = 0;
   let agreeCount = 0;
+  let disagreeCount = 0;
+  let agreementUnknownCount = 0;
   let topTierCount = 0;
   const pickDistributionByModel: Record<string, number> = {};
   const pickDistributionByTier = { top: 0, mid: 0 };
   const fallbackReasonCounts: Record<string, number> = {};
-  const byWorkKind: Record<string, ClassifierDecisionsWorkKindSummary & { agreeCount: number }> = {};
+  const byWorkKind: Record<
+    string,
+    Omit<ClassifierDecisionsWorkKindSummary, "agreementRate"> & { agreeCount: number; disagreeCount: number }
+  > = {};
   const outcomeBuckets = new Map<
     string,
     { model: string; workKind: string; total: number; finished: number; errored: number; running: number; archived: number; unknown: number; tokens: number[] }
   >();
 
   const workKindBucket = (workKind: string) =>
-    (byWorkKind[workKind] ??= { rankedCount: 0, fallbackCount: 0, agreementRate: null, fallbackReasonCounts: {}, agreeCount: 0 });
+    (byWorkKind[workKind] ??= {
+      rankedCount: 0,
+      fallbackCount: 0,
+      agreementUnknownCount: 0,
+      fallbackReasonCounts: {},
+      agreeCount: 0,
+      disagreeCount: 0,
+    });
 
   for (const { row, outcome } of entries) {
     const workKind = bucketKey(row.workKind);
@@ -169,9 +220,19 @@ export function summarize(entries: readonly ClassifierDecisionWithOutcome[]): Cl
       if (row.arena.tier === "top") {
         topTierCount += 1;
       }
-      if (row.modelRan !== null && row.modelRan === row.arena.ref) {
-        agreeCount += 1;
-        wk.agreeCount += 1;
+      switch (rowAgreement(row)) {
+        case "agree":
+          agreeCount += 1;
+          wk.agreeCount += 1;
+          break;
+        case "disagree":
+          disagreeCount += 1;
+          wk.disagreeCount += 1;
+          break;
+        case "unknown":
+          agreementUnknownCount += 1;
+          wk.agreementUnknownCount += 1;
+          break;
       }
     } else {
       fallbackCount += 1;
@@ -203,15 +264,18 @@ export function summarize(entries: readonly ClassifierDecisionWithOutcome[]): Cl
 
   const resolvedByWorkKind: Record<string, ClassifierDecisionsWorkKindSummary> = {};
   for (const [workKind, wk] of Object.entries(byWorkKind)) {
-    const { agreeCount, ...rest } = wk;
-    resolvedByWorkKind[workKind] = { ...rest, agreementRate: wk.rankedCount > 0 ? agreeCount / wk.rankedCount : null };
+    const { agreeCount: wkAgree, disagreeCount: wkDisagree, ...rest } = wk;
+    const known = wkAgree + wkDisagree;
+    resolvedByWorkKind[workKind] = { ...rest, agreementRate: known > 0 ? wkAgree / known : null };
   }
 
+  const knownCount = agreeCount + disagreeCount;
   return {
     totalRows: entries.length,
     rankedCount,
     fallbackCount,
-    agreementRate: rankedCount > 0 ? agreeCount / rankedCount : null,
+    agreementRate: knownCount > 0 ? agreeCount / knownCount : null,
+    agreementUnknownCount,
     pickDistributionByModel,
     pickDistributionByTier,
     topTierRate: rankedCount > 0 ? topTierCount / rankedCount : null,

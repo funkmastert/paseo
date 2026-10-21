@@ -83,9 +83,14 @@ const EXPECTED_CLAUDE_MODELS = [
     descriptionFragment: "Previous release",
   },
   {
+    id: "claude-sonnet-5-5",
+    model: "Sonnet 5.5",
+    descriptionFragment: "Latest release",
+  },
+  {
     id: "claude-sonnet-5",
     model: "Sonnet 5",
-    descriptionFragment: "Best for everyday tasks",
+    descriptionFragment: "Previous release",
   },
   {
     id: "claude-opus-4-7[1m]",

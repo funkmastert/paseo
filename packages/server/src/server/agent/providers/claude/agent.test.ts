@@ -437,6 +437,7 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
         "claude-fable-5[1m]",
         "claude-opus-4-8[1m]",
         "claude-opus-4-8",
+        "claude-sonnet-5-5",
         "claude-sonnet-5",
         "claude-sonnet-5[1m]",
         "claude-opus-4-7[1m]",

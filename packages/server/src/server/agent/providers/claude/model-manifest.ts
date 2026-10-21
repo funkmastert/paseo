@@ -105,10 +105,12 @@ export const CLAUDE_MODEL_MANIFEST = [
   },
   {
     // Claude Code does not advertise this id yet, but accepts it and reports it back as
-    // `claude-sonnet-5-5`, the same pre-advertisement shape as `claude-opus-5-5` above.
+    // `claude-sonnet-5-5`, the same pre-advertisement shape as `claude-opus-5-5` above. Same
+    // minimum version too: no confirmed earlier one, and the two likely shipped together.
     id: "claude-sonnet-5-5",
     label: "Sonnet 5.5",
     description: "Sonnet 5.5 · Latest release",
+    minimumClaudeCodeVersion: "2.1.219",
     contextWindowMaxTokens: 200_000,
     effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,

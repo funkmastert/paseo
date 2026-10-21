@@ -195,6 +195,10 @@ guard against that combination, belt-and-suspenders.
   eligible explicit request over the ranked pick in live mode; has no effect
   in shadow (the request is already honored there) or on a role outside
   `arena.roles`.
+- `paseo.classifier-decision-id` (`decision-log.ts`'s `CLASSIFIER_DECISION_ID_LABEL`): a sibling
+  of the decision log's own pairing token, but never stripped — the ledger's `agent.created`
+  handler reads it to resolve the pending row it noted before the agent existed. See "Decisions
+  ledger and dashboard".
 
 ## Shadow
 

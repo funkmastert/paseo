@@ -44,7 +44,7 @@ function ScreenTabs({ tab, onChange, theme }: { tab: ScreenTab; onChange: (tab: 
             }}
             testID={`agent-model-policy-tab-${id}`}
           >
-            <Text style={{ color: active ? theme.colors.accentForeground : theme.colors.foreground, fontWeight: "600" }}>{label}</Text>
+            <Text style={{ color: active ? theme.colors.accentForeground : theme.colors.foreground }}>{label}</Text>
           </Pressable>
         );
       })}

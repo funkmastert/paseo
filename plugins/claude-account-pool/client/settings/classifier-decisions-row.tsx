@@ -2,6 +2,7 @@ import { Pressable, Text, View } from "react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import type { RpcOutput } from "@getpaseo/plugin";
 import type { classifierDecisionsRpc } from "../../shared/classifier-decisions-rpc";
+import { rowAgreement } from "../../shared/classifier-decisions-aggregate";
 
 type Entry = RpcOutput<typeof classifierDecisionsRpc.list>["rows"][number];
 
@@ -13,7 +14,9 @@ export interface ClassifierDecisionsRowProps {
 
 function formatTokens(tokens: number | null): string | undefined {
   if (tokens === null) return undefined;
-  return tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(2)}M tok` : tokens >= 1_000 ? `${(tokens / 1_000).toFixed(1)}K tok` : `${Math.round(tokens)} tok`;
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(2)}M tok`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}K tok`;
+  return `${Math.round(tokens)} tok`;
 }
 
 function formatDuration(ms: number | null): string | undefined {
@@ -44,20 +47,25 @@ const OUTCOME_LABELS: Record<Entry["outcome"]["state"], string> = {
 export function ClassifierDecisionsRow({ entry, theme, onOpenAgent }: ClassifierDecisionsRowProps) {
   const { colors } = theme;
   const title = entry.agentTitle ?? entry.agentId;
-  const agreed =
-    entry.arena.outcome === "ranked" && entry.modelRan !== null ? entry.modelRan === entry.arena.ref : undefined;
-  const outcomeColor =
-    entry.outcome.state === "errored" ? colors.statusDanger : entry.outcome.state === "finished" ? colors.statusSuccess : colors.foregroundMuted;
+  const agreement = rowAgreement(entry);
+  const outcomeColors: Record<Entry["outcome"]["state"], string> = {
+    errored: colors.statusDanger,
+    finished: colors.statusSuccess,
+    running: colors.foregroundMuted,
+    archived: colors.foregroundMuted,
+    unknown: colors.foregroundMuted,
+  };
+  const outcomeColor = outcomeColors[entry.outcome.state];
 
   return (
     <View style={{ paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border, gap: 4 }} testID={`classifier-decision-row-${entry.id}`}>
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
         {onOpenAgent ? (
           <Pressable onPress={() => onOpenAgent(entry.agentId)} hitSlop={6}>
-            <Text style={{ color: colors.accent, fontWeight: "600" }}>{title}</Text>
+            <Text style={{ color: colors.accent }}>{title}</Text>
           </Pressable>
         ) : (
-          <Text style={{ color: colors.foreground, fontWeight: "600" }}>{title}</Text>
+          <Text style={{ color: colors.foreground }}>{title}</Text>
         )}
         <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{new Date(entry.at).toLocaleString()}</Text>
       </View>
@@ -75,10 +83,10 @@ export function ClassifierDecisionsRow({ entry, theme, onOpenAgent }: Classifier
               {entry.arena.pick.proxy ? ", proxy" : ""}
               {entry.arena.applied ? ", applied" : ", shadowed"})
             </Text>
-            {agreed !== undefined ? (
+            {agreement !== "unknown" ? (
               <Pill
-                label={agreed ? "Agree" : "Disagree"}
-                color={agreed ? colors.statusSuccess : colors.statusWarning}
+                label={agreement === "agree" ? "Agree" : "Disagree"}
+                color={agreement === "agree" ? colors.statusSuccess : colors.statusWarning}
                 background={colors.surface1}
               />
             ) : null}

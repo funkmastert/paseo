@@ -7,18 +7,22 @@
  * KTD-1, outcome is never stored on a row).
  */
 
-/** What the backfill and the outcome join each need off one agent snapshot. */
-export interface ClassifierDecisionsAgentSnapshot {
-  id: string;
-  title?: string | null;
-  labels?: Record<string, string>;
-  lastStatus?: string;
-  archivedAt?: string | null;
-  /** Cost-weighted total, as `AgentSnapshotPayloadSchema.totalTokens` reports it. */
-  totalTokens?: number;
-  createdAt?: string;
-  updatedAt?: string;
-}
+import type { PaseoAgentListResult } from "@getpaseo/client";
+
+/** The real wire shape `paseo.agents.list()` returns one entry's agent as (`AgentSnapshotPayload`). */
+type AgentListEntryAgent = PaseoAgentListResult["entries"][number]["agent"];
+
+/**
+ * What the backfill and the outcome join each need off one agent snapshot — a `Pick` of the real
+ * SDK type rather than a hand-written shape, so a field that doesn't exist (or is renamed) fails
+ * typecheck instead of silently reading `undefined` forever. This is how `status` got hand-written
+ * as `lastStatus` (no such field on `AgentSnapshotPayload`) and passed typecheck anyway: every
+ * agent non-archived read as `"finished"`.
+ */
+export type ClassifierDecisionsAgentSnapshot = Pick<
+  AgentListEntryAgent,
+  "id" | "title" | "labels" | "status" | "archivedAt" | "totalTokens" | "createdAt" | "updatedAt"
+>;
 
 export interface ClassifierDecisionsAgentsApi {
   agents: {
@@ -34,27 +38,44 @@ export interface ClassifierDecisionsAgentsApi {
 
 /** Mirrors `parent-profiles.ts`'s `warm()` sweep: 200/page is the daemon's documented maximum. */
 const PAGE_LIMIT = 200;
-/** 25 pages is 5,000 agents; a bigger directory is not this sweep's problem (same bound as `parent-profiles.ts`). */
+/**
+ * 25 pages is 5,000 agents. This is a last-resort circuit breaker against a runaway loop, not a
+ * normal stopping condition: running out of pages while `hasMore` is still true is a FAILURE
+ * (`complete: false`), the same way a thrown page is, per
+ * docs/solutions/logic-errors/pager-cap-exhaustion-must-fail-not-succeed-silently.md — silently
+ * returning the partial collection as if the sweep finished would under-report every caller that
+ * trusts it (the backfill marking itself done; an outcome join reading a missing agent as
+ * "unknown" instead of "the sweep never reached it").
+ */
 const MAX_PAGES = 25;
 
-/** Every agent, active or archived, across every workspace. Never throws; a failed page just ends the sweep early. */
-export async function listAllAgents(paseo: ClassifierDecisionsAgentsApi): Promise<ClassifierDecisionsAgentSnapshot[]> {
+export interface ListAllAgentsResult {
+  agents: ClassifierDecisionsAgentSnapshot[];
+  /** False when a page threw, or the page cap ran out while more agents remained. */
+  complete: boolean;
+}
+
+/** Every agent, active or archived, across every workspace. Never throws; a failed or capped-out sweep reports `complete: false`. */
+export async function listAllAgents(paseo: ClassifierDecisionsAgentsApi): Promise<ListAllAgentsResult> {
   const agents: ClassifierDecisionsAgentSnapshot[] = [];
   let cursor: string | undefined;
-  try {
-    for (let page = 0; page < MAX_PAGES; page += 1) {
-      const result = await paseo.agents.list({ filter: { includeArchived: true }, page: { limit: PAGE_LIMIT, cursor } });
-      for (const entry of result.entries) {
-        agents.push(entry.agent);
-      }
-      const nextCursor = result.pageInfo?.nextCursor;
-      if (result.pageInfo?.hasMore !== true || !nextCursor) {
-        break;
-      }
-      cursor = nextCursor;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    let result: Awaited<ReturnType<ClassifierDecisionsAgentsApi["agents"]["list"]>>;
+    try {
+      result = await paseo.agents.list({ filter: { includeArchived: true }, page: { limit: PAGE_LIMIT, cursor } });
+    } catch (error) {
+      console.error("classifier-decisions: agent sweep page failed", error);
+      return { agents, complete: false };
     }
-  } catch {
-    // A degraded sweep (one bad page) still returns whatever it already collected.
+    for (const entry of result.entries) {
+      agents.push(entry.agent);
+    }
+    const nextCursor = result.pageInfo?.nextCursor;
+    if (result.pageInfo?.hasMore !== true || !nextCursor) {
+      return { agents, complete: true };
+    }
+    cursor = nextCursor;
   }
-  return agents;
+  console.error(`classifier-decisions: agent sweep hit the ${MAX_PAGES}-page cap with more agents remaining`);
+  return { agents, complete: false };
 }

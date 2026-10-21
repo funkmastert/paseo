@@ -1,7 +1,7 @@
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   arenaFromDecisionLine,
   buildPendingRowFromDecisionLine,
@@ -101,18 +101,119 @@ describe("classifier-decisions ledger", () => {
     await reloaded.flush();
   });
 
-  it("replaces rather than crashes on a file that will not parse", async () => {
+  it("a flush failure (full disk, permissions) never throws and the row is retried on the next flush", async () => {
+    let attempts = 0;
+    const ledger = await loadClassifierDecisionsLedger({
+      filePath,
+      writeFile: async (targetPath, data) => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+        }
+        await fs.mkdir(path.dirname(targetPath), { recursive: true });
+        await fs.writeFile(targetPath, data, "utf-8");
+      },
+    });
+    ledger.notePending("t1", rankedRow("claude-sonnet-5-5"));
+    ledger.resolveAgent("t1", "agent-1", "fan-out");
+
+    await expect(ledger.flush()).resolves.toBeUndefined();
+    expect(attempts).toBe(1);
+
+    // The failed round stayed dirty, so a second flush retries rather than silently giving up.
+    await expect(ledger.flush()).resolves.toBeUndefined();
+    expect(attempts).toBe(2);
+    const raw = await fs.readFile(filePath, "utf-8");
+    expect(JSON.parse(raw).rows).toHaveLength(1);
+  });
+
+  it("quarantines (renames aside) and logs a file that will not parse as JSON, rather than silently replacing it", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.writeFile(filePath, "{ not json", "utf-8");
 
+    const ledger = await loadClassifierDecisionsLedger({ filePath, now: () => 1234 });
+    expect(ledger.all()).toHaveLength(0);
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("did not parse as JSON"));
+
+    const corruptRaw = await fs.readFile(`${filePath}.corrupt-1234`, "utf-8");
+    expect(corruptRaw).toBe("{ not json");
+    await expect(fs.readFile(filePath, "utf-8")).rejects.toThrow();
+
+    ledger.notePending("t1", rankedRow("claude-sonnet-5-5"));
+    ledger.resolveAgent("t1", "agent-1", null);
+    await ledger.flush();
+    expect(JSON.parse(await fs.readFile(filePath, "utf-8")).rows).toHaveLength(1);
+    errors.mockRestore();
+  });
+
+  it("does not quarantine a missing file (ENOENT is a fresh install, not corruption)", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const ledger = await loadClassifierDecisionsLedger({ filePath });
+
+    expect(ledger.all()).toHaveLength(0);
+    expect(errors).not.toHaveBeenCalled();
+    errors.mockRestore();
+  });
+
+  it("quarantines a read failure other than ENOENT (EACCES, EMFILE) instead of treating it like a fresh install", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const eaccesError = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    let renamed: [string, string] | undefined;
+
+    const ledger = await loadClassifierDecisionsLedger({
+      filePath,
+      now: () => 5678,
+      readFile: async () => {
+        throw eaccesError;
+      },
+      renameFile: async (from, to) => {
+        renamed = [from, to];
+      },
+    });
+
+    expect(ledger.all()).toHaveLength(0);
+    expect(renamed).toEqual([filePath, `${filePath}.corrupt-5678`]);
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("EACCES"));
+    errors.mockRestore();
+  });
+
+  it("drops only a malformed row, keeping every row that still parses", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    const goodRow = { ...rankedRow("claude-sonnet-5-5"), agentId: "agent-1", agentTitle: null, backfilled: false };
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({ v: 1, rows: [goodRow, { id: "broken", not: "a valid row" }] }),
+      "utf-8",
+    );
+
+    const ledger = await loadClassifierDecisionsLedger({ filePath });
+
+    expect(ledger.all()).toHaveLength(1);
+    expect(ledger.all()[0].agentId).toBe("agent-1");
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("dropped 1 malformed row"));
+    errors.mockRestore();
+  });
+
+  it("never overwrites a file from a newer, unrecognized version", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, JSON.stringify({ v: 2, rows: [], somethingThisBuildDoesNotKnow: true }), "utf-8");
+
     const ledger = await loadClassifierDecisionsLedger({ filePath });
     expect(ledger.all()).toHaveLength(0);
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("newer than this build understands"));
+
     ledger.notePending("t1", rankedRow("claude-sonnet-5-5"));
     ledger.resolveAgent("t1", "agent-1", null);
     await ledger.flush();
 
-    const raw = await fs.readFile(filePath, "utf-8");
-    expect(JSON.parse(raw).rows).toHaveLength(1);
+    // The v2 file on disk is untouched — not clobbered with a v1-shaped rewrite.
+    const raw = JSON.parse(await fs.readFile(filePath, "utf-8"));
+    expect(raw).toEqual({ v: 2, rows: [], somethingThisBuildDoesNotKnow: true });
+    errors.mockRestore();
   });
 
   describe("appendBackfill", () => {

@@ -77,7 +77,7 @@ export function ClassifierDecisionsSection({ theme, layout, navigation }: Plugin
                 Fallback reasons: {topEntries(load.summary.fallbackReasonCounts, 3).map(([reason, count]) => `${reason} (${count})`).join(", ")}
               </Text>
             ) : null}
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, fontStyle: "italic" }}>{load.summary.caveat}</Text>
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, fontStyle: "italic" }}>{load.summary.caveat}</Text>
           </View>
 
           <SettingsSwitch
@@ -118,8 +118,8 @@ export function ClassifierDecisionsSection({ theme, layout, navigation }: Plugin
           )}
           {load.nextCursor ? (
             <SettingsAction
-              label={`${load.rows.length} shown`}
-              actionLabel={load.loadingMore ? "Loading…" : "Load more"}
+              label={load.loadMoreError ? `Couldn't load more: ${load.loadMoreError}` : `${load.rows.length} shown`}
+              actionLabel={load.loadingMore ? "Loading…" : load.loadMoreError ? "Retry" : "Load more"}
               onPress={loadMore}
               disabled={load.loadingMore}
               testID="classifier-decisions-load-more"

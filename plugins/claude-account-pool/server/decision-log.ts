@@ -27,6 +27,15 @@ export interface LoggedRequest {
  */
 export const DECISION_TOKEN_LABEL = "paseo.decision-log-token";
 
+/**
+ * A sibling of `DECISION_TOKEN_LABEL`, owned by `index.server.ts`'s role hook — but, unlike that
+ * one, never stripped: the classifier-decisions ledger (`classifier-decisions-ledger.ts`) needs it
+ * to still be on the agent once `agent.created` fires, to resolve the pending row it noted before
+ * the agent existed. Exported here (not left private to `index.server.ts`) so this persisted
+ * contract has one source of truth instead of a string literal duplicated into tests.
+ */
+export const CLASSIFIER_DECISION_ID_LABEL = "paseo.classifier-decision-id";
+
 export interface DecisionLog {
   /** Called by the role router (server/role-router.ts) with what it decided for `request`. Writes nothing. */
   note(request: LoggedRequest, decision: AgentDecision): void;

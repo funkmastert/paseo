@@ -22,7 +22,7 @@ import { createPoolCache, type PoolCache } from "./server/pool";
 import { createRecentAgentTypes, type RecentAgentTypes } from "./server/recent-agent-types";
 import { createPolicyCache, type PolicyCache } from "./server/role-policy";
 import { createRoleModelPolicyRpcHandlers } from "./server/role-policy-rpc-handlers";
-import { createDecisionLog, type LoggedRequest } from "./server/decision-log";
+import { CLASSIFIER_DECISION_ID_LABEL, createDecisionLog, type LoggedRequest } from "./server/decision-log";
 import { buildPendingRowFromDecisionLine, loadClassifierDecisionsLedger } from "./server/classifier-decisions-ledger";
 import { runClassifierDecisionsBackfill } from "./server/classifier-decisions-backfill";
 import { createClassifierDecisionsRpcHandlers } from "./server/classifier-decisions-rpc-handlers";
@@ -56,16 +56,6 @@ const STARTUP_WARM_TIMEOUT_MS = 5000;
  * it can never collide with a server the caller configured itself.
  */
 const CLASSIFIER_MCP_SERVER = "paseo-agent-policy";
-
-/**
- * Correlates a role-hook decision to the real agent `agent.created` later
- * names (docs/arena-ranking.md, "Decisions ledger and dashboard"): the hook
- * that decides a create runs before the daemon mints an agent id, so this
- * rides on the request/response the way `DECISION_TOKEN_LABEL` does, but —
- * unlike that one — is never stripped, since the ledger needs it to still be
- * on the agent once `agent.created` fires.
- */
-const CLASSIFIER_DECISION_ID_LABEL = "paseo.classifier-decision-id";
 
 export default function contribute(server: PluginServerContext) {
   const health = createHealthTracker();
@@ -154,7 +144,9 @@ export default function contribute(server: PluginServerContext) {
     // rankings poller above -- it reads agents, not a create's hot path, and must never delay one.
     // `runClassifierDecisionsBackfill` itself no-ops once the ledger's `backfilledAt` is set, so a
     // reload or restart after the first successful run costs nothing beyond the no-op check.
-    void classifierDecisionsLedgerPromise.then((ledger) => runClassifierDecisionsBackfill(paseo, ledger));
+    void classifierDecisionsLedgerPromise
+      .then((ledger) => runClassifierDecisionsBackfill(paseo, ledger))
+      .catch((error) => console.error("classifier-decisions: backfill failed", error));
     // The plugin cache that feeds `ClassifierWorld.arenaRanking`, beside catalogCache/poolCache
     // above (U8). Reads `arena.maxAgeHours` fresh off the policy cache on every poll.
     arenaRankingCache = createArenaRankingCache(resolvePaseoHome(), {
@@ -508,7 +500,9 @@ export default function contribute(server: PluginServerContext) {
       const workKind = request.labels?.[WORK_KIND_LABEL];
       const pendingRow = buildPendingRowFromDecisionLine(decisionId, new Date().toISOString(), line, workKind);
       if (pendingRow) {
-        void classifierDecisionsLedgerPromise.then((ledger) => ledger.notePending(decisionId, pendingRow));
+        void classifierDecisionsLedgerPromise
+          .then((ledger) => ledger.notePending(decisionId, pendingRow))
+          .catch((error) => console.error("classifier-decisions: notePending failed", error));
       }
     }
     return routed ?? (token === undefined ? undefined : request);
@@ -641,9 +635,9 @@ export default function contribute(server: PluginServerContext) {
     }
     const decisionId = event.agent.labels?.[CLASSIFIER_DECISION_ID_LABEL];
     if (decisionId !== undefined) {
-      void classifierDecisionsLedgerPromise.then((ledger) =>
-        ledger.resolveAgent(decisionId, event.agent.id, event.agent.title ?? null),
-      );
+      void classifierDecisionsLedgerPromise
+        .then((ledger) => ledger.resolveAgent(decisionId, event.agent.id, event.agent.title ?? null))
+        .catch((error) => console.error("classifier-decisions: resolveAgent failed", error));
     }
   });
   const unregisterPermissionRequested = server.on("agent.permission_requested", (event, context) => {

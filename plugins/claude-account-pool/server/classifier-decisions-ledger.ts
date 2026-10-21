@@ -20,6 +20,7 @@ import * as path from "path";
 import { randomUUID } from "crypto";
 import {
   ClassifierDecisionArenaSchema,
+  ClassifierDecisionRowSchema,
   ClassifierDecisionsFileSchema,
   type ClassifierDecisionArena,
   type ClassifierDecisionRow,
@@ -58,6 +59,7 @@ export interface ClassifierDecisionsLedgerOptions {
   flushIntervalMs?: number;
   readFile?: (filePath: string) => Promise<string>;
   writeFile?: (filePath: string, data: string) => Promise<void>;
+  renameFile?: (from: string, to: string) => Promise<void>;
 }
 
 type Pending = { row: PendingClassifierDecisionRow; atMs: number };
@@ -73,10 +75,34 @@ async function defaultWriteFile(filePath: string, data: string): Promise<void> {
   await fs.rename(tempPath, filePath);
 }
 
+function defaultRenameFile(from: string, to: string): Promise<void> {
+  return fs.rename(from, to);
+}
+
+/** Parses `rows` one entry at a time so a single malformed row drops only itself, not the whole file. */
+function parseRowsLeniently(value: unknown): { rows: ClassifierDecisionRow[]; dropped: number } {
+  if (!Array.isArray(value)) {
+    return { rows: [], dropped: 0 };
+  }
+  const rows: ClassifierDecisionRow[] = [];
+  let dropped = 0;
+  for (const candidate of value) {
+    const parsed = ClassifierDecisionRowSchema.safeParse(candidate);
+    if (parsed.success) {
+      rows.push(parsed.data);
+    } else {
+      dropped += 1;
+    }
+  }
+  return { rows, dropped };
+}
+
 /**
- * Loads the ledger file, replacing rather than crashing on anything that
- * will not parse — this is a history, not a record anyone's correctness
- * depends on (docs/data-model.md's convention for this kind of store).
+ * Loads the ledger file. Only a missing file (`ENOENT`, a fresh install) is silent — any other
+ * read failure, a file that won't parse as JSON, or a shape this build's schema rejects is quarantined
+ * (renamed to `<path>.corrupt-<timestamp>`) and logged before starting empty, rather than the
+ * previous bare-catch, which treated an `EACCES`/`EMFILE` exactly like "nothing here yet" and
+ * silently replaced the file (with no log line) on the very next flush.
  */
 export async function loadClassifierDecisionsLedger(
   options: ClassifierDecisionsLedgerOptions,
@@ -84,17 +110,62 @@ export async function loadClassifierDecisionsLedger(
   const now = options.now ?? Date.now;
   const readFile = options.readFile ?? defaultReadFile;
   const writeFile = options.writeFile ?? defaultWriteFile;
+  const renameFile = options.renameFile ?? defaultRenameFile;
   const flushIntervalMs = options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
 
   let state: ClassifierDecisionsFile = { v: 1, rows: [] };
+  // Set when the file on disk is a future version this build's schema doesn't understand: never
+  // overwrite it with a v1-shaped rewrite. New decisions during this one process still work in
+  // memory; they are just not persisted until a build that understands the newer shape runs.
+  let skipFlush = false;
+
+  async function quarantine(reason: string): Promise<void> {
+    const corruptPath = `${options.filePath}.corrupt-${now()}`;
+    try {
+      await renameFile(options.filePath, corruptPath);
+      console.error(`classifier-decisions ledger: ${reason}; moved the original to ${corruptPath} and starting empty`);
+    } catch (renameError) {
+      console.error(`classifier-decisions ledger: ${reason}; starting empty (could not preserve the original file)`, renameError);
+    }
+  }
+
   try {
     const raw = await readFile(options.filePath);
-    const parsed = ClassifierDecisionsFileSchema.safeParse(JSON.parse(raw));
-    if (parsed.success) {
-      state = parsed.data;
+    let json: unknown;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      await quarantine("file did not parse as JSON");
+      json = undefined;
     }
-  } catch {
-    // Missing or unparseable: start fresh, same as a fresh install.
+    if (json !== undefined) {
+      const whole = ClassifierDecisionsFileSchema.safeParse(json);
+      if (whole.success) {
+        state = whole.data;
+      } else {
+        const fileVersion = typeof json === "object" && json !== null ? (json as { v?: unknown }).v : undefined;
+        if (typeof fileVersion === "number" && fileVersion !== 1) {
+          console.error(
+            `classifier-decisions ledger: file is v${fileVersion}, newer than this build understands (v1) — reading nothing and will not overwrite it`,
+          );
+          skipFlush = true;
+        } else {
+          const rowsField = typeof json === "object" && json !== null ? (json as { rows?: unknown }).rows : undefined;
+          const backfilledAtField = typeof json === "object" && json !== null ? (json as { backfilledAt?: unknown }).backfilledAt : undefined;
+          const { rows, dropped } = parseRowsLeniently(rowsField);
+          state = { v: 1, rows, ...(typeof backfilledAtField === "string" ? { backfilledAt: backfilledAtField } : {}) };
+          if (dropped > 0) {
+            console.error(`classifier-decisions ledger: dropped ${dropped} malformed row(s) on load, kept ${rows.length}`);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (code !== "ENOENT") {
+      await quarantine(`could not read the ledger file (${code ?? "unknown error"})`);
+    }
+    // ENOENT: a fresh install, nothing to log or preserve.
   }
 
   const pending = new Map<string, Pending>();
@@ -114,9 +185,17 @@ export async function loadClassifierDecisionsLedger(
   };
 
   const flush = async () => {
-    if (!dirty) return;
+    if (!dirty || skipFlush) return;
     dirty = false;
-    await writeFile(options.filePath, JSON.stringify(state, null, 2));
+    try {
+      await writeFile(options.filePath, JSON.stringify(state, null, 2));
+    } catch (error) {
+      // A full disk or a permissions error must never take the plugin process down with it
+      // (role routing, account routing and model policy all live in this same process). Put
+      // `dirty` back so the next interval tick — or the next row that arrives — retries.
+      dirty = true;
+      console.error("classifier-decisions ledger: flush failed, will retry", error);
+    }
   };
 
   flushTimer = setInterval(() => {

@@ -18,8 +18,17 @@ import { ARENA_PICK_LABEL, AGENT_ROLE_LABEL, TASK_CLASS_LABEL, WORK_KIND_LABEL }
 
 export type { ClassifierDecisionsAgentsApi } from "./classifier-decisions-agents";
 
+/**
+ * `packages/server/src/server/agent/account-failover-detector.ts`'s own label — redeclared
+ * locally rather than importing a core server module from this plugin, the same way
+ * `PARENT_AGENT_ID_LABEL` is redeclared in `role-router.ts`/`notify.ts`.
+ */
+const HANDOFF_FROM_LABEL = "handoff-from";
+
 export interface ClassifierDecisionsBackfillResult {
   ran: boolean;
+  /** Whether the agent sweep behind this result finished (vs. a thrown page or the page cap). */
+  complete: boolean;
   scanned: number;
   backfilled: number;
   skipped: number;
@@ -52,7 +61,7 @@ function parseArenaPickLabel(value: string): Omit<Extract<ClassifierDecisionRow[
   };
 }
 
-function backfillRowFor(agent: ClassifierDecisionsAgentSnapshot, now: () => number): ClassifierDecisionRow | undefined {
+function backfillRowFor(agent: ClassifierDecisionsAgentSnapshot): ClassifierDecisionRow | undefined {
   const pickLabel = agent.labels?.[ARENA_PICK_LABEL];
   if (!pickLabel) {
     return undefined;
@@ -63,7 +72,10 @@ function backfillRowFor(agent: ClassifierDecisionsAgentSnapshot, now: () => numb
   }
   return {
     id: `backfill-${agent.id}`,
-    at: new Date(now()).toISOString(),
+    // The decision's own time, not when the sweep happened to run — the sweep runs long after
+    // every historical decision, and stamping all ~280 rows with that one moment both misrepresents
+    // "when" and sorts them ahead of today's live rows in the newest-first ledger.
+    at: agent.createdAt,
     agentId: agent.id,
     agentTitle: agent.title ?? null,
     role: agent.labels?.[AGENT_ROLE_LABEL] ?? null,
@@ -76,24 +88,31 @@ function backfillRowFor(agent: ClassifierDecisionsAgentSnapshot, now: () => numb
 }
 
 /**
- * Runs the sweep if (and only if) the ledger has never been backfilled. Never throws — a failed
- * sweep leaves `backfilledAt` unset, so the next plugin start tries again rather than losing the
- * historical picks for good.
+ * Runs the sweep if (and only if) the ledger has never been backfilled. The marker is set only
+ * after a COMPLETE sweep — one a thrown page or the page cap never cut short — so a transient
+ * failure (a reload mid-boot is enough) leaves `backfilledAt` unset and the next plugin start
+ * tries again, rather than permanently recording a zero/partial backfill as done
+ * (docs/solutions/logic-errors/pager-cap-exhaustion-must-fail-not-succeed-silently.md).
  */
 export async function runClassifierDecisionsBackfill(
   paseo: ClassifierDecisionsAgentsApi,
   ledger: Pick<ClassifierDecisionsLedger, "backfilledAt" | "appendBackfill">,
-  now: () => number = Date.now,
 ): Promise<ClassifierDecisionsBackfillResult> {
   if (ledger.backfilledAt() !== undefined) {
-    return { ran: false, scanned: 0, backfilled: 0, skipped: 0 };
+    return { ran: false, complete: true, scanned: 0, backfilled: 0, skipped: 0 };
   }
 
-  const agents = await listAllAgents(paseo);
+  const { agents, complete } = await listAllAgents(paseo);
   const rows: ClassifierDecisionRow[] = [];
   let skipped = 0;
   for (const agent of agents) {
-    const row = backfillRowFor(agent, now);
+    // A failover successor is created with `{ ...predecessor.labels, [HANDOFF_FROM_LABEL]: predecessorId }`
+    // (account-failover-migration.ts), so it copies the predecessor's `paseo.arena-pick` verbatim —
+    // backfilling it too would count the one decision the predecessor made twice.
+    if (agent.labels?.[HANDOFF_FROM_LABEL]) {
+      continue;
+    }
+    const row = backfillRowFor(agent);
     if (row) {
       rows.push(row);
     } else if (agent.labels?.[ARENA_PICK_LABEL]) {
@@ -102,6 +121,13 @@ export async function runClassifierDecisionsBackfill(
     }
   }
 
+  if (!complete) {
+    console.error(
+      `classifier-decisions: backfill sweep was incomplete (${agents.length} agents scanned); leaving backfilledAt unset so the next plugin start retries`,
+    );
+    return { ran: false, complete: false, scanned: agents.length, backfilled: 0, skipped };
+  }
+
   await ledger.appendBackfill(rows);
-  return { ran: true, scanned: agents.length, backfilled: rows.length, skipped };
+  return { ran: true, complete: true, scanned: agents.length, backfilled: rows.length, skipped };
 }

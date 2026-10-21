@@ -75,6 +75,15 @@ describe("getClaudeModels", () => {
     ]);
   });
 
+  it("filters out claude-sonnet-5-5 below its minimum Claude Code version, like claude-opus-5-5", () => {
+    const olderModels = getClaudeModels("2.1.200");
+    expect(olderModels.map((m) => m.id)).not.toContain("claude-sonnet-5-5");
+    expect(olderModels.map((m) => m.id)).not.toContain("claude-opus-5-5");
+
+    const currentModels = getClaudeModels("2.1.219");
+    expect(currentModels.map((m) => m.id)).toContain("claude-sonnet-5-5");
+  });
+
   it("marks exactly one model as default", () => {
     const models = getClaudeModels();
     const defaults = models.filter((m) => m.isDefault);
