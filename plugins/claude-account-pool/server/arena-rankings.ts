@@ -20,6 +20,7 @@ import { randomUUID } from "crypto";
 import {
   allBoardIds,
   arenaAliasFor,
+  isLeaderBoardId,
   LEADER_BOARD_IDS,
   LEADER_HISTORY_MAX_PUBLISHES,
   type ArenaPublish,
@@ -233,6 +234,20 @@ export interface FetchedLeaderBoard {
   top: ArenaTopRow[];
 }
 
+/** The leader-board fields of the rankings file, as `mergeLeaderBoards` writes them. */
+export interface LeaderBoardState {
+  leaderHistory: Record<string, ArenaPublish[]>;
+  boardTop: Record<string, ArenaTopRow[]>;
+}
+
+/** Newest publish first. ISO dates compare correctly as strings. */
+function newestFirst(a: ArenaPublish, b: ArenaPublish): number {
+  if (a.publishDate === b.publishDate) {
+    return 0;
+  }
+  return a.publishDate < b.publishDate ? 1 : -1;
+}
+
 /**
  * Folds one fetch's leader boards into the previous file's history and top
  * rows. A new publish is prepended (newest first, at most
@@ -243,7 +258,7 @@ export interface FetchedLeaderBoard {
 export function mergeLeaderBoards(
   previous: Pick<ArenaRankingsFile, "leaderHistory" | "boardTop"> | undefined,
   fetched: Readonly<Record<string, FetchedLeaderBoard>>,
-): { leaderHistory: Record<string, ArenaPublish[]>; boardTop: Record<string, ArenaTopRow[]> } {
+): LeaderBoardState {
   const leaderHistory: Record<string, ArenaPublish[]> = { ...previous?.leaderHistory };
   const boardTop: Record<string, ArenaTopRow[]> = { ...previous?.boardTop };
   for (const boardId of LEADER_BOARD_IDS) {
@@ -260,7 +275,7 @@ export function mergeLeaderBoards(
       continue;
     }
     leaderHistory[boardId] = [{ publishDate: board.publishDate, rows: board.rows }, ...history]
-      .sort((a, b) => (a.publishDate < b.publishDate ? 1 : a.publishDate > b.publishDate ? -1 : 0))
+      .sort(newestFirst)
       .slice(0, LEADER_HISTORY_MAX_PUBLISHES);
   }
   return { leaderHistory, boardTop };
@@ -421,7 +436,6 @@ async function fetchBoardsGroupedByConfig(boardIds: readonly string[]): Promise<
   const unmatched: Record<string, number> = {};
   const failedBoards: string[] = [];
   const leaderBoards: Record<string, FetchedLeaderBoard> = {};
-  const isLeaderBoard = (boardId: string) => (LEADER_BOARD_IDS as readonly string[]).includes(boardId);
 
   const entriesByConfig = new Map<string, Array<{ category: string; boardId: string }>>();
   for (const boardId of boardIds) {
@@ -460,7 +474,7 @@ async function fetchBoardsGroupedByConfig(boardIds: readonly string[]): Promise<
       const { rows, unmatched: boardUnmatched } = normalizeBoardRows(categoryRows ?? []);
       boards[boardId] = rows;
       unmatched[boardId] = boardUnmatched;
-      if (isLeaderBoard(boardId)) {
+      if (isLeaderBoardId(boardId)) {
         leaderBoards[boardId] = { rows, publishDate: boardPublishDate(categoryRows ?? []), top: topRows(categoryRows ?? []) };
       }
     }

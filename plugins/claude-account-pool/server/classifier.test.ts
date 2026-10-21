@@ -2090,6 +2090,39 @@ describe("classifyAgent — arena leader pick (shadow first)", () => {
     expect(decision.model.leaderRanking).toMatchObject({ ref: SONNET, applied: false });
   });
 
+  it("live, the request names the winning challenger: honored, the pick applied, nothing overridden", () => {
+    const decision = classifyAgent({ title: "lead this", requestedProvider: "claude", requestedModel: SONNET }, leaderWorld({ shadow: false }));
+    expect(decision.model.outcome).toBe("honored-request");
+    expect(decision.model.model).toBe(SONNET);
+    expect(decision.model.override).toBeUndefined();
+    expect(decision.model.leaderRanking).toMatchObject({ ref: SONNET, applied: true });
+  });
+
+  it("an unusable incumbent: the record says it holds, and the model shows what actually ran", () => {
+    const decision = classifyAgent(
+      { title: "lead this" },
+      leaderWorld({ shadow: false, streakPublishes: 10 }, { catalog: catalog([SONNET, OPUS5, "claude-haiku-4-5-20251001"]) }),
+    );
+    expect(decision.model.leaderRanking).toMatchObject({ ref: OPUS, holds: "incumbent", applied: false });
+    expect(decision.model.model).not.toBe(OPUS);
+    expect(decision.model.reason).toContain(`${OPUS} holds`);
+  });
+
+  it("with the leader thinking rule off, the pick ranks at the effort the leader will actually run", () => {
+    // Opus has rows at max and xhigh; the xhigh row is the one that clears for Sonnet (max, a proxy
+    // only against an exact incumbent at xhigh). A requested xhigh must find the exact xhigh row.
+    const rows = [agentRow(OPUS, 0.2), { ...agentRow(OPUS, 0.1), effort: "xhigh", arenaName: "opus-xhigh" }, agentRow(SONNET, 0.32)];
+    const file: ArenaRankingsFile = {
+      ...sonnetWins,
+      boards: { "agent/overall": rows },
+      leaderHistory: { "agent/overall": ["2026-10-19", "2026-10-16", "2026-10-14"].map((publishDate) => ({ publishDate, rows })) },
+    };
+    const base = leaderWorld({}, { arenaRanking: file });
+    const noLeaderRule = { ...base, policy: { ...base.policy, thinking: { ...base.policy.thinking, leader: null } } } as ClassifierWorld;
+    const decision = classifyAgent({ title: "lead this", requestedThinkingOptionId: "xhigh" }, noLeaderRule);
+    expect(decision.model.leaderRanking).toMatchObject({ incumbent: { effort: "xhigh", proxy: false } });
+  });
+
   it("live with paseo.model-pin: the incumbent request is honored", () => {
     const decision = classifyAgent(
       { title: "lead this", requestedProvider: "claude", requestedModel: OPUS, labels: { [MODEL_PIN_LABEL]: "1" } },

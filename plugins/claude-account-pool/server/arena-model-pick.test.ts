@@ -313,6 +313,11 @@ describe("clearsLeaderBar (R6)", () => {
     expect(clearsLeaderBar({ ratingLower: 0.25, ratingUpper: 0.29 }, incumbent, 1)).toBe(false);
   });
 
+  it("never clears on a degenerate or inverted CI, so a malformed row can't build a streak", () => {
+    expect(clearsLeaderBar({ ratingLower: 0.4, ratingUpper: 0.3 }, incumbent, 1)).toBe(false);
+    expect(clearsLeaderBar({ ratingLower: 0.3, ratingUpper: 0.3 }, incumbent, 1)).toBe(false);
+  });
+
   it("is a plain non-overlap win at margin zero", () => {
     expect(clearsLeaderBar({ ratingLower: 0.23, ratingUpper: 0.27 }, incumbent, 0)).toBe(true);
     expect(clearsLeaderBar({ ratingLower: 0.22, ratingUpper: 0.26 }, incumbent, 0)).toBe(false);
@@ -452,6 +457,37 @@ describe("decideLeaderPick", () => {
         { date: "2026-10-14", rows: sonnetClears },
       ]);
       expect(decideLeaderPick(leaderInput({ rankings: file }))).toMatchObject({ holds: "incumbent", streak: { won: 1 } });
+    });
+
+    it("a publish missing the challenger's row, or the incumbent's, ends the count", () => {
+      const noChallenger = withHistory("agent/overall", [
+        { date: "2026-10-19", rows: sonnetClears },
+        { date: "2026-10-16", rows: [agent(OPUS, 0.2)] },
+        { date: "2026-10-14", rows: sonnetClears },
+      ]);
+      expect(decideLeaderPick(leaderInput({ rankings: noChallenger }))).toMatchObject({ holds: "incumbent", streak: { won: 1 } });
+      const noIncumbent = withHistory("agent/overall", [
+        { date: "2026-10-19", rows: sonnetClears },
+        { date: "2026-10-16", rows: [agent(SONNET, 0.32)] },
+        { date: "2026-10-14", rows: sonnetClears },
+      ]);
+      expect(decideLeaderPick(leaderInput({ rankings: noIncumbent }))).toMatchObject({ holds: "incumbent", streak: { won: 1 } });
+    });
+
+    it("an inverted CI on the challenger's row counts as a miss, not a clear", () => {
+      const inverted = [agent(OPUS, 0.2), { ...agent(SONNET, 0.32), ratingLower: 0.5, ratingUpper: 0.3 }];
+      const file = withHistory("agent/overall", [
+        { date: "2026-10-19", rows: inverted },
+        { date: "2026-10-16", rows: inverted },
+        { date: "2026-10-14", rows: inverted },
+      ]);
+      expect(decideLeaderPick(leaderInput({ rankings: file }))).toMatchObject({ holds: "incumbent", streak: { won: 0 } });
+    });
+
+    it("two challengers rated equally: the earlier pool entry is the challenger", () => {
+      const rows = [agent(OPUS, 0.2), agent(OPUS5, 0.3), agent(SONNET, 0.3)];
+      const file = withHistory("agent/overall", [{ date: "2026-10-19", rows }]);
+      expect(decideLeaderPick(leaderInput({ pool: [OPUS, SONNET, OPUS5], rankings: file }))).toMatchObject({ challenger: { ref: SONNET } });
     });
 
     it("a different challenger tops each publish: the newest's challenger is fixed, so its streak is 1", () => {

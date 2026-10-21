@@ -14,10 +14,15 @@ export interface CiBounds {
 /**
  * Whether `challenger` clears `incumbent`: its lower bound must sit above the
  * incumbent's upper bound by `marginWidths` widths of the challenger's own CI.
- * Zero widths is a plain non-overlap win.
+ * Zero widths is a plain non-overlap win. A degenerate or inverted CI never
+ * clears: a negative width would turn the margin into a head start, so a
+ * malformed row must not count toward a streak.
  */
 export function clearsLeaderBar(challenger: CiBounds, incumbent: CiBounds, marginWidths: number): boolean {
   const width = challenger.ratingUpper - challenger.ratingLower;
+  if (!(width > 0)) {
+    return false;
+  }
   return challenger.ratingLower - marginWidths * width > incumbent.ratingUpper;
 }
 

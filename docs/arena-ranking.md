@@ -259,10 +259,9 @@ entirely), `successor`, `no-file`, `no-ranked-board`.
 (`shared/arena-unpooled.ts`) lists models that clear the incumbent on the first
 leader board by the same bar, with no streak, but match no role's pool,
 including models the alias table doesn't map. The settings explain RPC returns
-them as `unpooledLeaderChallengers`. The classifier dashboard
-(`feat/classifier-dashboard`) is meant to show the top one as a summary line;
-that wiring, and its `paseo.arena-pick` backfill parser accepting the leader
-keys, land with the dashboard.
+them as `unpooledLeaderChallengers`. The classifier dashboard shows the top
+one as a summary line, and its `paseo.arena-pick` backfill parser accepts the
+leader keys; both arrive with the dashboard.
 
 ## Tests and verification
 

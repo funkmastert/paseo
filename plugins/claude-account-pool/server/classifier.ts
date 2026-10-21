@@ -389,8 +389,9 @@ export interface ModelDecision {
   /**
    * U8's arena-ranked pick (KTD-1, KTD-2, KTD-11, KTD-13), present whenever
    * `policy.arena` exists and the role/class/kind qualified for evaluation —
-   * including a fallback, so a leader, a declared class or a stale file is as
-   * visible in the decision line as a successful pick. Absent entirely when
+   * including a fallback, so a declared class or a stale file is as visible
+   * in the decision line as a successful pick. Never set for a leader, whose
+   * pick is `leaderRanking`. Absent entirely when
    * `policy.arena` is undefined (an old config): zero behavior change, zero
    * extra computation worth recording.
    */
@@ -775,7 +776,12 @@ function leaderPickNote(leaderRanking: NonNullable<ModelDecision["leaderRanking"
     leaderRanking.holds === "challenger"
       ? `${challenger.ref} would replace ${incumbent.ref}`
       : `${incumbent.ref} holds`;
-  const ran = leaderRanking.applied ? " It runs." : shadow ? " Recorded only." : "";
+  let ran = "";
+  if (leaderRanking.applied) {
+    ran = " It runs.";
+  } else if (shadow) {
+    ran = " Recorded only.";
+  }
   return ` LMArena leader pick (${mode}): ${verdict} on ${board} (${publishDate}); best challenger ${challenger.ref}, ${streak.won}/${streak.needed} publishes.${ran}`;
 }
 
@@ -899,8 +905,8 @@ function decideModelCore(
 
   // U8's arena-ranked pick (KTD-1, KTD-2, KTD-11, KTD-13): evaluated whenever `policy.arena` exists
   // AND the role isn't the leader, so a fallback is as visible in the decision line as a successful
-  // pick (R8) — except for a leader, which never carries a ranking at all (not even a "leader"
-  // fallback note): leaders are never a candidate for this feature, policy or no policy. Absent
+  // pick (R8) — except for a leader, which never carries `ranking` at all (not even a "leader"
+  // fallback note): its pick is the separate leader rule below, recorded as `leaderRanking`. Absent
   // `policy.arena` (an old config) skips this entirely — zero extra computation. Explicit beats
   // inferred (the file header's own rule): an honored explicit request below never consults this,
   // and ranking only ever reorders the SAME operator-approved pool, never adds to it.
@@ -945,7 +951,10 @@ function decideModelCore(
       isUsable,
       leader: leaderPolicy,
       rankings: world.arenaRanking,
-      plannedEffort: world.policy.thinking.leader ?? world.policy.thinking.byTaskClass[taskClass ?? "standard"],
+      // The level the leader will run at, resolved as `resolveWantedThinkingLevel` does for the leader
+      // tier: the leader rule, else (rule off) the request, else the task class default.
+      plannedEffort:
+        world.policy.thinking.leader ?? input.requestedThinkingOptionId ?? world.policy.thinking.byTaskClass[taskClass ?? "standard"],
       isSuccessor: hasHandoffFromLabel(input.labels),
     });
     const applied = decision.outcome === "ranked" && decision.holds === "challenger" && !leaderPolicy.shadow;

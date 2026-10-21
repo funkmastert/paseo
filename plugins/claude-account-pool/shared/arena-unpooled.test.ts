@@ -82,7 +82,20 @@ describe("findUnpooledLeaderChallengers", () => {
     expect(findUnpooledLeaderChallengers({ rankings: file(rows), policy: zeroMargin })).toHaveLength(1);
   });
 
-  it("is empty when the incumbent is missing from the board's top rows", () => {
+  it("still alerts when the incumbent has fallen out of the board's top rows, reading it from history", () => {
+    const crowded = Array.from({ length: 10 }, (_, i) => top(`claude-next-${i}-max`, 0.5 - i * 0.01));
+    const rankings: ArenaRankingsFile = {
+      ...file(crowded),
+      leaderHistory: {
+        "agent/overall": [
+          { publishDate: "2026-10-19", rows: [{ arenaName: "claude-opus-5.5-max", ours: OPUS, effort: "max", rating: 0.2, ratingLower: 0.18, ratingUpper: 0.22, votes: 1000 }] },
+        ],
+      },
+    };
+    expect(findUnpooledLeaderChallengers({ rankings, policy })).toHaveLength(10);
+  });
+
+  it("is empty when the incumbent is ranked nowhere on the board", () => {
     expect(findUnpooledLeaderChallengers({ rankings: file([top("claude-next-6-max", 0.35)]), policy })).toEqual([]);
   });
 

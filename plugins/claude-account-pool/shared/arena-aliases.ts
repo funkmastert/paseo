@@ -169,6 +169,10 @@ export const KIND_BOARD_PREFERENCE: Record<RankedWorkKind, readonly string[]> = 
 export const LEADER_BOARD_IDS = ["agent/overall", "text_style_control/hard_prompts"] as const;
 export type LeaderBoardId = (typeof LEADER_BOARD_IDS)[number];
 
+export function isLeaderBoardId(boardId: string): boardId is LeaderBoardId {
+  return (LEADER_BOARD_IDS as readonly string[]).includes(boardId);
+}
+
 /** How many distinct publishes of history the daily job keeps per leader board (`arena-rankings.ts`). */
 export const LEADER_HISTORY_MAX_PUBLISHES = 10;
 

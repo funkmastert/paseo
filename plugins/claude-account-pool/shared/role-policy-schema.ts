@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { DEFAULT_TOOL_PROFILE, ToolProfileSchema } from "./tool-profiles";
 import { LEADER_BOARD_IDS, LEADER_HISTORY_MAX_PUBLISHES } from "./arena-aliases";
+import { sameModel } from "./model-identity";
 
 /**
  * Label keys the role hook reads off `agent.create` requests. Mirrors the
@@ -403,6 +404,9 @@ export const CURRENT_SCHEMA_VERSION = 4;
  * - `streakPublishes`: how many consecutive publishes the same challenger must
  *   win before it becomes the pick. At most the history the job keeps.
  */
+/** The leader pick's default margin in CI widths; also the unpooled alert's margin when no leader block exists. */
+export const DEFAULT_LEADER_MARGIN_CI = 1;
+
 export const ArenaLeaderPolicySchema = z.object({
   enabled: z.boolean().default(false),
   shadow: z.boolean().default(true),
@@ -410,7 +414,7 @@ export const ArenaLeaderPolicySchema = z.object({
     .array(z.enum(LEADER_BOARD_IDS))
     .min(1)
     .default([...LEADER_BOARD_IDS]),
-  marginCi: z.number().min(0).default(1),
+  marginCi: z.number().min(0).default(DEFAULT_LEADER_MARGIN_CI),
   streakPublishes: z.number().int().min(1).max(LEADER_HISTORY_MAX_PUBLISHES).default(3),
 });
 export type ArenaLeaderPolicy = z.infer<typeof ArenaLeaderPolicySchema>;
@@ -689,6 +693,13 @@ export function splitModelRef(ref: string): ParsedModelRef | null {
 /** The provider family a ref's catalog entry lives under — POOL_FAMILY for bare refs. */
 export function modelRefFamily(parsed: ParsedModelRef): string {
   return parsed.provider ?? POOL_FAMILY;
+}
+
+/** Whether two model refs name the same model: same family, and `sameModel`'s dated/undated identity. */
+export function sameModelRef(a: string, b: string): boolean {
+  const left = splitModelRef(a);
+  const right = splitModelRef(b);
+  return left !== null && right !== null && modelRefFamily(left) === modelRefFamily(right) && sameModel(left.model, right.model);
 }
 
 /** Distinct provider-family ids referenced anywhere across the policy's roles, for catalog refresh scoping. */

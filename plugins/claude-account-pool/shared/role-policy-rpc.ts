@@ -8,6 +8,7 @@ import {
   ThinkingPolicyShapeSchema,
 } from "./role-policy-schema";
 import { defineRpc } from "@getpaseo/plugin";
+import { UnpooledChallengerSchema } from "./arena-unpooled";
 
 /**
  * The client-editable subset of a policy document: everything except
@@ -265,20 +266,7 @@ export const RoleModelPolicyExplainResultSchema = z.object({
    * `shared/arena-unpooled.ts`). Omitted when there are none. Present on every
    * explain, whatever role it asks about: it describes the fleet, not this create.
    */
-  unpooledLeaderChallengers: z
-    .array(
-      z.object({
-        arenaName: z.string(),
-        ours: z.string().optional(),
-        rating: z.number(),
-        ratingLower: z.number(),
-        ratingUpper: z.number(),
-        marginWidths: z.number(),
-        board: z.string(),
-        publishDate: z.string().optional(),
-      }),
-    )
-    .optional(),
+  unpooledLeaderChallengers: z.array(UnpooledChallengerSchema).optional(),
 });
 export type RoleModelPolicyExplainResult = z.infer<typeof RoleModelPolicyExplainResultSchema>;
 
