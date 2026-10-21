@@ -25,6 +25,8 @@ import { createRoleModelPolicyRpcHandlers } from "./server/role-policy-rpc-handl
 import { createDecisionLog, type LoggedRequest } from "./server/decision-log";
 import { buildPendingRowFromDecisionLine, loadClassifierDecisionsLedger } from "./server/classifier-decisions-ledger";
 import { runClassifierDecisionsBackfill } from "./server/classifier-decisions-backfill";
+import { createClassifierDecisionsRpcHandlers } from "./server/classifier-decisions-rpc-handlers";
+import { classifierDecisionsRpc } from "./shared/classifier-decisions-rpc";
 import { placesRootAsChild } from "./server/role-resolve";
 import { classifierInputFor, createRoleRouter, type RoleCreateRouter } from "./server/role-router";
 import { createProviderIdCache, createRouter, type AgentCreateRouter, type ProviderIdCache } from "./server/router";
@@ -681,6 +683,20 @@ export default function contribute(server: PluginServerContext) {
   server.handle(roleModelPolicyRpc.explain, (input, context) => {
     ensureStarted(context.paseo);
     return roleModelPolicyRpcHandlers!.explain(input, context);
+  });
+
+  // Built once the ledger has loaded; a dashboard open before that finishes waits on the same
+  // promise rather than racing a second load.
+  const classifierDecisionsRpcHandlersPromise = classifierDecisionsLedgerPromise.then((ledger) =>
+    createClassifierDecisionsRpcHandlers({ ledger }),
+  );
+  server.handle(classifierDecisionsRpc.list, async (input, context) => {
+    const handlers = await classifierDecisionsRpcHandlersPromise;
+    return handlers.list(input, context);
+  });
+  server.handle(classifierDecisionsRpc.summary, async (input, context) => {
+    const handlers = await classifierDecisionsRpcHandlersPromise;
+    return handlers.summary(input, context);
   });
 
   return async () => {

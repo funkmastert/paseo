@@ -4,31 +4,19 @@
  * label already sitting on every agent the arena-ranking plugin has ever
  * picked for, since those predate the ledger (U2) and would otherwise be
  * invisible to the dashboard. Runs once per `$PASEO_HOME` — gated by the
- * ledger's own `backfilledAt` marker — and pages through the plugin's
- * sanctioned `paseo.agents.list()` API (never the agent-storage filesystem
- * layout directly, which this plugin has no sanctioned reason to know).
+ * ledger's own `backfilledAt` marker.
  */
 
 import type { ClassifierDecisionsLedger } from "./classifier-decisions-ledger";
+import {
+  listAllAgents,
+  type ClassifierDecisionsAgentSnapshot,
+  type ClassifierDecisionsAgentsApi,
+} from "./classifier-decisions-agents";
 import type { ClassifierDecisionRow } from "../shared/classifier-decisions-schema";
 import { ARENA_PICK_LABEL, AGENT_ROLE_LABEL, TASK_CLASS_LABEL, WORK_KIND_LABEL } from "../shared/role-policy-schema";
 
-/** Mirrors `parent-profiles.ts`'s `warm()` sweep: 200/page is the daemon's documented maximum. */
-const PAGE_LIMIT = 200;
-/** 25 pages is 5,000 agents; a bigger directory is not this backfill's problem (same bound as `parent-profiles.ts`). */
-const MAX_PAGES = 25;
-
-export interface ClassifierDecisionsAgentsApi {
-  agents: {
-    list(options: {
-      filter?: { includeArchived?: boolean };
-      page?: { limit: number; cursor?: string };
-    }): Promise<{
-      entries: readonly { agent: { id: string; title?: string | null; labels?: Record<string, string> } }[];
-      pageInfo?: { hasMore?: boolean; nextCursor?: string | null };
-    }>;
-  };
-}
+export type { ClassifierDecisionsAgentsApi } from "./classifier-decisions-agents";
 
 export interface ClassifierDecisionsBackfillResult {
   ran: boolean;
@@ -64,10 +52,7 @@ function parseArenaPickLabel(value: string): Omit<Extract<ClassifierDecisionRow[
   };
 }
 
-function backfillRowFor(
-  agent: { id: string; title?: string | null; labels?: Record<string, string> },
-  now: () => number,
-): ClassifierDecisionRow | undefined {
+function backfillRowFor(agent: ClassifierDecisionsAgentSnapshot, now: () => number): ClassifierDecisionRow | undefined {
   const pickLabel = agent.labels?.[ARENA_PICK_LABEL];
   if (!pickLabel) {
     return undefined;
@@ -104,29 +89,19 @@ export async function runClassifierDecisionsBackfill(
     return { ran: false, scanned: 0, backfilled: 0, skipped: 0 };
   }
 
+  const agents = await listAllAgents(paseo);
   const rows: ClassifierDecisionRow[] = [];
-  let scanned = 0;
   let skipped = 0;
-  let cursor: string | undefined;
-  for (let page = 0; page < MAX_PAGES; page += 1) {
-    const result = await paseo.agents.list({ filter: { includeArchived: true }, page: { limit: PAGE_LIMIT, cursor } });
-    for (const entry of result.entries) {
-      scanned += 1;
-      const row = backfillRowFor(entry.agent, now);
-      if (row) {
-        rows.push(row);
-      } else if (entry.agent.labels?.[ARENA_PICK_LABEL]) {
-        // Carried the label but it didn't parse — count it, don't silently drop it.
-        skipped += 1;
-      }
+  for (const agent of agents) {
+    const row = backfillRowFor(agent, now);
+    if (row) {
+      rows.push(row);
+    } else if (agent.labels?.[ARENA_PICK_LABEL]) {
+      // Carried the label but it didn't parse — count it, don't silently drop it.
+      skipped += 1;
     }
-    const nextCursor = result.pageInfo?.nextCursor;
-    if (result.pageInfo?.hasMore !== true || !nextCursor) {
-      break;
-    }
-    cursor = nextCursor;
   }
 
   await ledger.appendBackfill(rows);
-  return { ran: true, scanned, backfilled: rows.length, skipped };
+  return { ran: true, scanned: agents.length, backfilled: rows.length, skipped };
 }
