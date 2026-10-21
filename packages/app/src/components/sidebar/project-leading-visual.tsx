@@ -45,9 +45,17 @@ const STATUS_BADGE_OFFSET = -4;
 //
 // The filled alert occupies the full badge shell so needs-input remains more prominent than
 // the passive status dots. The completion glyphs (ready-to-merge, done) are more detailed
-// shapes than the alert triangle, so they run two sizes down from the shell to keep a visible
-// ring of knockout background around them instead of bleeding into the circular edge.
-const COMPLETION_BADGE_GLYPH_SIZE = 8;
+// shapes than the alert triangle, so they run one size down from the shell to keep a visible
+// ring of knockout background around them instead of bleeding into the circular edge. Lucide's
+// default strokeWidth (2, in the icon's own 24-unit viewBox) maps to well under a physical pixel
+// at this size and reads as a smudge on a non-retina display — verified against a render of the
+// real icon geometry at 8x (git-pull-request-arrow/circle-check-big path data from
+// node_modules/lucide-react-native/dist/esm/icons), compared side by side with strokeWidth 2,
+// 2.5, and 3. 3 was the clear winner: a crisp ~1.25px stroke at this size with no overflow past
+// the shell, closest to this app's existing precedent of bolding icons below their natural size
+// (command-center.tsx's Folder at 16px uses strokeWidth 2.2 over the 2/24px default ratio).
+const COMPLETION_BADGE_GLYPH_SIZE = 10;
+const COMPLETION_BADGE_GLYPH_STROKE_WIDTH = 3;
 // Matches the workspace title's lineHeight (sidebar-workspace-row-content's
 // workspaceBranchText) so the icon centers on the title rather than floating above it.
 const LEADING_SLOT_HEIGHT = 20;
@@ -240,7 +248,11 @@ function ProjectCompletionBadge({
           style={[styles.statusBadge, getStatusBadgeBackdropStyle(backdrop)]}
           testID={testID}
         >
-          <Icon size={COMPLETION_BADGE_GLYPH_SIZE} uniProps={colorMapping} />
+          <Icon
+            size={COMPLETION_BADGE_GLYPH_SIZE}
+            strokeWidth={COMPLETION_BADGE_GLYPH_STROKE_WIDTH}
+            uniProps={colorMapping}
+          />
         </View>
       </TooltipTrigger>
       <TooltipContent side="top" align="center" offset={6}>
