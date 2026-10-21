@@ -81,3 +81,10 @@ time removes the stream as a trigger entirely, closing both.
 Agents are told about the tool through `daemon.appendSystemPrompt` text named
 `COMPLETION STATE (Bozeo)` — not checked into this repo. The account-pool plugin's leader policy
 notice (`plugins/claude-account-pool/server/compound-policy.ts`) carries a one-line pointer to it.
+
+## Where it shows
+
+Pinned and status-grouped sidebar rows render `ProjectStatusIndicator`
+(`packages/app/src/components/sidebar/project-leading-visual.tsx`), not `WorkspaceStatusIndicator`,
+because those rows lead with the project icon (`sidebar-workspace-row-content.tsx`). A new per-row
+status signal has to be wired into both, or it shows in one group of rows and not the other.
