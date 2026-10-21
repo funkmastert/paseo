@@ -90,6 +90,29 @@ describe("deriveProjectKey", () => {
     ).toBe("remote:github.com/getpaseo/paseo#subdir:packages/app");
   });
 
+  test("groups a linked worktree opened at its own root under its main repo, for a local repo with no remote", () => {
+    const mainRepoRoot = path.resolve("host-a", "paseo");
+    const worktreeRoot = path.resolve("host-a", "worktrees", "fix-empty-project-noise");
+
+    expect(
+      deriveProjectKey({
+        rootPath: worktreeRoot,
+        remoteUrl: null,
+        worktreeRoot,
+        mainRepoRoot,
+        serverId: "host-a",
+      }),
+    ).toBe(
+      deriveProjectKey({
+        rootPath: mainRepoRoot,
+        remoteUrl: null,
+        worktreeRoot: mainRepoRoot,
+        mainRepoRoot: null,
+        serverId: "host-a",
+      }),
+    );
+  });
+
   test("groups the same subproject across different absolute checkout roots", () => {
     const remoteUrl = "git@github.com:getpaseo/paseo.git";
     const deriveSubproject = (worktreeRoot: string) =>

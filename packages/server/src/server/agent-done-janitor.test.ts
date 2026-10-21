@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino, { type Logger } from "pino";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 // A spy over the real implementation (#3, docs/done-janitor.md): every other test relies on its
 // real, git-backed behaviour, so this must forward to it by default. Only the
@@ -3614,11 +3614,20 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
   });
 
   describe("projects with no active workspace", () => {
+    // A worktree-farm path that exists on disk, matching the realistic case: a worktree folder,
+    // not a main checkout. It exists so a project with zero workspaces at all (not just no
+    // active one) isn't also swept by the older, unrelated "root is gone" rule in these tests.
+    const defaultRootsDir = mkdtempSync(join(tmpdir(), "done-janitor-idle-project-"));
+    const defaultWorktreeRoot = join(defaultRootsDir, "mobile-worktrees", "feature");
+    mkdirSync(defaultWorktreeRoot, { recursive: true });
+    afterAll(() => {
+      rmSync(defaultRootsDir, { recursive: true, force: true });
+    });
+
     function idleProject(id: string, overrides: Partial<DoneJanitorProject> = {}) {
       return {
         projectId: id,
-        // A root that exists, so the older rule (no workspace and a root that is gone) spares it.
-        rootPath: tmpdir(),
+        rootPath: defaultWorktreeRoot,
         projectKey: null,
         createdAt: FOUR_DAYS_AGO,
         updatedAt: FOUR_DAYS_AGO,
@@ -3651,6 +3660,71 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
         }),
       );
       expect(h.pushes[0]?.body).toBe("Removed 1 empty project.");
+    });
+
+    test("are removed when the directory is also gone, not just blocked by the older rule", async () => {
+      const h = sweepHarness({
+        stored: [],
+        workspaces: [archivedAgo(30)],
+        projects: [idleProject("p1", { rootPath: "/nonexistent/p1-worktree" })],
+      });
+
+      await h.janitor.tick();
+
+      expect(h.removedProjects).toEqual(["p1"]);
+    });
+
+    test("are removed even while the worktree directory still sits on disk, unused", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "done-janitor-idle-project-"));
+      try {
+        const h = sweepHarness({
+          stored: [],
+          workspaces: [archivedAgo(30)],
+          projects: [idleProject("p1", { rootPath: join(dir, "mobile-worktrees", "feature") })],
+        });
+
+        await h.janitor.tick();
+
+        expect(h.removedProjects).toEqual(["p1"]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("a Paseo-owned worktree whose directory still exists is removed too", async () => {
+      const h = sweepHarness({
+        stored: [],
+        workspaces: [archivedAgo(30)],
+        projects: [idleProject("p1", { rootPath: "/home/t/.paseo/worktrees/abc123/feature" })],
+      });
+
+      await h.janitor.tick();
+
+      expect(h.removedProjects).toEqual(["p1"]);
+    });
+
+    test("a real checkout that happens to be idle is kept, never removed just for sitting quiet", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "done-janitor-idle-project-"));
+      try {
+        const h = sweepHarness({
+          stored: [],
+          workspaces: [archivedAgo(30)],
+          projects: [idleProject("p1", { rootPath: dir })],
+        });
+
+        const report = await h.janitor.tick();
+
+        expect(h.removedProjects).toEqual([]);
+        expect(report?.entries).toContainEqual(
+          expect.objectContaining({
+            action: "kept-project",
+            projectId: "p1",
+            reason: "it had no active workspace, but its root is not a worktree and still exists",
+          }),
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     test("stay within the grace period, so a project just emptied or opened is not pulled away", async () => {

@@ -1,5 +1,5 @@
 import { stat } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import type { Logger } from "pino";
 
 import { buildDoneJanitorNotificationPayload } from "@getpaseo/protocol/done-janitor-notification";
@@ -1291,8 +1291,10 @@ export class AgentDoneJanitor {
 
   /**
    * Removes projects with no active workspace once their last one has been gone for
-   * `projectGraceMs`. Record-only, like a person's project removal; runs after the older empty
-   * project rule, and a project that rule already reported is its.
+   * `projectGraceMs`, but only when the root is a worktree (gone, or a recognized worktree farm
+   * path) — never a main checkout or another folder Tyler opened himself. Record-only, like a
+   * person's project removal; runs after the older empty project rule, and a project that rule
+   * already reported is its.
    */
   private async sweepIdleProjects(
     report: DoneJanitorSweepReport,
@@ -1305,13 +1307,27 @@ export class AgentDoneJanitor {
         this.deps.listWorkspaces(),
       ]);
       const nowMs = this.now();
-      const candidates = projects
+      const quiet = projects
         .filter((project) => !reported.has(project.projectId))
         .flatMap((project) => {
           const verdict = idleProjectVerdict(project, workspaces, sweep, nowMs);
           return verdict.kind === "remove" ? [{ project, verdict }] : [];
-        })
-        .sort((a, b) => b.verdict.quietForMs - a.verdict.quietForMs);
+        });
+      const candidates: {
+        project: DoneJanitorProject;
+        verdict: Extract<IdleProjectVerdict, { kind: "remove" }>;
+      }[] = [];
+      for (const candidate of quiet) {
+        if (await this.isRemovableIdleProjectRoot(candidate.project)) {
+          candidates.push(candidate);
+        } else {
+          report.entries.push({
+            ...describeIdleProject(candidate.project, "kept-project", candidate.verdict),
+            reason: `it had no active workspace, but its root is not a worktree and still exists`,
+          });
+        }
+      }
+      candidates.sort((a, b) => b.verdict.quietForMs - a.verdict.quietForMs);
       for (const [index, { project, verdict }] of candidates.entries()) {
         if (index >= sweep.maxProjectRemovalsPerSweep) {
           report.entries.push({
@@ -1351,6 +1367,13 @@ export class AgentDoneJanitor {
       });
       return;
     }
+    if (!(await this.isRemovableIdleProjectRoot(fresh))) {
+      report.entries.push({
+        ...describeIdleProject(fresh, "kept-project", verdict),
+        reason: `it had no active workspace, but its root is not a worktree and still exists`,
+      });
+      return;
+    }
     try {
       await this.deps.removeProject(fresh.projectId);
     } catch (error) {
@@ -1366,6 +1389,19 @@ export class AgentDoneJanitor {
     }
     report.removedProjectCount += 1;
     report.entries.push(describeIdleProject(fresh, "removed-project", verdict));
+  }
+
+  /**
+   * Whether an idle project's root is safe to remove: gone, or a recognized worktree path (a
+   * Paseo-owned worktree, or the `<name>-worktrees/<slug>` farm convention). A root that still
+   * exists and matches neither is a main checkout or another folder Tyler opened himself, and is
+   * never removed just for sitting idle.
+   */
+  private async isRemovableIdleProjectRoot(project: DoneJanitorProject): Promise<boolean> {
+    if (isWorktreeFarmRootPath(project.rootPath)) return true;
+    if (await this.deps.isPaseoOwnedWorktreePath(project.rootPath)) return true;
+    const probe = await this.deps.probeProjectRoot(project.rootPath);
+    return probe.kind === "missing";
   }
 
   /**
@@ -2263,6 +2299,16 @@ function emptyProjectBlocker(
   const newestMs = Math.max(parseMs(project.createdAt), parseMs(project.updatedAt));
   if (!(nowMs - newestMs >= EMPTY_PROJECT_MIN_AGE_MS)) return "it was touched in the last hour";
   return null;
+}
+
+/**
+ * A `<name>-worktrees/<slug>` farm convention (`paseo-worktrees`, `mobile-worktrees`,
+ * `bn-worktrees`, `ts-monorepo-worktrees`, …): the immediate parent directory's own name ends in
+ * `-worktrees`. Paseo's own `.paseo/worktrees/<hash>/<slug>` path is checked separately, through
+ * `isPaseoOwnedWorktreePath`, since it respects a configured `worktreesRoot`/`paseoHome`.
+ */
+function isWorktreeFarmRootPath(rootPath: string): boolean {
+  return /-worktrees$/i.test(basename(dirname(rootPath)));
 }
 
 function describeRootProbe(probe: ProjectRootProbe): string | null {

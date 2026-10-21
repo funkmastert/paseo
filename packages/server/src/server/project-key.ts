@@ -11,8 +11,10 @@ export function deriveProjectKey(input: {
   serverId?: string;
 }): string {
   const remote = input.remoteUrl ? parseGitRemoteLocation(input.remoteUrl) : null;
+  // null: not a worktree subpath at all. "": the worktree root itself, no subdir offset — still
+  // a worktree, so the local-path branch below must not treat it the same as null.
   const selectedPath = input.worktreeRoot
-    ? getRealpathAwareRelativePath(input.worktreeRoot, input.rootPath) || null
+    ? getRealpathAwareRelativePath(input.worktreeRoot, input.rootPath)
     : null;
   if (remote) {
     const host = remote.port ? `${remote.host}:${remote.port}` : remote.host;
@@ -21,10 +23,10 @@ export function deriveProjectKey(input: {
     return selectedPath ? `${remoteKey}#subdir:${selectedPath.replaceAll("\\", "/")}` : remoteKey;
   }
 
-  const localPathParts = [
-    selectedPath && input.mainRepoRoot ? input.mainRepoRoot : input.rootPath,
-    selectedPath && input.mainRepoRoot ? selectedPath : "",
-  ];
+  const localPathParts: [string, string] =
+    selectedPath !== null && input.mainRepoRoot
+      ? [input.mainRepoRoot, selectedPath]
+      : [input.rootPath, ""];
   const resolvedLocalPath = localPathParts.some(looksLikeWindowsPath)
     ? win32.resolve(...localPathParts)
     : resolve(...localPathParts);
