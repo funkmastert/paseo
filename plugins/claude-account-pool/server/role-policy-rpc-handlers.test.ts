@@ -1154,6 +1154,40 @@ describe("explain — arena ranking (U8, finding #2)", () => {
   });
 });
 
+describe("explain — unpooled leader challengers", () => {
+  const leaderPolicy: RoleModelPolicy = {
+    ...DEFAULT_POLICY,
+    roles: DEFAULT_POLICY.roles.map((role) => (role.id === "leader" ? { ...role, models: ["claude-opus-5-5"] } : role)),
+  };
+  const opus = { arenaName: "claude-opus-5.5-max", ours: "claude-opus-5-5", effort: "max", rating: 0.2, ratingLower: 0.18, ratingUpper: 0.22, votes: 1000 };
+  const next = { arenaName: "claude-next-6-max", rating: 0.35, ratingLower: 0.33, ratingUpper: 0.37, votes: 1000 };
+
+  it("lists a model that would beat the leader but sits in no pool", async () => {
+    const handlers = createRoleModelPolicyRpcHandlers(
+      baseDeps({
+        policyCache: fakePolicyCache(leaderPolicy),
+        arenaRankingCache: {
+          get: () => ({ fetchedAt: Date.now(), publishDate: "2026-10-20", boards: {}, unmatched: {}, failedBoards: [], boardTop: { "agent/overall": [next, opus] } }),
+        },
+      }),
+    );
+
+    const result = await handlers.explain({ root: true, title: "lead" }, context(fakePaseo({})));
+
+    expect(result.unpooledLeaderChallengers).toEqual([
+      expect.objectContaining({ arenaName: "claude-next-6-max", board: "agent/overall" }),
+    ]);
+  });
+
+  it("omits the field when nothing qualifies", async () => {
+    const handlers = createRoleModelPolicyRpcHandlers(baseDeps({ policyCache: fakePolicyCache(leaderPolicy) }));
+
+    const result = await handlers.explain({ root: true, title: "lead" }, context(fakePaseo({})));
+
+    expect(result.unpooledLeaderChallengers).toBeUndefined();
+  });
+});
+
 describe("explain: codexGuardCache (daemon -> plugin guard health bridge, U4/U5)", () => {
   // Codex first, Claude second, so the picked model actually turns on usability rather than on
   // the "unavailable -> fall back to top configured model" path a single-model pool would hide

@@ -259,6 +259,26 @@ export const RoleModelPolicyExplainResultSchema = z.object({
       missingFromCatalog: z.boolean().optional(),
     })
     .optional(),
+  /**
+   * Models that would beat the leader pool's first entry on the first leader
+   * board by the leader pick's margin, but sit in no role's pool (see
+   * `shared/arena-unpooled.ts`). Omitted when there are none. Present on every
+   * explain, whatever role it asks about: it describes the fleet, not this create.
+   */
+  unpooledLeaderChallengers: z
+    .array(
+      z.object({
+        arenaName: z.string(),
+        ours: z.string().optional(),
+        rating: z.number(),
+        ratingLower: z.number(),
+        ratingUpper: z.number(),
+        marginWidths: z.number(),
+        board: z.string(),
+        publishDate: z.string().optional(),
+      }),
+    )
+    .optional(),
 });
 export type RoleModelPolicyExplainResult = z.infer<typeof RoleModelPolicyExplainResultSchema>;
 
