@@ -580,6 +580,8 @@ export interface LeaderCompactionAgentSummary {
   pendingPermissionCount: number;
   contextWindowUsedTokens: number | undefined;
   title: string | null;
+  /** Lifetime weighted-token spend (docs/token-burn.md); the compaction ledger's cost signal. */
+  totalTokens: number | undefined;
 }
 
 /** How a turn started by {@link AgentManager.startTurnIfIdle} ended. */
@@ -1366,6 +1368,8 @@ export class AgentManager {
   private readonly runs = new AgentRunState();
   private readonly subscribers = new Set<SubscriptionRecord>();
   private readonly operatorSignalListeners = new Set<(signal: AgentOperatorSignal) => void>();
+  /** The compaction ledger's request counter (docs/token-burn.md: one event per request). */
+  private readonly tokenBurnListeners = new Set<(agentId: string, tokens: number) => void>();
   private readonly idFactory: () => string;
   private readonly registry?: AgentStorage;
   private readonly durableTimelineStore?: AgentTimelineStore;
@@ -2202,6 +2206,7 @@ export class AgentManager {
       pendingPermissionCount: agent.pendingPermissions.size,
       contextWindowUsedTokens: agent.lastUsage?.contextWindowUsedTokens,
       title: agent.config.title ?? null,
+      totalTokens: agent.totalTokens,
     }));
   }
 
@@ -2219,6 +2224,14 @@ export class AgentManager {
     this.operatorSignalListeners.add(listener);
     return () => {
       this.operatorSignalListeners.delete(listener);
+    };
+  }
+
+  /** One call per `recordTokenBurn` (docs/token-burn.md's per-request signal). Returns the unsubscribe. */
+  subscribeTokenBurn(listener: (agentId: string, tokens: number) => void): () => void {
+    this.tokenBurnListeners.add(listener);
+    return () => {
+      this.tokenBurnListeners.delete(listener);
     };
   }
 
@@ -6730,6 +6743,13 @@ export class AgentManager {
     }
     agent.tokenRateBuckets = recordTokenDelta(agent.tokenRateBuckets ?? [], tokens, Date.now());
     agent.totalTokens = (agent.totalTokens ?? 0) + tokens;
+    for (const listener of this.tokenBurnListeners) {
+      try {
+        listener(agent.id, tokens);
+      } catch (error) {
+        this.logger.warn({ err: error, agentId: agent.id }, "Token burn listener failed");
+      }
+    }
   }
 
   private onStreamTurnCompleted(params: {

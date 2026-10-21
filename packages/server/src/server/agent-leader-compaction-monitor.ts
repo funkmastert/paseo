@@ -20,11 +20,43 @@ import {
   type LeaderCompactionStepFailure,
   type LeaderCompactionTiming,
   type LeaderCompactionTrigger,
+  type LeaderCompactionTurnApplied,
   type LeaderCompactionTurnResult,
 } from "./agent/leader-compaction-planner.js";
 import type { LeaderCompactionTimingPort } from "./agent/leader-compaction-timing.js";
 import type { PushNotificationSender } from "./push/index.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
+
+/**
+ * The compaction ledger's view onto each step, added without touching the planner's pure types
+ * (docs/insights.md). `episode` is the pre-step state the planner already tracked; `totalTokens`
+ * is `ActiveManagedAgent.totalTokens` (docs/token-burn.md), the ledger's cost signal.
+ */
+export interface LeaderCompactionEpisodeObserver {
+  onStepStarted(input: {
+    agentId: string;
+    agentTitle: string | null;
+    step: LeaderCompactionStep;
+    attempt: number;
+    trigger: LeaderCompactionTrigger;
+    usedTokens: number | undefined;
+    totalTokensAtStart: number | undefined;
+    atMs: number;
+  }): void;
+  onStepFinished(input: {
+    agentId: string;
+    step: LeaderCompactionStep;
+    outcome: "completed" | "canceled" | "failed" | "busy" | "notCompacted";
+    gaveUp: boolean;
+    episodeEnded: "done" | "gaveUp" | null;
+    compactedFromTokens: number | null;
+    compactedToTokens: number | null;
+    noteLength: number | null;
+    totalTokensAtStart: number | undefined;
+    totalTokensAtEnd: number | undefined;
+    atMs: number;
+  }): void;
+}
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 /**
@@ -59,6 +91,8 @@ export interface AgentLeaderCompactionMonitorOptions {
    * at `prepareAtTokens`, and `/compact` goes out with today's text.
    */
   timing?: LeaderCompactionTimingPort;
+  /** The compaction ledger (docs/insights.md). Absent: episodes are not recorded anywhere. */
+  episodeObserver?: LeaderCompactionEpisodeObserver;
 }
 
 function formatTokens(tokens: number): string {
@@ -263,6 +297,8 @@ export class AgentLeaderCompactionMonitor {
   /** Turns this monitor started and has not seen end. Tests await them through `settle()`. */
   private readonly turns = new Set<Promise<void>>();
   private readonly unsubscribeOperatorSignals: () => void;
+  /** `agent.totalTokens` as of each in-flight step's start, for the ledger's cost diff. */
+  private readonly stepStartTotals = new Map<string, number | undefined>();
 
   constructor(options: AgentLeaderCompactionMonitorOptions) {
     this.options = options;
@@ -580,6 +616,17 @@ export class AgentLeaderCompactionMonitor {
       },
       "Leader compaction started a step",
     );
+    this.stepStartTotals.set(agent.id, agent.totalTokens);
+    this.options.episodeObserver?.onStepStarted({
+      agentId: agent.id,
+      agentTitle: agent.title ?? null,
+      step,
+      attempt: episode.attempts + 1,
+      trigger: episode.trigger,
+      usedTokens: agent.contextWindowUsedTokens,
+      totalTokensAtStart: agent.totalTokens,
+      atMs: this.now(),
+    });
     const tracked = this.finishStep(agent, step, episode, started, config).finally(() => {
       this.turns.delete(tracked);
     });
@@ -599,7 +646,10 @@ export class AgentLeaderCompactionMonitor {
     } catch (error) {
       result = { status: "failed", error: error instanceof Error ? error.message : String(error) };
     }
-    this.applyResult(agent, step, episode, result, config);
+    const totalTokensAfter = this.options.agentManager
+      .listAgentsForLeaderCompaction()
+      .find((candidate) => candidate.id === agent.id)?.totalTokens;
+    this.applyResult(agent, step, episode, result, config, totalTokensAfter);
   }
 
   /** Reads the context size after the turn: for `/compact`, the only proof it took. */
@@ -613,12 +663,48 @@ export class AgentLeaderCompactionMonitor {
     return { status: "completed", finalText: outcome.finalText, usedTokensAfter };
   }
 
+  /** Tells the ledger (docs/insights.md) what this step cost and where the episode landed. */
+  private notifyStepFinished(
+    agentId: string,
+    step: LeaderCompactionStep,
+    episode: LeaderCompactionEpisode,
+    applied: LeaderCompactionTurnApplied,
+    totalTokensAfter: number | undefined,
+  ): void {
+    const totalTokensAtStart = this.stepStartTotals.get(agentId);
+    this.stepStartTotals.delete(agentId);
+    if (applied.failure?.kind === "busy") {
+      return;
+    }
+    const resultingEpisode =
+      applied.state.phase === "waiting" || applied.state.phase === "backoff"
+        ? applied.state.episode
+        : episode;
+    this.options.episodeObserver?.onStepFinished({
+      agentId,
+      step,
+      outcome: applied.failure?.kind ?? "completed",
+      gaveUp: applied.gaveUp,
+      episodeEnded:
+        applied.state.phase === "settled" && applied.state.reason !== "dryRun"
+          ? applied.state.reason
+          : null,
+      compactedFromTokens: resultingEpisode.compactedFromTokens,
+      compactedToTokens: resultingEpisode.compactedToTokens,
+      noteLength: resultingEpisode.note?.length ?? null,
+      totalTokensAtStart,
+      totalTokensAtEnd: totalTokensAfter,
+      atMs: this.now(),
+    });
+  }
+
   private applyResult(
     agent: LeaderCompactionAgentSummary,
     step: LeaderCompactionStep,
     episode: LeaderCompactionEpisode,
     result: LeaderCompactionTurnResult,
     config: LeaderCompactionConfig,
+    totalTokensAfter?: number,
   ): void {
     // A prompt sent while this step's turn was running was carried by mutating `this.states`
     // directly (`onOperatorSignal`), not the `episode` this call was started with. Read it back so
@@ -634,6 +720,7 @@ export class AgentLeaderCompactionMonitor {
       nowMs: this.now(),
     });
     this.setState(agent.id, applied.state);
+    this.notifyStepFinished(agent.id, step, episode, applied, totalTokensAfter);
     if (
       !applied.failure &&
       step === "prepare" &&

@@ -5,7 +5,10 @@ import type {
   IdleTurnOutcome,
   LeaderCompactionAgentSummary,
 } from "./agent/agent-manager.js";
-import { AgentLeaderCompactionMonitor } from "./agent-leader-compaction-monitor.js";
+import {
+  AgentLeaderCompactionMonitor,
+  type LeaderCompactionEpisodeObserver,
+} from "./agent-leader-compaction-monitor.js";
 import type { LeaderCompactionSettings } from "./agent/leader-compaction-planner.js";
 import type {
   LeaderCompactionTimingPort,
@@ -83,6 +86,7 @@ function leader(overrides: Partial<LeaderCompactionAgentSummary> = {}) {
     pendingPermissionCount: 0,
     contextWindowUsedTokens: 612_000,
     title: "Ship the thing",
+    totalTokens: 1_000_000,
     ...overrides,
   } satisfies LeaderCompactionAgentSummary;
 }
@@ -136,6 +140,7 @@ function createMonitor(
   settings: LeaderCompactionSettings,
   timing?: FakeTiming,
   now: () => number = () => 0,
+  episodeObserver?: LeaderCompactionEpisodeObserver,
 ) {
   const pushes: Array<{ title: string; body: string; level?: string }> = [];
   const logs: Array<{ msg: string; obj: object }> = [];
@@ -156,8 +161,23 @@ function createMonitor(
     logger,
     now,
     timing,
+    episodeObserver,
   });
   return { monitor, pushes, logs };
+}
+
+/** Records every observer call verbatim, for assertions. */
+class RecordingEpisodeObserver implements LeaderCompactionEpisodeObserver {
+  started: Array<Parameters<LeaderCompactionEpisodeObserver["onStepStarted"]>[0]> = [];
+  finished: Array<Parameters<LeaderCompactionEpisodeObserver["onStepFinished"]>[0]> = [];
+
+  onStepStarted(input: Parameters<LeaderCompactionEpisodeObserver["onStepStarted"]>[0]): void {
+    this.started.push(input);
+  }
+
+  onStepFinished(input: Parameters<LeaderCompactionEpisodeObserver["onStepFinished"]>[0]): void {
+    this.finished.push(input);
+  }
 }
 
 async function sweep(monitor: AgentLeaderCompactionMonitor): Promise<void> {
@@ -396,6 +416,159 @@ describe("AgentLeaderCompactionMonitor with the quiet gate and carried prompts",
     const prepare = fake.sent.at(0)?.prompt ?? "";
     expect(prepare).toContain('"second question"');
     expect(prepare).not.toContain('"first question"');
+  });
+});
+
+describe("AgentLeaderCompactionMonitor episode observer", () => {
+  test("no observer configured: the monitor behaves exactly as without one", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    fake.outcomes = [
+      { status: "completed", finalText: "note" },
+      { status: "completed", finalText: "" },
+      { status: "completed", finalText: "restored" },
+    ];
+    fake.onTurn = (turn) => {
+      if (turn.prompt.startsWith("/compact")) {
+        fake.agents = [leader({ contextWindowUsedTokens: 31_000 })];
+      }
+    };
+    const { monitor } = createMonitor(fake, { enabled: true });
+
+    await sweep(monitor);
+    await sweep(monitor);
+    await sweep(monitor);
+
+    expect(monitor.getState("leader-1")).toEqual({ phase: "settled", reason: "done" });
+  });
+
+  test("fires onStepStarted with the trigger and totalTokensAtStart for a line-triggered prepare", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ totalTokens: 1_000_000 })];
+    const observer = new RecordingEpisodeObserver();
+    const { monitor } = createMonitor(fake, { enabled: true }, undefined, undefined, observer);
+
+    await sweep(monitor);
+
+    expect(observer.started).toHaveLength(1);
+    expect(observer.started[0]).toMatchObject({
+      agentId: "leader-1",
+      step: "prepare",
+      attempt: 1,
+      trigger: { kind: "line" },
+      usedTokens: 612_000,
+      totalTokensAtStart: 1_000_000,
+    });
+  });
+
+  test("fires onStepFinished with outcome completed and episodeEnded null when prepare succeeds", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ totalTokens: 1_000_000 })];
+    fake.outcomes = [{ status: "completed", finalText: "GOAL: ship it." }];
+    fake.onTurn = () => {
+      fake.agents = [leader({ totalTokens: 1_000_450 })];
+    };
+    const observer = new RecordingEpisodeObserver();
+    const { monitor } = createMonitor(fake, { enabled: true }, undefined, undefined, observer);
+
+    await sweep(monitor);
+
+    expect(observer.finished).toHaveLength(1);
+    expect(observer.finished[0]).toMatchObject({
+      agentId: "leader-1",
+      step: "prepare",
+      outcome: "completed",
+      gaveUp: false,
+      episodeEnded: null,
+      noteLength: "GOAL: ship it.".length,
+      totalTokensAtStart: 1_000_000,
+      totalTokensAtEnd: 1_000_450,
+    });
+  });
+
+  test("fires onStepFinished with episodeEnded done and both context tokens after restore", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ totalTokens: 1_000_000 })];
+    fake.outcomes = [
+      { status: "completed", finalText: "GOAL: ship it." },
+      { status: "completed", finalText: "" },
+      { status: "completed", finalText: "restored" },
+    ];
+    fake.onTurn = (turn) => {
+      if (turn.prompt.startsWith("/compact")) {
+        fake.agents = [leader({ contextWindowUsedTokens: 31_000, totalTokens: 1_002_000 })];
+      }
+    };
+    const observer = new RecordingEpisodeObserver();
+    const { monitor } = createMonitor(fake, { enabled: true }, undefined, undefined, observer);
+
+    await sweep(monitor);
+    await sweep(monitor);
+    await sweep(monitor);
+
+    const restoreFinish = observer.finished.find((entry) => entry.step === "restore");
+    expect(restoreFinish).toMatchObject({
+      outcome: "completed",
+      episodeEnded: "done",
+      compactedFromTokens: 612_000,
+      compactedToTokens: 31_000,
+    });
+  });
+
+  test("fires onStepFinished with outcome notCompacted, gaveUp true, episodeEnded gaveUp", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    const observer = new RecordingEpisodeObserver();
+    const { monitor } = createMonitor(
+      fake,
+      { enabled: true, maxAttempts: 2, retryAfterMinutes: 0 },
+      undefined,
+      undefined,
+      observer,
+    );
+
+    for (let i = 0; i < 6; i += 1) {
+      await sweep(monitor);
+    }
+
+    const gaveUpFinish = observer.finished.find((entry) => entry.episodeEnded === "gaveUp");
+    expect(gaveUpFinish).toMatchObject({
+      step: "compact",
+      outcome: "notCompacted",
+      gaveUp: true,
+      episodeEnded: "gaveUp",
+    });
+  });
+
+  test("totalTokensAtEnd reflects spend that advanced during the turn", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ totalTokens: 500_000 })];
+    fake.outcomes = [{ status: "completed", finalText: "note" }];
+    fake.onTurn = () => {
+      // The turn itself spends tokens before it resolves.
+      fake.agents = [leader({ totalTokens: 530_000 })];
+    };
+    const observer = new RecordingEpisodeObserver();
+    const { monitor } = createMonitor(fake, { enabled: true }, undefined, undefined, observer);
+
+    await sweep(monitor);
+
+    expect(observer.finished[0]).toMatchObject({
+      totalTokensAtStart: 500_000,
+      totalTokensAtEnd: 530_000,
+    });
+  });
+
+  test("an agent that is not idle gets no observer calls this sweep", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ lifecycle: "running", busy: true })];
+    const observer = new RecordingEpisodeObserver();
+    const { monitor } = createMonitor(fake, { enabled: true }, undefined, undefined, observer);
+
+    await sweep(monitor);
+
+    expect(observer.started).toEqual([]);
+    expect(observer.finished).toEqual([]);
   });
 });
 
