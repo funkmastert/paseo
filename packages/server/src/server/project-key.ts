@@ -38,10 +38,21 @@ export function deriveProjectGroupingDisplayName(input: {
   rootPath: string;
   remoteUrl: string | null;
   worktreeRoot: string | null;
+  mainRepoRoot: string | null;
 }): string {
+  // null: not a worktree subpath at all. "": the worktree root itself, no subdir offset — mirrors
+  // deriveProjectKey's own null-vs-empty-string distinction, so the two can't drift apart again.
   const selectedPath = input.worktreeRoot
     ? getRealpathAwareRelativePath(input.worktreeRoot, input.rootPath)
     : null;
+  if (selectedPath === "" && input.mainRepoRoot) {
+    return deriveProjectGroupingDisplayName({
+      rootPath: input.mainRepoRoot,
+      remoteUrl: input.remoteUrl,
+      worktreeRoot: null,
+      mainRepoRoot: null,
+    });
+  }
   if (selectedPath) return lastPathSegment(input.rootPath);
 
   const remote = input.remoteUrl ? parseGitRemoteLocation(input.remoteUrl) : null;

@@ -180,6 +180,8 @@ function harness(input: {
   logger?: Logger;
   /** The directory archive-by-scope would delete; absent: its resolution, by path shape. */
   resolveArchiveDirectory?: (workspace: DoneJanitorWorkspace) => string | null;
+  /** Default: `/home/t/.paseo/worktrees/` prefix, matching the fixtures' Paseo-owned paths. */
+  isPaseoOwnedWorktreePath?: (path: string) => boolean;
 }): Harness {
   let now = NOW;
   const stored = input.stored ?? [record()];
@@ -249,7 +251,8 @@ function harness(input: {
     },
     countTerminals: async (workspaceId) =>
       input.countTerminals?.(workspaceId) ?? input.terminals ?? 0,
-    isPaseoOwnedWorktreePath: async (path) => path.startsWith("/home/t/.paseo/worktrees/"),
+    isPaseoOwnedWorktreePath: async (path) =>
+      input.isPaseoOwnedWorktreePath?.(path) ?? path.startsWith("/home/t/.paseo/worktrees/"),
     checkWorktree: async ({ worktreePath }) =>
       input.checkWorktree?.(worktreePath) ??
       input.safety ?? { safe: true, branch: "feature", head: "abc" },
@@ -3613,13 +3616,20 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
     expect(h.archivedWorkspaces).toEqual([]);
   });
 
+  // A `.git` pointer file, not a directory, is how `git worktree add` leaves a linked worktree —
+  // the same signal `isLinkedGitWorktreeRoot` checks for.
+  function makeLinkedWorktreeDir(worktreeRoot: string): void {
+    mkdirSync(worktreeRoot, { recursive: true });
+    writeFileSync(join(worktreeRoot, ".git"), "gitdir: /tmp/main-repo/.git/worktrees/feature\n");
+  }
+
   describe("projects with no active workspace", () => {
-    // A worktree-farm path that exists on disk, matching the realistic case: a worktree folder,
+    // A linked worktree's root, matching the realistic case: a worktree a person never opened,
     // not a main checkout. It exists so a project with zero workspaces at all (not just no
     // active one) isn't also swept by the older, unrelated "root is gone" rule in these tests.
     const defaultRootsDir = mkdtempSync(join(tmpdir(), "done-janitor-idle-project-"));
     const defaultWorktreeRoot = join(defaultRootsDir, "mobile-worktrees", "feature");
-    mkdirSync(defaultWorktreeRoot, { recursive: true });
+    makeLinkedWorktreeDir(defaultWorktreeRoot);
     afterAll(() => {
       rmSync(defaultRootsDir, { recursive: true, force: true });
     });
@@ -3635,12 +3645,25 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
         ...overrides,
       } satisfies DoneJanitorProject;
     }
-    const archivedAgo = (hours: number) =>
+    const archivedAgo = (hours: number, overrides: Partial<DoneJanitorWorkspace> = {}) =>
       external({
         workspaceId: `ws-${hours}`,
         projectId: "p1",
         archivedAt: new Date(NOW - hours * HOUR).toISOString(),
+        createdBy: "agent",
+        ...overrides,
       });
+    function archivedWorkspaceFor(
+      projectId: string,
+      createdBy: DoneJanitorWorkspace["createdBy"] = "agent",
+    ): DoneJanitorWorkspace {
+      return external({
+        workspaceId: `ws-${projectId}`,
+        projectId,
+        archivedAt: FOUR_DAYS_AGO,
+        createdBy,
+      });
+    }
 
     test("are removed once their last workspace has been gone for the grace period", async () => {
       const h = sweepHarness({
@@ -3677,10 +3700,12 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
     test("are removed even while the worktree directory still sits on disk, unused", async () => {
       const dir = mkdtempSync(join(tmpdir(), "done-janitor-idle-project-"));
       try {
+        const worktreeRoot = join(dir, "mobile-worktrees", "feature");
+        makeLinkedWorktreeDir(worktreeRoot);
         const h = sweepHarness({
           stored: [],
           workspaces: [archivedAgo(30)],
-          projects: [idleProject("p1", { rootPath: join(dir, "mobile-worktrees", "feature") })],
+          projects: [idleProject("p1", { rootPath: worktreeRoot })],
         });
 
         await h.janitor.tick();
@@ -3692,15 +3717,25 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
     });
 
     test("a Paseo-owned worktree whose directory still exists is removed too", async () => {
-      const h = sweepHarness({
-        stored: [],
-        workspaces: [archivedAgo(30)],
-        projects: [idleProject("p1", { rootPath: "/home/t/.paseo/worktrees/abc123/feature" })],
-      });
+      // A real, plain directory (no `.git` pointer file) on disk: only the Paseo-owned path
+      // check, not the linked-worktree stat, can prove this one removable.
+      const dir = mkdtempSync(join(tmpdir(), "done-janitor-idle-project-"));
+      const rootPath = join(dir, "worktrees", "abc123", "feature");
+      mkdirSync(rootPath, { recursive: true });
+      try {
+        const h = sweepHarness({
+          stored: [],
+          workspaces: [archivedAgo(30)],
+          projects: [idleProject("p1", { rootPath })],
+          isPaseoOwnedWorktreePath: (path) => path === rootPath,
+        });
 
-      await h.janitor.tick();
+        await h.janitor.tick();
 
-      expect(h.removedProjects).toEqual(["p1"]);
+        expect(h.removedProjects).toEqual(["p1"]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     test("a real checkout that happens to be idle is kept, never removed just for sitting quiet", async () => {
@@ -3719,12 +3754,82 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
           expect.objectContaining({
             action: "kept-project",
             projectId: "p1",
-            reason: "it had no active workspace, but its root is not a worktree and still exists",
+            reason: "it had no active workspace, but its root still exists and is not a worktree",
           }),
         );
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
+    });
+
+    test("a root on an unmounted volume is kept with the volume's own reason, not a generic 'still exists'", async () => {
+      const volume = join(defaultRootsDir, "Volumes", "unplugged");
+      const rootPath = join(volume, "feature");
+      const h = sweepHarness({
+        stored: [],
+        workspaces: [archivedAgo(30)],
+        projects: [idleProject("p1", { rootPath })],
+        volumeRootOf: () => volume,
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.removedProjects).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-project",
+          projectId: "p1",
+          reason: `it had no active workspace, but its volume ${volume} is not mounted`,
+        }),
+      );
+    });
+
+    test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+      "a root that cannot be read (EACCES) is kept with that reason, not a generic 'still exists'",
+      async () => {
+        const locked = join(defaultRootsDir, "locked");
+        mkdirSync(join(locked, "feature"), { recursive: true });
+        chmodSync(locked, 0o000);
+        try {
+          const h = sweepHarness({
+            stored: [],
+            workspaces: [archivedAgo(30)],
+            projects: [idleProject("p1", { rootPath: join(locked, "feature") })],
+          });
+
+          const report = await h.janitor.tick();
+
+          expect(h.removedProjects).toEqual([]);
+          expect(report?.entries).toContainEqual(
+            expect.objectContaining({
+              action: "kept-project",
+              projectId: "p1",
+              reason: expect.stringContaining("its directory could not be checked"),
+            }),
+          );
+        } finally {
+          chmodSync(locked, 0o755);
+        }
+      },
+    );
+
+    test("a worktree a person ever opened is kept, even once idle and even past the grace period", async () => {
+      const h = sweepHarness({
+        stored: [],
+        workspaces: [archivedAgo(30, { createdBy: "person" })],
+        projects: [idleProject("p1")],
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.removedProjects).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-project",
+          projectId: "p1",
+          reason: "it had no active workspace, but its root still exists and a person opened it",
+        }),
+      );
     });
 
     test("stay within the grace period, so a project just emptied or opened is not pulled away", async () => {
@@ -3776,13 +3881,65 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
       const h = sweepHarness({
         config: { ...SWEEP, workspaceSweep: { dryRun: false, maxProjectRemovalsPerSweep: 1 } },
         stored: [],
-        workspaces: [],
+        workspaces: [
+          archivedWorkspaceFor("p1"),
+          archivedWorkspaceFor("p2"),
+          archivedWorkspaceFor("p3"),
+        ],
         projects: [idleProject("p1"), idleProject("p2"), idleProject("p3")],
       });
 
       await h.janitor.tick();
 
       expect(h.removedProjects).toHaveLength(1);
+    });
+
+    test("a root-kept project never spends a maxProjectRemovalsPerSweep slot that a removable one needs", async () => {
+      const keptDir = mkdtempSync(join(tmpdir(), "done-janitor-idle-project-"));
+      try {
+        const h = sweepHarness({
+          config: { ...SWEEP, workspaceSweep: { dryRun: false, maxProjectRemovalsPerSweep: 2 } },
+          stored: [],
+          // p-kept-1 and p-kept-2 fail the root check (a real, non-worktree checkout) and must
+          // not count against the cap; p1 and p2 are genuinely removable and both fit under 2.
+          workspaces: [
+            archivedWorkspaceFor("p-kept-1", "person"),
+            archivedWorkspaceFor("p-kept-2", "person"),
+            archivedWorkspaceFor("p1"),
+            archivedWorkspaceFor("p2"),
+          ],
+          projects: [
+            idleProject("p-kept-1", { rootPath: keptDir }),
+            idleProject("p-kept-2", { rootPath: keptDir }),
+            idleProject("p1"),
+            idleProject("p2"),
+          ],
+        });
+
+        await h.janitor.tick();
+
+        expect(new Set(h.removedProjects)).toEqual(new Set(["p1", "p2"]));
+      } finally {
+        rmSync(keptDir, { recursive: true, force: true });
+      }
+    });
+
+    test("the common case — a worktree already gone — never spawns a git check", async () => {
+      let paseoOwnedChecks = 0;
+      const h = sweepHarness({
+        stored: [],
+        workspaces: [archivedAgo(30)],
+        projects: [idleProject("p1", { rootPath: "/nonexistent/p1-worktree" })],
+        isPaseoOwnedWorktreePath: () => {
+          paseoOwnedChecks += 1;
+          return false;
+        },
+      });
+
+      await h.janitor.tick();
+
+      expect(h.removedProjects).toEqual(["p1"]);
+      expect(paseoOwnedChecks).toBe(0);
     });
   });
 });

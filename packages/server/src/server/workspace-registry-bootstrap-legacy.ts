@@ -59,6 +59,7 @@ export function classifyDirectoryForProjectMembership(input: {
       rootPath: cwd,
       remoteUrl: checkout.remoteUrl,
       worktreeRoot: checkout.worktreeRoot,
+      mainRepoRoot: checkout.mainRepoRoot,
     }),
     projectRootPath,
     projectKind: deriveProjectKind(checkout),

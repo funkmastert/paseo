@@ -174,6 +174,13 @@ export interface ProjectRegistry {
     kind: PersistedProjectKind;
     displayName: string;
     projectKey?: string;
+    /**
+     * Set only when `rootPath` is a confirmed linked git worktree (its own git common dir
+     * belongs to another repo) — never for an independent full clone, whose own common dir
+     * resolves to itself. Lets a workspace opened at the worktree's own root attach to the
+     * existing project at this path instead of minting its own.
+     */
+    mainRepoRoot?: string | null;
     timestamp: string;
   }): Promise<PersistedProjectRecord>;
   upsert(record: PersistedProjectRecord): Promise<void>;
@@ -445,6 +452,7 @@ export class FileBackedProjectRegistry
     kind: PersistedProjectKind;
     displayName: string;
     projectKey?: string;
+    mainRepoRoot?: string | null;
     timestamp: string;
   }): Promise<PersistedProjectRecord> {
     const previous = this.allocationQueue;
@@ -452,15 +460,27 @@ export class FileBackedProjectRegistry
     this.allocationQueue = new Promise<void>((resolve) => (release = resolve));
     await previous;
     try {
-      const active = (await this.list())
-        .filter(
-          (project) => !project.archivedAt && areEquivalentPaths(project.rootPath, input.rootPath),
-        )
-        .sort(
-          (left, right) =>
-            Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
-            left.projectId.localeCompare(right.projectId),
-        )[0];
+      const byCreatedAt = (left: PersistedProjectRecord, right: PersistedProjectRecord) =>
+        Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
+        left.projectId.localeCompare(right.projectId);
+      const activeProjects = (await this.list()).filter((project) => !project.archivedAt);
+      let active = activeProjects
+        .filter((project) => areEquivalentPaths(project.rootPath, input.rootPath))
+        .sort(byCreatedAt)[0];
+      // A linked worktree with no project of its own yet: join the main repo's project by root,
+      // falling back to one sharing its projectKey. Never reached for an independent full clone,
+      // whose mainRepoRoot is null — only a confirmed linked worktree sets it.
+      if (!active && input.mainRepoRoot) {
+        active =
+          activeProjects
+            .filter((project) => areEquivalentPaths(project.rootPath, input.mainRepoRoot!))
+            .sort(byCreatedAt)[0] ??
+          (input.projectKey
+            ? activeProjects
+                .filter((project) => project.projectKey === input.projectKey)
+                .sort(byCreatedAt)[0]
+            : undefined);
+      }
       if (active) {
         if (active.kind === input.kind && active.projectKey === (input.projectKey ?? null))
           return active;

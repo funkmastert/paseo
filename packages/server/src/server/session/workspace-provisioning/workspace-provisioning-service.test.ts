@@ -210,6 +210,63 @@ test("persists manual worktree ownership separately from its workspace kind", as
   });
 });
 
+test("a workspace opened at a linked worktree's own root joins its main repo's project", async () => {
+  const mainRepoRoot = path.join(tmpDir, "main-repo");
+  const worktreeRoot = path.join(tmpDir, "worktrees", "feature");
+  const linkedWorktreeProvisioning = createWorkspaceProvisioningService({
+    workspaceRegistry,
+    projectRegistry,
+    workspaceGitService: createNoopWorkspaceGitService({
+      peekSnapshot: () => null,
+      getCheckout: async (cwd: string) => ({
+        cwd,
+        isGit: true,
+        currentBranch: cwd === mainRepoRoot ? "main" : "feature",
+        remoteUrl: null,
+        worktreeRoot: cwd,
+        isPaseoOwnedWorktree: false,
+        mainRepoRoot: cwd === mainRepoRoot ? null : mainRepoRoot,
+      }),
+    }),
+  });
+
+  const main = await linkedWorktreeProvisioning.findOrCreateWorkspaceForDirectory(mainRepoRoot);
+  const worktree = await linkedWorktreeProvisioning.findOrCreateWorkspaceForDirectory(worktreeRoot);
+
+  expect(worktree.projectId).toBe(main.projectId);
+  expect((await projectRegistry.get(worktree.projectId))?.rootPath).toBe(mainRepoRoot);
+  expect(await projectRegistry.list()).toHaveLength(1);
+});
+
+test("an independent full clone of the same repo never joins the main project", async () => {
+  const mainRepoRoot = path.join(tmpDir, "main-repo");
+  const otherClone = path.join(tmpDir, "other-clone");
+  const independentCloneProvisioning = createWorkspaceProvisioningService({
+    workspaceRegistry,
+    projectRegistry,
+    workspaceGitService: createNoopWorkspaceGitService({
+      peekSnapshot: () => null,
+      // A full clone's own common dir resolves to itself, so mainRepoRoot is always null here —
+      // unlike the linked-worktree case above.
+      getCheckout: async (cwd: string) => ({
+        cwd,
+        isGit: true,
+        currentBranch: "main",
+        remoteUrl: null,
+        worktreeRoot: cwd,
+        isPaseoOwnedWorktree: false,
+        mainRepoRoot: null,
+      }),
+    }),
+  });
+
+  const main = await independentCloneProvisioning.findOrCreateWorkspaceForDirectory(mainRepoRoot);
+  const clone = await independentCloneProvisioning.findOrCreateWorkspaceForDirectory(otherClone);
+
+  expect(clone.projectId).not.toBe(main.projectId);
+  expect(await projectRegistry.list()).toHaveLength(2);
+});
+
 test("re-opening an archived workspace by its exact path unarchives it and keeps the id", async () => {
   const repo = path.join(tmpDir, "repo");
   gitRoots.add(repo);

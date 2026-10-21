@@ -1024,6 +1024,7 @@ describe("project command-center RPCs", () => {
           worktreeRoot: null,
           mainRepoRoot: null,
         }),
+        mainRepoRoot: null,
         timestamp: expect.any(String),
       });
       expect(messages).toEqual([
