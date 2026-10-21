@@ -1219,6 +1219,7 @@ export const fr: TranslationResources = {
       askJev: "Demander à JEV",
       jevDashboard: "Tableau de bord JEV",
       tokenUsage: "Tokens",
+      insights: "Statistiques",
     },
     worktreeSetup: {
       title: "Configurer les scripts d'arbre de travail",

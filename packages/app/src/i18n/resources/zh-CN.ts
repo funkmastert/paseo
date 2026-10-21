@@ -1177,6 +1177,7 @@ export const zhCN: TranslationResources = {
       askJev: "询问 JEV",
       jevDashboard: "JEV 仪表盘",
       tokenUsage: "Token",
+      insights: "洞察",
     },
     worktreeSetup: {
       title: "设置 worktree scripts",

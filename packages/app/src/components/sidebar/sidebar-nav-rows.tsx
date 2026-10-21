@@ -1,5 +1,6 @@
 import { router, usePathname } from "expo-router";
 import {
+  BarChart3,
   CalendarClock,
   Coins,
   History,
@@ -11,6 +12,7 @@ import { memo, useCallback, useMemo, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import { View, type StyleProp, type ViewStyle } from "react-native";
 import { SidebarHeaderRow } from "@/components/sidebar/sidebar-header-row";
+import { useSidebarInsightsTarget } from "@/components/sidebar/use-sidebar-insights-target";
 import { useSidebarTokenUsageTarget } from "@/components/sidebar/use-sidebar-token-usage-target";
 import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import { PluginSidebarItemRow } from "@/plugins/sidebar-items";
@@ -27,6 +29,7 @@ import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspac
 import { useWorkspace } from "@/stores/session-store-hooks";
 import {
   buildAskJevRoute,
+  buildInsightsRoute,
   buildNewWorkspaceRoute,
   buildSchedulesRoute,
   buildSessionsRoute,
@@ -223,6 +226,29 @@ function SidebarTokenUsageRow({ onBeforeNavigate }: SidebarNavRowProps) {
   );
 }
 
+function SidebarInsightsRow({ onBeforeNavigate }: SidebarNavRowProps) {
+  const { t } = useTranslation();
+  const pathname = usePathname();
+  const target = useSidebarInsightsTarget();
+  const handlePress = useCallback(() => {
+    onBeforeNavigate?.();
+    router.push(buildInsightsRoute());
+  }, [onBeforeNavigate]);
+
+  if (!target) return null;
+
+  return (
+    <SidebarHeaderRow
+      icon={BarChart3}
+      label={t(builtinSidebarNavLabelKey("insights"))}
+      onPress={handlePress}
+      isActive={pathname.includes("/insights")}
+      testID="sidebar-insights"
+      variant="compact"
+    />
+  );
+}
+
 const BUILTIN_ROWS: Record<BuiltinSidebarNavId, ComponentType<SidebarNavRowProps>> = {
   "new-workspace": SidebarNewWorkspaceRow,
   history: SidebarHistoryRow,
@@ -230,4 +256,5 @@ const BUILTIN_ROWS: Record<BuiltinSidebarNavId, ComponentType<SidebarNavRowProps
   schedules: SidebarSchedulesRow,
   "ask-jev": SidebarAskJevRow,
   "token-usage": SidebarTokenUsageRow,
+  insights: SidebarInsightsRow,
 };

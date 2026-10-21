@@ -7,6 +7,7 @@ export const BUILTIN_SIDEBAR_NAV_IDS = [
   "schedules",
   "ask-jev",
   "token-usage",
+  "insights",
 ] as const;
 export type BuiltinSidebarNavId = (typeof BUILTIN_SIDEBAR_NAV_IDS)[number];
 
@@ -39,6 +40,7 @@ const BUILTIN_LABEL_KEYS: Record<BuiltinSidebarNavId, string> = {
   schedules: "sidebar.sections.schedules",
   "ask-jev": "sidebar.sections.askJev",
   "token-usage": "sidebar.sections.tokenUsage",
+  insights: "sidebar.sections.insights",
 };
 
 export function builtinSidebarNavLabelKey(id: BuiltinSidebarNavId): string {
@@ -57,6 +59,7 @@ const BUILTIN_SHORTCUT_ACTIONS: Record<BuiltinSidebarNavId, string | null> = {
   schedules: null,
   "ask-jev": null,
   "token-usage": null,
+  insights: null,
 };
 
 export function builtinSidebarNavShortcutAction(id: BuiltinSidebarNavId): string | null {
