@@ -1,8 +1,8 @@
 import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
 import express from "express";
 import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "http";
-import { constants, existsSync, unlinkSync } from "fs";
-import { readFile } from "node:fs/promises";
+import { constants, createReadStream, existsSync, unlinkSync } from "fs";
+import { createInterface } from "node:readline";
 import { open, rm, statfs } from "fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, hostname as getHostname } from "node:os";
@@ -1003,9 +1003,17 @@ function createCompactionLedgerService(input: {
       runCompactionLedgerBackfill({
         store,
         logPath: path.join(input.paseoHome, "daemon.log"),
+        // Streamed rather than `readFile` + `split("\n")`: daemon.log can be large, and reading
+        // it whole plus materializing the split array would transiently double the memory it
+        // takes to extract three rare message types.
         readLines: async (logPath) => {
-          const text = await readFile(logPath, "utf8");
-          return text.split("\n");
+          const lines: string[] = [];
+          const rl = createInterface({
+            input: createReadStream(logPath, { encoding: "utf8" }),
+            crlfDelay: Number.POSITIVE_INFINITY,
+          });
+          for await (const line of rl) lines.push(line);
+          return lines;
         },
         logger: moduleLogger,
       }),

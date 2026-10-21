@@ -3,6 +3,7 @@ import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { FloatingScrollView } from "@/components/ui/floating";
+import { formatDuration } from "@/utils/time";
 import {
   compactionOutcomeLabel,
   formatCompactionTokens,
@@ -10,6 +11,8 @@ import {
 } from "./compaction-insights-model";
 import type { CompactionEpisode } from "./use-compaction-episodes";
 
+// Matches JevMarkerChip's popover sizing (jev-marker-chip.tsx) -- the same tap/hover detail
+// popover shape, tuned for the same column width.
 const MARKER_POPOVER_MAX_HEIGHT = 320;
 
 function formatStepCost(costWeightedTokens: number | null): string {
@@ -18,8 +21,7 @@ function formatStepCost(costWeightedTokens: number | null): string {
 
 function formatStepDuration(startedAtMs: number, endedAtMs: number | null): string {
   if (endedAtMs === null) return new Date(startedAtMs).toLocaleTimeString();
-  const seconds = Math.round((endedAtMs - startedAtMs) / 1000);
-  return `${new Date(startedAtMs).toLocaleTimeString()} · ${seconds}s`;
+  return `${new Date(startedAtMs).toLocaleTimeString()} · ${formatDuration(endedAtMs - startedAtMs)}`;
 }
 
 /**

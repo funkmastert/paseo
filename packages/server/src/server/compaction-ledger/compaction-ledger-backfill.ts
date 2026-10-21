@@ -1,9 +1,10 @@
-import type {
-  CompactionEpisodeRow,
-  CompactionEpisodeTrigger,
-  CompactionLedgerStore,
-  CompactionStepName,
-  CompactionStepRecord,
+import {
+  emptyCompactionEpisodeTail,
+  type CompactionEpisodeRow,
+  type CompactionEpisodeTrigger,
+  type CompactionLedgerStore,
+  type CompactionStepName,
+  type CompactionStepRecord,
 } from "./compaction-ledger-store.js";
 
 /**
@@ -70,13 +71,8 @@ function newEpisode(
     contextBeforeTokens: typeof usedTokens === "number" ? usedTokens : null,
     contextAfterTokens: null,
     outcome: "unknown",
-    noteLength: null,
-    promptsCarried: null,
-    quietGate: null,
-    costWeightedTokens: null,
     costBasis: "unmeasured",
-    estimatedSavedWeightedTokens: null,
-    requestsSincePaybackCountedThrough: null,
+    ...emptyCompactionEpisodeTail(),
   };
 }
 

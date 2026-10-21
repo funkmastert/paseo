@@ -1,3 +1,4 @@
+import { formatTokens } from "@/jev/jev-dashboard-model";
 import type { CompactionEpisode, CompactionEpisodesSummary } from "./use-compaction-episodes";
 
 /**
@@ -5,13 +6,8 @@ import type { CompactionEpisode, CompactionEpisodesSummary } from "./use-compact
  * marker (docs/insights.md). Shared so the two surfaces never disagree about what a figure means.
  */
 
-/** Compacted token count, matching the JEV dashboard's tile convention: 1,284 / 12.4k / 3.1M. */
-export function formatCompactionTokens(tokens: number): string {
-  const abs = Math.abs(tokens);
-  if (abs >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
-  if (abs >= 10_000) return `${(tokens / 1_000).toFixed(1)}k`;
-  return Math.round(tokens).toLocaleString("en-US");
-}
+/** Compacted token count, matching the JEV dashboard's own tile formatting: 1,284 / 12.4k / 3.1M. */
+export const formatCompactionTokens = formatTokens;
 
 /** The episode's own cost: a figure when measured, an explicit "not measured" when not. */
 export function formatEpisodeCost(episode: CompactionEpisode): string {

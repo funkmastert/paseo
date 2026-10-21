@@ -60,6 +60,27 @@ export interface CompactionEpisodeRow {
   requestsSincePaybackCountedThrough: number | null;
 }
 
+/** The fields every freshly-built row starts with, regardless of source (monitor, native,
+ * backfill) -- filled in only once more is known. */
+export function emptyCompactionEpisodeTail(): Pick<
+  CompactionEpisodeRow,
+  | "noteLength"
+  | "promptsCarried"
+  | "quietGate"
+  | "costWeightedTokens"
+  | "estimatedSavedWeightedTokens"
+  | "requestsSincePaybackCountedThrough"
+> {
+  return {
+    noteLength: null,
+    promptsCarried: null,
+    quietGate: null,
+    costWeightedTokens: null,
+    estimatedSavedWeightedTokens: null,
+    requestsSincePaybackCountedThrough: null,
+  };
+}
+
 export interface CompactionLedgerLimits {
   retentionDays: number;
   maxRows: number;

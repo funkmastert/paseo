@@ -1,12 +1,13 @@
 import type { LeaderCompactionEpisodeObserver } from "../agent-leader-compaction-monitor.js";
 import { estimatedSavedWeightedTokens, stepCost } from "./compaction-ledger-cost.js";
-import type {
-  CompactionEpisodeOutcome,
-  CompactionEpisodeRow,
-  CompactionEpisodeSource,
-  CompactionLedgerStore,
-  CompactionStepOutcome,
-  CompactionStepRecord,
+import {
+  emptyCompactionEpisodeTail,
+  type CompactionEpisodeOutcome,
+  type CompactionEpisodeRow,
+  type CompactionEpisodeSource,
+  type CompactionLedgerStore,
+  type CompactionStepOutcome,
+  type CompactionStepRecord,
 } from "./compaction-ledger-store.js";
 
 /**
@@ -165,13 +166,8 @@ export class CompactionLedgerService implements LeaderCompactionEpisodeObserver 
       contextBeforeTokens: input.preTokens,
       contextAfterTokens: input.postTokens,
       outcome: "done",
-      noteLength: null,
-      promptsCarried: null,
-      quietGate: null,
-      costWeightedTokens: null,
       costBasis: "unmeasured",
-      estimatedSavedWeightedTokens: null,
-      requestsSincePaybackCountedThrough: null,
+      ...emptyCompactionEpisodeTail(),
     });
     this.payingBackEpisodeId.set(input.agentId, id);
   }
@@ -246,13 +242,8 @@ export class CompactionLedgerService implements LeaderCompactionEpisodeObserver 
       contextBeforeTokens: usedTokens ?? null,
       contextAfterTokens: null,
       outcome: "unknown",
-      noteLength: null,
-      promptsCarried: null,
-      quietGate: null,
-      costWeightedTokens: null,
       costBasis: "measured",
-      estimatedSavedWeightedTokens: null,
-      requestsSincePaybackCountedThrough: null,
+      ...emptyCompactionEpisodeTail(),
     };
   }
 
