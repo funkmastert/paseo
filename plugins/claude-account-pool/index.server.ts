@@ -1,3 +1,5 @@
+import { randomUUID } from "crypto";
+import * as path from "path";
 import type { PluginBeforeRequests, PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { createAccountIdentity } from "./server/account-identity";
 import { createArenaRankingCache, type ArenaRankingCache } from "./server/arena-ranking-cache";
@@ -21,12 +23,13 @@ import { createRecentAgentTypes, type RecentAgentTypes } from "./server/recent-a
 import { createPolicyCache, type PolicyCache } from "./server/role-policy";
 import { createRoleModelPolicyRpcHandlers } from "./server/role-policy-rpc-handlers";
 import { createDecisionLog, type LoggedRequest } from "./server/decision-log";
+import { buildPendingRowFromDecisionLine, loadClassifierDecisionsLedger } from "./server/classifier-decisions-ledger";
 import { placesRootAsChild } from "./server/role-resolve";
 import { classifierInputFor, createRoleRouter, type RoleCreateRouter } from "./server/role-router";
 import { createProviderIdCache, createRouter, type AgentCreateRouter, type ProviderIdCache } from "./server/router";
 import { createUsagePoller, type FetchUsageFn, type UsagePoller } from "./server/usage-poll";
 import { roleModelPolicyRpc } from "./shared/role-policy-rpc";
-import { AGENT_TYPE_LABEL, catalogFamilies, DEFAULT_POLICY } from "./shared/role-policy-schema";
+import { AGENT_TYPE_LABEL, catalogFamilies, DEFAULT_POLICY, WORK_KIND_LABEL } from "./shared/role-policy-schema";
 
 function isPoolProvider(pool: PoolCache, providerId: string): boolean {
   const { pool: resolved } = pool.get();
@@ -51,11 +54,27 @@ const STARTUP_WARM_TIMEOUT_MS = 5000;
  */
 const CLASSIFIER_MCP_SERVER = "paseo-agent-policy";
 
+/**
+ * Correlates a role-hook decision to the real agent `agent.created` later
+ * names (docs/arena-ranking.md, "Decisions ledger and dashboard"): the hook
+ * that decides a create runs before the daemon mints an agent id, so this
+ * rides on the request/response the way `DECISION_TOKEN_LABEL` does, but —
+ * unlike that one — is never stripped, since the ledger needs it to still be
+ * on the agent once `agent.created` fires.
+ */
+const CLASSIFIER_DECISION_ID_LABEL = "paseo.classifier-decision-id";
+
 export default function contribute(server: PluginServerContext) {
   const health = createHealthTracker();
   // Long-lived alongside the health tracker: both are fed by the same usage poll, and both
   // start empty after a reload rather than being rebuilt per hook dispatch.
   const accountIdentity = createAccountIdentity();
+  // Kicked off immediately, independent of `ensureStarted`/`paseo` — it only needs PASEO_HOME,
+  // not the daemon's RPC surface, so it loads in parallel with the very first create instead of
+  // waiting behind the policy/pool warm-up.
+  const classifierDecisionsLedgerPromise = loadClassifierDecisionsLedger({
+    filePath: path.join(resolvePaseoHome(), "classifier", "decisions.json"),
+  });
 
   let poolCache: PoolCache | null = null;
   let providerIds: ProviderIdCache | null = null;
@@ -450,7 +469,14 @@ export default function contribute(server: PluginServerContext) {
     // clone and strict parse between handlers. `tag` returns its argument
     // untouched when nothing was noted, so a passthrough stays a passthrough.
     const tagged = decisionLog.tag(input.request, routed ?? input.request);
-    return tagged === input.request ? routed : tagged;
+    if (tagged === input.request) {
+      return routed;
+    }
+    // A second, NEVER-stripped label (unlike `DECISION_TOKEN_LABEL`): the
+    // classifier-decisions ledger correlates this create's pending row to
+    // the real agent `agent.created` names, which needs the id to still be
+    // on the agent once that event fires.
+    return { ...tagged, labels: { ...tagged.labels, [CLASSIFIER_DECISION_ID_LABEL]: randomUUID() } };
   });
   const unregisterCreate = server.before("agent.create", async (input, context) => {
     await ensureStarted(context.paseo);
@@ -468,7 +494,15 @@ export default function contribute(server: PluginServerContext) {
       decisionLog.finish(token, asked, undefined);
       throw error;
     }
-    decisionLog.finish(token, asked, (routed ?? request) as unknown as LoggedRequest);
+    const line = decisionLog.finish(token, asked, (routed ?? request) as unknown as LoggedRequest);
+    const decisionId = request.labels?.[CLASSIFIER_DECISION_ID_LABEL];
+    if (decisionId !== undefined) {
+      const workKind = request.labels?.[WORK_KIND_LABEL];
+      const pendingRow = buildPendingRowFromDecisionLine(decisionId, new Date().toISOString(), line, workKind);
+      if (pendingRow) {
+        void classifierDecisionsLedgerPromise.then((ledger) => ledger.notePending(decisionId, pendingRow));
+      }
+    }
     return routed ?? (token === undefined ? undefined : request);
   });
 
@@ -597,6 +631,12 @@ export default function contribute(server: PluginServerContext) {
     if (agentTypeKey) {
       recentAgentTypes?.record(agentTypeKey);
     }
+    const decisionId = event.agent.labels?.[CLASSIFIER_DECISION_ID_LABEL];
+    if (decisionId !== undefined) {
+      void classifierDecisionsLedgerPromise.then((ledger) =>
+        ledger.resolveAgent(decisionId, event.agent.id, event.agent.title ?? null),
+      );
+    }
   });
   const unregisterPermissionRequested = server.on("agent.permission_requested", (event, context) => {
     ensureStarted(context.paseo);
@@ -637,7 +677,7 @@ export default function contribute(server: PluginServerContext) {
     return roleModelPolicyRpcHandlers!.explain(input, context);
   });
 
-  return () => {
+  return async () => {
     unregisterRoleCreate();
     unregisterCreate();
     unregisterCompoundPolicy();
@@ -660,5 +700,11 @@ export default function contribute(server: PluginServerContext) {
     arenaRankingsPoller?.stop();
     arenaRankingCache?.stop();
     classifierTool?.close();
+    try {
+      const ledger = await classifierDecisionsLedgerPromise;
+      await ledger.flush();
+    } catch {
+      // A lost flush costs at most the interval since the last one; never worth failing unload over.
+    }
   };
 }

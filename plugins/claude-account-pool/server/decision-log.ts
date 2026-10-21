@@ -50,9 +50,16 @@ export interface DecisionLog {
    * here — after the role router, which deliberately classifies without
    * `nowMs` — so a line written any earlier would name an account that isn't
    * the one that runs. A create whose decision cannot be found still gets a
-   * line, with the decision marked unknown. Never throws.
+   * line, with the decision marked unknown. Never throws. Returns the same
+   * structured object the line was serialized from — `undefined` only on the
+   * internal catch below — so a caller (the classifier-decisions ledger) can
+   * read the fields it needs without re-parsing the written line.
    */
-  finish(token: string | undefined, request: LoggedRequest, result: LoggedRequest | undefined): void;
+  finish(
+    token: string | undefined,
+    request: LoggedRequest,
+    result: LoggedRequest | undefined,
+  ): Record<string, unknown> | undefined;
 }
 
 export interface DecisionLogOptions {
@@ -137,8 +144,10 @@ export function createDecisionLog(options: DecisionLogOptions): DecisionLog {
         }
         const line = entry ? describe(entry.decision, result) : describeUnknown(request, result);
         options.write(`${DECISION_LOG_PREFIX} ${JSON.stringify(line)}`);
+        return line;
       } catch {
         // A log line is never worth failing a create over.
+        return undefined;
       }
     },
   };

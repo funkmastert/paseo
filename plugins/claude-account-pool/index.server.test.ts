@@ -740,7 +740,17 @@ describe("contribute (index.server)", () => {
         expect(mixed.spies?.decide).not.toHaveBeenCalled();
         expect(mixed.spies?.checkScope).not.toHaveBeenCalled();
         expect(mixed.logged).toEqual(absent.logged);
-        expect(JSON.stringify(mixed.created)).toBe(JSON.stringify(absent.created));
+        // Every decision-bearing create carries a fresh random
+        // `paseo.classifier-decision-id` (the classifier-decisions ledger's
+        // agent-created correlation token) — it necessarily differs between
+        // these two independent create() runs even though nothing else does.
+        const withoutDecisionId = (entries: unknown[]) =>
+          entries.map((entry) => {
+            const { labels, ...rest } = entry as { labels?: Record<string, string> };
+            const { "paseo.classifier-decision-id": _omit, ...withoutId } = labels ?? {};
+            return { ...rest, labels: withoutId };
+          });
+        expect(JSON.stringify(withoutDecisionId(mixed.created))).toBe(JSON.stringify(withoutDecisionId(absent.created)));
         expect(mixed.logged.join("\n")).not.toContain('"jev');
       });
 
