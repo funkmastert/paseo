@@ -27,6 +27,15 @@ export interface LoggedRequest {
  */
 export const DECISION_TOKEN_LABEL = "paseo.decision-log-token";
 
+/**
+ * A sibling of `DECISION_TOKEN_LABEL`, owned by `index.server.ts`'s role hook — but, unlike that
+ * one, never stripped: the classifier-decisions ledger (`classifier-decisions-ledger.ts`) needs it
+ * to still be on the agent once `agent.created` fires, to resolve the pending row it noted before
+ * the agent existed. Exported here (not left private to `index.server.ts`) so this persisted
+ * contract has one source of truth instead of a string literal duplicated into tests.
+ */
+export const CLASSIFIER_DECISION_ID_LABEL = "paseo.classifier-decision-id";
+
 export interface DecisionLog {
   /** Called by the role router (server/role-router.ts) with what it decided for `request`. Writes nothing. */
   note(request: LoggedRequest, decision: AgentDecision): void;
@@ -50,9 +59,16 @@ export interface DecisionLog {
    * here — after the role router, which deliberately classifies without
    * `nowMs` — so a line written any earlier would name an account that isn't
    * the one that runs. A create whose decision cannot be found still gets a
-   * line, with the decision marked unknown. Never throws.
+   * line, with the decision marked unknown. Never throws. Returns the same
+   * structured object the line was serialized from — `undefined` only on the
+   * internal catch below — so a caller (the classifier-decisions ledger) can
+   * read the fields it needs without re-parsing the written line.
    */
-  finish(token: string | undefined, request: LoggedRequest, result: LoggedRequest | undefined): void;
+  finish(
+    token: string | undefined,
+    request: LoggedRequest,
+    result: LoggedRequest | undefined,
+  ): Record<string, unknown> | undefined;
 }
 
 export interface DecisionLogOptions {
@@ -137,8 +153,10 @@ export function createDecisionLog(options: DecisionLogOptions): DecisionLog {
         }
         const line = entry ? describe(entry.decision, result) : describeUnknown(request, result);
         options.write(`${DECISION_LOG_PREFIX} ${JSON.stringify(line)}`);
+        return line;
       } catch {
         // A log line is never worth failing a create over.
+        return undefined;
       }
     },
   };

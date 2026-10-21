@@ -1,10 +1,11 @@
-import { useEffect, useRef } from "react";
-import { Text } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import { Pressable, Text, View } from "react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { SettingsAction, SettingsSection } from "@getpaseo/plugin/client/ui";
 import { rolePolicyFamilies } from "../../shared/role-policy-schema";
 import { AddRoleButton } from "./add-role-button";
 import { AgentRoleMappingsSection } from "./agent-role-mappings-section";
+import { ClassifierDecisionsSection } from "./classifier-decisions-section";
 import { MalformedBanner } from "./limits-banner";
 import { ModelBudgetSection } from "./model-budget-section";
 import { RefreshModelsButton } from "./refresh-models-button";
@@ -15,8 +16,46 @@ import { useModelCatalog } from "./use-model-catalog";
 import { useRecentAgentTypes } from "./use-recent-agent-types";
 import { useRoleModelPolicy } from "./use-role-model-policy";
 
+type ScreenTab = "policy" | "decisions";
+
+/**
+ * A plain in-screen segmented control, not a second registered settings
+ * screen or a host tab primitive (neither exists — `client.addSettingsScreen`
+ * registers one flat component per screen, docs/plugins.md). KTD-6.
+ */
+function ScreenTabs({ tab, onChange, theme }: { tab: ScreenTab; onChange: (tab: ScreenTab) => void; theme: PluginSurfaceProps["theme"] }) {
+  const tabs: Array<{ id: ScreenTab; label: string }> = [
+    { id: "policy", label: "Policy" },
+    { id: "decisions", label: "Decisions" },
+  ];
+  return (
+    <View style={{ flexDirection: "row", gap: 8, paddingHorizontal: 12, paddingVertical: 8 }} testID="agent-model-policy-tabs">
+      {tabs.map(({ id, label }) => {
+        const active = id === tab;
+        return (
+          <Pressable
+            key={id}
+            onPress={() => onChange(id)}
+            style={{
+              paddingHorizontal: 12,
+              paddingVertical: 6,
+              borderRadius: 6,
+              backgroundColor: active ? theme.colors.accent : theme.colors.surface1,
+            }}
+            testID={`agent-model-policy-tab-${id}`}
+          >
+            <Text style={{ color: active ? theme.colors.accentForeground : theme.colors.foreground }}>{label}</Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
 /** Registered via `client.addSettingsScreen({ id: "agent-model-policy", ... })` in index.client.tsx. */
-export function AgentModelPolicyScreen({ theme }: PluginSurfaceProps) {
+export function AgentModelPolicyScreen(props: PluginSurfaceProps) {
+  const { theme } = props;
+  const [tab, setTab] = useState<ScreenTab>("policy");
   const load = useRoleModelPolicy();
   const recentAgentTypes = useRecentAgentTypes();
   const referencedFamilies = load.status === "ready" ? rolePolicyFamilies(load.state.policy) : [];
@@ -37,15 +76,32 @@ export function AgentModelPolicyScreen({ theme }: PluginSurfaceProps) {
     }
   }, [referencedKey, catalog]);
 
+  if (tab === "decisions") {
+    return (
+      <>
+        <ScreenTabs tab={tab} onChange={setTab} theme={theme} />
+        <ClassifierDecisionsSection {...props} />
+      </>
+    );
+  }
+
   if (load.status === "loading") {
-    return <Text style={{ color: theme.colors.foreground }}>Loading policy…</Text>;
+    return (
+      <>
+        <ScreenTabs tab={tab} onChange={setTab} theme={theme} />
+        <Text style={{ color: theme.colors.foreground }}>Loading policy…</Text>
+      </>
+    );
   }
   if (load.status === "error") {
     return (
-      <SettingsSection title="Agent Model Policy" testID="agent-model-policy-error">
-        <Text style={{ color: theme.colors.statusDanger }}>{load.error}</Text>
-        <SettingsAction label="Reload" actionLabel="Try again" onPress={load.reload} />
-      </SettingsSection>
+      <>
+        <ScreenTabs tab={tab} onChange={setTab} theme={theme} />
+        <SettingsSection title="Agent Model Policy" testID="agent-model-policy-error">
+          <Text style={{ color: theme.colors.statusDanger }}>{load.error}</Text>
+          <SettingsAction label="Reload" actionLabel="Try again" onPress={load.reload} />
+        </SettingsSection>
+      </>
     );
   }
 
@@ -53,6 +109,7 @@ export function AgentModelPolicyScreen({ theme }: PluginSurfaceProps) {
 
   return (
     <>
+      <ScreenTabs tab={tab} onChange={setTab} theme={theme} />
       {state.malformed ? <MalformedBanner error={state.malformedError} onReload={load.reload} theme={theme} /> : null}
 
       <SettingsSection

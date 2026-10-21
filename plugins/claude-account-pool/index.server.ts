@@ -1,3 +1,5 @@
+import { randomUUID } from "crypto";
+import * as path from "path";
 import type { PluginBeforeRequests, PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { createAccountIdentity } from "./server/account-identity";
 import { createArenaRankingCache, type ArenaRankingCache } from "./server/arena-ranking-cache";
@@ -20,13 +22,17 @@ import { createPoolCache, type PoolCache } from "./server/pool";
 import { createRecentAgentTypes, type RecentAgentTypes } from "./server/recent-agent-types";
 import { createPolicyCache, type PolicyCache } from "./server/role-policy";
 import { createRoleModelPolicyRpcHandlers } from "./server/role-policy-rpc-handlers";
-import { createDecisionLog, type LoggedRequest } from "./server/decision-log";
+import { CLASSIFIER_DECISION_ID_LABEL, createDecisionLog, type LoggedRequest } from "./server/decision-log";
+import { buildPendingRowFromDecisionLine, loadClassifierDecisionsLedger } from "./server/classifier-decisions-ledger";
+import { runClassifierDecisionsBackfill } from "./server/classifier-decisions-backfill";
+import { createClassifierDecisionsRpcHandlers } from "./server/classifier-decisions-rpc-handlers";
+import { classifierDecisionsRpc } from "./shared/classifier-decisions-rpc";
 import { placesRootAsChild } from "./server/role-resolve";
 import { classifierInputFor, createRoleRouter, type RoleCreateRouter } from "./server/role-router";
 import { createProviderIdCache, createRouter, type AgentCreateRouter, type ProviderIdCache } from "./server/router";
 import { createUsagePoller, type FetchUsageFn, type UsagePoller } from "./server/usage-poll";
 import { roleModelPolicyRpc } from "./shared/role-policy-rpc";
-import { AGENT_TYPE_LABEL, catalogFamilies, DEFAULT_POLICY } from "./shared/role-policy-schema";
+import { AGENT_TYPE_LABEL, catalogFamilies, DEFAULT_POLICY, WORK_KIND_LABEL } from "./shared/role-policy-schema";
 
 function isPoolProvider(pool: PoolCache, providerId: string): boolean {
   const { pool: resolved } = pool.get();
@@ -56,6 +62,12 @@ export default function contribute(server: PluginServerContext) {
   // Long-lived alongside the health tracker: both are fed by the same usage poll, and both
   // start empty after a reload rather than being rebuilt per hook dispatch.
   const accountIdentity = createAccountIdentity();
+  // Kicked off immediately, independent of `ensureStarted`/`paseo` — it only needs PASEO_HOME,
+  // not the daemon's RPC surface, so it loads in parallel with the very first create instead of
+  // waiting behind the policy/pool warm-up.
+  const classifierDecisionsLedgerPromise = loadClassifierDecisionsLedger({
+    filePath: path.join(resolvePaseoHome(), "classifier", "decisions.json"),
+  });
 
   let poolCache: PoolCache | null = null;
   let providerIds: ProviderIdCache | null = null;
@@ -72,6 +84,10 @@ export default function contribute(server: PluginServerContext) {
   let codexGuardAvailability: CodexGuardAvailability | null = null;
   let arenaRankingsPoller: IntervalPoller<void> | null = null;
   let arenaRankingCache: ArenaRankingCache | null = null;
+  // Tracked so shutdown can await an in-flight backfill before its own ledger flush, rather than
+  // leaving it to write (or fail to write, once the temp PASEO_HOME it started against is gone)
+  // after cleanup() has already resolved.
+  let classifierDecisionsBackfillPromise: Promise<unknown> | null = null;
   // stdout, not console.error: this is a record of every create, not a problem report.
   const decisionLog = createDecisionLog({ write: (line) => console.log(line) });
   let roleModelPolicyRpcHandlers: ReturnType<typeof createRoleModelPolicyRpcHandlers> | null = null;
@@ -128,6 +144,13 @@ export default function contribute(server: PluginServerContext) {
     // fetch must never delay a create, and the classifier treats a missing
     // or stale file as today's order regardless of why.
     arenaRankingsPoller = startArenaRankingsPoller(resolvePaseoHome());
+    // U3's one-time historical backfill (docs/arena-ranking.md): fire-and-forget, like the arena
+    // rankings poller above -- it reads agents, not a create's hot path, and must never delay one.
+    // `runClassifierDecisionsBackfill` itself no-ops once the ledger's `backfilledAt` is set, so a
+    // reload or restart after the first successful run costs nothing beyond the no-op check.
+    classifierDecisionsBackfillPromise = classifierDecisionsLedgerPromise
+      .then((ledger) => runClassifierDecisionsBackfill(paseo, ledger))
+      .catch((error) => console.error("classifier-decisions: backfill failed", error));
     // The plugin cache that feeds `ClassifierWorld.arenaRanking`, beside catalogCache/poolCache
     // above (U8). Reads `arena.maxAgeHours` fresh off the policy cache on every poll.
     arenaRankingCache = createArenaRankingCache(resolvePaseoHome(), {
@@ -450,7 +473,14 @@ export default function contribute(server: PluginServerContext) {
     // clone and strict parse between handlers. `tag` returns its argument
     // untouched when nothing was noted, so a passthrough stays a passthrough.
     const tagged = decisionLog.tag(input.request, routed ?? input.request);
-    return tagged === input.request ? routed : tagged;
+    if (tagged === input.request) {
+      return routed;
+    }
+    // A second, NEVER-stripped label (unlike `DECISION_TOKEN_LABEL`): the
+    // classifier-decisions ledger correlates this create's pending row to
+    // the real agent `agent.created` names, which needs the id to still be
+    // on the agent once that event fires.
+    return { ...tagged, labels: { ...tagged.labels, [CLASSIFIER_DECISION_ID_LABEL]: randomUUID() } };
   });
   const unregisterCreate = server.before("agent.create", async (input, context) => {
     await ensureStarted(context.paseo);
@@ -468,7 +498,17 @@ export default function contribute(server: PluginServerContext) {
       decisionLog.finish(token, asked, undefined);
       throw error;
     }
-    decisionLog.finish(token, asked, (routed ?? request) as unknown as LoggedRequest);
+    const line = decisionLog.finish(token, asked, (routed ?? request) as unknown as LoggedRequest);
+    const decisionId = request.labels?.[CLASSIFIER_DECISION_ID_LABEL];
+    if (decisionId !== undefined) {
+      const workKind = request.labels?.[WORK_KIND_LABEL];
+      const pendingRow = buildPendingRowFromDecisionLine(decisionId, new Date().toISOString(), line, workKind);
+      if (pendingRow) {
+        void classifierDecisionsLedgerPromise
+          .then((ledger) => ledger.notePending(decisionId, pendingRow))
+          .catch((error) => console.error("classifier-decisions: notePending failed", error));
+      }
+    }
     return routed ?? (token === undefined ? undefined : request);
   });
 
@@ -597,6 +637,12 @@ export default function contribute(server: PluginServerContext) {
     if (agentTypeKey) {
       recentAgentTypes?.record(agentTypeKey);
     }
+    const decisionId = event.agent.labels?.[CLASSIFIER_DECISION_ID_LABEL];
+    if (decisionId !== undefined) {
+      void classifierDecisionsLedgerPromise
+        .then((ledger) => ledger.resolveAgent(decisionId, event.agent.id, event.agent.title ?? null))
+        .catch((error) => console.error("classifier-decisions: resolveAgent failed", error));
+    }
   });
   const unregisterPermissionRequested = server.on("agent.permission_requested", (event, context) => {
     ensureStarted(context.paseo);
@@ -637,7 +683,21 @@ export default function contribute(server: PluginServerContext) {
     return roleModelPolicyRpcHandlers!.explain(input, context);
   });
 
-  return () => {
+  // Built once the ledger has loaded; a dashboard open before that finishes waits on the same
+  // promise rather than racing a second load.
+  const classifierDecisionsRpcHandlersPromise = classifierDecisionsLedgerPromise.then((ledger) =>
+    createClassifierDecisionsRpcHandlers({ ledger }),
+  );
+  server.handle(classifierDecisionsRpc.list, async (input, context) => {
+    const handlers = await classifierDecisionsRpcHandlersPromise;
+    return handlers.list(input, context);
+  });
+  server.handle(classifierDecisionsRpc.summary, async (input, context) => {
+    const handlers = await classifierDecisionsRpcHandlersPromise;
+    return handlers.summary(input, context);
+  });
+
+  return async () => {
     unregisterRoleCreate();
     unregisterCreate();
     unregisterCompoundPolicy();
@@ -660,5 +720,15 @@ export default function contribute(server: PluginServerContext) {
     arenaRankingsPoller?.stop();
     arenaRankingCache?.stop();
     classifierTool?.close();
+    try {
+      // Await any in-flight backfill FIRST: it is the thing most likely to still be running (a
+      // real agent-directory sweep), and it writes through this same ledger, so flushing before
+      // it finishes would miss its rows and let it write again after this function has returned.
+      await classifierDecisionsBackfillPromise;
+      const ledger = await classifierDecisionsLedgerPromise;
+      await ledger.flush();
+    } catch {
+      // A lost flush costs at most the interval since the last one; never worth failing unload over.
+    }
   };
 }

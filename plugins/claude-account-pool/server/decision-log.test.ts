@@ -98,6 +98,27 @@ describe("decision log", () => {
     expect(line.reasons.model).toContain("claude-haiku-4-5-20251001");
   });
 
+  it("finish() returns the same structured object the line was serialized from, for a caller (the classifier-decisions ledger) that needs the fields without re-parsing", () => {
+    const { lines, log } = harness();
+    const asked = request();
+    log.note(asked, decisionFor(asked));
+    const routed = { ...asked, config: { ...asked.config, provider: "claude-work", thinkingOptionId: undefined } };
+
+    const returned = log.finish(tokenOf(log, asked), asked, routed);
+
+    expect(returned).toEqual(parse(lines[0]));
+  });
+
+  it("finish() still returns the noted decision, marked refused, when the create threw (result: undefined)", () => {
+    const { log } = harness();
+    const asked = request();
+    log.note(asked, decisionFor(asked));
+
+    const returned = log.finish(tokenOf(log, asked), asked, undefined);
+
+    expect(returned).toMatchObject({ caller: "child", account: { refused: true } });
+  });
+
   it("is written once even if finish is called again for the same create", () => {
     const { lines, log } = harness();
     const asked = request();

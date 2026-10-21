@@ -62,6 +62,7 @@ describe("getClaudeModels", () => {
       "claude-fable-5[1m]",
       "claude-opus-4-8[1m]",
       "claude-opus-4-8",
+      "claude-sonnet-5-5",
       "claude-sonnet-5",
       "claude-sonnet-5[1m]",
       "claude-opus-4-7[1m]",
@@ -72,6 +73,15 @@ describe("getClaudeModels", () => {
       "claude-sonnet-4-6",
       "claude-haiku-4-5",
     ]);
+  });
+
+  it("filters out claude-sonnet-5-5 below its minimum Claude Code version, like claude-opus-5-5", () => {
+    const olderModels = getClaudeModels("2.1.200");
+    expect(olderModels.map((m) => m.id)).not.toContain("claude-sonnet-5-5");
+    expect(olderModels.map((m) => m.id)).not.toContain("claude-opus-5-5");
+
+    const currentModels = getClaudeModels("2.1.219");
+    expect(currentModels.map((m) => m.id)).toContain("claude-sonnet-5-5");
   });
 
   it("marks exactly one model as default", () => {
@@ -95,6 +105,7 @@ describe("getClaudeModels", () => {
         ["claude-fable-5[1m]", 1_000_000],
         ["claude-opus-4-8[1m]", 1_000_000],
         ["claude-opus-4-8", 200_000],
+        ["claude-sonnet-5-5", 200_000],
         ["claude-sonnet-5", 200_000],
         ["claude-sonnet-5[1m]", 1_000_000],
         ["claude-opus-4-7[1m]", 1_000_000],

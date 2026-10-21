@@ -100,6 +100,16 @@ effort is preferred; absent that, the nearest-effort row is used and marked a
 one extra CI width, on top of `topTierMarginCi` — a proxy overstates what a
 lower-effort run actually gets.
 
+A ref sitting in a role's pool is not automatically **usable** for ranking:
+`decideArenaPick`'s candidate filter drops anything `isModelRefUsable` rejects
+(capped, drained, budget-gated, or absent from the provider's advertised
+catalog and not in `allowUnlistedModels`), before ranking ever sees it. A new
+Claude model added to a pool before it has a `CLAUDE_MODEL_MANIFEST` entry —
+or an `allowUnlistedModels` waiver — sits in the pool forever without ever
+being ranked, which read as an alias-table gap in `arena-aliases.ts` the one
+time it happened (`claude-sonnet-5-5`, fixed by adding its manifest entry)
+but was actually this.
+
 ## Fail-open order (R8)
 
 Any doubt falls back to today's pool order, with the reason always recorded
@@ -177,11 +187,18 @@ guard against that combination, belt-and-suspenders.
   `v1;ref=<ref>;tier=<top|mid>;board=<board>;date=<publishDate>;applied=<0|1>;proxy=<0|1>`.
   A leader pick appends `;role=leader;incumbent=<ref>;streak=<won>/<needed>`,
   with `tier=top` and `date` the board's own publish date. Readers must parse
-  by key and ignore keys they don't know.
+  by key and ignore keys they don't know. Every pre-ledger pick is backfilled
+  from this label (see "Decisions ledger and dashboard"), which skips a
+  leader row (`role=leader`) rather than mixing a leader-pick decision into
+  worker/reviewer ranking stats.
 - `paseo.model-pin`: set by the caller, read only by `decideModel`. Keeps an
   eligible explicit request over the ranked pick in live mode; has no effect
   in shadow (the request is already honored there) or on a role outside
   `arena.roles`.
+- `paseo.classifier-decision-id` (`decision-log.ts`'s `CLASSIFIER_DECISION_ID_LABEL`): a sibling
+  of the decision log's own pairing token, but never stripped — the ledger's `agent.created`
+  handler reads it to resolve the pending row it noted before the agent existed. See "Decisions
+  ledger and dashboard".
 
 ## Shadow
 
@@ -259,9 +276,71 @@ entirely), `successor`, `no-file`, `no-ranked-board`.
 (`shared/arena-unpooled.ts`) lists models that clear the incumbent on the first
 leader board by the same bar, with no streak, but match no role's pool,
 including models the alias table doesn't map. The settings explain RPC returns
-them as `unpooledLeaderChallengers`. The classifier dashboard shows the top
-one as a summary line, and its `paseo.arena-pick` backfill parser accepts the
-leader keys; both arrive with the dashboard.
+them as `unpooledLeaderChallengers`. (The classifier dashboard surfacing these
+as a summary line is not built yet; its `paseo.arena-pick` backfill parser
+does already accept the leader keys — see "Decisions ledger and dashboard".)
+
+## Decisions ledger and dashboard
+
+The `classifier-decision` line above is the only record of a decision, and
+the daemon log rotates — a shadow day's picks are gone once the log is. The
+plugin also writes a durable, bounded ledger at
+`$PASEO_HOME/classifier/decisions.json` (a Zod-validated array capped at
+5,000 rows, atomic writes, newest dropped last — not JSONL, since this
+repo's stores rewrite the whole file atomically rather than appending), so a
+day's picks outlive log rotation and a daemon restart.
+
+A row is written at the same point `decision-log.ts`'s `finish()` writes its
+log line, for any decision whose `model.ranking` field is present (every
+non-leader create `decideArenaPick` was asked about, ranked or fallback).
+The create hook runs before the daemon mints an agent id, so the row is
+buffered (`notePending`) under a fresh, never-stripped
+`paseo.classifier-decision-id` label — a sibling of `paseo.decision-log-token`
+that, unlike that one, rides onto the real agent — and resolved
+(`resolveAgent`) once `agent.created` names it. A row is a snapshot: role,
+task class, work kind, the model that ran, and the would-be pick or fallback
+reason, as decided. It never stores outcome — an agent's status, completion
+state, and failover history keep changing after its decision was made, so
+the dashboard joins each row against the agent's CURRENT state (`lastStatus`,
+`archivedAt`, `paseo.completion`, `paseo.account-failover.migrated-to`,
+`totalTokens`) at read time instead.
+
+The 280-odd picks that predate the ledger are not lost: a one-time backfill
+(gated by a `backfilledAt` marker on the ledger file itself) pages through
+the plugin's sanctioned `paseo.agents.list()` API — never the agent-storage
+filesystem layout directly — and reconstructs one row per agent carrying
+`paseo.arena-pick`, from that label plus its sibling `paseo.agent-role` /
+`paseo.task-class` / `paseo.work-kind` labels. A backfilled row is marked
+`backfilled: true` and carries no fallback reason and no score detail
+(rating/votes/effort) — the compact label format has no room for either —
+but `modelRan` is recovered from the agent snapshot (`runtimeInfo.model`, the
+actual model, falling back to the configured `model`) rather than left
+`null`, since a historical row that can never agree or disagree is the one
+thing that would make the dashboard's headline agreement rate read "—" for
+every pre-ledger row on day one. The
+label parser reads by key and ignores any it doesn't recognize, so a leader
+pick's `;role=leader;incumbent=<ref>;streak=<won>/<needed>` suffix (see
+"Leaders") never breaks parsing — but a leader row is skipped from the
+backfill entirely: its pick is the leader rule's incumbent-vs-challenger
+decision, not the worker/reviewer ranking this dashboard's agreement and
+pick-distribution stats are about, and `tier` on a leader pick is always
+`top` by construction, which would otherwise inflate `topTierRate` with
+numbers that mean something unrelated.
+
+The plugin RPC pair `classifier-decisions.list` / `.summary`
+(`shared/classifier-decisions-rpc.ts`) serves the dashboard: `list` returns
+paginated rows (newest first, with a `disagreementsOnly`/`role`/`workKind`
+filter), `summary` returns the agreement rate, the would-be pick distribution
+by model and tier, the top-tier rate, fallback reasons, the same splits by
+work kind, and — per model actually run, split by work kind — the outcome
+rate and median tokens, the only real performance evidence there is, since a
+would-be pick never ran.
+
+The dashboard itself is a "Decisions" view on the plugin's existing Agent
+Model Policy settings screen (a plain in-screen "Policy"/"Decisions" toggle,
+not a second registered screen or a host tab primitive — neither exists),
+read-only: it shows what shadow mode would have done and does not flip
+`arena.shadow`.
 
 ## Tests and verification
 
@@ -303,4 +382,38 @@ leader keys; both arrive with the dashboard.
 - `client/settings/explain-summary.test.ts`: `describeRequestedModel` renders
   the `"arena-ranked"` override reason with its own explanation, not the
   `"not-approved"` fallback text.
-- Verify: `cd plugins/claude-account-pool && npx vitest run server/arena-model-pick.test.ts server/arena-rankings.test.ts server/classifier.test.ts server/decision-log.test.ts server/role-router.test.ts server/classifier-tool.test.ts server/role-policy-rpc-handlers.test.ts shared/role-policy-schema.test.ts shared/arena-unpooled.test.ts --bail=1`.
+- `server/classifier-decisions-ledger.test.ts`: appending a ranked and a
+  fallback row; the 5,000-row cap drops the oldest first; a flush/reload
+  round-trips through the schema; a flush failure never throws and retries
+  on the next tick; an unreadable or malformed file is quarantined
+  (`<path>.corrupt-<ts>`) rather than silently replaced, and a single bad row
+  drops only itself; `appendBackfill` runs once, gated by `backfilledAt`.
+- `server/classifier-decisions-backfill.test.ts`: one row per agent carrying
+  `paseo.arena-pick`, `backfilled: true`, no fallback reason, stamped with
+  the agent's own `createdAt`; a leader row (`role=leader`) and a failover
+  successor (`handoff-from`) are both skipped rather than double-counted or
+  mixed into worker/reviewer stats; paging through every page, including
+  archived agents; a malformed label counted as skipped, not silently
+  dropped; the marker is set only after a complete sweep — a thrown page or
+  the page cap running out leaves it unset so the next start retries; a
+  second run after `backfilledAt` is a no-op and does not re-page.
+- `shared/classifier-decisions-aggregate.test.ts`: `joinOutcome`'s state
+  mapping off the real `status` field (archived beats error; running/
+  initializing vs idle/closed), completion and moved-flag reads, the
+  `durationMs` latest-timestamp rule; `rowAgreement` resolving a provider-
+  prefixed pick ref against a bare `modelRan` and reading "unknown" (not
+  "disagree") for a row with no `modelRan`; `summarize`'s agreement rate
+  excluding unknown rows from its denominator (overall and by work kind,
+  `null` not `NaN` when every row is a fallback), pick/tier distribution,
+  fallback-reason counts, and median tokens per model per work kind.
+- `server/classifier-decisions-rpc-handlers.test.ts`: `list` and `summary`
+  filtered identically by role/work kind; `disagreementsOnly` via
+  `rowAgreement`; an id-based `list` cursor that survives a row prepended
+  between two Load-more calls; the agent sweep cached and single-flighted
+  across calls within its TTL; an empty ledger returning an empty list and a
+  zeroed summary, not an error.
+- `index.server.test.ts`: the full create-hook wiring — the correlation
+  label survives while the decision-log pairing token is stripped, `agent.
+created` resolves the pending row into the ledger file, and a leader
+  create produces no row even though it still carries the label.
+- Verify: `cd plugins/claude-account-pool && npx vitest run server/arena-model-pick.test.ts server/arena-rankings.test.ts server/classifier.test.ts server/decision-log.test.ts server/role-router.test.ts server/classifier-tool.test.ts server/role-policy-rpc-handlers.test.ts shared/role-policy-schema.test.ts shared/arena-unpooled.test.ts server/classifier-decisions-ledger.test.ts server/classifier-decisions-backfill.test.ts shared/classifier-decisions-aggregate.test.ts server/classifier-decisions-rpc-handlers.test.ts index.server.test.ts --bail=1`.

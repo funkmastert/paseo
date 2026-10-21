@@ -1,11 +1,29 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginBeforeRequests, PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import contribute from "./index.server";
 import { CE_PLUGIN_ID, COMPOUND_POLICY_LABEL, COMPOUND_POLICY_NOTICE } from "./server/compound-policy";
-import { DECISION_TOKEN_LABEL } from "./server/decision-log";
+import { CLASSIFIER_DECISION_ID_LABEL, DECISION_TOKEN_LABEL } from "./server/decision-log";
+
+/**
+ * `contribute()` resolves the classifier-decisions ledger path from
+ * `process.env.PASEO_HOME` at load time (`index.server.ts`'s
+ * `resolvePaseoHome()`), so every test here — whether or not it cares about
+ * the ledger — must run against a hermetic temp home. Without this, every
+ * `contribute()` call in this file writes (and ran the one-time backfill
+ * against) the real `~/.paseo/classifier/decisions.json`.
+ */
+let paseoHomeDir: string;
+beforeEach(() => {
+  paseoHomeDir = mkdtempSync(join(tmpdir(), "paseo-home-test-"));
+  vi.stubEnv("PASEO_HOME", paseoHomeDir);
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  rmSync(paseoHomeDir, { recursive: true, force: true });
+});
 
 type BeforeHandler = (
   input: { request: PluginBeforeRequests["agent.create"] },
@@ -346,6 +364,127 @@ describe("contribute (index.server)", () => {
         },
       };
     }
+
+    it("REGRESSION (U2/U5 wiring): a worker create's decision is noted, agent.created resolves it, and the ledger file gets one row", async () => {
+      const { server, dispatchBefore, onHandlers } = fakeServer();
+      const cleanup = contribute(server);
+      const { paseo } = fakePaseo({
+        providers: PROVIDERS,
+        agentModelPolicy: { ...LIVE_POLICY, arena: { enabled: true, shadow: true, roles: ["worker"], topTier: [], topTierMarginCi: 0, maxAgeHours: 72 } },
+      });
+      (paseo.providers as unknown as { listModels: unknown }).listModels = vi
+        .fn()
+        .mockResolvedValue({ models: ADVERTISED.map((id) => ({ id })) });
+
+      const routed = await dispatchBefore(
+        "agent.create",
+        {
+          config: { provider: "claude-personal", model: "claude-sonnet-5", cwd: "/tmp" },
+          callerAgentId: "caller-1",
+          initialPrompt: "Implement the thing.",
+          labels: { "paseo.agent-type": "worker" },
+        } as unknown as PluginBeforeRequests["agent.create"],
+        fakeContext(paseo),
+      );
+
+      // The correlation label rides onto the real agent; the decision log's own pairing token
+      // (role-hook-to-account-hook only) does not.
+      const decisionId = routed.labels?.[CLASSIFIER_DECISION_ID_LABEL];
+      expect(decisionId).toEqual(expect.any(String));
+      expect(routed.labels?.[DECISION_TOKEN_LABEL]).toBeUndefined();
+
+      const created = onHandlers.get("agent.created");
+      expect(created).toBeDefined();
+      created?.({ agent: { id: "agent-123", title: "worker create", labels: routed.labels } }, fakeContext(paseo));
+
+      await cleanup();
+
+      const raw = readFileSync(join(paseoHomeDir, "classifier", "decisions.json"), "utf-8");
+      const parsed = JSON.parse(raw) as { rows: Array<{ agentId: string; backfilled: boolean }> };
+      expect(parsed.rows).toHaveLength(1);
+      expect(parsed.rows[0]).toMatchObject({ agentId: "agent-123", backfilled: false });
+    });
+
+    it("#10: the classifier-decisions RPCs are registered, and the full create -> agent.created -> ledger wiring works end to end", async () => {
+      const { server, dispatchBefore, onHandlers } = fakeServer();
+      const cleanup = contribute(server);
+      const { paseo } = fakePaseo({
+        providers: PROVIDERS,
+        agentModelPolicy: { ...LIVE_POLICY, arena: { enabled: true, shadow: true, roles: ["worker"], topTier: [], topTierMarginCi: 0, maxAgeHours: 72 } },
+      });
+      (paseo.providers as unknown as { listModels: unknown }).listModels = vi
+        .fn()
+        .mockResolvedValue({ models: ADVERTISED.map((id) => ({ id })) });
+
+      // The RPCs are registered at contribute() time, independent of any create.
+      const handleCalls = (server.handle as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+      const registeredNames = handleCalls.map((call) => (call[0] as { name: string }).name);
+      expect(registeredNames).toContain("classifier-decisions.list");
+      expect(registeredNames).toContain("classifier-decisions.summary");
+
+      const routed = await dispatchBefore(
+        "agent.create",
+        {
+          config: { provider: "claude-personal", model: "claude-sonnet-5", cwd: "/tmp" },
+          callerAgentId: "caller-1",
+          initialPrompt: "Implement the thing.",
+          labels: { "paseo.agent-type": "worker" },
+        } as unknown as PluginBeforeRequests["agent.create"],
+        fakeContext(paseo),
+      );
+
+      // The correlation label is tagged on this decision-bearing create, and rides onto the
+      // real agent -- unlike the decision-log's own pairing token, which is stripped.
+      const decisionId = routed.labels?.[CLASSIFIER_DECISION_ID_LABEL];
+      expect(decisionId).toEqual(expect.any(String));
+      expect(routed.labels?.[DECISION_TOKEN_LABEL]).toBeUndefined();
+
+      // agent.created resolves the pending row to the real agent id.
+      const created = onHandlers.get("agent.created");
+      expect(created).toBeDefined();
+      created?.({ agent: { id: "agent-456", title: "worker create", labels: routed.labels } }, fakeContext(paseo));
+
+      // Shutdown flushes the ledger: awaiting cleanup() is what guarantees the row is on disk
+      // (the only other writer is a 30s interval this test never waits out).
+      await cleanup();
+
+      const ledgerPath = join(paseoHomeDir, "classifier", "decisions.json");
+      const parsed = JSON.parse(readFileSync(ledgerPath, "utf-8")) as { rows: Array<{ agentId: string }> };
+      expect(parsed.rows).toHaveLength(1);
+      expect(parsed.rows[0].agentId).toBe("agent-456");
+    });
+
+    it("a leader create (no caller) never reaches decideArenaPick, so no ledger row is written even though the correlation label still rides along", async () => {
+      const { server, dispatchBefore, onHandlers } = fakeServer();
+      const cleanup = contribute(server);
+      const { paseo } = fakePaseo({
+        providers: PROVIDERS,
+        agentModelPolicy: { ...LIVE_POLICY, arena: { enabled: true, shadow: true, roles: ["worker", "reviewer"], topTier: [], topTierMarginCi: 0, maxAgeHours: 72 } },
+      });
+      (paseo.providers as unknown as { listModels: unknown }).listModels = vi
+        .fn()
+        .mockResolvedValue({ models: ADVERTISED.map((id) => ({ id })) });
+
+      // No callerAgentId: a root create, placed as the leader.
+      const routed = await dispatchBefore(
+        "agent.create",
+        { config: { provider: "claude-personal", cwd: "/tmp" }, initialPrompt: "Rename it." } as unknown as PluginBeforeRequests["agent.create"],
+        fakeContext(paseo),
+      );
+      // `decisionLog.note`/`.tag` fire for every create, leaders included, so the correlation
+      // label still rides along — but a leader's decision has no `model.ranking` field at all
+      // (`decideModel` never calls `decideArenaPick` for one), so nothing was ever buffered for
+      // it to resolve.
+      expect(routed.labels?.[CLASSIFIER_DECISION_ID_LABEL]).toEqual(expect.any(String));
+
+      const created = onHandlers.get("agent.created");
+      created?.({ agent: { id: "leader-1", title: "Rename it.", labels: routed.labels ?? {} } }, fakeContext(paseo));
+
+      await cleanup();
+
+      const raw = readFileSync(join(paseoHomeDir, "classifier", "decisions.json"), "utf-8");
+      expect(JSON.parse(raw).rows).toHaveLength(0);
+    });
 
     /**
      * `exposeClassifierTool` defaults OFF, and while it is off the feature
@@ -740,7 +879,17 @@ describe("contribute (index.server)", () => {
         expect(mixed.spies?.decide).not.toHaveBeenCalled();
         expect(mixed.spies?.checkScope).not.toHaveBeenCalled();
         expect(mixed.logged).toEqual(absent.logged);
-        expect(JSON.stringify(mixed.created)).toBe(JSON.stringify(absent.created));
+        // Every decision-bearing create carries a fresh random
+        // `paseo.classifier-decision-id` (the classifier-decisions ledger's
+        // agent-created correlation token) — it necessarily differs between
+        // these two independent create() runs even though nothing else does.
+        const withoutDecisionId = (entries: unknown[]) =>
+          entries.map((entry) => {
+            const { labels, ...rest } = entry as { labels?: Record<string, string> };
+            const { "paseo.classifier-decision-id": _omit, ...withoutId } = labels ?? {};
+            return { ...rest, labels: withoutId };
+          });
+        expect(JSON.stringify(withoutDecisionId(mixed.created))).toBe(JSON.stringify(withoutDecisionId(absent.created)));
         expect(mixed.logged.join("\n")).not.toContain('"jev');
       });
 
