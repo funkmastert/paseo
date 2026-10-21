@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, realpathSync, rmSync, type Dirent } from "node:fs";
 import { access, constants, lstat, opendir, readdir, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, relative as pathRelative, resolve, sep } from "node:path";
 
 import { FORGE_DEFINITIONS } from "@getpaseo/protocol/forge-manifest";
 import { normalizeHost, parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
@@ -1112,11 +1112,32 @@ function splitNonEmptyLines(output: string): string[] {
 }
 
 /**
+ * `core.fsmonitor` values git itself treats as a plain on/off switch, never a hook command: git's
+ * own bool parsing (`true`/`false`/`yes`/`no`/`on`/`off`/`1`/`0`, case-insensitive, or no value at
+ * all for a bare key). Anything else is a path git executes as the fsmonitor hook.
+ */
+const GIT_BOOLEAN_CONFIG_VALUES: ReadonlySet<string> = new Set([
+  "",
+  "true",
+  "false",
+  "yes",
+  "no",
+  "on",
+  "off",
+  "1",
+  "0",
+]);
+
+/**
  * Executable or config settings that would run code the daemon's user controls, read before any
  * `git status` call inside a nested repository (#5, #9, docs/done-janitor.md): a clean/smudge
- * filter, a diff driver, a custom ssh command, hooks, or fsmonitor, all of which a nested repo's
- * own tracked `.gitattributes`/local config can point at a script the janitor would then execute
- * as a side effect of a read-only safety check. Reads `--worktree` scope first (local merged with
+ * filter, a diff driver, a custom ssh command, hooks, or an fsmonitor hook script, all of which a
+ * nested repo's own tracked `.gitattributes`/local config can point at a script the janitor would
+ * then execute as a side effect of a read-only safety check. `core.fsmonitor` is the one setting
+ * here that is just as often a plain boolean (git, and Xcode's own SwiftPM package resolution,
+ * both write `core.fsmonitor=false` routinely to turn the built-in watcher off) as it is a hook
+ * path, so only a non-boolean value counts as dangerous; every other key is unsafe the moment it
+ * is set, whatever its value. Reads `--worktree` scope first (local merged with
  * `config.worktree`, the file `extensions.worktreeConfig` points a per-worktree filter or hooks
  * path at), falling back to `--local` alone when that fails -- git itself already degrades
  * `--worktree` to `--local` when the extension is off, but the explicit fallback stays in case a
@@ -1130,8 +1151,17 @@ async function hasDangerousLocalGitConfig(git: ReadOnlyGit): Promise<boolean> {
     (await git(["config", "--local", "--list", "--includes"]));
   if (listing === null) return true;
   for (const line of listing.split("\n")) {
-    const key = line.split("=")[0]?.trim().toLowerCase();
+    const separator = line.indexOf("=");
+    const key = (separator === -1 ? line : line.slice(0, separator)).trim().toLowerCase();
     if (!key) continue;
+    if (
+      key === "core.fsmonitor" &&
+      GIT_BOOLEAN_CONFIG_VALUES.has(
+        (separator === -1 ? "" : line.slice(separator + 1)).trim().toLowerCase(),
+      )
+    ) {
+      continue;
+    }
     if (
       key.startsWith("filter.") ||
       key === "core.fsmonitor" ||
@@ -1295,6 +1325,147 @@ async function hasExternalLinkedWorktrees(gitDir: string, commonDir: string): Pr
   return entries.some((entry) => realpathOrSelf(join(commonDir, "worktrees", entry)) !== self);
 }
 
+/**
+ * A SwiftPM checkout's own path shape: `<pkgDir>/.build/[index-build/]checkouts/<name>`. Null for
+ * anything else, so the fallback below never runs for an ordinary nested repository.
+ */
+interface SwiftPmCheckoutShape {
+  pkgDir: string;
+  indexBuild: boolean;
+  name: string;
+}
+
+function resolveSwiftPmCheckoutShape(nestedRepositoryPath: string): SwiftPmCheckoutShape | null {
+  const segments = nestedRepositoryPath.split(sep);
+  const name = segments.pop();
+  if (!name || segments.pop() !== "checkouts") return null;
+  let indexBuild = false;
+  let buildSegment = segments.pop();
+  if (buildSegment === "index-build") {
+    indexBuild = true;
+    buildSegment = segments.pop();
+  }
+  if (buildSegment !== ".build" || segments.length === 0) return null;
+  return { pkgDir: segments.join(sep), indexBuild, name };
+}
+
+/**
+ * Whether one of the checkout's own remotes resolves, as a local path, into the sibling
+ * `repositories/` mirror SwiftPM keeps inside the same `.build` tree -- the structural fact, beside
+ * sitting next to a `Package.swift` ({@link checkSwiftPmCheckoutSafety}), that marks this as
+ * SwiftPM's own cache layout rather than some other nested repository that happens to share a
+ * `checkouts` directory name. Not a trust decision by itself: the mirror is inside the same
+ * worktree and goes with the deletion too.
+ */
+/** A `git remote -v` line: `<name>\t<url> (fetch)` or `<name>\t<url> (push)`. */
+const REMOTE_VERBOSE_LINE_RE = /^\S+\t(.+)\s\((?:fetch|push)\)$/u;
+
+async function isSwiftPmMirrorRemote(
+  git: ReadOnlyGit,
+  nestedRepositoryPath: string,
+  shape: SwiftPmCheckoutShape,
+): Promise<boolean> {
+  // One `remote -v` call lists every remote's fetch and push URL (with `insteadOf` applied, same
+  // as `remote get-url`) instead of one `get-url` call per remote.
+  const verbose = await git(["remote", "-v"]);
+  if (!verbose) return false;
+  const expectedMirrorRoot = realpathOrSelf(
+    join(shape.pkgDir, ".build", ...(shape.indexBuild ? ["index-build"] : []), "repositories"),
+  );
+  for (const line of verbose.split("\n")) {
+    const url = REMOTE_VERBOSE_LINE_RE.exec(line.trim())?.[1];
+    if (!url) continue;
+    const resolved = realpathOrSelf(resolve(nestedRepositoryPath, url));
+    if (dirname(resolved) === expectedMirrorRoot) return true;
+  }
+  return false;
+}
+
+interface SwiftPmPin {
+  location: string;
+  revision: string;
+}
+
+/**
+ * The `pins[]` entry named `identity` in a `Package.resolved` (v2 and v3 share this shape; v1's
+ * different field names are never parsed, so a very old lockfile reads as "no pin" -- doubt keeps
+ * the worktree, same as everywhere else here). Null for anything short of a well-formed pin:
+ * malformed JSON, no `pins` array, no matching identity, or a missing location/revision.
+ *
+ * `identity` is matched case-insensitively: SwiftPM lowercases a pin's own `identity` (so
+ * `Amplitude-iOS` resolves `amplitude-ios`) but keeps the checkout directory's original casing, so
+ * the two routinely differ only in case.
+ */
+function findSwiftPmPin(packageResolvedContents: string, identity: string): SwiftPmPin | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(packageResolvedContents);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const pins = (parsed as Record<string, unknown>).pins;
+  if (!Array.isArray(pins)) return null;
+  const wantedIdentity = identity.toLowerCase();
+  for (const pin of pins) {
+    if (typeof pin !== "object" || pin === null) continue;
+    const record = pin as Record<string, unknown>;
+    if (typeof record.identity !== "string" || record.identity.toLowerCase() !== wantedIdentity) {
+      continue;
+    }
+    const location = record.location;
+    const state = record.state;
+    if (typeof location !== "string" || typeof state !== "object" || state === null) return null;
+    const revision = (state as Record<string, unknown>).revision;
+    return typeof revision === "string" ? { location, revision } : null;
+  }
+  return null;
+}
+
+/**
+ * Whether a SwiftPM checkout is safe to lose because it is provably reproducible, in place of the
+ * remote-trust check above -- its own remote is always a local path into the sibling mirror
+ * (#1, docs/done-janitor.md), never a trusted host directly. All of:
+ *
+ * - a `Package.swift` sits at `shape.pkgDir`: the checkout is a dependency of a real package, not
+ *   some other nested repository that happens to sit under a directory named `.build`;
+ * - `shape.pkgDir/Package.resolved` is tracked by the *outer* worktree's own git at HEAD -- already
+ *   covered by the outer gate's own clean/pushed check, not a new trust surface of its own -- and
+ *   names a pin whose `identity` is the checkout's own directory name;
+ * - that pin's `revision` is exactly this checkout's HEAD (not merely an ancestor: SwiftPM always
+ *   checks out the pinned commit exactly, so anything else means the checkout was touched by hand
+ *   after the fact);
+ * - that pin's `location` is a trusted host (the same allowlist every other remote in this file
+ *   uses): `swift package resolve` clones from there and checks out the pinned revision, recreating
+ *   this exact checkout from nothing.
+ *
+ * Deliberately skips the general path's "every other ref reachable from a trusted remote, no
+ * stash entry" sweep over the checkout's own copy of the upstream repository: SwiftPM clones the
+ * whole repository rather than a single commit, so a checkout routinely carries the upstream's
+ * entire branch and tag list, none of which the project depends on or could lose anything
+ * meaningful by -- the pinned revision is the only content the build ever reads, and the pin above
+ * already proves that exact commit is the trusted host's. The caller still checks for a stash
+ * entry itself (cheap, and worth keeping regardless of how trust was established).
+ */
+async function checkSwiftPmCheckoutSafety(
+  worktreePath: string,
+  shape: SwiftPmCheckoutShape,
+  head: string,
+  trustedRemoteHosts: ReadonlySet<string>,
+  runGit: RunGitCommand,
+): Promise<boolean> {
+  if (!existsSync(join(shape.pkgDir, "Package.swift"))) return false;
+  const relativeResolvedPath = pathRelative(worktreePath, join(shape.pkgDir, "Package.resolved"));
+  if (relativeResolvedPath.startsWith("..") || relativeResolvedPath === "") return false;
+  const outerGit = createReadOnlyGit(worktreePath, runGit);
+  const gitPath = relativeResolvedPath.split(sep).join("/");
+  const contents = await outerGit(["show", `HEAD:${gitPath}`]);
+  if (contents === null) return false;
+  const pin = findSwiftPmPin(contents, shape.name);
+  if (!pin || pin.revision !== head) return false;
+  return isTrustedRemoteUrl(pin.location, trustedRemoteHosts);
+}
+
 export async function checkNestedRepositorySafety(
   worktreePath: string,
   nestedRepositoryPath: string,
@@ -1311,7 +1482,16 @@ export async function checkNestedRepositorySafety(
   if (!head) return false;
 
   const trustedRemotes = await readTrustedRemoteNames(git, trustedRemoteHosts);
-  if (trustedRemotes.length === 0) return false;
+  if (trustedRemotes.length === 0) {
+    const shape = resolveSwiftPmCheckoutShape(nestedRepositoryPath);
+    if (!shape || !(await isSwiftPmMirrorRemote(git, nestedRepositoryPath, shape))) return false;
+    if (
+      !(await checkSwiftPmCheckoutSafety(worktreePath, shape, head, trustedRemoteHosts, runGit))
+    ) {
+      return false;
+    }
+    return (await git(["rev-parse", "--verify", "--quiet", "refs/stash"])) === null;
+  }
   const survivors = trustedRemotes.map((name) => `--remotes=${name}`);
 
   if (await hasUnsafeUnreachableCommits(git, ["HEAD", "--not", ...survivors])) return false;

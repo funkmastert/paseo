@@ -79,13 +79,22 @@ export const SECRET_PATHSPEC_GLOBS = [
  * Exported for `agent/workspace-sweep-detector.ts`'s `regenerableIgnoredPaths` matcher, which
  * needs the same glob semantics with a different flag (`"u"`, case-sensitive, instead of this
  * module's own case-insensitive `"i"`) rather than a second copy of the escape-and-join logic.
+ *
+ * `matchChildren` is for a pattern naming a directory (`agent/backup-eligible-ignored.ts`'s
+ * `backupIgnoredPaths`): it also matches anything git lists individually underneath that
+ * directory, not just the directory path itself.
  */
-export function globToRegExp(glob: string, flags = "i"): RegExp {
+export function globToRegExp(
+  glob: string,
+  flags = "i",
+  options: { matchChildren?: boolean } = {},
+): RegExp {
   const body = glob
     .split("*")
     .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
     .join("[^/]*");
-  return new RegExp(`(^|/)${body}$`, flags);
+  const tail = options.matchChildren ? "(?:/.*)?$" : "$";
+  return new RegExp(`(^|/)${body}${tail}`, flags);
 }
 
 const SECRET_NAME_RES = SECRET_PATHSPEC_GLOBS.map((glob) => globToRegExp(glob));

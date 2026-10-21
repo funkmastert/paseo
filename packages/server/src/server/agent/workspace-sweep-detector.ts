@@ -69,6 +69,7 @@ const REGENERABLE_DIRS: ReadonlySet<string> = new Set([
   ".next",
   ".nuxt",
   ".svelte-kit",
+  ".astro",
   ".turbo",
   ".parcel-cache",
   ".cache",

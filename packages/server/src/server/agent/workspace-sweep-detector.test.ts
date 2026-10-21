@@ -740,6 +740,7 @@ describe("isRegenerablePath", () => {
     "tools",
     "ios/Packages",
     "src/Camp.Api",
+    "cloudflare/booking-links",
   ]);
 
   test.each([
@@ -755,6 +756,9 @@ describe("isRegenerablePath", () => {
     ["tsconfig.tsbuildinfo", true],
     ["ios/Packages/.build/", true],
     [".swiftpm/", true],
+    ["cloudflare/booking-links/.astro/", true],
+    // Astro's generated dir away from any manifest is somebody's directory, same as "build".
+    ["docs/.astro/", false],
     [".yarn/cache/", true],
     [".yarn/install-state.gz", true],
     ["node_modules/pkg/build/", true],

@@ -1656,6 +1656,274 @@ describe("checkNestedRepositorySafety", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  // `core.fsmonitor=false` is a plain boolean, not a hook path -- git itself, and Xcode's own
+  // SwiftPM package resolution, both write it routinely to turn the built-in watcher off. It must
+  // not read as the dangerous, executable form of the same setting.
+  test("a nested repository with core.fsmonitor=false is safe", async () => {
+    const worktree = addWorktree("nested-fsmonitor-false", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    commit(nested, "f.txt", "content\n");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
+    git(nested, "config", "core.fsmonitor", "false");
+
+    await expect(checkNestedRepositorySafety(worktree, nested)).resolves.toBe(true);
+  });
+
+  // A non-boolean core.fsmonitor value is a hook command git executes on status -- still unsafe,
+  // and still never actually run by this read-only check.
+  test("a nested repository with an executable core.fsmonitor hook is not safe, and the hook itself never runs", async () => {
+    const worktree = addWorktree("nested-fsmonitor-hook", "feature");
+    const nested = initNested(worktree, "vendor/tool");
+    commit(nested, "f.txt", "content\n");
+    fakeNetworkRemote(nested, git(nested, "rev-parse", "HEAD").trim());
+    const marker = join(root, "fsmonitor-hook-ran-marker");
+    git(nested, "config", "core.fsmonitor", `touch ${marker}`);
+
+    await expect(checkNestedRepositorySafety(worktree, nested)).resolves.toBe(false);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  // #SPM: a SwiftPM-managed checkout's own remote is always a local path into the sibling
+  // `repositories/` mirror inside the same `.build` tree, so the general remote-trust check above
+  // never passes it. Pinned exactly at a tracked `Package.resolved`'s revision, with that pin's
+  // own location on the trusted-host allowlist, it is reproducible and therefore safe.
+  describe("SwiftPM checkouts", () => {
+    function initSwiftPmCheckout(input: { worktree: string; name: string; indexBuild?: boolean }): {
+      checkout: string;
+      pkgDir: string;
+      pkgRelative: string;
+      head: string;
+    } {
+      const indexBuild = input.indexBuild ?? true;
+      const pkgRelative = join("packages", "mobile", "core", "ios", "MobileCore");
+      const pkgDir = join(input.worktree, pkgRelative);
+      mkdirSync(pkgDir, { recursive: true });
+      commit(input.worktree, join(pkgRelative, "Package.swift"), "// swift-tools-version:5.9\n");
+      const buildSegments = [".build", ...(indexBuild ? ["index-build"] : [])];
+      const mirror = join(pkgDir, ...buildSegments, "repositories", `${input.name}-deadbeef`);
+      mkdirSync(mirror, { recursive: true });
+      const checkout = join(pkgDir, ...buildSegments, "checkouts", input.name);
+      mkdirSync(checkout, { recursive: true });
+      git(checkout, "init", "-q");
+      git(checkout, "remote", "add", "origin", mirror);
+      commit(checkout, "f.txt", "content\n");
+      return { checkout, pkgDir, pkgRelative, head: git(checkout, "rev-parse", "HEAD").trim() };
+    }
+
+    function writePackageResolved(input: {
+      worktree: string;
+      pkgRelative: string;
+      pins: ReadonlyArray<{ identity: string; location: string; revision: string }>;
+    }): void {
+      commit(
+        input.worktree,
+        join(input.pkgRelative, "Package.resolved"),
+        JSON.stringify({
+          pins: input.pins.map((pin) => ({
+            identity: pin.identity,
+            kind: "remoteSourceControl",
+            location: pin.location,
+            state: { revision: pin.revision, version: "1.0.0" },
+          })),
+          version: 2,
+        }),
+      );
+    }
+
+    test("a checkout pinned at its own HEAD by a tracked Package.resolved, on a trusted host, is safe", async () => {
+      const worktree = addWorktree("spm-safe", "feature");
+      const { checkout, pkgRelative, head } = initSwiftPmCheckout({
+        worktree,
+        name: "Amplitude-iOS",
+      });
+      writePackageResolved({
+        worktree,
+        pkgRelative,
+        pins: [
+          {
+            identity: "amplitude-ios", // SwiftPM lowercases identity; the directory keeps its case
+            location: "https://github.com/amplitude/Amplitude-iOS.git",
+            revision: head,
+          },
+        ],
+      });
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(true);
+    });
+
+    test("the same checkout without index-build is safe too", async () => {
+      const worktree = addWorktree("spm-safe-no-index-build", "feature");
+      const { checkout, pkgRelative, head } = initSwiftPmCheckout({
+        worktree,
+        name: "Starscream",
+        indexBuild: false,
+      });
+      writePackageResolved({
+        worktree,
+        pkgRelative,
+        pins: [
+          {
+            identity: "starscream",
+            location: "https://github.com/daltoniam/Starscream",
+            revision: head,
+          },
+        ],
+      });
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(true);
+    });
+
+    test("a checkout whose HEAD no longer matches the pinned revision is not safe", async () => {
+      const worktree = addWorktree("spm-head-mismatch", "feature");
+      const { checkout, pkgRelative, head } = initSwiftPmCheckout({
+        worktree,
+        name: "Amplitude-iOS",
+      });
+      writePackageResolved({
+        worktree,
+        pkgRelative,
+        pins: [
+          {
+            identity: "amplitude-ios",
+            location: "https://github.com/amplitude/Amplitude-iOS.git",
+            revision: `${head.slice(0, -4)}dead`,
+          },
+        ],
+      });
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(false);
+    });
+
+    test("a checkout pinned to a location on an untrusted host is not safe", async () => {
+      const worktree = addWorktree("spm-untrusted-location", "feature");
+      const { checkout, pkgRelative, head } = initSwiftPmCheckout({
+        worktree,
+        name: "Amplitude-iOS",
+      });
+      writePackageResolved({
+        worktree,
+        pkgRelative,
+        pins: [
+          {
+            identity: "amplitude-ios",
+            location: "https://git.example.org/amplitude/Amplitude-iOS.git",
+            revision: head,
+          },
+        ],
+      });
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(false);
+    });
+
+    test("a checkout with no Package.swift beside it is not safe", async () => {
+      const worktree = addWorktree("spm-no-manifest", "feature");
+      const { checkout, pkgDir, pkgRelative, head } = initSwiftPmCheckout({
+        worktree,
+        name: "Amplitude-iOS",
+      });
+      rmSync(join(pkgDir, "Package.swift"));
+      git(worktree, "rm", "-q", "--cached", join(pkgRelative, "Package.swift"));
+      git(worktree, "commit", "-q", "-m", "remove manifest");
+      writePackageResolved({
+        worktree,
+        pkgRelative,
+        pins: [
+          {
+            identity: "amplitude-ios",
+            location: "https://github.com/amplitude/Amplitude-iOS.git",
+            revision: head,
+          },
+        ],
+      });
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(false);
+    });
+
+    test("a checkout with no Package.resolved pin for it is not safe", async () => {
+      const worktree = addWorktree("spm-no-pin", "feature");
+      const { checkout, pkgRelative } = initSwiftPmCheckout({ worktree, name: "Amplitude-iOS" });
+      writePackageResolved({ worktree, pkgRelative, pins: [] });
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(false);
+    });
+
+    test("a checkout with no Package.resolved at all is not safe", async () => {
+      const worktree = addWorktree("spm-no-resolved-file", "feature");
+      const { checkout } = initSwiftPmCheckout({ worktree, name: "Amplitude-iOS" });
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(false);
+    });
+
+    // The general path's own stash guard still applies: a provably-reproducible pin match does
+    // not excuse local-only state the pin says nothing about.
+    test("a pinned checkout with a stash entry is not safe", async () => {
+      const worktree = addWorktree("spm-stash", "feature");
+      const { checkout, pkgRelative, head } = initSwiftPmCheckout({
+        worktree,
+        name: "Amplitude-iOS",
+      });
+      writePackageResolved({
+        worktree,
+        pkgRelative,
+        pins: [
+          {
+            identity: "amplitude-ios",
+            location: "https://github.com/amplitude/Amplitude-iOS.git",
+            revision: head,
+          },
+        ],
+      });
+      writeFileSync(join(checkout, "f.txt"), "stashed edit\n");
+      git(checkout, "stash", "push", "-q");
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(false);
+    });
+
+    // A checkout-shaped directory whose remote does *not* resolve into the sibling
+    // `repositories/` mirror is not SwiftPM's own cache layout -- the general, remote-trust path
+    // alone decides it, same as any other nested repository with a local-path remote.
+    test("a checkout-shaped directory whose remote is not the sibling mirror falls back to the general check", async () => {
+      const worktree = addWorktree("spm-not-a-mirror", "feature");
+      const pkgRelative = join("packages", "mobile", "core", "ios", "MobileCore");
+      const pkgDir = join(worktree, pkgRelative);
+      mkdirSync(pkgDir, { recursive: true });
+      commit(worktree, join(pkgRelative, "Package.swift"), "// swift-tools-version:5.9\n");
+      const checkout = join(pkgDir, ".build", "index-build", "checkouts", "Amplitude-iOS");
+      mkdirSync(checkout, { recursive: true });
+      git(checkout, "init", "-q");
+      const elsewhere = join(root, "not-the-mirror");
+      git(root, "init", "-q", "--bare", elsewhere);
+      commit(checkout, "f.txt", "content\n");
+      git(checkout, "remote", "add", "origin", elsewhere);
+      git(checkout, "push", "-q", "origin", "HEAD:main");
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(false);
+    });
+
+    // Identity match is case-insensitive: SwiftPM lowercases a pin's own identity, but preserves
+    // the checkout directory's original casing.
+    test("identity matching is case-insensitive between the checkout directory and the pin", async () => {
+      const worktree = addWorktree("spm-case-insensitive", "feature");
+      const { checkout, pkgRelative, head } = initSwiftPmCheckout({
+        worktree,
+        name: "SwiftUI-Introspect",
+      });
+      writePackageResolved({
+        worktree,
+        pkgRelative,
+        pins: [
+          {
+            identity: "swiftui-introspect",
+            location: "https://github.com/siteline/SwiftUI-Introspect",
+            revision: head,
+          },
+        ],
+      });
+
+      await expect(checkNestedRepositorySafety(worktree, checkout)).resolves.toBe(true);
+    });
+  });
+
   describe("linked worktrees (#6)", () => {
     function createLinkedWorktree(input: {
       worktree: string;
