@@ -375,6 +375,79 @@ describe("workspace registries", () => {
     expect(await projectRegistry.list()).toHaveLength(2);
   });
 
+  test("a linked worktree attaches to the active project rooted at its main repo", async () => {
+    await projectRegistry.initialize();
+    const mainRepoRoot = path.join(tmpDir, "main-repo");
+    const main = await projectRegistry.getOrCreateActiveByRoot({
+      rootPath: mainRepoRoot,
+      kind: "git",
+      displayName: "main-repo",
+      timestamp: "2026-03-01T00:00:00.000Z",
+    });
+
+    const worktree = await projectRegistry.getOrCreateActiveByRoot({
+      rootPath: path.join(tmpDir, "worktrees", "feature"),
+      kind: "git",
+      displayName: "feature",
+      mainRepoRoot,
+      timestamp: "2026-03-02T00:00:00.000Z",
+    });
+
+    expect(worktree.projectId).toBe(main.projectId);
+    expect(worktree.rootPath).toBe(mainRepoRoot);
+    expect(await projectRegistry.list()).toHaveLength(1);
+  });
+
+  test("a linked worktree falls back to a project sharing its projectKey when the main repo has none yet", async () => {
+    await projectRegistry.initialize();
+    const existing = await projectRegistry.getOrCreateActiveByRoot({
+      rootPath: path.join(tmpDir, "some-other-clone"),
+      kind: "git",
+      displayName: "some-other-clone",
+      projectKey: "remote:github.com/acme/repo",
+      timestamp: "2026-03-01T00:00:00.000Z",
+    });
+
+    const worktree = await projectRegistry.getOrCreateActiveByRoot({
+      rootPath: path.join(tmpDir, "worktrees", "feature"),
+      kind: "git",
+      displayName: "feature",
+      projectKey: "remote:github.com/acme/repo",
+      mainRepoRoot: path.join(tmpDir, "never-opened-main-repo"),
+      timestamp: "2026-03-02T00:00:00.000Z",
+    });
+
+    expect(worktree.projectId).toBe(existing.projectId);
+    expect(worktree.rootPath).toBe(existing.rootPath);
+    expect(await projectRegistry.list()).toHaveLength(1);
+  });
+
+  test("never merges an independent full clone into another project with the same projectKey", async () => {
+    await projectRegistry.initialize();
+    const first = await projectRegistry.getOrCreateActiveByRoot({
+      rootPath: path.join(tmpDir, "clone-one"),
+      kind: "git",
+      displayName: "clone-one",
+      projectKey: "remote:github.com/acme/repo",
+      timestamp: "2026-03-01T00:00:00.000Z",
+    });
+
+    const second = await projectRegistry.getOrCreateActiveByRoot({
+      rootPath: path.join(tmpDir, "clone-two"),
+      kind: "git",
+      displayName: "clone-two",
+      projectKey: "remote:github.com/acme/repo",
+      // A full clone's own git-common-dir resolves to itself, so mainRepoRoot is null — it never
+      // attaches to another record just because the remote is the same.
+      mainRepoRoot: null,
+      timestamp: "2026-03-02T00:00:00.000Z",
+    });
+
+    expect(second.projectId).not.toBe(first.projectId);
+    expect(second.rootPath).toBe(path.join(tmpDir, "clone-two"));
+    expect(await projectRegistry.list()).toHaveLength(2);
+  });
+
   test("project record schema accepts records without customName (legacy on-disk records)", async () => {
     await projectRegistry.initialize();
 

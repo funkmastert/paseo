@@ -1544,13 +1544,19 @@ describe("WorkspaceReconciliationService", () => {
     });
 
     const result = await service.reconcileGitMetadata();
+    const projectKey = deriveProjectKey({
+      rootPath,
+      remoteUrl: null,
+      worktreeRoot: rootPath,
+      mainRepoRoot: "/tmp/main-repo",
+    });
 
     expect(result.changesApplied).toEqual([
       {
         kind: "project_updated",
         projectId: "p1",
         directory: rootPath,
-        fields: { projectKey: canonicalLocalProjectKey(rootPath) },
+        fields: { projectKey },
       },
       {
         kind: "workspace_updated",

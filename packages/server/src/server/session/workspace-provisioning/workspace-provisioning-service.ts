@@ -197,6 +197,7 @@ export function createWorkspaceProvisioningService(deps: {
         mainRepoRoot: checkout.mainRepoRoot,
         serverId,
       }),
+      mainRepoRoot: checkout.isGit ? checkout.mainRepoRoot : null,
       timestamp,
     });
   }

@@ -11,8 +11,10 @@ export function deriveProjectKey(input: {
   serverId?: string;
 }): string {
   const remote = input.remoteUrl ? parseGitRemoteLocation(input.remoteUrl) : null;
+  // null: not a worktree subpath at all. "": the worktree root itself, no subdir offset — still
+  // a worktree, so the local-path branch below must not treat it the same as null.
   const selectedPath = input.worktreeRoot
-    ? getRealpathAwareRelativePath(input.worktreeRoot, input.rootPath) || null
+    ? getRealpathAwareRelativePath(input.worktreeRoot, input.rootPath)
     : null;
   if (remote) {
     const host = remote.port ? `${remote.host}:${remote.port}` : remote.host;
@@ -21,10 +23,10 @@ export function deriveProjectKey(input: {
     return selectedPath ? `${remoteKey}#subdir:${selectedPath.replaceAll("\\", "/")}` : remoteKey;
   }
 
-  const localPathParts = [
-    selectedPath && input.mainRepoRoot ? input.mainRepoRoot : input.rootPath,
-    selectedPath && input.mainRepoRoot ? selectedPath : "",
-  ];
+  const localPathParts: [string, string] =
+    selectedPath !== null && input.mainRepoRoot
+      ? [input.mainRepoRoot, selectedPath]
+      : [input.rootPath, ""];
   const resolvedLocalPath = localPathParts.some(looksLikeWindowsPath)
     ? win32.resolve(...localPathParts)
     : resolve(...localPathParts);
@@ -36,10 +38,21 @@ export function deriveProjectGroupingDisplayName(input: {
   rootPath: string;
   remoteUrl: string | null;
   worktreeRoot: string | null;
+  mainRepoRoot: string | null;
 }): string {
+  // null: not a worktree subpath at all. "": the worktree root itself, no subdir offset — mirrors
+  // deriveProjectKey's own null-vs-empty-string distinction, so the two can't drift apart again.
   const selectedPath = input.worktreeRoot
     ? getRealpathAwareRelativePath(input.worktreeRoot, input.rootPath)
     : null;
+  if (selectedPath === "" && input.mainRepoRoot) {
+    return deriveProjectGroupingDisplayName({
+      rootPath: input.mainRepoRoot,
+      remoteUrl: input.remoteUrl,
+      worktreeRoot: null,
+      mainRepoRoot: null,
+    });
+  }
   if (selectedPath) return lastPathSegment(input.rootPath);
 
   const remote = input.remoteUrl ? parseGitRemoteLocation(input.remoteUrl) : null;

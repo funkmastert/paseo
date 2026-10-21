@@ -1,5 +1,5 @@
-import { stat } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { lstat, stat } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 import type { Logger } from "pino";
 
 import { buildDoneJanitorNotificationPayload } from "@getpaseo/protocol/done-janitor-notification";
@@ -247,6 +247,9 @@ export type ProjectRootProbe =
   | { kind: "missing" }
   | { kind: "volume-absent"; volumeRoot: string }
   | { kind: "unknown"; error: string };
+
+/** Whether an idle project's root may be removed, and why not when it may not. */
+export type IdleProjectRootVerdict = { removable: true } | { removable: false; reason: string };
 
 /** `busy`: another sender's turn owns the agent, so it was not asked, or its question is theirs now. */
 export type AskAgentResult =
@@ -1291,8 +1294,9 @@ export class AgentDoneJanitor {
 
   /**
    * Removes projects with no active workspace once their last one has been gone for
-   * `projectGraceMs`. Record-only, like a person's project removal; runs after the older empty
-   * project rule, and a project that rule already reported is its.
+   * `projectGraceMs`, but only once the root is also safe: gone, or a worktree no person ever
+   * opened a workspace in. Record-only, like a person's project removal; runs after the older
+   * empty project rule, and a project that rule already reported is its.
    */
   private async sweepIdleProjects(
     report: DoneJanitorSweepReport,
@@ -1305,13 +1309,28 @@ export class AgentDoneJanitor {
         this.deps.listWorkspaces(),
       ]);
       const nowMs = this.now();
-      const candidates = projects
+      const quiet = projects
         .filter((project) => !reported.has(project.projectId))
         .flatMap((project) => {
           const verdict = idleProjectVerdict(project, workspaces, sweep, nowMs);
           return verdict.kind === "remove" ? [{ project, verdict }] : [];
-        })
-        .sort((a, b) => b.verdict.quietForMs - a.verdict.quietForMs);
+        });
+      const candidates: {
+        project: DoneJanitorProject;
+        verdict: Extract<IdleProjectVerdict, { kind: "remove" }>;
+      }[] = [];
+      for (const candidate of quiet) {
+        const rootVerdict = await this.isRemovableIdleProjectRoot(candidate.project, workspaces);
+        if (rootVerdict.removable) {
+          candidates.push(candidate);
+        } else {
+          report.entries.push({
+            ...describeIdleProject(candidate.project, "kept-project", candidate.verdict),
+            reason: `it had no active workspace, but ${rootVerdict.reason}`,
+          });
+        }
+      }
+      candidates.sort((a, b) => b.verdict.quietForMs - a.verdict.quietForMs);
       for (const [index, { project, verdict }] of candidates.entries()) {
         if (index >= sweep.maxProjectRemovalsPerSweep) {
           report.entries.push({
@@ -1343,11 +1362,20 @@ export class AgentDoneJanitor {
       (project) => project.projectId === candidate.projectId,
     );
     if (!fresh) return;
-    const verdict = idleProjectVerdict(fresh, await this.deps.listWorkspaces(), sweep, this.now());
+    const freshWorkspaces = await this.deps.listWorkspaces();
+    const verdict = idleProjectVerdict(fresh, freshWorkspaces, sweep, this.now());
     if (verdict.kind !== "remove") {
       report.entries.push({
         ...describeIdleProject(fresh, "kept-project", verdict),
         reason: `it had no active workspace, but then ${verdict.reason}`,
+      });
+      return;
+    }
+    const rootVerdict = await this.isRemovableIdleProjectRoot(fresh, freshWorkspaces);
+    if (!rootVerdict.removable) {
+      report.entries.push({
+        ...describeIdleProject(fresh, "kept-project", verdict),
+        reason: `it had no active workspace, but ${rootVerdict.reason}`,
       });
       return;
     }
@@ -1366,6 +1394,37 @@ export class AgentDoneJanitor {
     }
     report.removedProjectCount += 1;
     report.entries.push(describeIdleProject(fresh, "removed-project", verdict));
+  }
+
+  /**
+   * Whether an idle project's root is safe to remove: gone, or a worktree (a linked git worktree
+   * or a Paseo-owned one) that no person ever opened a workspace in — every workspace this
+   * project ever had, archived ones included, has to be agent-made. A single person-created
+   * workspace, or a root that is a main checkout or another folder Tyler opened himself, keeps
+   * the project no matter how long it sits idle. The free stat probe runs before any git check,
+   * so the common case (the worktree is already gone) never spawns a process.
+   */
+  private async isRemovableIdleProjectRoot(
+    project: DoneJanitorProject,
+    workspaces: readonly DoneJanitorWorkspace[],
+  ): Promise<IdleProjectRootVerdict> {
+    const probe = await this.deps.probeProjectRoot(project.rootPath);
+    if (probe.kind === "missing") return { removable: true };
+    if (probe.kind !== "exists") {
+      return { removable: false, reason: describeRootProbe(probe) ?? "its root exists" };
+    }
+    const own = workspaces.filter((workspace) => workspace.projectId === project.projectId);
+    if (!(own.length > 0 && own.every((workspace) => workspace.createdBy === "agent"))) {
+      return { removable: false, reason: "its root still exists and a person opened it" };
+    }
+    if (await this.isWorktreeRoot(project.rootPath)) return { removable: true };
+    return { removable: false, reason: "its root still exists and is not a worktree" };
+  }
+
+  /** A linked git worktree (free: `.git` is a pointer file, not a directory), or Paseo-owned. */
+  private async isWorktreeRoot(rootPath: string): Promise<boolean> {
+    if (await isLinkedGitWorktreeRoot(rootPath)) return true;
+    return this.deps.isPaseoOwnedWorktreePath(rootPath);
   }
 
   /**
@@ -2326,6 +2385,19 @@ async function statError(path: string): Promise<{ code?: string; message: string
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     return { code, message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * Whether `rootPath` is a linked git worktree: its own `.git` is a pointer file (`gitdir: ...`),
+ * not a directory, the way `git worktree add` leaves it. A plain clone or the main checkout has
+ * `.git` as a directory. One `lstat`, no git subprocess.
+ */
+async function isLinkedGitWorktreeRoot(rootPath: string): Promise<boolean> {
+  try {
+    return (await lstat(join(rootPath, ".git"))).isFile();
+  } catch {
+    return false;
   }
 }
 
