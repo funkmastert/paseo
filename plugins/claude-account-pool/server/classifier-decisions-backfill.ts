@@ -14,7 +14,7 @@ import {
   type ClassifierDecisionsAgentsApi,
 } from "./classifier-decisions-agents";
 import type { ClassifierDecisionRow } from "../shared/classifier-decisions-schema";
-import { ARENA_PICK_LABEL, AGENT_ROLE_LABEL, TASK_CLASS_LABEL, WORK_KIND_LABEL } from "../shared/role-policy-schema";
+import { ARENA_PICK_LABEL, AGENT_ROLE_LABEL, TASK_CLASS_LABEL, WORK_KIND_LABEL, splitModelRef } from "../shared/role-policy-schema";
 
 export type { ClassifierDecisionsAgentsApi } from "./classifier-decisions-agents";
 
@@ -77,6 +77,23 @@ function parseArenaPickLabel(value: string): Omit<Extract<ClassifierDecisionRow[
   };
 }
 
+/**
+ * The model that actually ran, recovered from the agent snapshot rather than left `null`: the
+ * runtime model if the provider reported one, else the configured model. Resolved through
+ * `splitModelRef` to the bare id `rowAgreement` compares against an arena pick's ref with (a pool
+ * ref can carry a provider prefix, e.g. `codex/gpt-6-sol`; the model field here is expected to
+ * already be bare, but normalizing defends against either shape), per
+ * docs/solutions/logic-errors/bare-pool-ref-family-resolves-before-compare.md.
+ */
+function actualModelRan(agent: ClassifierDecisionsAgentSnapshot): string | null {
+  const raw = agent.runtimeInfo?.model ?? agent.model ?? null;
+  if (!raw) {
+    return null;
+  }
+  const parsed = splitModelRef(raw);
+  return parsed ? parsed.model : raw;
+}
+
 function backfillRowFor(agent: ClassifierDecisionsAgentSnapshot): ClassifierDecisionRow | undefined {
   const pickLabel = agent.labels?.[ARENA_PICK_LABEL];
   if (!pickLabel) {
@@ -97,7 +114,7 @@ function backfillRowFor(agent: ClassifierDecisionsAgentSnapshot): ClassifierDeci
     role: agent.labels?.[AGENT_ROLE_LABEL] ?? null,
     taskClass: agent.labels?.[TASK_CLASS_LABEL] ?? null,
     workKind: agent.labels?.[WORK_KIND_LABEL] ?? null,
-    modelRan: null,
+    modelRan: actualModelRan(agent),
     arena: { outcome: "ranked", ...parsed },
     backfilled: true,
   };

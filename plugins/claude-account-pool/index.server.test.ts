@@ -405,6 +405,55 @@ describe("contribute (index.server)", () => {
       expect(parsed.rows[0]).toMatchObject({ agentId: "agent-123", backfilled: false });
     });
 
+    it("#10: the classifier-decisions RPCs are registered, and the full create -> agent.created -> ledger wiring works end to end", async () => {
+      const { server, dispatchBefore, onHandlers } = fakeServer();
+      const cleanup = contribute(server);
+      const { paseo } = fakePaseo({
+        providers: PROVIDERS,
+        agentModelPolicy: { ...LIVE_POLICY, arena: { enabled: true, shadow: true, roles: ["worker"], topTier: [], topTierMarginCi: 0, maxAgeHours: 72 } },
+      });
+      (paseo.providers as unknown as { listModels: unknown }).listModels = vi
+        .fn()
+        .mockResolvedValue({ models: ADVERTISED.map((id) => ({ id })) });
+
+      // The RPCs are registered at contribute() time, independent of any create.
+      const handleCalls = (server.handle as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+      const registeredNames = handleCalls.map((call) => (call[0] as { name: string }).name);
+      expect(registeredNames).toContain("classifier-decisions.list");
+      expect(registeredNames).toContain("classifier-decisions.summary");
+
+      const routed = await dispatchBefore(
+        "agent.create",
+        {
+          config: { provider: "claude-personal", model: "claude-sonnet-5", cwd: "/tmp" },
+          callerAgentId: "caller-1",
+          initialPrompt: "Implement the thing.",
+          labels: { "paseo.agent-type": "worker" },
+        } as unknown as PluginBeforeRequests["agent.create"],
+        fakeContext(paseo),
+      );
+
+      // The correlation label is tagged on this decision-bearing create, and rides onto the
+      // real agent -- unlike the decision-log's own pairing token, which is stripped.
+      const decisionId = routed.labels?.[CLASSIFIER_DECISION_ID_LABEL];
+      expect(decisionId).toEqual(expect.any(String));
+      expect(routed.labels?.[DECISION_TOKEN_LABEL]).toBeUndefined();
+
+      // agent.created resolves the pending row to the real agent id.
+      const created = onHandlers.get("agent.created");
+      expect(created).toBeDefined();
+      created?.({ agent: { id: "agent-456", title: "worker create", labels: routed.labels } }, fakeContext(paseo));
+
+      // Shutdown flushes the ledger: awaiting cleanup() is what guarantees the row is on disk
+      // (the only other writer is a 30s interval this test never waits out).
+      await cleanup();
+
+      const ledgerPath = join(paseoHomeDir, "classifier", "decisions.json");
+      const parsed = JSON.parse(readFileSync(ledgerPath, "utf-8")) as { rows: Array<{ agentId: string }> };
+      expect(parsed.rows).toHaveLength(1);
+      expect(parsed.rows[0].agentId).toBe("agent-456");
+    });
+
     it("a leader create (no caller) never reaches decideArenaPick, so no ledger row is written even though the correlation label still rides along", async () => {
       const { server, dispatchBefore, onHandlers } = fakeServer();
       const cleanup = contribute(server);

@@ -168,7 +168,7 @@ describe("summarize", () => {
     expect(summary.outcomesByModelAndWorkKind[0].finished).toBe(0);
   });
 
-  it("a backfilled row (modelRan: null, as every real one is) is excluded from agreementRate's denominator, not counted as disagreeing", () => {
+  it("a row with modelRan: null (backfill.ts recovers it when the snapshot has one, but leaves it null when it genuinely has neither) is excluded from agreementRate's denominator, not counted as disagreeing", () => {
     const entries: ClassifierDecisionWithOutcome[] = [
       { row: row({ backfilled: true, modelRan: null }), outcome: outcomeFor("finished") },
       { row: row({ modelRan: "claude-sonnet-5-5" }), outcome: outcomeFor("finished") }, // one real agreement

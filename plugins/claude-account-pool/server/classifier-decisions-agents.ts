@@ -21,7 +21,7 @@ type AgentListEntryAgent = PaseoAgentListResult["entries"][number]["agent"];
  */
 export type ClassifierDecisionsAgentSnapshot = Pick<
   AgentListEntryAgent,
-  "id" | "title" | "labels" | "status" | "archivedAt" | "totalTokens" | "createdAt" | "updatedAt"
+  "id" | "title" | "labels" | "status" | "archivedAt" | "totalTokens" | "createdAt" | "updatedAt" | "model" | "runtimeInfo"
 >;
 
 export interface ClassifierDecisionsAgentsApi {

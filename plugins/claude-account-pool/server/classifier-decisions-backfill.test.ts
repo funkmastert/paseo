@@ -7,7 +7,13 @@ import { loadClassifierDecisionsLedger, type ClassifierDecisionsLedger } from ".
 
 function agentEntry(
   id: string,
-  overrides: { title?: string | null; labels?: Record<string, string>; createdAt?: string } = {},
+  overrides: {
+    title?: string | null;
+    labels?: Record<string, string>;
+    createdAt?: string;
+    model?: string | null;
+    runtimeInfo?: { model?: string | null };
+  } = {},
 ) {
   return {
     agent: {
@@ -16,6 +22,8 @@ function agentEntry(
       status: "idle" as const,
       createdAt: overrides.createdAt ?? "2026-10-20T00:00:00.000Z",
       updatedAt: "2026-10-20T00:00:00.000Z",
+      model: overrides.model ?? null,
+      runtimeInfo: overrides.runtimeInfo && { provider: "claude", sessionId: null, ...overrides.runtimeInfo },
       labels: overrides.labels ?? {
         "paseo.arena-pick": "v1;ref=claude-sonnet-5-5;tier=mid;board=agent/overall;date=2026-10-20;applied=0;proxy=0",
         "paseo.agent-role": "worker",
@@ -79,6 +87,57 @@ describe("classifier-decisions backfill", () => {
     await runClassifierDecisionsBackfill(paseo, ledger);
 
     expect(ledger.all()[0].at).toBe("2026-09-01T00:00:00.000Z");
+  });
+
+  describe("modelRan recovery from the agent snapshot", () => {
+    it("prefers runtimeInfo.model (the actual model) over config.model when both are present", async () => {
+      const paseo = fakeAgentsApi([[agentEntry("a1", { model: "claude-sonnet-5", runtimeInfo: { model: "claude-sonnet-5-5" } })]]);
+
+      await runClassifierDecisionsBackfill(paseo, ledger);
+
+      expect(ledger.all()[0].modelRan).toBe("claude-sonnet-5-5");
+    });
+
+    it("falls back to config.model when runtimeInfo.model is absent", async () => {
+      const paseo = fakeAgentsApi([[agentEntry("a1", { model: "claude-opus-5-5", runtimeInfo: undefined })]]);
+
+      await runClassifierDecisionsBackfill(paseo, ledger);
+
+      expect(ledger.all()[0].modelRan).toBe("claude-opus-5-5");
+    });
+
+    it("resolves a provider-prefixed runtimeInfo.model to the bare id rowAgreement compares, for a Codex agent", async () => {
+      const paseo = fakeAgentsApi([
+        [
+          agentEntry("a1", {
+            runtimeInfo: { model: "codex/gpt-6-sol" },
+            labels: {
+              "paseo.arena-pick": "v1;ref=codex/gpt-6-sol;tier=mid;board=agent/overall;date=2026-10-20;applied=0;proxy=0",
+            },
+          }),
+        ],
+      ]);
+
+      await runClassifierDecisionsBackfill(paseo, ledger);
+
+      expect(ledger.all()[0].modelRan).toBe("gpt-6-sol");
+    });
+
+    it("leaves modelRan null when the snapshot has neither runtimeInfo.model nor config.model", async () => {
+      const paseo = fakeAgentsApi([[agentEntry("a1", { model: null, runtimeInfo: undefined })]]);
+
+      await runClassifierDecisionsBackfill(paseo, ledger);
+
+      expect(ledger.all()[0].modelRan).toBeNull();
+    });
+
+    it("leaves modelRan null when runtimeInfo exists but its own model is absent, falling back to config.model instead", async () => {
+      const paseo = fakeAgentsApi([[agentEntry("a1", { model: "claude-sonnet-5", runtimeInfo: { model: null } })]]);
+
+      await runClassifierDecisionsBackfill(paseo, ledger);
+
+      expect(ledger.all()[0].modelRan).toBe("claude-sonnet-5");
+    });
   });
 
   it("skips a failover successor (carries handoff-from) so one decision is not counted twice", async () => {

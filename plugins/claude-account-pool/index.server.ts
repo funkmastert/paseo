@@ -84,6 +84,10 @@ export default function contribute(server: PluginServerContext) {
   let codexGuardAvailability: CodexGuardAvailability | null = null;
   let arenaRankingsPoller: IntervalPoller<void> | null = null;
   let arenaRankingCache: ArenaRankingCache | null = null;
+  // Tracked so shutdown can await an in-flight backfill before its own ledger flush, rather than
+  // leaving it to write (or fail to write, once the temp PASEO_HOME it started against is gone)
+  // after cleanup() has already resolved.
+  let classifierDecisionsBackfillPromise: Promise<unknown> | null = null;
   // stdout, not console.error: this is a record of every create, not a problem report.
   const decisionLog = createDecisionLog({ write: (line) => console.log(line) });
   let roleModelPolicyRpcHandlers: ReturnType<typeof createRoleModelPolicyRpcHandlers> | null = null;
@@ -144,7 +148,7 @@ export default function contribute(server: PluginServerContext) {
     // rankings poller above -- it reads agents, not a create's hot path, and must never delay one.
     // `runClassifierDecisionsBackfill` itself no-ops once the ledger's `backfilledAt` is set, so a
     // reload or restart after the first successful run costs nothing beyond the no-op check.
-    void classifierDecisionsLedgerPromise
+    classifierDecisionsBackfillPromise = classifierDecisionsLedgerPromise
       .then((ledger) => runClassifierDecisionsBackfill(paseo, ledger))
       .catch((error) => console.error("classifier-decisions: backfill failed", error));
     // The plugin cache that feeds `ClassifierWorld.arenaRanking`, beside catalogCache/poolCache
@@ -717,6 +721,10 @@ export default function contribute(server: PluginServerContext) {
     arenaRankingCache?.stop();
     classifierTool?.close();
     try {
+      // Await any in-flight backfill FIRST: it is the thing most likely to still be running (a
+      // real agent-directory sweep), and it writes through this same ledger, so flushing before
+      // it finishes would miss its rows and let it write again after this function has returned.
+      await classifierDecisionsBackfillPromise;
       const ledger = await classifierDecisionsLedgerPromise;
       await ledger.flush();
     } catch {

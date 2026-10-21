@@ -23,9 +23,11 @@ export type RowAgreement = "agree" | "disagree" | "unknown";
  * docs/solutions/logic-errors/bare-pool-ref-family-resolves-before-compare.md.
  *
  * "unknown" — not "disagree" — for a fallback row (nothing was picked) or a ranked row with no
- * `modelRan` (every backfilled row: the compact `paseo.arena-pick` label doesn't carry it). The
- * one place this is computed, shared by the summary, the `disagreementsOnly` filter, and the row
- * pill, so the three never disagree with each other about what counts as a disagreement.
+ * `modelRan`: the compact `paseo.arena-pick` label never carries it, but `backfill.ts` recovers it
+ * from the agent snapshot (`runtimeInfo.model` falling back to `model`) when either is present,
+ * leaving it `null` only for the rare historical agent with neither on record. The one place this
+ * is computed, shared by the summary, the `disagreementsOnly` filter, and the row pill, so the
+ * three never disagree with each other about what counts as a disagreement.
  */
 export function rowAgreement(row: Pick<ClassifierDecisionRow, "modelRan" | "arena">): RowAgreement {
   if (row.arena.outcome !== "ranked" || row.modelRan === null) {
@@ -139,7 +141,7 @@ export interface ClassifierDecisionsWorkKindSummary {
   fallbackCount: number;
   /** Agreeing over (agreeing + disagreeing) ranked rows in this bucket — `unknown` rows excluded from both. `null` when there are none. */
   agreementRate: number | null;
-  /** Ranked rows in this bucket with no `modelRan` to compare (every backfilled row) — excluded from `agreementRate`'s denominator, not counted as disagreeing. */
+  /** Ranked rows in this bucket with no `modelRan` to compare — excluded from `agreementRate`'s denominator, not counted as disagreeing. */
   agreementUnknownCount: number;
   fallbackReasonCounts: Record<string, number>;
 }

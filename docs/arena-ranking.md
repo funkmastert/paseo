@@ -312,7 +312,12 @@ filesystem layout directly — and reconstructs one row per agent carrying
 `paseo.arena-pick`, from that label plus its sibling `paseo.agent-role` /
 `paseo.task-class` / `paseo.work-kind` labels. A backfilled row is marked
 `backfilled: true` and carries no fallback reason and no score detail
-(rating/votes/effort) — the compact label format has no room for either. The
+(rating/votes/effort) — the compact label format has no room for either —
+but `modelRan` is recovered from the agent snapshot (`runtimeInfo.model`, the
+actual model, falling back to the configured `model`) rather than left
+`null`, since a historical row that can never agree or disagree is the one
+thing that would make the dashboard's headline agreement rate read "—" for
+every pre-ledger row on day one. The
 label parser reads by key and ignores any it doesn't recognize, so a leader
 pick's `;role=leader;incumbent=<ref>;streak=<won>/<needed>` suffix (see
 "Leaders") never breaks parsing — but a leader row is skipped from the
