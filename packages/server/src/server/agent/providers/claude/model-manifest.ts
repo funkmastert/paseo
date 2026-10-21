@@ -104,9 +104,19 @@ export const CLAUDE_MODEL_MANIFEST = [
     supportsFastMode: true,
   },
   {
+    // Claude Code does not advertise this id yet, but accepts it and reports it back as
+    // `claude-sonnet-5-5`, the same pre-advertisement shape as `claude-opus-5-5` above.
+    id: "claude-sonnet-5-5",
+    label: "Sonnet 5.5",
+    description: "Sonnet 5.5 · Latest release",
+    contextWindowMaxTokens: 200_000,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
+    supportsThinkingDisabled: true,
+  },
+  {
     id: "claude-sonnet-5",
     label: "Sonnet 5",
-    description: "Sonnet 5 · Best for everyday tasks",
+    description: "Sonnet 5 · Previous release",
     contextWindowMaxTokens: 200_000,
     effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,
