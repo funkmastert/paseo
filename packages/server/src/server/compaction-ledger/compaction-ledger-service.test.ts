@@ -347,4 +347,32 @@ describe("CompactionLedgerService episode observer", () => {
     expect(summary.totalCostWeightedTokens).toBe(200);
     expect(summary.averageCostWeightedTokens).toBe(200);
   });
+
+  test("page() returns pages with no overlap and no gap across a cursor", async () => {
+    const store = freshStore();
+    await store.load();
+    const service = new CompactionLedgerService({ store });
+    for (let i = 0; i < 5; i += 1) {
+      service.recordNativeCompaction({
+        agentId: "leader-1",
+        agentTitle: null,
+        trigger: "auto",
+        preTokens: 100,
+        postTokens: 10,
+        atMs: 1000 + i * 100,
+      });
+    }
+
+    const firstPage = service.page({ limit: 2 });
+    expect(firstPage.episodes.map((row) => row.startedAtMs)).toEqual([1400, 1300]);
+    expect(firstPage.nextCursor).toBe("1300");
+
+    const secondPage = service.page({ limit: 2, cursor: firstPage.nextCursor ?? undefined });
+    expect(secondPage.episodes.map((row) => row.startedAtMs)).toEqual([1200, 1100]);
+    expect(secondPage.nextCursor).toBe("1100");
+
+    const thirdPage = service.page({ limit: 2, cursor: secondPage.nextCursor ?? undefined });
+    expect(thirdPage.episodes.map((row) => row.startedAtMs)).toEqual([1000]);
+    expect(thirdPage.nextCursor).toBeNull();
+  });
 });

@@ -78,6 +78,12 @@ import {
   TokenUsageGetBreakdownResponseSchema,
 } from "./token-usage/rpc-schemas.js";
 import {
+  CompactionEpisodesListRequestSchema,
+  CompactionEpisodesListResponseSchema,
+  CompactionEpisodesSummaryRequestSchema,
+  CompactionEpisodesSummaryResponseSchema,
+} from "./compaction/rpc-schemas.js";
+import {
   RestartRecoveryGetPlanRequestSchema,
   RestartRecoveryApplyRequestSchema,
   RestartRecoveryDismissRequestSchema,
@@ -3991,6 +3997,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   JevAskRequestSchema,
   JevSavingsSummaryRequestSchema,
   JevSavingsEventsRequestSchema,
+  CompactionEpisodesListRequestSchema,
+  CompactionEpisodesSummaryRequestSchema,
   CodexGuardStatusRequestSchema,
   ResumeAgentRequestMessageSchema,
   ImportAgentRequestMessageSchema,
@@ -4484,6 +4492,9 @@ export const ServerInfoStatusPayloadSchema = z
         // section's release/reserve/shutdown actions (docs/device-leases.md); an older daemon
         // only supports the read-only device_status_update the deviceLeases flag above gates.
         deviceManagement: z.boolean().optional(),
+        // COMPAT(compactionLedger): added in v0.9.x, remove gate after 2027-04-21. Whether the
+        // daemon serves compaction.episodes.list/.summary (docs/insights.md).
+        compactionLedger: z.boolean().optional(),
       })
       .optional(),
   })
@@ -7850,6 +7861,8 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   JevAskResponseSchema,
   JevSavingsSummaryResponseSchema,
   JevSavingsEventsResponseSchema,
+  CompactionEpisodesListResponseSchema,
+  CompactionEpisodesSummaryResponseSchema,
   CodexGuardStatusResponseSchema,
   ListCommandsResponseSchema,
   ListTerminalsResponseSchema,

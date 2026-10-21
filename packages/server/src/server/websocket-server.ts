@@ -180,6 +180,8 @@ interface WebSocketServerConfig {
   autoPinExpiry?: SessionOptions["autoPinExpiry"];
   /** Token usage by model and role; the `tokenUsage` feature is advertised only with it. */
   tokenUsage?: SessionOptions["tokenUsage"];
+  /** The compaction episode ledger; the `compactionLedger` feature is advertised only with it. */
+  compactionLedger?: SessionOptions["compactionLedger"];
 }
 
 type WebSocketRuntimeMetrics = SessionRuntimeMetrics & CheckoutDiffMetrics;
@@ -636,6 +638,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly jev: JevService | null | undefined;
   private readonly autoPinExpiry: SessionOptions["autoPinExpiry"];
   private readonly tokenUsage: SessionOptions["tokenUsage"];
+  private readonly compactionLedger: SessionOptions["compactionLedger"];
 
   constructor(
     server: HTTPServer,
@@ -696,6 +699,7 @@ export class VoiceAssistantWebSocketServer {
     this.advertiseDaemonStatusRpc = wsConfig.daemonStatusRpc !== false;
     this.autoPinExpiry = wsConfig.autoPinExpiry;
     this.tokenUsage = wsConfig.tokenUsage;
+    this.compactionLedger = wsConfig.compactionLedger;
     this.advertiseRelayConfig = wsConfig.relayConfig !== false;
     this.connectionLifecycle = wsConfig.startPaused === true ? "starting" : "accepting";
     this.serverId = serverId;
@@ -1573,6 +1577,7 @@ export class VoiceAssistantWebSocketServer {
       accountSignIn: this.accountSignIn,
       usageHistory: this.usageHistoryStore,
       tokenUsage: this.tokenUsage,
+      compactionLedger: this.compactionLedger,
       contextUsage: this.contextUsageService,
       jev: this.jev,
       hubExecutionAgents: options.hubExecutionAgents,
@@ -1813,6 +1818,8 @@ export class VoiceAssistantWebSocketServer {
         codexGuardStatus: true,
         // COMPAT(deviceManagement): added in v0.8.x, remove gate after 2027-09-30.
         deviceManagement: true,
+        // COMPAT(compactionLedger): added in v0.9.x, remove gate after 2027-04-21.
+        ...(this.compactionLedger ? { compactionLedger: true } : {}),
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported
         // daemon floor is >= v0.2.0.

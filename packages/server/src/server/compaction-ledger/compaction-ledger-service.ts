@@ -185,6 +185,24 @@ export class CompactionLedgerService implements LeaderCompactionEpisodeObserver 
       .sort((a, b) => b.startedAtMs - a.startedAtMs);
   }
 
+  /** `list()`, sliced for the RPC: a cursor is the previous page's last row's `startedAtMs`. */
+  page(filter: CompactionEpisodeFilter & { cursor?: string; limit?: number }): {
+    episodes: CompactionEpisodeRow[];
+    nextCursor: string | null;
+  } {
+    const rows = this.list(filter);
+    const limit = Math.max(1, Math.min(200, Math.floor(filter.limit ?? 50)));
+    const cursorMs = filter.cursor !== undefined ? Number(filter.cursor) : null;
+    const afterCursor =
+      cursorMs !== null && Number.isFinite(cursorMs)
+        ? rows.filter((row) => row.startedAtMs < cursorMs)
+        : rows;
+    const episodes = afterCursor.slice(0, limit);
+    const nextCursor =
+      afterCursor.length > limit ? String(episodes[episodes.length - 1]?.startedAtMs) : null;
+    return { episodes, nextCursor };
+  }
+
   summary(filter: CompactionEpisodeFilter): CompactionEpisodeSummary {
     const rows = this.list(filter);
     let totalCost = 0;
