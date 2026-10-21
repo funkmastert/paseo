@@ -3,7 +3,8 @@
 Reorders a worker or reviewer's already-approved model pool by the LMArena
 leaderboard, so the classifier picks the best-ranked candidate for the kind
 of work instead of always the operator's first pool entry. Ranking never adds
-a model to a pool and never runs for a leader. Credit: "LMArena leaderboard
+a model to a pool. Leaders have their own, much stricter rule with its own
+switch ([Leaders](#leaders)). Credit: "LMArena leaderboard
 dataset (CC-BY-4.0)" — https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset.
 
 ## Data flow
@@ -14,7 +15,8 @@ dataset (CC-BY-4.0)" — https://huggingface.co/datasets/lmarena-ai/leaderboard-
    exact match only — an unmatched name is dropped and counted, never
    guessed), drops rows below the vote floor, and writes
    `$PASEO_HOME/arena-rankings.json` atomically. A failed refresh keeps the
-   old file.
+   old file. For the leader boards it also keeps per-publish history and the
+   top rows, matched or not ([Leaders](#leaders)).
 
    Several boards share one HF config — `text_style_control` alone backs
    five — so fetches are grouped by config and each is read once, not once
@@ -62,14 +64,15 @@ to the `"no-file"` fallback, as the preview did until this was fixed.
 behaves exactly as before: zero extra computation, no `ranking` field on any
 decision.
 
-| Field             | Default                  | Meaning                                                                             |
-| ----------------- | ------------------------ | ----------------------------------------------------------------------------------- |
-| `enabled`         | `false`                  | Master switch.                                                                      |
-| `shadow`          | `true`                   | Records the would-be pick without applying it (D6, "shadow first").                 |
-| `roles`           | `["worker", "reviewer"]` | Policy role ids ranking applies to. The classifier refuses `leader` even if listed. |
-| `topTier`         | `[]`                     | Refs dropped from standard/mechanical candidates; win a hard pick only rarely.      |
-| `topTierMarginCi` | `0`                      | Extra CI widths a top-tier pick must clear beyond a plain non-overlap win.          |
-| `maxAgeHours`     | `72`                     | How stale the rankings file may be before falling back.                             |
+| Field             | Default                  | Meaning                                                                                     |
+| ----------------- | ------------------------ | ------------------------------------------------------------------------------------------- |
+| `enabled`         | `false`                  | Master switch.                                                                              |
+| `shadow`          | `true`                   | Records the would-be pick without applying it (D6, "shadow first").                         |
+| `roles`           | `["worker", "reviewer"]` | Policy role ids ranking applies to. The classifier refuses `leader` even if listed.         |
+| `topTier`         | `[]`                     | Refs dropped from standard/mechanical candidates; win a hard pick only rarely.              |
+| `topTierMarginCi` | `0`                      | Extra CI widths a top-tier pick must clear beyond a plain non-overlap win.                  |
+| `maxAgeHours`     | `72`                     | How stale the rankings file may be before falling back.                                     |
+| `leader`          | absent                   | The leader pick's own block ([Leaders](#leaders)). `enabled`/`shadow` above never reach it. |
 
 ## Boards, by kind of work
 
@@ -103,7 +106,7 @@ Any doubt falls back to today's pool order, with the reason always recorded
 (`decision-log.ts`'s `model.ranking.reason`) even on a fallback:
 
 - `disabled` — `arena` is absent or `enabled` is `false`.
-- `leader` — never evaluated at all for a leader; no `ranking` field on its decision.
+- `leader` — this rule never evaluates a leader; no `ranking` field on its decision. Leaders get `leaderRanking` from the leader pick instead.
 - `role-out-of-scope` — the resolved role isn't in `arena.roles`.
 - `declared-class` — a `paseo.task-class` label decided the class: a declared label always wins.
 - `unknown-kind` — no `work_kind` answer, the role isn't a reviewer, or the answer is `other`.
@@ -172,6 +175,9 @@ guard against that combination, belt-and-suspenders.
   including a shadowed or pinned explicit request (see "Explicit requests")
   — never for a fallback.
   `v1;ref=<ref>;tier=<top|mid>;board=<board>;date=<publishDate>;applied=<0|1>;proxy=<0|1>`.
+  A leader pick appends `;role=leader;incumbent=<ref>;streak=<won>/<needed>`,
+  with `tier=top` and `date` the board's own publish date. Readers must parse
+  by key and ignore keys they don't know.
 - `paseo.model-pin`: set by the caller, read only by `decideModel`. Keeps an
   eligible explicit request over the ranked pick in live mode; has no effect
   in shadow (the request is already honored there) or on a role outside
@@ -184,6 +190,79 @@ ranked decision and records it — `applied: false`, the pool untouched — so
 the leader can read a day of would-be picks before flipping `shadow: false`.
 This includes an eligible explicit request: it is honored as it always was,
 with the would-be pick recorded alongside it rather than discarded.
+
+## Leaders
+
+A leader is the longest-lived, most expensive agent in the fleet, and a model
+switch rebuilds its whole prompt cache. So the leader pick is a separate rule
+(`decideLeaderPick` in `server/arena-model-pick.ts`) that keeps the operator's
+default unless something beats it clearly and for a while. The research behind
+its defaults is `docs/design-notes/2026-10-20-leader-model-research.md`.
+
+**Policy.** `agentModelPolicy.arena.leader`, absent by default:
+
+| Field             | Default                                                | Meaning                                                                                      |
+| ----------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| `enabled`         | `false`                                                | Off means a leader's decision is exactly what it was before this existed.                    |
+| `shadow`          | `true`                                                 | Record the pick, never apply it.                                                             |
+| `boards`          | `["agent/overall", "text_style_control/hard_prompts"]` | Walked in order. Only `LEADER_BOARD_IDS`, the boards that keep history.                      |
+| `marginCi`        | `1`                                                    | Widths of the challenger's own CI its lower bound must clear the incumbent's upper bound by. |
+| `streakPublishes` | `3`                                                    | Consecutive publishes the same challenger must win. At most 10, the history kept.            |
+
+**The rule.**
+
+- The incumbent is the leader role's first pool entry. Candidates are only the
+  leader pool's other usable entries; Codex is never one.
+- On each board in order, the newest publish must rank the incumbent and at
+  least one challenger, or the next board is tried. The best-rated challenger
+  there is fixed for the streak.
+- The streak counts consecutive newest-first publishes where that challenger
+  clears the bar (`clearsLeaderBar`, `shared/arena-leader-rule.ts`). A
+  challenger whose row is an effort proxy while the incumbent's is not pays
+  one more width. A publish missing either row ends the count.
+- A full streak makes the challenger the pick; anything less keeps the
+  incumbent. Ties, near-misses and short streaks all keep pool order.
+
+In score terms, one width at today's widths is roughly a 0.10 lead on
+`agent/overall`. When Fable 5.1 led Opus 5.5 for four publishes (2026-09-27 to
+10-02), its CI never cleared Opus 5.5's, so the rule would not have moved.
+
+**Decided once, at create.** The pick runs only in the `before("agent.create")`
+hook. Resume, reload and account moves never run that hook, so a running
+leader's model never changes. A create carrying `handoff-from` (a failover
+import successor) falls back with `successor` even if a future path runs the
+hook for it. Thinking stays the leader rule's level; account routing, budget
+gates and failover are unchanged.
+
+**Live mode.** With `shadow: false` and a full streak, the leader pool is
+reordered so the challenger runs. The app sends the remembered model on almost
+every root create, so an explicit request that names the incumbent follows the
+pick (recorded as an `"arena-ranked"` override). Any other explicit model, or
+`paseo.model-pin`, is honored.
+
+**History.** `arena-rankings.json` carries `leaderHistory` (per leader board,
+the last 10 publishes, newest first) and `boardTop` (each leader board's top 10
+rows, matched or not). History is keyed on the rows' own
+`leaderboard_publish_date`. The file's `publishDate` is the fetch date and
+changes every run, so it can't tell a new publish from a repeated one. A
+refresh sees only the latest publish, so two publishes between daily
+refreshes leave one unrecorded. A retry that recovers a leader board records
+its publish too.
+
+**Record.** `model.leaderRanking` on the decision (kept apart from the worker
+`ranking`), `leaderRanking` on the decision-log line, a sentence on the model
+reason, and `paseo.arena-pick` with the leader keys. Fallback reasons:
+`disabled` (only from the pure core; the classifier skips a disabled block
+entirely), `successor`, `no-file`, `no-ranked-board`.
+
+**Unpooled challengers.** `findUnpooledLeaderChallengers`
+(`shared/arena-unpooled.ts`) lists models that clear the incumbent on the first
+leader board by the same bar, with no streak, but match no role's pool,
+including models the alias table doesn't map. The settings explain RPC returns
+them as `unpooledLeaderChallengers`. The classifier dashboard
+(`feat/classifier-dashboard`) is meant to show the top one as a summary line;
+that wiring, and its `paseo.arena-pick` backfill parser accepting the leader
+keys, land with the dashboard.
 
 ## Tests and verification
 
@@ -212,7 +291,17 @@ with the would-be pick recorded alongside it rather than discarded.
   `arenaRankingCache` the create hook uses, proving the settings preview and
   the agent-facing tool reflect a real ranked pick rather than always falling
   back to `"no-file"`.
+- Leaders: `shared/role-policy-schema.test.ts` ("leader") for the policy block;
+  `server/arena-rankings.test.ts` ("leader boards") for history and top rows,
+  including dedupe on the board's own date and retry recovery;
+  `server/arena-model-pick.test.ts` (`clearsLeaderBar`, `decideLeaderPick`) for
+  the rule and a calibration case from real history; `server/classifier.test.ts`
+  ("arena leader pick") for shadow, live and explicit requests;
+  `server/decision-log.test.ts` and `server/role-router.test.ts` ("the leader
+  pick") for the record and label; `shared/arena-unpooled.test.ts` and
+  `server/role-policy-rpc-handlers.test.ts` ("unpooled leader challengers",
+  plus the save carrying `arena` through).
 - `client/settings/explain-summary.test.ts`: `describeRequestedModel` renders
   the `"arena-ranked"` override reason with its own explanation, not the
   `"not-approved"` fallback text.
-- Verify: `cd plugins/claude-account-pool && npx vitest run server/arena-model-pick.test.ts server/arena-rankings.test.ts server/classifier.test.ts server/decision-log.test.ts server/role-router.test.ts server/classifier-tool.test.ts server/role-policy-rpc-handlers.test.ts --bail=1`.
+- Verify: `cd plugins/claude-account-pool && npx vitest run server/arena-model-pick.test.ts server/arena-rankings.test.ts server/classifier.test.ts server/decision-log.test.ts server/role-router.test.ts server/classifier-tool.test.ts server/role-policy-rpc-handlers.test.ts shared/role-policy-schema.test.ts shared/arena-unpooled.test.ts --bail=1`.
