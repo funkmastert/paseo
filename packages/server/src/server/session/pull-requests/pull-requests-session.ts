@@ -73,6 +73,9 @@ function rowOnWire(row: PullRequestLedgerRow): PullRequestLedgerEntry {
 const REPO_SEGMENT = /^[\w.-]+$/;
 
 function isValidRepoSegment(value: string): boolean {
+  // "." and ".." are otherwise valid under REPO_SEGMENT but are path-traversal segments, not
+  // real owner/repo slugs -- reject them explicitly before building any forge API path from them.
+  if (value === "." || value === "..") return false;
   return value.length > 0 && value.length <= 255 && REPO_SEGMENT.test(value);
 }
 

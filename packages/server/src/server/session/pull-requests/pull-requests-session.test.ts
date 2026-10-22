@@ -259,6 +259,9 @@ describe("PullRequestsSession.handleGetStatusRequest", () => {
     await session.handleGetStatusRequest(baseRequest({ repoOwner: "acme/evil" }));
     await session.handleGetStatusRequest(baseRequest({ number: -1 }));
     await session.handleGetStatusRequest(baseRequest({ number: 1.5 }));
+    await session.handleGetStatusRequest(baseRequest({ repoOwner: "." }));
+    await session.handleGetStatusRequest(baseRequest({ repoOwner: ".." }));
+    await session.handleGetStatusRequest(baseRequest({ repoName: ".." }));
 
     expect(resolveForge).not.toHaveBeenCalled();
     for (const message of emitted) {

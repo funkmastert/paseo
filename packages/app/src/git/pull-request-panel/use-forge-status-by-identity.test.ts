@@ -99,4 +99,45 @@ describe("nextStatusRefetchInterval", () => {
       nextStatusRefetchInterval({ queryEnabled: true, status: null, unsupportedForge: false }),
     ).toBe(STATUS_REFETCH_INTERVAL_MS);
   });
+
+  it("stops polling on a not_found payload error -- the identity will never resolve", () => {
+    expect(
+      nextStatusRefetchInterval({
+        queryEnabled: true,
+        status: null,
+        unsupportedForge: false,
+        payloadErrorKind: "not_found",
+      }),
+    ).toBe(false);
+  });
+
+  it("stops polling on an invalid_request payload error -- retrying the same identity can't fix it", () => {
+    expect(
+      nextStatusRefetchInterval({
+        queryEnabled: true,
+        status: null,
+        unsupportedForge: false,
+        payloadErrorKind: "invalid_request",
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps polling through a transient payload error like rate_limited or failed", () => {
+    expect(
+      nextStatusRefetchInterval({
+        queryEnabled: true,
+        status: null,
+        unsupportedForge: false,
+        payloadErrorKind: "rate_limited",
+      }),
+    ).toBe(STATUS_REFETCH_INTERVAL_MS);
+    expect(
+      nextStatusRefetchInterval({
+        queryEnabled: true,
+        status: null,
+        unsupportedForge: false,
+        payloadErrorKind: "failed",
+      }),
+    ).toBe(STATUS_REFETCH_INTERVAL_MS);
+  });
 });

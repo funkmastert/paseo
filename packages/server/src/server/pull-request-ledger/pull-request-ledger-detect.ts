@@ -17,9 +17,13 @@ export interface DetectedPullRequest {
 
 // Matches a command at the start of the string or right after a shell command separator
 // (`;`, `&` of `&&`, `|` of `||`, `(`, or a newline), allowing leading `VAR=value` env
-// assignments. A plain `.test()` scan finds this boundary anywhere in a chained command
+// assignments and `env`/`sudo` wrappers (with their own flags, e.g. `env -i`, `sudo -u user`)
+// in either order. A plain `.test()` scan finds this boundary anywhere in a chained command
 // (`cd wt && gh pr create ...`) without needing to split the string ourselves.
-const BOUNDARY_SRC = "(?:^|[;&|(\\n])\\s*(?:[A-Za-z_][A-Za-z0-9_]*=\\S+\\s+)*";
+const BOUNDARY_SRC =
+  "(?:^|[;&|(\\n])\\s*" +
+  "(?:(?:env|sudo)\\s+(?:-\\S+\\s+)*)*" +
+  "(?:[A-Za-z_][A-Za-z0-9_]*=\\S+\\s+)*";
 const PR_CREATE_COMMAND = new RegExp(`${BOUNDARY_SRC}gh\\s+pr\\s+create\\b`);
 const TEA_PR_CREATE_COMMAND = new RegExp(`${BOUNDARY_SRC}tea\\s+(?:pulls?|pr)\\s+create\\b`);
 

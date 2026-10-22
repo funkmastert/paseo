@@ -132,6 +132,32 @@ describe("detectPullRequestCreation", () => {
     });
   });
 
+  it("detects gh pr create prefixed with env setting a var", () => {
+    const output = "https://github.com/acme/widgets/pull/46";
+    expect(
+      detectPullRequestCreation("Bash", shell("env GH_TOKEN=x gh pr create --fill", output)),
+    ).toEqual({
+      host: "github.com",
+      repoOwner: "acme",
+      repoName: "widgets",
+      number: 46,
+      url: "https://github.com/acme/widgets/pull/46",
+      forge: "github",
+    });
+  });
+
+  it("detects gh pr create prefixed with sudo", () => {
+    const output = "https://github.com/acme/widgets/pull/47";
+    expect(detectPullRequestCreation("Bash", shell("sudo gh pr create --fill", output))).toEqual({
+      host: "github.com",
+      repoOwner: "acme",
+      repoName: "widgets",
+      number: 47,
+      url: "https://github.com/acme/widgets/pull/47",
+      forge: "github",
+    });
+  });
+
   it("detects gh pr create wrapped in sh -c", () => {
     const output = "https://github.com/acme/widgets/pull/45";
     expect(

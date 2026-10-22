@@ -25,14 +25,23 @@ const STATUS_REFETCH_INTERVAL_MS = 60_000;
  * timeline query reuses the same cadence. */
 export const STATUS_STALE_TIME_MS = 10_000;
 
-/** False once a PR reaches a terminal state, or its forge has no identity lookup — merged/closed
- * PRs don't reopen under normal use, and an unsupported forge will never answer. */
+/** Payload error kinds that describe the identity itself, not a transient fetch failure --
+ * retrying the same (host, repoOwner, repoName, number) can't turn these into a result. */
+const TERMINAL_PAYLOAD_ERROR_KINDS = new Set(["not_found", "invalid_request"]);
+
+/** False once a PR reaches a terminal state, its forge has no identity lookup, or the identity
+ * itself is unresolvable — merged/closed PRs don't reopen under normal use, an unsupported forge
+ * will never answer, and a not_found/invalid_request identity won't change on retry. */
 export function nextStatusRefetchInterval(input: {
   queryEnabled: boolean;
   status: { isMerged: boolean; state: string } | null | undefined;
   unsupportedForge: boolean;
+  payloadErrorKind?: string | null;
 }): number | false {
   if (!input.queryEnabled || input.unsupportedForge) return false;
+  if (input.payloadErrorKind && TERMINAL_PAYLOAD_ERROR_KINDS.has(input.payloadErrorKind)) {
+    return false;
+  }
   if (input.status && (input.status.isMerged || input.status.state !== "open")) return false;
   return STATUS_REFETCH_INTERVAL_MS;
 }
@@ -104,6 +113,7 @@ export function useForgeStatusByIdentity({
           payloadErrorKind: data?.error?.kind,
           queryError: currentQuery.state.error,
         }),
+        payloadErrorKind: data?.error?.kind,
       });
     },
     refetchOnWindowFocus: false,

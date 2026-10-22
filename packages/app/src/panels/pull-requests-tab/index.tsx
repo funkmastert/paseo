@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { FlatList, Pressable, Text, View } from "react-native";
-import { StyleSheet } from "react-native-unistyles";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { ChevronLeft } from "lucide-react-native";
 import { useTranslation } from "react-i18next";
 import {
@@ -16,9 +16,13 @@ import {
 import { openExternalUrl } from "@/utils/open-external-url";
 import { useWorkspaceDirectory } from "@/stores/session-store-hooks";
 import type { PullRequestLedgerEntry } from "@getpaseo/protocol/pull-requests/rpc-schemas";
+import type { Theme } from "@/styles/theme";
 import { usePullRequests } from "./use-pull-requests";
 import { resolveStatusCwd } from "./use-row-status";
 import { PullRequestRow } from "./row";
+
+const ThemedChevronLeft = withUnistyles(ChevronLeft);
+const mutedForegroundMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
 export interface PullRequestsTabContentProps {
   serverId: string;
@@ -112,7 +116,7 @@ function PullRequestDetail({
         accessibilityRole="button"
         accessibilityLabel={t("panels.pullRequests.back")}
       >
-        <ChevronLeft size={16} />
+        <ThemedChevronLeft size={16} uniProps={mutedForegroundMapping} />
         <Text style={styles.backLabel}>{t("panels.pullRequests.back")}</Text>
       </Pressable>
       {renderContent()}

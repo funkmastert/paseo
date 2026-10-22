@@ -4505,7 +4505,7 @@ export const ServerInfoStatusPayloadSchema = z
         // daemon serves compaction.episodes.list/.summary (docs/insights.md).
         compactionLedger: z.boolean().optional(),
         // COMPAT(pullRequestLedger): added in v0.9.x, remove gate after 2027-04-22. Whether the
-        // daemon serves workspace.pullRequests.list and
+        // daemon serves workspace.pull_requests.list and
         // checkout.forge.get_pull_request_status (docs/pull-request-ledger.md).
         pullRequestLedger: z.boolean().optional(),
       })
