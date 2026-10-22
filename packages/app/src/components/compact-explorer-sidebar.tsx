@@ -322,8 +322,8 @@ function ExplorerSidebarContent({
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const hasPullRequestLedger = useHostFeature(serverId, "pullRequestLedger");
-  // COMPAT(pullRequestLedger): the single-PR tab this feature replaces (R7) — only computed
-  // against an old daemon that doesn't serve the ledger yet.
+  // COMPAT(pullRequestLedger): the single-PR tab this feature replaces — only computed against
+  // an old daemon that doesn't serve the ledger yet.
   const { prPane, showPullRequest: showPrTab } = usePullRequestPanelAvailability({
     serverId,
     cwd: workspaceRoot,

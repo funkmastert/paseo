@@ -1934,6 +1934,11 @@ export const ru: TranslationResources = {
         failure: "Проверки не пройдены",
         pending: "Проверки выполняются",
       },
+      review: {
+        approved: "Одобрено",
+        changesRequested: "Запрошены изменения",
+        pending: "Ожидает проверки",
+      },
     },
     orchestration: {
       label: "Оркестрация",

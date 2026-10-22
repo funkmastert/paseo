@@ -1951,6 +1951,11 @@ export const es: TranslationResources = {
         failure: "Verificaciones fallidas",
         pending: "Verificaciones en curso",
       },
+      review: {
+        approved: "Aprobado",
+        changesRequested: "Cambios solicitados",
+        pending: "Revisión pendiente",
+      },
     },
     orchestration: {
       label: "Orquestación",

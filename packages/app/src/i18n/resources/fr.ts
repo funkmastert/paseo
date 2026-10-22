@@ -1956,6 +1956,11 @@ export const fr: TranslationResources = {
         failure: "Vérifications échouées",
         pending: "Vérifications en cours",
       },
+      review: {
+        approved: "Approuvée",
+        changesRequested: "Modifications demandées",
+        pending: "Relecture en attente",
+      },
     },
     orchestration: {
       label: "Orchestration",

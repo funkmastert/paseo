@@ -2,7 +2,6 @@ import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import type { PullRequestTimelineResponse } from "@getpaseo/protocol/messages";
-import { normalizeForge, type Forge } from "@/git/forge";
 import { useFetchQuery } from "@/data/query";
 import {
   createInMemoryUnsupportedTimelineRegistry,
@@ -12,23 +11,16 @@ import {
   unsupportedTimelineKey,
   type UsePrPaneDataResult,
 } from "./use-data.js";
-import { prPaneStatusByIdentityQueryKey, prPaneTimelineQueryKey } from "./query-keys.js";
+import { prPaneTimelineQueryKey } from "./query-keys.js";
+import {
+  useForgeStatusByIdentity,
+  type PullRequestIdentity,
+} from "./use-forge-status-by-identity.js";
+
+export type { PullRequestIdentity } from "./use-forge-status-by-identity.js";
+export { isUnsupportedForgeStatusError } from "./use-forge-status-by-identity.js";
 
 type PullRequestTimeline = PullRequestTimelineResponse["payload"];
-
-/**
- * A pull request identified explicitly, not derived from a checkout's current branch
- * (docs/pull-request-ledger.md). Feeds the same `PrPaneData` shape `usePrPaneData` does, so
- * `PullRequestPane`/`PullRequestContent` render it unchanged — see KTD6 in the plan.
- */
-export interface PullRequestIdentity {
-  host: string;
-  repoOwner: string;
-  repoName: string;
-  number: number;
-  /** The creating agent's cwd: selects which authenticated CLI context to run from. */
-  cwd: string;
-}
 
 export interface UsePrPaneDataByIdentityOptions {
   serverId: string;
@@ -39,24 +31,11 @@ export interface UsePrPaneDataByIdentityOptions {
 
 const registry = createInMemoryUnsupportedTimelineRegistry();
 
-/** 60s while the row's detail view is open, per docs/explorer-sidebar.md's refresh cadence. */
-const STATUS_REFETCH_INTERVAL_MS = 60_000;
-
 /**
- * True when the row's forge has no identity-based status lookup (KTD6's fallback-to-URL
- * forges): either the daemon's own typed error, or an old daemon that doesn't know the RPC at
- * all (`unknown_schema`, same convention as {@link isUnsupportedTimelineError}).
+ * The PR detail pane's data, keyed by an explicit identity instead of the checkout's current
+ * branch (docs/pull-request-ledger.md). Produces the same `PrPaneData` shape `usePrPaneData`
+ * does, so `PullRequestPane`/`PullRequestContent` render it unchanged.
  */
-export function isUnsupportedForgeStatusError(input: {
-  payloadErrorKind: string | null | undefined;
-  queryError: unknown;
-}): boolean {
-  if (input.payloadErrorKind === "unsupported_forge") return true;
-  if (!(input.queryError instanceof Error)) return false;
-  const rpcError = input.queryError as Error & { code?: unknown };
-  return rpcError.code === "unknown_schema";
-}
-
 export function usePrPaneDataByIdentity({
   serverId,
   identity,
@@ -66,27 +45,8 @@ export function usePrPaneDataByIdentity({
   const { t } = useTranslation();
   const daemonClient = useHostRuntimeClient(serverId);
   const isConnected = useHostRuntimeIsConnected(serverId);
+  const statusResult = useForgeStatusByIdentity({ serverId, identity, enabled });
 
-  const statusQuery = useFetchQuery({
-    dataShape: "value",
-    staleTimeMs: 0,
-    queryKey: prPaneStatusByIdentityQueryKey({ serverId, ...identity }),
-    queryFn: async () => {
-      if (!daemonClient) throw new Error(t("common.errors.daemonClientUnavailable"));
-      return daemonClient.checkoutForgeGetPullRequestStatus(identity);
-    },
-    enabled: !!daemonClient && isConnected && enabled,
-    refetchInterval: enabled ? STATUS_REFETCH_INTERVAL_MS : false,
-    refetchOnWindowFocus: false,
-  });
-
-  const unsupportedForge = isUnsupportedForgeStatusError({
-    payloadErrorKind: statusQuery.data?.error?.kind,
-    queryError: statusQuery.error,
-  });
-
-  const status = statusQuery.data?.status ?? null;
-  const forge: Forge = normalizeForge(status?.forge);
   const unsupportedKey = unsupportedTimelineKey({
     serverId,
     cwd: identity.cwd,
@@ -135,13 +95,13 @@ export function usePrPaneDataByIdentity({
 
   return {
     ...selectPrPaneState({
-      status,
+      status: statusResult.status,
       statusPayloadError: null,
-      statusError: statusQuery.error instanceof Error ? statusQuery.error : null,
-      statusIsLoading: statusQuery.isLoading,
-      statusIsFetching: statusQuery.isFetching,
+      statusError: statusResult.error,
+      statusIsLoading: statusResult.isLoading,
+      statusIsFetching: statusResult.isFetching,
       githubFeaturesEnabled: true,
-      forge,
+      forge: statusResult.forge,
       timelineEnabled,
       shouldFetchTimeline,
       timelinePayload: timelineQuery.data,
@@ -149,6 +109,6 @@ export function usePrPaneDataByIdentity({
       timelineIsLoading: timelineQuery.isLoading,
       timelineIsFetching: timelineQuery.isFetching,
     }),
-    unsupportedForge,
+    unsupportedForge: statusResult.unsupportedForge,
   };
 }

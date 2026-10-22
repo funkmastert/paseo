@@ -1922,6 +1922,11 @@ export const ja: TranslationResources = {
         failure: "チェックが失敗しました",
         pending: "チェックを実行中",
       },
+      review: {
+        approved: "承認済み",
+        changesRequested: "変更を要求",
+        pending: "レビュー待ち",
+      },
     },
     orchestration: {
       label: "オーケストレーション",

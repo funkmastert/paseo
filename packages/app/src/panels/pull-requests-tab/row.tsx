@@ -9,6 +9,7 @@ import { useRowPullRequestStatus } from "./use-row-status";
 export interface PullRequestRowProps {
   serverId: string;
   entry: PullRequestLedgerEntry;
+  isOpen: boolean;
   onPress: (entry: PullRequestLedgerEntry) => void;
 }
 
@@ -28,11 +29,28 @@ function checksStatusLabel(
   }
 }
 
-export function PullRequestRow({ serverId, entry, onPress }: PullRequestRowProps) {
+function reviewDecisionLabel(
+  t: (key: string) => string,
+  reviewDecision: string | null | undefined,
+): string | null {
+  switch (reviewDecision) {
+    case "approved":
+      return t("panels.pullRequests.review.approved");
+    case "changes_requested":
+      return t("panels.pullRequests.review.changesRequested");
+    case "pending":
+      return t("panels.pullRequests.review.pending");
+    default:
+      return null;
+  }
+}
+
+export function PullRequestRow({ serverId, entry, isOpen, onPress }: PullRequestRowProps) {
   const { t } = useTranslation();
-  const rowStatus = useRowPullRequestStatus({ serverId, entry, enabled: true });
+  const rowStatus = useRowPullRequestStatus({ serverId, entry, enabled: isOpen });
   const handlePress = useCallback(() => onPress(entry), [onPress, entry]);
   const checksLabel = checksStatusLabel(t, rowStatus.checksStatus);
+  const reviewLabel = reviewDecisionLabel(t, rowStatus.reviewDecision);
 
   return (
     <Pressable
@@ -52,7 +70,10 @@ export function PullRequestRow({ serverId, entry, onPress }: PullRequestRowProps
           {`${entry.repoOwner}/${entry.repoName} #${entry.number}`}
         </Text>
       </View>
-      {checksLabel ? <Text style={styles.checksLabel}>{checksLabel}</Text> : null}
+      <View style={styles.trailing}>
+        {reviewLabel ? <Text style={styles.statusLabel}>{reviewLabel}</Text> : null}
+        {checksLabel ? <Text style={styles.statusLabel}>{checksLabel}</Text> : null}
+      </View>
     </Pressable>
   );
 }
@@ -83,7 +104,11 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
   },
-  checksLabel: {
+  trailing: {
+    alignItems: "flex-end",
+    gap: 2,
+  },
+  statusLabel: {
     fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
   },

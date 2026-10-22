@@ -135,20 +135,21 @@ export class PullRequestLedgerService {
     const detected = detectPullRequestCreation(item.name, item.detail);
     if (!detected) return;
     const id = buildPullRequestLedgerRowId(detected);
+    const existing = this.store.getRow(id);
     const ledgerRow: PullRequestLedgerRow = {
       id,
       agentId,
-      agentTitle: agentTitle ?? this.store.getRow(id)?.agentTitle ?? null,
-      agentCwd: agentCwd ?? this.store.getRow(id)?.agentCwd ?? "",
+      agentTitle: agentTitle ?? existing?.agentTitle ?? null,
+      agentCwd: agentCwd ?? existing?.agentCwd ?? "",
       host: detected.host,
       repoOwner: detected.repoOwner,
       repoName: detected.repoName,
       number: detected.number,
       url: detected.url,
       forge: detected.forge,
-      detectedAtMs: this.store.getRow(id)?.detectedAtMs ?? this.now(),
-      status: this.store.getRow(id)?.status ?? "open",
-      lastStatusCheckedAtMs: this.store.getRow(id)?.lastStatusCheckedAtMs ?? null,
+      detectedAtMs: existing?.detectedAtMs ?? this.now(),
+      status: existing?.status ?? "open",
+      lastStatusCheckedAtMs: existing?.lastStatusCheckedAtMs ?? null,
     };
     this.store.upsertRow(ledgerRow);
   }

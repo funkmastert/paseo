@@ -7,7 +7,7 @@ export function buildExplorerAvailableTabs(input: {
 }): ExplorerTab[] {
   const tabs: ExplorerTab[] = input.isGit ? ["changes", "files"] : ["files"];
   if (!input.isGit) return tabs;
-  // The ledger-backed "prs" tab is unconditional on git workspaces (R1); the single-PR tab it
+  // The ledger-backed "prs" tab is unconditional on git workspaces; the single-PR tab it
   // replaces stays conditional on a branch PR existing, for hosts that don't serve it yet.
   if (input.hasPullRequestLedger) tabs.push("prs");
   else if (input.showPrTab) tabs.push("pr");

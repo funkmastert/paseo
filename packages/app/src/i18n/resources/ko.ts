@@ -1913,6 +1913,11 @@ export const ko: TranslationResources = {
         failure: "검사 실패",
         pending: "검사 실행 중",
       },
+      review: {
+        approved: "승인됨",
+        changesRequested: "변경 요청됨",
+        pending: "리뷰 대기 중",
+      },
     },
     orchestration: {
       label: "오케스트레이션",

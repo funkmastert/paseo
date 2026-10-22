@@ -1936,6 +1936,11 @@ export const ptBR: TranslationResources = {
         failure: "Verificações com falha",
         pending: "Verificações em execução",
       },
+      review: {
+        approved: "Aprovado",
+        changesRequested: "Alterações solicitadas",
+        pending: "Revisão pendente",
+      },
     },
     orchestration: {
       label: "Orquestração",

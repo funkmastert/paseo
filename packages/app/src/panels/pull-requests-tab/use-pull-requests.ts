@@ -4,8 +4,6 @@ import { useHostFeature } from "@/runtime/host-features";
 import { useFetchQuery } from "@/data/query";
 import type { PullRequestLedgerEntry } from "@getpaseo/protocol/pull-requests/rpc-schemas";
 
-export type { PullRequestLedgerEntry };
-
 /** 60s while the tab is open, per docs/explorer-sidebar.md's refresh cadence. */
 const REFETCH_INTERVAL_MS = 60_000;
 
@@ -23,10 +21,8 @@ export interface UsePullRequestsOptions {
 
 export interface UsePullRequestsResult {
   pullRequests: PullRequestLedgerEntry[];
-  isSupported: boolean;
   isLoading: boolean;
   isError: boolean;
-  error: Error | null;
 }
 
 /** Every PR a workspace's agent or its descendants created. See docs/pull-request-ledger.md. */
@@ -58,9 +54,7 @@ export function usePullRequests({
 
   return {
     pullRequests: query.data?.pullRequests ?? [],
-    isSupported,
     isLoading: queryEnabled && query.isLoading,
     isError: query.isError,
-    error: query.error instanceof Error ? query.error : null,
   };
 }

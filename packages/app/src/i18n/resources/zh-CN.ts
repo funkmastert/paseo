@@ -1882,6 +1882,11 @@ export const zhCN: TranslationResources = {
         failure: "检查失败",
         pending: "检查进行中",
       },
+      review: {
+        approved: "已批准",
+        changesRequested: "已请求修改",
+        pending: "待审核",
+      },
     },
     orchestration: {
       label: "编排",

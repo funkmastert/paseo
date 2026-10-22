@@ -52,8 +52,8 @@ function PullRequestDetail({
     void Linking.openURL(entry.url);
   }, [entry.url]);
 
-  // KTD6's fallback: a forge with no identity-based status lookup opens the PR URL instead of a
-  // broken detail view.
+  // A forge with no identity-based status lookup opens the PR URL instead of a broken detail
+  // view (docs/pull-request-ledger.md).
   useEffect(() => {
     if (prPane.unsupportedForge) void Linking.openURL(entry.url);
   }, [prPane.unsupportedForge, entry.url]);
@@ -147,13 +147,17 @@ export function PullRequestsTabContent({
   return (
     <View style={styles.list} testID="pull-requests-list">
       {pullRequests.map((entry) => (
-        <PullRequestRow key={entry.id} serverId={serverId} entry={entry} onPress={setSelected} />
+        <PullRequestRow
+          key={entry.id}
+          serverId={serverId}
+          entry={entry}
+          isOpen={isOpen}
+          onPress={setSelected}
+        />
       ))}
     </View>
   );
 }
-
-export type { PullRequestLedgerEntry };
 
 const styles = StyleSheet.create((theme) => ({
   list: {

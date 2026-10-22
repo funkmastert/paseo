@@ -1903,6 +1903,11 @@ export const ar: TranslationResources = {
         failure: "فشلت الفحوصات",
         pending: "الفحوصات قيد التنفيذ",
       },
+      review: {
+        approved: "تمت الموافقة",
+        changesRequested: "طُلبت تغييرات",
+        pending: "المراجعة معلّقة",
+      },
     },
     orchestration: {
       label: "التنسيق",

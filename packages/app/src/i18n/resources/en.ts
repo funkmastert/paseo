@@ -1914,6 +1914,11 @@ export const en = {
         failure: "Checks failed",
         pending: "Checks running",
       },
+      review: {
+        approved: "Approved",
+        changesRequested: "Changes requested",
+        pending: "Review pending",
+      },
     },
     orchestration: {
       label: "Orchestration",
