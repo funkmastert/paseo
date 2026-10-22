@@ -41,6 +41,16 @@ export interface CompactionQuietGate {
   heldMs: number;
 }
 
+/**
+ * What the agent deferred the episode by (docs/leader-compaction.md, "Deferral"): how many times
+ * it asked and how long the monitor waited in total. The finish-up time is the prepare steps'
+ * own duration.
+ */
+export interface CompactionDeferrals {
+  count: number;
+  totalMs: number;
+}
+
 /** A human prompt the episode carried into its restore message. */
 export interface CompactionCarriedPrompt {
   atMs: number;
@@ -65,6 +75,8 @@ export interface CompactionEpisodeRow {
   promptsCarried: CompactionCarriedPrompt[] | null;
   /** Set when the quiet gate held the episode's start. */
   quietGate: CompactionQuietGate | null;
+  /** Set when the agent asked to defer the episode at least once. */
+  deferrals: CompactionDeferrals | null;
   costWeightedTokens: number | null;
   costBasis: CompactionCostBasis;
   estimatedSavedWeightedTokens: number | null;
@@ -79,6 +91,7 @@ export function emptyCompactionEpisodeTail(): Pick<
   | "noteLength"
   | "promptsCarried"
   | "quietGate"
+  | "deferrals"
   | "costWeightedTokens"
   | "estimatedSavedWeightedTokens"
   | "requestsSincePaybackCountedThrough"
@@ -87,6 +100,7 @@ export function emptyCompactionEpisodeTail(): Pick<
     noteLength: null,
     promptsCarried: null,
     quietGate: null,
+    deferrals: null,
     costWeightedTokens: null,
     estimatedSavedWeightedTokens: null,
     requestsSincePaybackCountedThrough: null,
@@ -137,6 +151,7 @@ const ROW_SCHEMA = z.object({
     .object({ heldFromMs: z.number(), heldUntilMs: z.number(), heldMs: z.number() })
     .nullable()
     .optional(),
+  deferrals: z.object({ count: z.number(), totalMs: z.number() }).nullable().optional(),
   costWeightedTokens: z.number().nullable(),
   costBasis: z.enum(["measured", "unmeasured"]),
   estimatedSavedWeightedTokens: z.number().nullable(),
@@ -274,6 +289,7 @@ export class CompactionLedgerStore {
           ...row,
           promptsCarried: row.promptsCarried ?? null,
           quietGate: row.quietGate ?? null,
+          deferrals: row.deferrals ?? null,
         });
       }
     }

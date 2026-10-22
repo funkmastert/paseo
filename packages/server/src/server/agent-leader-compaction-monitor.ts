@@ -7,12 +7,16 @@ import type {
 import { formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
 import {
   LEADER_COMPACTION_MESSAGE_HEADER,
+  NO_LEADER_COMPACTION_DEFERRAL,
   applyLeaderCompactionTurnOutcome,
+  hasLeaderCompactionPrepareTimedOut,
+  leaderCompactionDeferMinutesLeft,
   type LeaderCompactionAction,
   planLeaderCompactionStep,
   resolveLeaderCompactionConfig,
   type LeaderCompactionCarriedPrompt,
   type LeaderCompactionConfig,
+  type LeaderCompactionDeferral,
   type LeaderCompactionEpisode,
   type LeaderCompactionPlan,
   type LeaderCompactionSettings,
@@ -56,6 +60,8 @@ export interface LeaderCompactionEpisodeObserver {
     quietGate?: LeaderCompactionQuietHold | null;
     /** The human prompts the episode carries so far. */
     carriedPrompts?: readonly LeaderCompactionCarriedPrompt[];
+    /** This prepare asks again after the agent deferred, or was refused: same episode. */
+    reask?: boolean;
   }): void;
   onStepFinished(input: {
     agentId: string;
@@ -73,6 +79,8 @@ export interface LeaderCompactionEpisodeObserver {
     steeredIn?: number;
     /** The human prompts the episode carries as of this step's end. */
     carriedPrompts?: readonly LeaderCompactionCarriedPrompt[];
+    /** What the agent has deferred the episode by so far; null when it has not. */
+    deferral?: { count: number; totalMs: number } | null;
   }): void;
   /**
    * The episode stopped without finishing: the planner dropped it (the context shrank on its own,
@@ -85,10 +93,16 @@ export interface LeaderCompactionEpisodeObserver {
 interface StepStartSnapshot {
   totalTokens: number | undefined;
   steersAccepted: number;
+  startedAtMs: number;
 }
 
 function isOpenPhase(phase: LeaderCompactionState["phase"] | undefined): boolean {
-  return phase === "waiting" || phase === "inFlight" || phase === "backoff";
+  return phase === "waiting" || phase === "inFlight" || phase === "backoff" || phase === "deferred";
+}
+
+/** The episode a state carries, for the phases that carry one. */
+function episodeOf(state: LeaderCompactionState): LeaderCompactionEpisode | null {
+  return state.phase === "armed" || state.phase === "settled" ? null : state.episode;
 }
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
@@ -134,16 +148,92 @@ function formatTokens(tokens: number): string {
   return `${Math.round(tokens)}`;
 }
 
+/** What `prepare` offers the agent on top of the note: whether it may defer, and how far. */
+export interface LeaderCompactionPrepareOffer {
+  /** Whole minutes the agent may still ask to defer by; 0 when it may not. */
+  deferMinutesLeft: number;
+  /** Minutes earlier deferrals in this episode already added; 0 on the first ask. */
+  deferredMinutes: number;
+  /** The agent asked to defer and was refused, so this is the last ask. */
+  deferralRefused: boolean;
+}
+
+function prepareOfferFor(
+  deferral: LeaderCompactionDeferral,
+  config: LeaderCompactionConfig,
+  usedTokens: number | undefined,
+): LeaderCompactionPrepareOffer {
+  return {
+    deferMinutesLeft: leaderCompactionDeferMinutesLeft(deferral, config, usedTokens),
+    deferredMinutes: Math.round(deferral.grantedMs / 60_000),
+    deferralRefused: deferral.refused,
+  };
+}
+
+function formatMinutes(minutes: number): string {
+  return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
+
+/**
+ * The finish-up window (docs/leader-compaction.md): an agent partway through a step it cannot
+ * safely leave finishes just that step before it writes the note. Bounded in time and in scope, so
+ * the turn stays the short one the monitor waits for.
+ */
+function formatFinishUp(config: LeaderCompactionConfig, offer: LeaderCompactionPrepareOffer) {
+  if (config.finishUpMs <= 0) {
+    return "Do not call tools or start anything new in this turn.";
+  }
+  const window = formatMinutes(Math.max(1, Math.round(config.finishUpMs / 60_000)));
+  return (
+    "If you are partway through a step that is unsafe or costly to leave half-done (a merge, " +
+    "push, deploy, migration, multi-file edit, or a build or test you are waiting on), finish " +
+    `that one step now. Spend at most about ${window} and a few tool calls on it, and start ` +
+    "nothing new, not even the step that obviously comes next. If you are not partway through " +
+    `such a step, call no tools. ${formatUnfinishedStep(config, offer)}`
+  );
+}
+
+/** What the agent does with a step it cannot finish in the window: defer it, or say where it stands. */
+function formatUnfinishedStep(
+  config: LeaderCompactionConfig,
+  offer: LeaderCompactionPrepareOffer,
+): string {
+  const stop =
+    "stop where it is safe to stop, and say in the note exactly where it stands and how to resume it.";
+  if (offer.deferralRefused) {
+    return (
+      "You asked to defer this compaction and it cannot be deferred any further. If that step " +
+      `is still unfinished, ${stop}`
+    );
+  }
+  if (offer.deferMinutesLeft <= 0) {
+    return `If that step cannot finish in that time, ${stop}`;
+  }
+  return (
+    "If that step cannot finish in that time, do not leave it half-done and do not run past " +
+    "the limit. Reply with exactly `DEFER <minutes>: <reason>` and nothing else, asking for " +
+    `at most ${formatMinutes(offer.deferMinutesLeft)}. The daemon asks you again when the wait ` +
+    `is over. Once your context passes ${formatTokens(config.ceilingTokens)} tokens a deferral ` +
+    "is refused."
+  );
+}
+
 /**
  * Step 1. The agent writes its own working state while it still has all of it, including the
  * reasoning compaction will not carry forward. The note is its reply rather than a file: a reply
- * needs no permission and no path, and the daemon reads it straight off the turn.
+ * needs no permission and no path, and the daemon reads it straight off the turn. Before that, an
+ * agent partway through a critical step may finish just that step, or ask to defer.
  */
 export function formatPrepareMessage(
   usedTokens: number,
   config: LeaderCompactionConfig,
   trigger: LeaderCompactionTrigger = { kind: "line" },
   recentPrompt: LeaderCompactionCarriedPrompt | null = null,
+  offer: LeaderCompactionPrepareOffer = prepareOfferFor(
+    NO_LEADER_COMPACTION_DEFERRAL,
+    config,
+    usedTokens,
+  ),
 ): string {
   const size = `Your conversation is ${formatTokens(usedTokens)} tokens`;
   const line = formatTokens(config.prepareAtTokens);
@@ -152,6 +242,10 @@ export function formatPrepareMessage(
       ? `${size}. That is under the ${line} line, but ${trigger.reason}, so this is a clean ` +
         "point to compact it."
       : `${size}, over the ${line} line.`;
+  const deferred =
+    offer.deferredMinutes > 0
+      ? ` You deferred this by ${formatMinutes(offer.deferredMinutes)}; it is due now.`
+      : "";
   const nextStepBullet = recentPrompt
     ? "- The exact next step. The user also sent you this, possibly not yet done: " +
       `"${truncateAt(recentPrompt.text, MAX_PROMPT_CHARS, "message")}". If it is not done, make ` +
@@ -159,19 +253,21 @@ export function formatPrepareMessage(
     : "- The exact next step.";
   return formatSystemNotificationPrompt(
     [
-      `${LEADER_COMPACTION_MESSAGE_HEADER} 1 of 3. ${why} Every request you make ` +
+      `${LEADER_COMPACTION_MESSAGE_HEADER} 1 of 3. ${why}${deferred} Every request you make ` +
         "re-reads the whole of it, so at this size each step costs many times what it would " +
         "in a fresh context. The daemon will compact your conversation (Claude Code's " +
         "/compact) as soon as this turn ends. You keep the same agent id, your subagents keep " +
         "running, and their finish notifications still come to you.",
       "Compaction replaces your history with a summary, and your earlier reasoning does not " +
-        "survive it. So write your restore note now, as your entire reply. The daemon hands it " +
-        "back to you word for word afterwards. Do not call tools or start anything new in this " +
-        "turn. Cover:",
+        "survive it. So your final message in this turn must be your restore note, and nothing " +
+        "else. The daemon hands it back to you word for word afterwards.",
+      formatFinishUp(config, offer),
       [
+        "The note covers:",
         "- The goal, and every instruction, rule or constraint the user gave you. Quote them.",
         "- What is done: commits, branches, PRs, files, with ids and paths.",
-        "- What is in flight: each subagent id you are waiting on and what it is doing.",
+        "- What is in flight: each subagent id you are waiting on and what it is doing, and any " +
+          "step you were finishing and where it stands.",
         "- Decisions made and why, and dead ends not to try again.",
         nextStepBullet,
       ].join("\n"),
@@ -255,12 +351,14 @@ export function formatRestoreMessage(episode: LeaderCompactionEpisode): string {
   return formatSystemNotificationPrompt(sections.join("\n\n"));
 }
 
-function formatStepPrompt(
-  step: LeaderCompactionStep,
-  episode: LeaderCompactionEpisode,
-  config: LeaderCompactionConfig,
-  cutPoint: string | null,
-): string {
+function formatStepPrompt(input: {
+  step: LeaderCompactionStep;
+  episode: LeaderCompactionEpisode;
+  config: LeaderCompactionConfig;
+  cutPoint: string | null;
+  usedTokens: number | undefined;
+}): string {
+  const { step, episode, config, cutPoint, usedTokens } = input;
   switch (step) {
     case "prepare":
       return formatPrepareMessage(
@@ -268,6 +366,7 @@ function formatStepPrompt(
         config,
         episode.trigger,
         episode.carriedPrompts.at(-1) ?? null,
+        prepareOfferFor(episode.deferral, config, usedTokens),
       );
     case "compact":
       return formatCompactCommand(cutPoint);
@@ -290,6 +389,8 @@ function describeFailure(failure: LeaderCompactionStepFailure): string {
   switch (failure.kind) {
     case "canceled":
       return "the turn was cancelled";
+    case "timedOut":
+      return "the turn was still running when the monitor stopped waiting for it";
     case "failed":
       return `the turn failed: ${failure.error}`;
     case "busy":
@@ -330,8 +431,13 @@ export class AgentLeaderCompactionMonitor {
   /** Turns this monitor started and has not seen end. Tests await them through `settle()`. */
   private readonly turns = new Set<Promise<void>>();
   private readonly unsubscribeOperatorSignals: () => void;
-  /** Each in-flight step's start snapshot, for the ledger's cost diff. */
+  /** Each in-flight step's start snapshot, for the ledger's cost diff and the prepare bound. */
   private readonly stepStarts = new Map<string, StepStartSnapshot>();
+  /**
+   * Which turn each agent's step is waiting on. A prepare turn the monitor stopped waiting for
+   * keeps running; when it ends, its token is stale and its outcome is dropped.
+   */
+  private readonly stepTokens = new Map<string, number>();
   /** When the quiet gate first held each agent's would-be episode, while it still holds. */
   private readonly quietHoldSince = new Map<string, number>();
   /** A hold that ended with an episode opening, waiting for that episode's first step to start. */
@@ -359,9 +465,7 @@ export class AgentLeaderCompactionMonitor {
     this.lastHumanPrompt.set(signal.agentId, prompt);
     const state = this.states.get(signal.agentId);
     if (!state) return;
-    if (state.phase !== "waiting" && state.phase !== "backoff" && state.phase !== "inFlight") {
-      return;
-    }
+    if (state.phase === "armed" || state.phase === "settled") return;
     if (state.phase === "inFlight" && state.step === "restore") return;
     const carriedPrompts = [...state.episode.carriedPrompts, prompt].slice(-MAX_CARRIED_PROMPTS);
     this.states.set(signal.agentId, {
@@ -451,6 +555,10 @@ export class AgentLeaderCompactionMonitor {
     for (const agentId of this.episodeQuietHolds.keys()) {
       if (!liveIds.has(agentId)) this.episodeQuietHolds.delete(agentId);
     }
+    // A gone agent's state can outlive this sweep (an in-flight turn), and so must its token.
+    for (const agentId of this.stepTokens.keys()) {
+      if (!liveIds.has(agentId) && !this.states.has(agentId)) this.stepTokens.delete(agentId);
+    }
   }
 
   private sweep(): void {
@@ -483,6 +591,7 @@ export class AgentLeaderCompactionMonitor {
 
     for (const agent of agents) {
       const timing = this.timingFor(agent.id, config);
+      this.stopWaitingForOverlongPrepare(agent, config, nowMs);
       const previous = this.states.get(agent.id);
       const plan = planLeaderCompactionStep({
         state: previous,
@@ -500,6 +609,25 @@ export class AgentLeaderCompactionMonitor {
       this.setState(agent.id, plan.state);
       this.act(agent, plan.action, timing, config);
     }
+  }
+
+  /**
+   * A `prepare` turn past `prepareTimeoutMinutes` (docs/leader-compaction.md, "Finish-up window").
+   * The turn is not cancelled: it may be a deploy the agent is finishing. The monitor stops
+   * waiting, counts a failed try, and asks again after the backoff; the turn's own outcome is
+   * dropped when it comes.
+   */
+  private stopWaitingForOverlongPrepare(
+    agent: LeaderCompactionAgentSummary,
+    config: LeaderCompactionConfig,
+    nowMs: number,
+  ): void {
+    const state = this.states.get(agent.id);
+    const start = this.stepStarts.get(agent.id);
+    if (state?.phase !== "inFlight" || state.step !== "prepare" || !start) return;
+    if (!hasLeaderCompactionPrepareTimedOut(start.startedAtMs, nowMs, config)) return;
+    this.stepTokens.set(agent.id, (this.stepTokens.get(agent.id) ?? 0) + 1);
+    this.applyResult(agent, "prepare", state.episode, { status: "timedOut" }, config);
   }
 
   /**
@@ -689,7 +817,13 @@ export class AgentLeaderCompactionMonitor {
   ): void {
     const cutPoint =
       step === "compact" ? (this.options.timing?.cutPointFor(agent.id) ?? null) : null;
-    const prompt = formatStepPrompt(step, episode, config, cutPoint);
+    const prompt = formatStepPrompt({
+      step,
+      episode,
+      config,
+      cutPoint,
+      usedTokens: agent.contextWindowUsedTokens,
+    });
     let started: Promise<IdleTurnOutcome> | null;
     try {
       started = this.options.agentManager.startTurnIfIdle(agent.id, prompt);
@@ -717,7 +851,10 @@ export class AgentLeaderCompactionMonitor {
     this.stepStarts.set(agent.id, {
       totalTokens: agent.totalTokens,
       steersAccepted: agent.steersAccepted,
+      startedAtMs: this.now(),
     });
+    const token = (this.stepTokens.get(agent.id) ?? 0) + 1;
+    this.stepTokens.set(agent.id, token);
     const quietGate = this.episodeQuietHolds.get(agent.id) ?? null;
     this.episodeQuietHolds.delete(agent.id);
     this.observe(agent.id, (observer) =>
@@ -732,9 +869,10 @@ export class AgentLeaderCompactionMonitor {
         atMs: this.now(),
         quietGate,
         carriedPrompts: episode.carriedPrompts,
+        reask: episode.deferral.count > 0 || episode.deferral.refused,
       }),
     );
-    const tracked = this.finishStep(agent, step, episode, started, config).finally(() => {
+    const tracked = this.finishStep(agent, step, episode, started, config, token).finally(() => {
       this.turns.delete(tracked);
     });
     this.turns.add(tracked);
@@ -746,12 +884,20 @@ export class AgentLeaderCompactionMonitor {
     episode: LeaderCompactionEpisode,
     started: Promise<IdleTurnOutcome>,
     config: LeaderCompactionConfig,
+    token: number,
   ): Promise<void> {
     let result: LeaderCompactionTurnResult;
     try {
       result = this.toTurnResult(agent.id, await started);
     } catch (error) {
       result = { status: "failed", error: error instanceof Error ? error.message : String(error) };
+    }
+    if (this.stepTokens.get(agent.id) !== token) {
+      this.options.logger.info(
+        { agentId: agent.id, step },
+        "Leader compaction ignored the outcome of a turn it had stopped waiting for",
+      );
+      return;
     }
     const after = this.options.agentManager
       .listAgentsForLeaderCompaction()
@@ -783,16 +929,16 @@ export class AgentLeaderCompactionMonitor {
     if (applied.failure?.kind === "busy") {
       return;
     }
-    const resultingEpisode =
-      applied.state.phase === "waiting" || applied.state.phase === "backoff"
-        ? applied.state.episode
-        : episode;
+    const resultingEpisode = episodeOf(applied.state) ?? episode;
     const steeredIn = start && after ? Math.max(0, after.steersAccepted - start.steersAccepted) : 0;
     this.observe(agentId, (observer) =>
       observer.onStepFinished({
         agentId,
         step,
-        outcome: applied.failure?.kind ?? "completed",
+        // The ledger's outcomes are the wire's (docs/insights.md); a turn the monitor stopped
+        // waiting for is a failed try there.
+        outcome:
+          applied.failure?.kind === "timedOut" ? "failed" : (applied.failure?.kind ?? "completed"),
         gaveUp: applied.gaveUp,
         episodeEnded:
           applied.state.phase === "settled" && applied.state.reason !== "dryRun"
@@ -806,6 +952,13 @@ export class AgentLeaderCompactionMonitor {
         atMs: this.now(),
         steeredIn,
         carriedPrompts: resultingEpisode.carriedPrompts,
+        deferral:
+          resultingEpisode.deferral.count > 0
+            ? {
+                count: resultingEpisode.deferral.count,
+                totalMs: resultingEpisode.deferral.grantedMs,
+              }
+            : null,
       }),
     );
   }
@@ -833,30 +986,8 @@ export class AgentLeaderCompactionMonitor {
     });
     this.setState(agent.id, applied.state);
     this.notifyStepFinished(agent.id, step, currentEpisode, applied, after);
-    if (
-      !applied.failure &&
-      step === "prepare" &&
-      applied.state.phase === "waiting" &&
-      applied.state.step === "compact"
-    ) {
-      // Asked now, used if the answer is back by the sweep that sends /compact.
-      this.options.timing?.requestCutPoint(agent.id);
-    }
     if (!applied.failure) {
-      this.options.logger.info(
-        {
-          agentId: agent.id,
-          step,
-          next: applied.state.phase === "waiting" ? applied.state.step : applied.state.phase,
-          ...(applied.state.phase === "waiting" && applied.state.step === "restore"
-            ? {
-                compactedFromTokens: applied.state.episode.compactedFromTokens,
-                compactedToTokens: applied.state.episode.compactedToTokens,
-              }
-            : {}),
-        },
-        "Leader compaction finished a step",
-      );
+      this.onStepSucceeded(agent, step, currentEpisode, applied.state);
       return;
     }
     if (applied.failure.kind === "busy") {
@@ -878,9 +1009,68 @@ export class AgentLeaderCompactionMonitor {
         : "Leader compaction step did not take; will retry",
     );
     // An early start was optional: the leader is under the line, and the line starts the next
-    // episode. Only the line's own give-up needs a person.
-    if (applied.gaveUp && episode.trigger.kind === "line") {
+    // episode. Only the line's own give-up needs a person, and only for a leader: a delegated
+    // agent (scope `all`) is left to the CLI's own compaction.
+    if (applied.gaveUp && episode.trigger.kind === "line" && !agent.isDelegated) {
       void this.pushGaveUp(agent, step, applied.failure, config);
+    }
+  }
+
+  private onStepSucceeded(
+    agent: LeaderCompactionAgentSummary,
+    step: LeaderCompactionStep,
+    before: LeaderCompactionEpisode,
+    state: LeaderCompactionState,
+  ): void {
+    if (step === "prepare") {
+      if (state.phase === "waiting" && state.step === "compact") {
+        // Asked now, used if the answer is back by the sweep that sends /compact.
+        this.options.timing?.requestCutPoint(agent.id);
+      }
+      this.logDeferralOutcome(agent, before, state);
+    }
+    this.options.logger.info(
+      {
+        agentId: agent.id,
+        step,
+        next: state.phase === "waiting" ? state.step : state.phase,
+        ...(state.phase === "waiting" && state.step === "restore"
+          ? {
+              compactedFromTokens: state.episode.compactedFromTokens,
+              compactedToTokens: state.episode.compactedToTokens,
+            }
+          : {}),
+      },
+      "Leader compaction finished a step",
+    );
+  }
+
+  /** Says so when a prepare reply asked to defer: granted, or refused and asked once more. */
+  private logDeferralOutcome(
+    agent: LeaderCompactionAgentSummary,
+    before: LeaderCompactionEpisode,
+    state: LeaderCompactionState,
+  ): void {
+    if (state.phase === "deferred") {
+      this.options.logger.info(
+        {
+          agentId: agent.id,
+          minutes: Math.round(
+            (state.episode.deferral.grantedMs - before.deferral.grantedMs) / 60_000,
+          ),
+          totalMinutes: Math.round(state.episode.deferral.grantedMs / 60_000),
+          reason: state.episode.deferral.lastReason,
+          resumesAt: new Date(state.untilMs).toISOString(),
+        },
+        "Leader compaction deferred at the agent's request",
+      );
+    } else if (
+      state.phase === "waiting" &&
+      state.step === "prepare" &&
+      state.episode.deferral.refused &&
+      !before.deferral.refused
+    ) {
+      this.options.logger.info({ agentId: agent.id }, "Leader compaction deferral refused");
     }
   }
 

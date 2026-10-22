@@ -10,6 +10,7 @@ import {
   formatEpisodeCost,
   formatEpisodeMarkerLine,
   formatEpisodePayback,
+  formatEpisodeDeferrals,
   formatEpisodePromptsCarried,
   formatEpisodeQuietGate,
   formatEpisodeTrigger,
@@ -243,6 +244,22 @@ describe("formatEpisodeQuietGate", () => {
   it("is null when the gate never held the episode, or the daemon predates it", () => {
     expect(formatEpisodeQuietGate(episode({ quietGate: null }))).toBeNull();
     expect(formatEpisodeQuietGate(episode())).toBeNull();
+  });
+});
+
+describe("formatEpisodeDeferrals", () => {
+  it("says how long the agent deferred the compaction and how many times", () => {
+    expect(formatEpisodeDeferrals(episode({ deferrals: { count: 2, totalMs: 20 * 60_000 } }))).toBe(
+      "Deferred 20m (2 times)",
+    );
+    expect(formatEpisodeDeferrals(episode({ deferrals: { count: 1, totalMs: 7 * 60_000 } }))).toBe(
+      "Deferred 7m",
+    );
+  });
+
+  it("is null when the agent never deferred, or the daemon predates it", () => {
+    expect(formatEpisodeDeferrals(episode({ deferrals: null }))).toBeNull();
+    expect(formatEpisodeDeferrals(episode())).toBeNull();
   });
 });
 

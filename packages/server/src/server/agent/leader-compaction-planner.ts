@@ -12,6 +12,11 @@ const DEFAULT_RETRY_AFTER_MINUTES = 30;
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_QUIET_MINUTES = 10;
 const DEFAULT_CEILING_TOKENS = 550_000;
+const DEFAULT_FINISH_UP_MINUTES = 10;
+const DEFAULT_PREPARE_TIMEOUT_MINUTES = 30;
+const DEFAULT_MAX_DEFER_MINUTES = 20;
+/** A deferral shorter than this is not worth a turn to ask again. */
+const MIN_DEFERRAL_MS = 60_000;
 
 /**
  * How every message the monitor sends begins, inside its `<paseo-system>` envelope. The timing
@@ -33,6 +38,9 @@ export interface LeaderCompactionSettings {
   maxAttempts?: number;
   quietMinutes?: number;
   ceilingTokens?: number;
+  finishUpMinutes?: number;
+  prepareTimeoutMinutes?: number;
+  maxDeferMinutes?: number;
 }
 
 export interface LeaderCompactionConfig {
@@ -46,11 +54,23 @@ export interface LeaderCompactionConfig {
   /** The quiet gate's override: at or over this, an episode starts regardless of how recently the
    * leader heard from a person. */
   ceilingTokens: number;
+  /**
+   * What `prepare` tells the agent it has to finish a step it is partway through (docs/leader-
+   * compaction.md, "Finish-up window"). 0: it is told to call no tools, as before.
+   */
+  finishUpMs: number;
+  /** How long the monitor waits for a `prepare` turn before it stops waiting. 0: as long as it
+   * takes. Never shorter than `finishUpMs`. */
+  prepareTimeoutMs: number;
+  /** The most one episode may be deferred at the agent's request, in total. 0: no deferral. */
+  maxDeferMs: number;
 }
 
 export function resolveLeaderCompactionConfig(
   settings: LeaderCompactionSettings,
 ): LeaderCompactionConfig {
+  const finishUpMinutes = settings.finishUpMinutes ?? DEFAULT_FINISH_UP_MINUTES;
+  const prepareTimeoutMinutes = settings.prepareTimeoutMinutes ?? DEFAULT_PREPARE_TIMEOUT_MINUTES;
   return {
     dryRun: settings.dryRun ?? false,
     scope: settings.scope ?? "leaders",
@@ -59,7 +79,21 @@ export function resolveLeaderCompactionConfig(
     maxAttempts: settings.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
     quietMs: (settings.quietMinutes ?? DEFAULT_QUIET_MINUTES) * 60_000,
     ceilingTokens: settings.ceilingTokens ?? DEFAULT_CEILING_TOKENS,
+    finishUpMs: finishUpMinutes * 60_000,
+    // The bound is on the wait, so it cannot be shorter than the window the agent was promised.
+    prepareTimeoutMs:
+      prepareTimeoutMinutes === 0 ? 0 : Math.max(prepareTimeoutMinutes, finishUpMinutes) * 60_000,
+    maxDeferMs: (settings.maxDeferMinutes ?? DEFAULT_MAX_DEFER_MINUTES) * 60_000,
   };
+}
+
+/** Whether a `prepare` turn started at `startedAtMs` has run past the monitor's wait for it. */
+export function hasLeaderCompactionPrepareTimedOut(
+  startedAtMs: number,
+  nowMs: number,
+  config: LeaderCompactionConfig,
+): boolean {
+  return config.prepareTimeoutMs > 0 && nowMs - startedAtMs >= config.prepareTimeoutMs;
 }
 
 export interface LeaderCompactionAgentInput {
@@ -93,6 +127,28 @@ export interface LeaderCompactionCarriedPrompt {
   text: string;
 }
 
+/**
+ * What the agent has asked for by replying `DEFER <minutes>: <reason>` to `prepare` (docs/leader-
+ * compaction.md, "Deferral").
+ */
+export interface LeaderCompactionDeferral {
+  /** Deferrals granted so far. */
+  count: number;
+  /** The wait granted across all of them. */
+  grantedMs: number;
+  /** The agent asked for one it could not have and was told so: its next reply is the note. */
+  refused: boolean;
+  /** The reason on its latest request, for the log. */
+  lastReason: string | null;
+}
+
+export const NO_LEADER_COMPACTION_DEFERRAL: LeaderCompactionDeferral = {
+  count: 0,
+  grantedMs: 0,
+  refused: false,
+  lastReason: null,
+};
+
 /** Everything one compaction carries from the crossing to the restore prompt. */
 export interface LeaderCompactionEpisode {
   triggeredAtTokens: number;
@@ -113,12 +169,20 @@ export interface LeaderCompactionEpisode {
    * through to the start of `restore`. Quoted verbatim in the restore message.
    */
   carriedPrompts: LeaderCompactionCarriedPrompt[];
+  deferral: LeaderCompactionDeferral;
 }
 
 export type LeaderCompactionState =
   | { phase: "armed" }
   | { phase: "waiting"; step: LeaderCompactionStep; episode: LeaderCompactionEpisode }
   | { phase: "inFlight"; step: LeaderCompactionStep; episode: LeaderCompactionEpisode }
+  /** The agent asked to be asked again at `untilMs`; the ceiling ends the wait early. */
+  | {
+      phase: "deferred";
+      step: "prepare";
+      episode: LeaderCompactionEpisode;
+      untilMs: number;
+    }
   | {
       phase: "backoff";
       step: LeaderCompactionStep;
@@ -181,6 +245,13 @@ function isOverThreshold(agent: LeaderCompactionAgentInput, config: LeaderCompac
 
 function isUnder(agent: LeaderCompactionAgentInput, lineTokens: number) {
   return agent.contextWindowUsedTokens !== undefined && agent.contextWindowUsedTokens < lineTokens;
+}
+
+function isAtCeiling(agent: LeaderCompactionAgentInput, config: LeaderCompactionConfig) {
+  return (
+    agent.contextWindowUsedTokens !== undefined &&
+    agent.contextWindowUsedTokens >= config.ceilingTokens
+  );
 }
 
 function isUnderThreshold(agent: LeaderCompactionAgentInput, config: LeaderCompactionConfig) {
@@ -287,6 +358,7 @@ function planArmedStart(
       compactedFromTokens: null,
       compactedToTokens: null,
       carriedPrompts: recentPrompt ? [recentPrompt] : [],
+      deferral: NO_LEADER_COMPACTION_DEFERRAL,
     },
     agent,
   );
@@ -330,6 +402,12 @@ export function planLeaderCompactionStep(input: {
     }
     case "waiting":
       return planWaiting(state.step, state.episode, agent);
+    case "deferred":
+      // A request for more time never outranks the ceiling.
+      if (nowMs < state.untilMs && !isAtCeiling(agent, config)) {
+        return { state, action: NO_ACTION };
+      }
+      return planWaiting(state.step, state.episode, agent);
     case "backoff":
       if (nowMs < state.untilMs) {
         return { state, action: NO_ACTION };
@@ -345,6 +423,8 @@ export function planLeaderCompactionStep(input: {
 /** A turn that ended any way other than `completed` with a compaction that took. */
 export type LeaderCompactionStepFailure =
   | { kind: "canceled" }
+  /** The monitor stopped waiting for the turn. It was not cancelled and may still be running. */
+  | { kind: "timedOut" }
   | { kind: "failed"; error: string }
   | { kind: "busy" }
   | { kind: "notCompacted"; usedTokens: number | undefined };
@@ -352,6 +432,7 @@ export type LeaderCompactionStepFailure =
 export type LeaderCompactionTurnResult =
   | { status: "completed"; finalText: string; usedTokensAfter: number | undefined }
   | { status: "canceled" }
+  | { status: "timedOut" }
   | { status: "failed"; error: string }
   /** The agent picked up work between the sweep and the start, so nothing was sent. */
   | { status: "busy" };
@@ -391,6 +472,83 @@ function failStep(
   };
 }
 
+const DEFER_REPLY = /^DEFER\s+(\d+)\s*:\s*(\S.*)$/;
+
+/**
+ * The reply `prepare` offers instead of a note: exactly `DEFER <minutes>: <reason>`, one line.
+ * Anything else, a note that merely mentions it included, is the note.
+ */
+export function parseLeaderCompactionDeferral(
+  text: string,
+): { minutes: number; reason: string } | null {
+  const trimmed = text.trim().replace(/^`+|`+$/g, "");
+  if (trimmed.includes("\n")) return null;
+  const match = DEFER_REPLY.exec(trimmed);
+  if (!match) return null;
+  const minutes = Number(match[1]);
+  const reason = match[2]?.trim();
+  if (!reason || !Number.isInteger(minutes) || minutes < 1) return null;
+  return { minutes, reason };
+}
+
+/**
+ * Whole minutes the agent may still ask to defer by: none at the ceiling, after a refusal, when
+ * the budget is under a minute, or when the context size is unknown.
+ */
+export function leaderCompactionDeferMinutesLeft(
+  deferral: LeaderCompactionDeferral,
+  config: LeaderCompactionConfig,
+  usedTokens: number | undefined,
+): number {
+  if (deferral.refused) return 0;
+  if (usedTokens === undefined || usedTokens >= config.ceilingTokens) return 0;
+  const leftMs = config.maxDeferMs - deferral.grantedMs;
+  return leftMs < MIN_DEFERRAL_MS ? 0 : Math.floor(leftMs / 60_000);
+}
+
+function applyDeferralRequest(input: {
+  episode: LeaderCompactionEpisode;
+  request: { minutes: number; reason: string };
+  usedTokensAfter: number | undefined;
+  config: LeaderCompactionConfig;
+  nowMs: number;
+}): LeaderCompactionTurnApplied {
+  const { episode, request, usedTokensAfter, config, nowMs } = input;
+  const minutesLeft = leaderCompactionDeferMinutesLeft(episode.deferral, config, usedTokensAfter);
+  if (minutesLeft === 0) {
+    // Not a note: ask once more, and take whatever comes back as the note.
+    return {
+      state: {
+        phase: "waiting",
+        step: "prepare",
+        episode: { ...episode, attempts: 0, deferral: { ...episode.deferral, refused: true } },
+      },
+      failure: null,
+      gaveUp: false,
+    };
+  }
+  const grantedMs = Math.min(request.minutes, minutesLeft) * 60_000;
+  return {
+    state: {
+      phase: "deferred",
+      step: "prepare",
+      untilMs: nowMs + grantedMs,
+      episode: {
+        ...episode,
+        attempts: 0,
+        deferral: {
+          count: episode.deferral.count + 1,
+          grantedMs: episode.deferral.grantedMs + grantedMs,
+          refused: false,
+          lastReason: request.reason,
+        },
+      },
+    },
+    failure: null,
+    gaveUp: false,
+  };
+}
+
 export function applyLeaderCompactionTurnOutcome(input: {
   step: LeaderCompactionStep;
   episode: LeaderCompactionEpisode;
@@ -407,7 +565,19 @@ export function applyLeaderCompactionTurnOutcome(input: {
     return failStep(step, episode, failure, config, nowMs);
   }
   switch (step) {
-    case "prepare":
+    case "prepare": {
+      const request = episode.deferral.refused
+        ? null
+        : parseLeaderCompactionDeferral(result.finalText);
+      if (request) {
+        return applyDeferralRequest({
+          episode,
+          request,
+          usedTokensAfter: result.usedTokensAfter,
+          config,
+          nowMs,
+        });
+      }
       return {
         state: {
           phase: "waiting",
@@ -417,6 +587,7 @@ export function applyLeaderCompactionTurnOutcome(input: {
         failure: null,
         gaveUp: false,
       };
+    }
     case "compact": {
       // The turn completing proves nothing: an interrupted or refused compaction still ends the
       // turn. The context shrinking below the line is the only evidence it happened.

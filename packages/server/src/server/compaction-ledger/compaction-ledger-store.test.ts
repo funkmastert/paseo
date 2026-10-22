@@ -45,6 +45,7 @@ function row(overrides: Partial<CompactionEpisodeRow> = {}): CompactionEpisodeRo
     noteLength: 120,
     promptsCarried: null,
     quietGate: null,
+    deferrals: null,
     costWeightedTokens: 175,
     costBasis: "measured",
     estimatedSavedWeightedTokens: null,
@@ -148,7 +149,7 @@ describe("CompactionLedgerStore", () => {
   test("rows written before the quiet-gate fields existed still load", async () => {
     const rootDir = mkdtempSync(join(tmpdir(), "compaction-ledger-older-row-"));
     try {
-      const { promptsCarried: _prompts, quietGate: _gate, ...older } = row();
+      const { promptsCarried: _prompts, quietGate: _gate, deferrals: _deferrals, ...older } = row();
       writeFileSync(
         join(rootDir, "state.json"),
         JSON.stringify({ v: 1, backfillDoneAtMs: null, rows: [older] }),
@@ -156,6 +157,25 @@ describe("CompactionLedgerStore", () => {
       const store = new CompactionLedgerStore({ rootDir, logger });
       await store.load();
       expect(store.getEpisode("leader-1:1000")).toEqual(row());
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("round-trips the deferrals an episode took", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "compaction-ledger-deferrals-"));
+    try {
+      const store = new CompactionLedgerStore({ rootDir, logger });
+      await store.load();
+      store.upsertEpisode(row({ deferrals: { count: 2, totalMs: 20 * 60_000 } }));
+      await store.flush();
+
+      const reloaded = new CompactionLedgerStore({ rootDir, logger });
+      await reloaded.load();
+      expect(reloaded.getEpisode("leader-1:1000")?.deferrals).toEqual({
+        count: 2,
+        totalMs: 20 * 60_000,
+      });
     } finally {
       rmSync(rootDir, { recursive: true, force: true });
     }

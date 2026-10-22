@@ -35,6 +35,13 @@ export const CompactionQuietGateSchema = z.object({
   heldMs: z.number(),
 });
 
+// What the agent deferred the episode by (docs/leader-compaction.md, "Deferral"): how many times
+// it asked, and the wait in total.
+export const CompactionDeferralsSchema = z.object({
+  count: z.number(),
+  totalMs: z.number(),
+});
+
 // A human prompt the episode carried into its restore message, text as the leader saw it.
 export const CompactionCarriedPromptSchema = z.object({
   atMs: z.number(),
@@ -59,6 +66,8 @@ export const CompactionEpisodeSchema = z.object({
   // older daemon.
   promptsCarried: z.array(CompactionCarriedPromptSchema).nullable().optional(),
   quietGate: CompactionQuietGateSchema.nullable().optional(),
+  // Absent or null on an episode the agent never deferred, and on an older daemon.
+  deferrals: CompactionDeferralsSchema.nullable().optional(),
   costWeightedTokens: z.number().nullable(),
   costBasis: CompactionCostBasisSchema,
   estimatedSavedWeightedTokens: z.number().nullable(),

@@ -593,3 +593,59 @@ describe("CompactionLedgerService: quiet gate and carried prompts", () => {
     expect(service.list({})[0]?.promptsCarried).toBeNull();
   });
 });
+
+describe("CompactionLedgerService: deferrals", () => {
+  test("the deferrals an episode took land on the row, latest count wins", async () => {
+    const store = freshStore();
+    await store.load();
+    const service = new CompactionLedgerService({ store });
+    startPrepare(service);
+    finishStep(service, { deferral: { count: 1, totalMs: 7 * 60_000 } });
+    expect(service.list({})[0]?.deferrals).toEqual({ count: 1, totalMs: 7 * 60_000 });
+
+    startPrepare(service, { reask: true, atMs: 8_000_000 });
+    finishStep(service, { deferral: { count: 2, totalMs: 15 * 60_000 }, atMs: 8_000_500 });
+    expect(service.list({})).toHaveLength(1);
+    expect(service.list({})[0]?.deferrals).toEqual({ count: 2, totalMs: 15 * 60_000 });
+    expect(service.list({})[0]?.steps.map((step) => step.step)).toEqual(["prepare", "prepare"]);
+  });
+
+  test("a first prepare that is not a re-ask still starts a new episode", async () => {
+    const store = freshStore();
+    await store.load();
+    const service = new CompactionLedgerService({ store });
+    startPrepare(service);
+    finishStep(service, { deferral: { count: 1, totalMs: 7 * 60_000 } });
+    startPrepare(service, { atMs: 8_000_000 });
+    expect(service.list({})).toHaveLength(2);
+  });
+
+  test("an episode that was never deferred stores null", async () => {
+    const store = freshStore();
+    await store.load();
+    const service = new CompactionLedgerService({ store });
+    startPrepare(service);
+    finishStep(service, { deferral: null });
+    expect(service.list({})[0]?.deferrals).toBeNull();
+  });
+
+  test("a deferred prepare is a completed step, and its duration is the finish-up time", async () => {
+    const store = freshStore();
+    await store.load();
+    const service = new CompactionLedgerService({ store });
+    startPrepare(service, { atMs: 1_000 });
+    finishStep(service, { atMs: 1_000 + 9 * 60_000, deferral: { count: 1, totalMs: 12 * 60_000 } });
+    const step = service.list({})[0]?.steps[0];
+    expect(step).toMatchObject({ step: "prepare", outcome: "completed" });
+    expect((step?.endedAtMs ?? 0) - (step?.startedAtMs ?? 0)).toBe(9 * 60_000);
+  });
+
+  test("a prepare the monitor stopped waiting for is a failed step", async () => {
+    const store = freshStore();
+    await store.load();
+    const service = new CompactionLedgerService({ store });
+    startPrepare(service);
+    finishStep(service, { outcome: "failed" });
+    expect(service.list({})[0]?.steps[0]?.outcome).toBe("failed");
+  });
+});
