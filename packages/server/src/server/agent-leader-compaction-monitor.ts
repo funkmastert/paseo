@@ -597,7 +597,7 @@ export class AgentLeaderCompactionMonitor {
         this.options.logger.warn(
           { ceilingTokens: rawCeilingTokens },
           "Leader compaction: ceilingTokens is close to the CLI's own auto-compact point; " +
-            "clamped to 900K for deferral eligibility and wait-ending",
+            "values above 900K are clamped to 900K for deferral eligibility and wait-ending",
         );
       },
     });
