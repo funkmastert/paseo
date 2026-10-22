@@ -79,8 +79,7 @@ const CLAUDE_PRICES_PER_MTOK: Partial<Record<string, ModelPrice>> = {
  *
  * `gpt-5-codex`, `gpt-5.1-codex` and `gpt-5.1-codex-max` are not on OpenAI's current pricing page
  * (checked 2026-10-22) and stay out of this table — unpriced, never guessed. Only the models
- * below that ship a confirmed >272K-token tier carry a `longPrompt` entry; the rest of this
- * table's models may have one too, not yet sourced.
+ * below that ship a confirmed >272K-token tier carry a `longPrompt` entry.
  */
 /** OpenAI's standard-vs-long-context split for the fork's newer Codex models below. */
 const OPENAI_LONG_PROMPT_THRESHOLD_TOKENS = 272_000;
@@ -92,10 +91,22 @@ const CODEX_PRICES_PER_MTOK: Partial<Record<string, ModelPrice>> = {
   "gpt-5.1": { base: { input: 1.25, cacheWrite: 1.25, cacheRead: 0.125, output: 10.0 } },
   "gpt-5.2": { base: { input: 1.75, cacheWrite: 1.75, cacheRead: 0.175, output: 14.0 } },
   "gpt-5.3-codex": { base: { input: 1.75, cacheWrite: 1.75, cacheRead: 0.175, output: 14.0 } },
-  "gpt-5.4": { base: { input: 2.5, cacheWrite: 2.5, cacheRead: 0.25, output: 15.0 } },
+  "gpt-5.4": {
+    base: { input: 2.5, cacheWrite: 2.5, cacheRead: 0.25, output: 15.0 },
+    longPrompt: {
+      aboveAvgPromptTokens: OPENAI_LONG_PROMPT_THRESHOLD_TOKENS,
+      price: { input: 5.0, cacheWrite: 5.0, cacheRead: 0.5, output: 22.5 },
+    },
+  },
   "gpt-5.4-mini": { base: { input: 0.75, cacheWrite: 0.75, cacheRead: 0.075, output: 4.5 } },
   "gpt-5.4-nano": { base: { input: 0.2, cacheWrite: 0.2, cacheRead: 0.02, output: 1.25 } },
-  "gpt-5.5": { base: { input: 5.0, cacheWrite: 5.0, cacheRead: 0.5, output: 30.0 } },
+  "gpt-5.5": {
+    base: { input: 5.0, cacheWrite: 5.0, cacheRead: 0.5, output: 30.0 },
+    longPrompt: {
+      aboveAvgPromptTokens: OPENAI_LONG_PROMPT_THRESHOLD_TOKENS,
+      price: { input: 10.0, cacheWrite: 10.0, cacheRead: 1.0, output: 45.0 },
+    },
+  },
   o3: { base: { input: 2.0, cacheWrite: 2.0, cacheRead: 0.5, output: 8.0 } },
   "o3-mini": { base: { input: 1.1, cacheWrite: 1.1, cacheRead: 0.55, output: 4.4 } },
   "o4-mini": { base: { input: 1.1, cacheWrite: 1.1, cacheRead: 0.275, output: 4.4 } },

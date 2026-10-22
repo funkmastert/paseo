@@ -232,6 +232,18 @@ describe("buildTokenUsageModelBars cost", () => {
     expect(bars[0]?.isCostLowerBound).toBe(false);
     expect(bars[0]?.formattedCost).toBeNull();
   });
+
+  it("doesn't stack a lower-bound marker onto an already-rounded tiny amount", () => {
+    const rows: TokenUsageRow[] = [
+      row({ role: "leader", weighted: 100, costUsd: 0.002 }),
+      row({ role: "worker", weighted: 100, costUsd: null }),
+    ];
+
+    const bars = buildTokenUsageModelBars(rows, "weighted");
+
+    expect(bars[0]?.isCostLowerBound).toBe(true);
+    expect(bars[0]?.formattedCost).toBe("<$0.01");
+  });
 });
 
 describe("buildTokenUsageRoleTotals cost", () => {

@@ -88,7 +88,9 @@ function sumCostUsd(rows: readonly TokenUsageRow[]): CostAggregate {
 function formatCostOrNull(costUsd: number | null, isLowerBound: boolean): string | null {
   if (costUsd === null) return null;
   const formatted = formatUsd(costUsd);
-  return isLowerBound ? `≥${formatted}` : formatted;
+  // `formatted` can already read "<$0.01" for a tiny sum — don't stack a second, redundant
+  // lower-bound marker on top of it ("≥<$0.01").
+  return isLowerBound && !formatted.startsWith("<") ? `≥${formatted}` : formatted;
 }
 
 export function totalForUnit(row: TokenUsageRow, unit: TokenUsageUnit): number {

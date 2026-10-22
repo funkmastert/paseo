@@ -10,6 +10,12 @@ const PHONE_WIDTH = 390;
 const NARROW_PHONE_WIDTH = 360;
 const DESKTOP_WIDTH = 900;
 
+// The real Tokens screen wraps this content in a scroll view with this horizontal padding at
+// phone widths (token-usage-screen.tsx's `scrollContent`, `xs` breakpoint: `theme.spacing[3]`
+// each side). `ContentHarness` mounts the content directly with none of that padding, so a test
+// that measures the bare harness width is measuring more room than the real screen gives it.
+const SCREEN_PADDING_HORIZONTAL_XS = 12;
+
 // TokenUsageContent's JSX compiles under the classic transform (expo/tsconfig.base's
 // `jsx: "react-native"`) but its own module never imports React by name, so its compiled
 // `React.createElement` calls resolve to the global instead (jev-dashboard-view.browser.test.tsx
@@ -44,7 +50,10 @@ describe("TokenUsageContent screenshots", () => {
 describe("TokensByModelCard narrow layout", () => {
   it("keeps the bar track visible instead of squeezed out by the cost line at 360px", async () => {
     await page.viewport(NARROW_PHONE_WIDTH, 1400);
-    const container = mount(<ContentHarness width={NARROW_PHONE_WIDTH} />, NARROW_PHONE_WIDTH);
+    // Mount at the content width the real screen actually gives this component, not the bare
+    // viewport width — the screen's own horizontal padding is otherwise invisible to this test.
+    const contentWidth = NARROW_PHONE_WIDTH - 2 * SCREEN_PADDING_HORIZONTAL_XS;
+    const container = mount(<ContentHarness width={contentWidth} />, contentWidth);
     const track = container.querySelector(
       '[data-testid="tokens-by-model-bar-claude/claude-opus-5-5"]',
     );
@@ -53,9 +62,11 @@ describe("TokensByModelCard narrow layout", () => {
     );
     expect(track).not.toBeNull();
     expect(cost).not.toBeNull();
-    // The bug this guards against: the cost text sat in the same fixed-width column as the token
-    // total, so a longer "≥$X" lower-bound string squeezed the bar track toward zero width.
-    expect(track!.getBoundingClientRect().width).toBeGreaterThan(20);
+    // The bug this guards against: the label column stayed a fixed 180px, squeezing the bar
+    // track toward zero width once the row's real available width (after screen padding, card
+    // padding, and the token-total column) got tight. 80px is a usable minimum, not just
+    // "nonzero".
+    expect(track!.getBoundingClientRect().width).toBeGreaterThanOrEqual(80);
     // The cost line sits below the row, not crammed beside the track — it spans close to the
     // row's own width rather than a narrow fixed column.
     expect(cost!.getBoundingClientRect().width).toBeGreaterThan(50);

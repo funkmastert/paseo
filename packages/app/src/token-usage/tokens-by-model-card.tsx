@@ -140,13 +140,18 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     gap: theme.spacing[3],
   },
+  // Was a fixed 180px, which left the bar track almost no room on a phone-width row (R7):
+  // `flexShrink` plus a smaller cap lets the label give way to the track instead of taking its
+  // full content width whenever the row has slack to spare.
   label: {
-    width: 180,
+    flexShrink: 1,
+    maxWidth: 120,
     color: theme.colors.foreground,
     fontSize: theme.fontSize.sm,
   },
   labelMuted: {
-    width: 180,
+    flexShrink: 1,
+    maxWidth: 120,
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
   },
