@@ -2288,6 +2288,10 @@ export const es: TranslationResources = {
   tokenUsage: {
     byModelTitle: "Tokens por modelo",
     byRoleTitle: "Tokens por rol",
+    costLabel: "Costo equivalente de API",
+    costCaption:
+      "Lo que costaría este uso a precios de lista de la API — no lo que factura una suscripción de tarifa plana.",
+    unpricedFooter: "{{count}} tokens no tienen un precio conocido y no se incluyen en el total",
   },
   review: {
     comment: {

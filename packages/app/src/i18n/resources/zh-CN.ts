@@ -2209,6 +2209,9 @@ export const zhCN: TranslationResources = {
   tokenUsage: {
     byModelTitle: "按模型统计 Token",
     byRoleTitle: "按角色统计 Token",
+    costLabel: "API 等效费用",
+    costCaption: "按 API 标价计算此用量的费用 — 并非固定费率订阅实际收取的金额。",
+    unpricedFooter: "{{count}} 个 token 没有已知价格，未计入总额",
   },
   review: {
     comment: {

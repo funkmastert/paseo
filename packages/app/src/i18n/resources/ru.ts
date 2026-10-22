@@ -2270,6 +2270,10 @@ export const ru: TranslationResources = {
   tokenUsage: {
     byModelTitle: "Токены по модели",
     byRoleTitle: "Токены по роли",
+    costLabel: "Эквивалент стоимости API",
+    costCaption:
+      "Сколько это использование стоило бы по прайс-листу API — а не то, что взимается по тарифу с фиксированной платой.",
+    unpricedFooter: "{{count}} токенов не имеют известной цены и не включены в итог",
   },
   review: {
     comment: {

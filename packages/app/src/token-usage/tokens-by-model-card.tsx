@@ -43,7 +43,15 @@ function ModelBarTrack({ bar }: { bar: TokenUsageModelBar }) {
   );
 }
 
-function ModelRow({ bar, bordered }: { bar: TokenUsageModelBar; bordered: boolean }) {
+function ModelRow({
+  bar,
+  bordered,
+  costSupported,
+}: {
+  bar: TokenUsageModelBar;
+  bordered: boolean;
+  costSupported: boolean;
+}) {
   return (
     <View
       style={[styles.row, bordered ? settingsStyles.rowBorder : null]}
@@ -59,9 +67,16 @@ function ModelRow({ bar, bordered }: { bar: TokenUsageModelBar; bordered: boolea
       <View style={styles.trackWrap}>
         <ModelBarTrack bar={bar} />
       </View>
-      <Text style={styles.value} testID={`tokens-by-model-value-${bar.id}`}>
-        {bar.formattedTotal}
-      </Text>
+      <View style={styles.valueColumn}>
+        <Text style={styles.value} testID={`tokens-by-model-value-${bar.id}`}>
+          {bar.formattedTotal}
+        </Text>
+        {costSupported ? (
+          <Text style={styles.costValue} testID={`tokens-by-model-cost-${bar.id}`}>
+            {bar.formattedCost ?? "—"}
+          </Text>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -71,14 +86,20 @@ function ModelRow({ bar, bordered }: { bar: TokenUsageModelBar; bordered: boolea
  * segments. Pure in its props — `buildTokenUsageModelBars` does the sorting and fraction math, this
  * only renders it.
  */
-export function TokensByModelCard({ bars }: { bars: TokenUsageModelBar[] }) {
+export function TokensByModelCard({
+  bars,
+  costSupported,
+}: {
+  bars: TokenUsageModelBar[];
+  costSupported: boolean;
+}) {
   const { t } = useTranslation();
   return (
     <SettingsSection title={t("tokenUsage.byModelTitle")} testID="tokens-by-model-card">
       <Legend />
       <View style={settingsStyles.card}>
         {bars.map((bar, index) => (
-          <ModelRow key={bar.id} bar={bar} bordered={index > 0} />
+          <ModelRow key={bar.id} bar={bar} bordered={index > 0} costSupported={costSupported} />
         ))}
       </View>
     </SettingsSection>
@@ -141,9 +162,18 @@ const styles = StyleSheet.create((theme) => ({
   segment: {
     height: "100%",
   },
-  value: {
+  valueColumn: {
     minWidth: 56,
+    alignItems: "flex-end",
+  },
+  value: {
     color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    fontVariant: ["tabular-nums"],
+    textAlign: "right",
+  },
+  costValue: {
+    color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
     fontVariant: ["tabular-nums"],
     textAlign: "right",

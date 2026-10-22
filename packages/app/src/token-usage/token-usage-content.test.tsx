@@ -96,6 +96,34 @@ describe("TokenUsageContent", () => {
     expect(container.querySelector('[data-testid="token-usage-loading"]')).not.toBeNull();
   });
 
+  it("shows the cost summary and a model row's cost when the host supports it", () => {
+    const container = mount(<ContentHarness width={DESKTOP_WIDTH} />, DESKTOP_WIDTH);
+    expect(container.querySelector('[data-testid="token-usage-cost-summary"]')).not.toBeNull();
+    expect(container.textContent).toContain("API-equivalent cost");
+    const modelCost = container.querySelector(
+      '[data-testid^="tokens-by-model-cost-claude/claude-opus-5-5"]',
+    );
+    expect(modelCost).not.toBeNull();
+    expect(modelCost?.textContent).toMatch(/^\$/);
+  });
+
+  it("hides all cost UI when the host doesn't support tokenUsageCost", () => {
+    const container = mount(
+      <ContentHarness width={DESKTOP_WIDTH} costSupported={false} />,
+      DESKTOP_WIDTH,
+    );
+    expect(container.querySelector('[data-testid="token-usage-cost-summary"]')).toBeNull();
+    expect(container.querySelector('[data-testid^="tokens-by-model-cost-"]')).toBeNull();
+    expect(container.querySelector('[data-testid^="tokens-by-role-cost-"]')).toBeNull();
+  });
+
+  it("shows the unpriced footer only when the fixture has unpriced tokens", () => {
+    const container = mount(<ContentHarness width={DESKTOP_WIDTH} />, DESKTOP_WIDTH);
+    expect(
+      container.querySelector('[data-testid="token-usage-cost-unpriced-footer"]'),
+    ).not.toBeNull();
+  });
+
   it("shows a retryable error when the query itself rejects, with no payload yet", () => {
     const onRetry = vi.fn();
     const container = mount(
