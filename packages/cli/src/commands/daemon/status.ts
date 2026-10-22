@@ -15,16 +15,21 @@ import type { CommandOptions, ListResult, OutputSchema } from "../../output/inde
 import { resolveLocalDaemonState } from "./local-daemon.js";
 import { resolveNodePathFromPid } from "./runtime-toolchain.js";
 
-const DAEMON_STATUS_PROBE_TIMEOUT_MS = 1500;
+// Matches doctor.ts's `getDaemonStatus({ timeout: 5000 })`: the daemon answers this by probing
+// every registered provider's `isAvailable()` live (no caching), and at least one of those checks
+// (Codex, discovered via a real subprocess `--version` probe of the ChatGPT-bundled binary) can
+// take close to 2s on a cold run. A tighter budget here timed out reliably and silently fell back
+// to checkProviderBinaries() below, which answers a different question (PATH-only).
+export const DAEMON_STATUS_PROBE_TIMEOUT_MS = 5000;
 
-interface ProviderBinaryStatus {
+export interface ProviderBinaryStatus {
   label: string;
   path: string | null;
   version: string | null;
   source?: "daemon" | "local";
 }
 
-interface DaemonStatus {
+export interface DaemonStatus {
   serverId: string | null;
   localDaemon: "running" | "stopped" | "stale_pid" | "unresponsive";
   connectedDaemon: "reachable" | "unreachable" | "auth_required" | "auth_failed" | "not_probed";
@@ -118,8 +123,8 @@ function createStatusSchema(status: DaemonStatus): OutputSchema<StatusRow> {
             return "yellow";
           }
           if (item.key.startsWith("  ")) {
-            if (item.value === "not found" || item.value === "not found (daemon)") return "red";
-            if (item.value.endsWith("(--version failed)")) return "yellow";
+            if (item.value.startsWith("not found")) return "red";
+            if (item.value.includes("(--version failed)")) return "yellow";
             return "green";
           }
           return undefined;
@@ -130,7 +135,13 @@ function createStatusSchema(status: DaemonStatus): OutputSchema<StatusRow> {
   };
 }
 
-function toStatusRows(status: DaemonStatus): StatusRow[] {
+function formatProviderValue(path: string | null, version: string | null, suffix: string): string {
+  if (!path) return `not found${suffix}`;
+  if (!version) return `${path} (--version failed)${suffix}`;
+  return `${path} (${version})${suffix}`;
+}
+
+export function toStatusRows(status: DaemonStatus): StatusRow[] {
   const rows: StatusRow[] = [
     { key: "Server ID", value: status.serverId ?? "-" },
     { key: "Local Daemon", value: status.localDaemon },
@@ -166,12 +177,15 @@ function toStatusRows(status: DaemonStatus): StatusRow[] {
       } else {
         rows.push({ key: `  ${provider.label}`, value: `${provider.path} (daemon)` });
       }
-    } else if (!provider.path) {
-      rows.push({ key: `  ${provider.label}`, value: "not found" });
-    } else if (!provider.version) {
-      rows.push({ key: `  ${provider.label}`, value: `${provider.path} (--version failed)` });
     } else {
-      rows.push({ key: `  ${provider.label}`, value: `${provider.path} (${provider.version})` });
+      // No daemon-sourced answer reached this (the daemon detail request failed or was never
+      // made): this is checkProviderBinaries()'s own PATH-only check, a materially narrower
+      // question than the daemon's live availability probe. Tag every row so it never reads like
+      // the daemon's own answer.
+      rows.push({
+        key: `  ${provider.label}`,
+        value: formatProviderValue(provider.path, provider.version, " (local)"),
+      });
     }
   }
 
@@ -201,11 +215,11 @@ async function checkProviderBinary(
   }
 }
 
-async function checkProviderBinaries(): Promise<ProviderBinaryStatus[]> {
+export async function checkProviderBinaries(): Promise<ProviderBinaryStatus[]> {
   const results = await Promise.all(
     PROVIDER_BINARIES.map(async ({ label, binary }) => {
       const result = await checkProviderBinary(binary);
-      return Object.assign({ label }, result);
+      return Object.assign({ label, source: "local" as const }, result);
     }),
   );
   return results;

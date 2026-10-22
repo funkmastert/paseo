@@ -2,7 +2,15 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { resolveDaemonProbeTarget, resolveVitalsRows, selectRelayStatus } from "./status.js";
+import {
+  DAEMON_STATUS_PROBE_TIMEOUT_MS,
+  type DaemonStatus,
+  type ProviderBinaryStatus,
+  resolveDaemonProbeTarget,
+  resolveVitalsRows,
+  selectRelayStatus,
+  toStatusRows,
+} from "./status.js";
 
 describe("resolveDaemonProbeTarget", () => {
   const originalHost = process.env.PASEO_HOST;
@@ -22,6 +30,92 @@ describe("resolveDaemonProbeTarget", () => {
   test("an explicit --host wins over PASEO_HOST", () => {
     process.env.PASEO_HOST = "example.internal:9999";
     expect(resolveDaemonProbeTarget({ host: "other.internal:1111" })).toBe("other.internal:1111");
+  });
+});
+
+describe("DAEMON_STATUS_PROBE_TIMEOUT_MS", () => {
+  // Matches doctor.ts's `getDaemonStatus({ timeout: 5000 })` for the same RPC. The old 1500ms
+  // budget was tighter than the server-side cost of a multi-provider live availability sweep (a
+  // Codex bundle-binary probe alone can take ~2s), so it timed out reliably and silently fell back
+  // to checkProviderBinaries()'s PATH-only check — "Codex: not found" even when Codex is fine.
+  test("is sized for a multi-provider live availability sweep, not a single fast RPC", () => {
+    expect(DAEMON_STATUS_PROBE_TIMEOUT_MS).toBe(5000);
+  });
+});
+
+function baseDaemonStatus(providers: ProviderBinaryStatus[]): DaemonStatus {
+  return {
+    serverId: "srv_test",
+    localDaemon: "running",
+    connectedDaemon: "reachable",
+    home: "/home/test",
+    listen: "127.0.0.1:6767",
+    relay: "disabled",
+    hostname: "test-host",
+    pid: 1,
+    startedAt: null,
+    owner: null,
+    logPath: "/home/test/daemon.log",
+    daemonNode: "/usr/bin/node",
+    cliNode: "/usr/bin/node",
+    cliVersion: "0.0.0",
+    daemonVersion: "0.0.0",
+    desktopManaged: false,
+    eventLoop: null,
+    lastWedge: null,
+    lastShutdown: null,
+    providers,
+  };
+}
+
+function providerRow(rows: ReturnType<typeof toStatusRows>, label: string) {
+  const row = rows.find((r) => r.key.trim() === label);
+  if (!row) throw new Error(`no row for ${label}`);
+  return row.value;
+}
+
+describe("toStatusRows provider source marking", () => {
+  // The daemon's own answer (statusPayload.providers via probeDaemonOverWebsocket) is tagged
+  // "daemon" and must keep reading that way.
+  test("a daemon-reported provider is tagged (daemon), found or not", () => {
+    const rows = toStatusRows(
+      baseDaemonStatus([
+        { label: "Claude", path: "available", version: null, source: "daemon" },
+        { label: "Codex", path: null, version: "no client registered", source: "daemon" },
+      ]),
+    );
+    expect(providerRow(rows, "Claude")).toBe("available (daemon)");
+    expect(providerRow(rows, "Codex")).toBe("not found (daemon)");
+  });
+
+  // checkProviderBinaries()'s PATH-only fallback runs when the daemon detail request fails (or
+  // was never made) and must never render indistinguishably from a daemon-reported row — that was
+  // the exact bug: "Codex: not found" from a local `which codex` read as if the live daemon,
+  // which had already discovered Codex via the ChatGPT bundle and a green guard self-test, had
+  // said so.
+  test("a local PATH-only provider is tagged (local), found or not", () => {
+    const rows = toStatusRows(
+      baseDaemonStatus([
+        { label: "Claude", path: "/usr/local/bin/claude", version: "2.0.0", source: "local" },
+        { label: "Codex", path: null, version: null, source: "local" },
+        { label: "OpenCode", path: "/usr/local/bin/opencode", version: null, source: "local" },
+      ]),
+    );
+    expect(providerRow(rows, "Claude")).toBe("/usr/local/bin/claude (2.0.0) (local)");
+    expect(providerRow(rows, "Codex")).toBe("not found (local)");
+    expect(providerRow(rows, "OpenCode")).toBe(
+      "/usr/local/bin/opencode (--version failed) (local)",
+    );
+  });
+
+  // A provider record with no `source` at all can only come from the local fallback (the daemon
+  // path always sets "daemon" explicitly) — treat it the same as an explicit "local", never as an
+  // unmarked/ambiguous row.
+  test("a provider with no source at all is still tagged (local), not left unmarked", () => {
+    const rows = toStatusRows(
+      baseDaemonStatus([{ label: "Codex", path: null, version: null } as ProviderBinaryStatus]),
+    );
+    expect(providerRow(rows, "Codex")).toBe("not found (local)");
   });
 });
 
