@@ -545,6 +545,14 @@ export type JevSavingsEventsPayload = Extract<
   SessionOutboundMessage,
   { type: "jev.savings.events.response" }
 >["payload"];
+export type CompactionEpisodesListPayload = Extract<
+  SessionOutboundMessage,
+  { type: "compaction.episodes.list.response" }
+>["payload"];
+export type CompactionEpisodesSummaryPayload = Extract<
+  SessionOutboundMessage,
+  { type: "compaction.episodes.summary.response" }
+>["payload"];
 type DaemonStatusPayload = DaemonGetStatusResponse["payload"];
 type DaemonPairingOfferPayload = DaemonGetPairingOfferResponse["payload"];
 type DiagnosticsPayload = DiagnosticsResponse["payload"];
@@ -5503,6 +5511,37 @@ export class DaemonClient {
       requestId: options?.requestId,
       timeout: options?.timeout ?? JEV_DEFAULT_RPC_TIMEOUT_MS,
       message: { type: "jev.savings.events.request", ...query },
+    });
+  }
+
+  /** One page of compaction episodes, newest first. See docs/insights.md. */
+  async compactionEpisodesList(
+    query: {
+      range: "today" | "7d" | "all";
+      agentId?: string;
+      cursor?: string;
+      limit?: number;
+    },
+    options?: { requestId?: string },
+  ): Promise<CompactionEpisodesListPayload> {
+    // COMPAT(compactionLedger): callers gate on `server_info.features.compactionLedger`; an older
+    // daemon answers an unknown request type with an `unknown_schema` rpc_error.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "compaction.episodes.list.request", ...query },
+    });
+  }
+
+  /** Totals over a range: count, cost, and estimated saved. See docs/insights.md. */
+  async compactionEpisodesSummary(
+    query: { range: "today" | "7d" | "all"; agentId?: string },
+    options?: { requestId?: string },
+  ): Promise<CompactionEpisodesSummaryPayload> {
+    // COMPAT(compactionLedger): callers gate on `server_info.features.compactionLedger`; an older
+    // daemon answers an unknown request type with an `unknown_schema` rpc_error.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "compaction.episodes.summary.request", ...query },
     });
   }
 

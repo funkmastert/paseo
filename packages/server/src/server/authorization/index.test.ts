@@ -76,6 +76,24 @@ describe("SessionAuthorization", () => {
 
   // COMPAT(mcpStatus): mapped to daemon.read only (unlike providers_snapshot_update's
   // ["daemon.read", "hub.execute"]) — a Hub without daemon.read shouldn't see gateway status.
+  test("the compaction episode list carries agents, so it is workspace.read; the totals are daemon.read", () => {
+    const daemonOnly = new SessionAuthorization(["daemon.read"]);
+    const workspace = new SessionAuthorization(["workspace.read"]);
+    expect(daemonOnly.allowsInbound(inboundMessage("compaction.episodes.list.request"))).toBe(
+      false,
+    );
+    expect(daemonOnly.allowsOutbound(outboundMessage("compaction.episodes.list.response"))).toBe(
+      false,
+    );
+    expect(workspace.allowsInbound(inboundMessage("compaction.episodes.list.request"))).toBe(true);
+    expect(workspace.allowsOutbound(outboundMessage("compaction.episodes.list.response"))).toBe(
+      true,
+    );
+    expect(daemonOnly.allowsInbound(inboundMessage("compaction.episodes.summary.request"))).toBe(
+      true,
+    );
+  });
+
   test("mcp_status_update requires daemon.read; hub.execute alone doesn't grant it", () => {
     expect(
       new SessionAuthorization(["hub.execute"]).allowsOutbound(

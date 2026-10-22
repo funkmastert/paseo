@@ -1210,6 +1210,7 @@ export const ptBR: TranslationResources = {
       askJev: "Perguntar ao JEV",
       jevDashboard: "Painel do JEV",
       tokenUsage: "Tokens",
+      insights: "Estatísticas",
     },
     worktreeSetup: {
       title: "Configurar scripts de worktree",

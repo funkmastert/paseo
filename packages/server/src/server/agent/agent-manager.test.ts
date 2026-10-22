@@ -1453,6 +1453,38 @@ test("turn_completed with a positive turnTokenDelta updates the token-rate bucke
   expect(withDelta.emits).toBe(withoutDelta.emits);
 });
 
+test("subscribeTokenBurn delivers (agentId, tokens) on recordTokenBurn; unsubscribe stops delivery", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-token-burn-subscribe-"));
+  try {
+    const { manager, agentId, session } = await createLiveEventAgent(workdir);
+    const deliveries: Array<{ agentId: string; tokens: number }> = [];
+    const unsubscribe = manager.subscribeTokenBurn((id, tokens) => {
+      deliveries.push({ agentId: id, tokens });
+    });
+
+    session.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "turn-1",
+      turnTokenDelta: 40,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(deliveries).toEqual([{ agentId, tokens: 40 }]);
+
+    unsubscribe();
+    session.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "turn-2",
+      turnTokenDelta: 10,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(deliveries).toEqual([{ agentId, tokens: 40 }]);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});
+
 test("turn_completed ignores a zero or negative turnTokenDelta", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-token-rate-zero-"));
   try {
@@ -8325,6 +8357,25 @@ describe("a quiet idle turn", () => {
     expect((await question.outcome).status).toBe("completed");
     await manager.flush();
     expect(finishedTurns).toEqual([agentId]);
+  });
+
+  test("an accepted steer counts toward steersAccepted, which the leader compaction monitor reads", async () => {
+    const { manager, agentId } = await quietTurnFixture();
+    const question = manager.startQuietTurnIfIdle(agentId, "are you done?");
+    if (!question) throw new Error("expected the idle agent to take the question");
+    await manager.waitForAgentRunStart(agentId);
+    const before = manager
+      .listAgentsForLeaderCompaction()
+      .find((agent) => agent.id === agentId)?.steersAccepted;
+
+    await manager.steerIntoActiveTurn(agentId, "also, fix the test", { clientMessageId: "m1" });
+    await manager.steerIntoActiveTurn(agentId, "and the docs", { clientMessageId: "m2" });
+
+    const after = manager
+      .listAgentsForLeaderCompaction()
+      .find((agent) => agent.id === agentId)?.steersAccepted;
+    expect(before).toBe(0);
+    expect(after).toBe(2);
   });
 
   test("its handle cancels its own turn, quietly", async () => {

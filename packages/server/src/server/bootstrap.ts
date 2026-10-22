@@ -242,6 +242,9 @@ import { AutoPinExpiry } from "./workspace-auto-pin.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { AgentBudgetPacingMonitor } from "./agent-budget-pacing-monitor.js";
 import { AgentLeaderCompactionMonitor } from "./agent-leader-compaction-monitor.js";
+import { runCompactionLedgerBackfill } from "./compaction-ledger/compaction-ledger-backfill.js";
+import { CompactionLedgerService } from "./compaction-ledger/compaction-ledger-service.js";
+import { CompactionLedgerStore } from "./compaction-ledger/compaction-ledger-store.js";
 import {
   COMPACTION_TIMING_READ_ROWS,
   LeaderCompactionTimingAdvisor,
@@ -967,6 +970,45 @@ function createTokenUsageService(input: {
   input.agentManager.subscribe((event) => {
     if (event.type === "agent_state") service.observeAgent(event.agent);
   });
+  return service;
+}
+
+/**
+ * The compaction episode ledger (docs/insights.md): cost and payback for each leader-compaction
+ * episode, fed by the leader compaction monitor's episode observer (wired into
+ * `leaderCompactionMonitor` once it is constructed, below) and by the one-time log backfill.
+ * Neither the store's load nor the backfill is awaited here, so startup is never held up by
+ * them; a request that lands before the load resolves just sees an empty ledger, same as a
+ * fresh daemon would. Once loaded, rows a previous daemon left open are closed as interrupted.
+ */
+function createCompactionLedgerService(input: {
+  paseoHome: string;
+  agentManager: AgentManager;
+  logger: Logger;
+}): CompactionLedgerService {
+  const moduleLogger = input.logger.child({ module: "compaction-ledger" });
+  const store = new CompactionLedgerStore({
+    rootDir: path.join(input.paseoHome, "compactions"),
+    logger: moduleLogger,
+  });
+  const service = new CompactionLedgerService({
+    store,
+    subscribeTokenBurn: (listener) => input.agentManager.subscribeTokenBurn(listener),
+  });
+  void store
+    .load()
+    .then(() => {
+      service.reconcileAfterLoad();
+      return runCompactionLedgerBackfill({
+        store,
+        logPath: path.join(input.paseoHome, "daemon.log"),
+        logger: moduleLogger,
+      });
+    })
+    .catch((error: unknown) => {
+      moduleLogger.warn({ err: error }, "Compaction ledger load or backfill failed");
+    });
+  service.start();
   return service;
 }
 
@@ -1848,6 +1890,7 @@ export async function createPaseoDaemon(
   let accountFailoverMonitor: AccountFailoverMonitor | null = null;
   let budgetPacingMonitor: AgentBudgetPacingMonitor | null = null;
   let leaderCompactionMonitor: AgentLeaderCompactionMonitor | null = null;
+  let compactionLedgerService: CompactionLedgerService | null = null;
   let doneJanitor: AgentDoneJanitor | null = null;
   let remediationLadder: RemediationLadder | null = null;
   let tokenAuditJob: TokenAuditJob | null = null;
@@ -3525,6 +3568,11 @@ export async function createPaseoDaemon(
               logger,
             });
             tokenUsageService = tokenUsage;
+            compactionLedgerService = createCompactionLedgerService({
+              paseoHome: config.paseoHome,
+              agentManager,
+              logger,
+            });
             wsServer = new VoiceAssistantWebSocketServer(
               httpServer,
               logger,
@@ -3543,6 +3591,7 @@ export async function createPaseoDaemon(
                 startPaused: true,
                 autoPinExpiry,
                 tokenUsage,
+                compactionLedger: compactionLedgerService,
               },
               workspaceAutoName,
               config.auth,
@@ -3858,6 +3907,7 @@ export async function createPaseoDaemon(
               logger,
               sweepIntervalMs: config.leaderCompactionOverrides?.sweepIntervalMs,
               timing: compactionTiming,
+              episodeObserver: compactionLedgerService,
             });
             leaderCompactionMonitor.start();
             const leaderCompactionMonitorForModeLog = leaderCompactionMonitor;
@@ -4151,6 +4201,10 @@ export async function createPaseoDaemon(
       logger.warn({ err: error }, "Failed to save token usage");
     });
     stopMonitorsAndSweeps();
+    // After the leader compaction monitor stops: a step it applied on the way down still lands.
+    await compactionLedgerService?.stop().catch((error: unknown) => {
+      logger.warn({ err: error }, "Failed to save the compaction ledger");
+    });
     // Before the savings callers: the observer's queued judgments still land their records.
     await readCheckObserver.observer.stop();
     spawnHintSavings.stop();

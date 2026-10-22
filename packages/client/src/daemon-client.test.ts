@@ -6680,3 +6680,88 @@ test("gets a token usage breakdown for a range", async () => {
 
   await expect(response).resolves.toEqual(payload);
 });
+
+test("lists compaction episodes for a range", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: { compactionLedger: true } });
+  await connectPromise;
+
+  const response = client.compactionEpisodesList({ range: "7d", agentId: "leader-1" });
+  const request = parseSentFrame(mock.sent[0]);
+  expect(request).toMatchObject({
+    type: "compaction.episodes.list.request",
+    range: "7d",
+    agentId: "leader-1",
+  });
+  const payload = {
+    requestId: request.requestId,
+    episodes: [
+      {
+        id: "leader-1:1000",
+        agentId: "leader-1",
+        agentTitle: "Ship the thing",
+        source: "monitor",
+        trigger: "line",
+        triggerReason: null,
+        startedAtMs: 1000,
+        endedAtMs: 1700,
+        steps: [],
+        contextBeforeTokens: 612_000,
+        contextAfterTokens: 31_000,
+        outcome: "done",
+        noteLength: 120,
+        costWeightedTokens: 175,
+        costBasis: "measured",
+        estimatedSavedWeightedTokens: 38_000,
+      },
+    ],
+    nextCursor: null,
+  };
+  mock.triggerMessage(wrapSessionMessage({ type: "compaction.episodes.list.response", payload }));
+
+  await expect(response).resolves.toEqual(payload);
+});
+
+test("gets a compaction episodes summary for a range", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: { compactionLedger: true } });
+  await connectPromise;
+
+  const response = client.compactionEpisodesSummary({ range: "all" });
+  const request = parseSentFrame(mock.sent[0]);
+  expect(request).toMatchObject({ type: "compaction.episodes.summary.request", range: "all" });
+  const payload = {
+    requestId: request.requestId,
+    summary: {
+      count: 3,
+      totalCostWeightedTokens: 525,
+      averageCostWeightedTokens: 175,
+      totalEstimatedSavedWeightedTokens: 114_000,
+      measuredCount: 3,
+      unmeasuredCount: 0,
+    },
+  };
+  mock.triggerMessage(
+    wrapSessionMessage({ type: "compaction.episodes.summary.response", payload }),
+  );
+
+  await expect(response).resolves.toEqual(payload);
+});

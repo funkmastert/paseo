@@ -1201,6 +1201,7 @@ export const ru: TranslationResources = {
       askJev: "Спросить JEV",
       jevDashboard: "Панель JEV",
       tokenUsage: "Токены",
+      insights: "Аналитика",
     },
     worktreeSetup: {
       title: "Настроить скрипты worktree",

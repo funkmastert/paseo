@@ -206,6 +206,11 @@ import {
   createContextUsageSession,
   type ContextUsageSession,
 } from "./session/context-usage/context-usage-session.js";
+import {
+  createCompactionSession,
+  type CompactionLedgerReader,
+  type CompactionSession,
+} from "./session/compaction/compaction-session.js";
 import type { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
 import { createJevSession, type JevSession } from "./session/jev/jev-session.js";
 import {
@@ -596,6 +601,7 @@ export interface SessionOptions {
   usageHistory?: UsageHistoryStore;
   tokenUsage?: TokenUsageReader;
   contextUsage?: AgentContextUsageService;
+  compactionLedger?: CompactionLedgerReader;
   /** The daemon's one sign-in launcher, shared by every connection. Absent: sign-in fails. */
   accountSignIn?: Pick<ClaudeAccountSignIn, "start">;
   jev?: JevService | null;
@@ -863,6 +869,7 @@ export class Session {
   private readonly usageHistorySession: UsageHistorySession | null;
   private readonly tokenUsageSession: TokenUsageSession | null;
   private readonly contextUsageSession: ContextUsageSession | null;
+  private readonly compactionSession: CompactionSession | null;
   private readonly jevSession: JevSession | null;
   private readonly codexGuardSession: CodexGuardSession;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
@@ -921,6 +928,7 @@ export class Session {
       usageHistory,
       tokenUsage,
       contextUsage,
+      compactionLedger,
       accountSignIn,
       jev,
       serviceProxy,
@@ -1086,6 +1094,10 @@ export class Session {
       host: { emit: (msg) => this.emit(msg) },
       reader: tokenUsage,
       logger: this.sessionLogger,
+    });
+    this.compactionSession = createCompactionSession({
+      host: { emit: (msg) => this.emit(msg) },
+      reader: compactionLedger,
     });
     this.contextUsageSession = createContextUsageSession({
       host: { emit: (msg) => this.emit(msg) },
@@ -2345,8 +2357,21 @@ export class Session {
       this.dispatchTokenUsageMessage(msg) ??
       this.dispatchContextUsageMessage(msg) ??
       this.dispatchJevMessage(msg) ??
-      this.dispatchCodexGuardMessage(msg)
+      this.dispatchCodexGuardMessage(msg) ??
+      this.dispatchCompactionMessage(msg)
     );
+  }
+
+  private dispatchCompactionMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (!this.compactionSession) return undefined;
+    switch (msg.type) {
+      case "compaction.episodes.list.request":
+        return this.compactionSession.handleListRequest(msg);
+      case "compaction.episodes.summary.request":
+        return this.compactionSession.handleSummaryRequest(msg);
+      default:
+        return undefined;
+    }
   }
 
   private dispatchContextUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
