@@ -613,9 +613,29 @@ const AgentBuildGateSchema = z
   .object({
     enabled: z.boolean().optional(),
     dryRun: z.boolean().optional(),
+    // The guaranteed floor. Absent: derived from the machine's cores and memory.
     maxConcurrent: z.number().int().positive().optional(),
     // A counted build older than this stops holding a slot: a hung build never blocks forever.
     maxBuildMinutes: z.number().positive().optional(),
+    // Builds above the floor, allowed only while the machine has headroom.
+    burst: z
+      .object({
+        enabled: z.boolean().optional(),
+        // The ceiling. Absent: derived from the machine and held to floor + 3; with a floor under
+        // the derived one, burst is off. One at or under the floor is burst off.
+        maxConcurrent: z.number().int().positive().optional(),
+        // Reclaimable memory needed, per build starting and for the new one.
+        perBuildMemoryGB: z.number().positive().optional(),
+        // Free disk needed above the disk-low line, per build running and the new one. Also the
+        // reserve for every floor build after the first.
+        perBuildDiskGB: z.number().positive().optional(),
+        // macOS and Linux: load average per core under which burst is allowed.
+        maxLoadPerCore: z.number().positive().optional(),
+        // Windows: busy share of CPU under which burst is allowed.
+        maxBusyFraction: z.number().positive().max(1).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

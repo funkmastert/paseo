@@ -186,6 +186,14 @@ export interface SystemMemorySample {
    */
   availableBytes?: number;
   /**
+   * macOS only: memory the OS can hand a new process without writing anything to swap, counting
+   * the file cache and purgeable pages that `availableBytes` leaves out. The native build gate's
+   * burst check (native-build-headroom.ts) judges on this, with the pressure level and swap growth
+   * as its guards against a machine that is actually short. Absent where the host has no
+   * `File-backed pages` line; consumers then fall back to `availableBytes`.
+   */
+  reclaimableBytes?: number;
+  /**
    * macOS `kern.memorystatus_vm_pressure_level`: 1 normal, 2 warn, 4 critical. The memory brake
    * (memory-brake.ts) holds child admission on it. Absent on other platforms, and when the read
    * fails, which the brake treats as no signal.
@@ -244,6 +252,28 @@ export function parseMacosVmStat(output: string): number | undefined {
   const free = readPages("Pages free");
   if (free === 0 && !/^Pages free:/m.test(output)) return undefined;
   return (free + readPages("Pages speculative") + readPages("Pages purgeable")) * pageSize;
+}
+
+/**
+ * Parses macOS `vm_stat` for what the OS could free without swapping: free + file-backed +
+ * purgeable pages, the kernel's own "available pages" ingredients (Activity Monitor's "Cached
+ * Files" is the file-backed and purgeable part). Unlike `parseMacosVmStat` it counts the file cache,
+ * which on a Mac in steady use is most of the memory that is not an app's: 15.7 GiB of a 64 GiB
+ * machine macOS reported as 76% free, against 3.6 GiB from `parseMacosVmStat`. Inactive pages are
+ * still left out, since they include anonymous memory that has to be compressed or swapped first.
+ * Undefined when `File-backed pages` is missing, so the caller keeps the stricter figure.
+ */
+export function parseMacosReclaimable(output: string): number | undefined {
+  const pageSize = Number.parseInt(VM_STAT_PAGE_SIZE.exec(output)?.[1] ?? "", 10);
+  if (!Number.isFinite(pageSize)) return undefined;
+  const readPages = (label: string): number | undefined => {
+    const match = new RegExp(`^${label}:\\s*(\\d+)\\.`, "m").exec(output);
+    return match ? Number.parseInt(match[1], 10) : undefined;
+  };
+  const free = readPages("Pages free");
+  const fileBacked = readPages("File-backed pages");
+  if (free === undefined || fileBacked === undefined) return undefined;
+  return (free + fileBacked + (readPages("Pages purgeable") ?? 0)) * pageSize;
 }
 
 function extractMeminfoKb(content: string, key: string): number | undefined {
@@ -335,11 +365,13 @@ async function sampleMacosMemory(): Promise<SystemMemorySample | undefined> {
     const swap = parseMacosSwapUsage(swapUsage);
     if (!Number.isFinite(totalPhysicalBytes) || !swap) return undefined;
     const availableBytes = vmStat ? parseMacosVmStat(vmStat) : undefined;
+    const reclaimableBytes = vmStat ? parseMacosReclaimable(vmStat) : undefined;
     const memoryPressureLevel = pressure ? parseMacosMemoryPressureLevel(pressure) : undefined;
     return {
       totalPhysicalBytes,
       ...swap,
       ...(availableBytes !== undefined ? { availableBytes } : {}),
+      ...(reclaimableBytes !== undefined ? { reclaimableBytes } : {}),
       ...(memoryPressureLevel !== undefined ? { memoryPressureLevel } : {}),
     };
   } catch {

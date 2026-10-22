@@ -7,6 +7,7 @@ import {
   parseClockSeconds,
   parseMacosMemoryPressureLevel,
   parseMacosSwapUsage,
+  parseMacosReclaimable,
   parseMacosVmStat,
   parseProcMeminfo,
   parsePsOutput,
@@ -438,5 +439,45 @@ describe("parseMacosVmStat", () => {
 
   test("returns undefined when the output is not vm_stat's", () => {
     expect(parseMacosVmStat("nothing useful")).toBeUndefined();
+  });
+});
+
+describe("parseMacosReclaimable", () => {
+  // Real `vm_stat` output from the machine the build gate's burst was measured on, while macOS
+  // itself reported 76% of memory free.
+  const output = [
+    "Mach Virtual Memory Statistics: (page size of 16384 bytes)",
+    "Pages free:                                   206452.",
+    "Pages active:                                1462287.",
+    "Pages inactive:                              1465063.",
+    "Pages speculative:                              7989.",
+    "Pages throttled:                                   0.",
+    "Pages wired down:                             287893.",
+    "Pages purgeable:                               13855.",
+    '"Translation faults":                    12195046658.',
+    "File-backed pages:                            810104.",
+    "Anonymous pages:                             2125235.",
+    "Pages occupied by compressor:                 705833.",
+    "",
+  ].join("\n");
+
+  test("counts free, file-backed and purgeable pages: what the OS can drop without writing", () => {
+    expect(parseMacosReclaimable(output)).toBe((206452 + 810104 + 13855) * 16384);
+  });
+
+  test("is far above parseMacosVmStat's figure on the same output, and under inactive + free", () => {
+    const reclaimable = parseMacosReclaimable(output) ?? 0;
+    expect(reclaimable).toBeGreaterThan((parseMacosVmStat(output) ?? 0) * 4);
+    // Inactive pages include anonymous memory that has to be compressed or swapped to free.
+    expect(reclaimable).toBeLessThan((206452 + 1465063 + 7989 + 13855) * 16384);
+  });
+
+  test("is undefined when this macOS prints no file-backed line, so the caller keeps the strict figure", () => {
+    const without = output.replace(/^File-backed pages:.*\n/m, "");
+    expect(parseMacosReclaimable(without)).toBeUndefined();
+  });
+
+  test("returns undefined when the output is not vm_stat's", () => {
+    expect(parseMacosReclaimable("nothing useful")).toBeUndefined();
   });
 });

@@ -81,6 +81,7 @@ import {
   type SaturationLedger,
   type SaturationLedgerEvent,
 } from "./agent/saturation-ledger.js";
+import type { BuildGateMachineReading } from "./agent/native-build-headroom.js";
 import type { SystemLoadReading, SystemLoadSample } from "./agent/system-load.js";
 import type { DiskGrowthReport } from "./disk-growth-sampler.js";
 import type { PushNotificationSender, PushSendMeta } from "./push/index.js";
@@ -405,6 +406,13 @@ export interface AgentResourceMonitorOptions {
     rows: readonly ProcessSampleRow[];
     agentTrees: readonly AgentProcessTree[];
   }) => void;
+  /**
+   * Hands the native build gate what burst slots are judged on: this sweep's memory and load
+   * readings and whether the brakes and saturation hold, at the end of every sweep, whether or
+   * not `ps` answered. A sweep that never gets this far reports nothing, and the gate treats
+   * an old reading as none.
+   */
+  reportMachineReading?: (reading: BuildGateMachineReading) => void;
   /**
    * Hands the physical-device lease manager (docs/device-leases.md#physical-devices) this
    * sweep's attributed `ps`, the only process evidence a phone lease has — that manager's own
@@ -762,6 +770,7 @@ export class AgentResourceMonitor {
   private readonly readFreeDiskBytes: AgentResourceMonitorOptions["readFreeDiskBytes"];
   private readonly readDiskGrowth: () => DiskGrowthReport | null;
   private readonly reportAttributedSample: AgentResourceMonitorOptions["reportAttributedSample"];
+  private readonly reportMachineReading: AgentResourceMonitorOptions["reportMachineReading"];
   private readonly reportPhysicalDeviceSample: AgentResourceMonitorOptions["reportPhysicalDeviceSample"];
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Machine-level legs have no agent to attach state to, so this monitor instance — a
@@ -844,6 +853,7 @@ export class AgentResourceMonitor {
     this.readFreeDiskBytes = options.readFreeDiskBytes;
     this.readDiskGrowth = options.readDiskGrowth ?? (() => null);
     this.reportAttributedSample = options.reportAttributedSample;
+    this.reportMachineReading = options.reportMachineReading;
     this.reportPhysicalDeviceSample = options.reportPhysicalDeviceSample;
   }
 
@@ -1009,6 +1019,30 @@ export class AgentResourceMonitor {
       config,
       nowMs,
     });
+    this.reportMachine({ systemMemory, systemLoad, nowMs });
+  }
+
+  /** The build gate's burst slots are judged on this, after the brakes ran on the same readings. */
+  private reportMachine(input: {
+    systemMemory: SystemMemorySample | undefined;
+    systemLoad: SystemLoadSample;
+    nowMs: number;
+  }): void {
+    try {
+      this.reportMachineReading?.({
+        takenAtMs: input.nowMs,
+        systemMemory: input.systemMemory,
+        systemLoad: input.systemLoad,
+        memoryBrakeHeld: this.memoryBrake?.held === true,
+        diskBrakeHeld: this.diskBrake?.held === true,
+        cpuSaturated: this.saturationState?.episode !== undefined,
+      });
+    } catch (error) {
+      this.logger.warn(
+        { err: error },
+        "Failed to hand the build gate this sweep's machine reading",
+      );
+    }
   }
 
   /**
@@ -1057,6 +1091,7 @@ export class AgentResourceMonitor {
       config,
       nowMs,
     });
+    this.reportMachine({ systemMemory, systemLoad: input.systemLoad, nowMs });
   }
 
   /**

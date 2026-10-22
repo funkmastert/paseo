@@ -571,6 +571,17 @@ const MutableBuildGateConfigSchema = z
     dryRun: z.boolean().optional(),
     maxConcurrent: z.number().int().positive().optional(),
     maxBuildMinutes: z.number().positive().optional(),
+    burst: z
+      .object({
+        enabled: z.boolean().optional(),
+        maxConcurrent: z.number().int().positive().optional(),
+        perBuildMemoryGB: z.number().positive().optional(),
+        perBuildDiskGB: z.number().positive().optional(),
+        maxLoadPerCore: z.number().positive().optional(),
+        maxBusyFraction: z.number().positive().max(1).optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 

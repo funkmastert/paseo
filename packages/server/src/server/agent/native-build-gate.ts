@@ -20,8 +20,15 @@
  *
  * Fails open on every uncertainty, like the gate it wraps: a disk read that throws skips the disk
  * check, and with no sample in time the build is allowed.
+ *
+ * `maxConcurrent` is the guaranteed floor. Above it, up to `burst.maxConcurrent`, a build is
+ * allowed only while the machine has headroom (native-build-headroom.ts), judged from the
+ * resource monitor's reading of the machine and a free-disk read at decision time. Burst fails
+ * closed: a missing, old or partial reading refuses it. A burst build already running is never
+ * touched when headroom drops; only the next build is refused.
  */
 
+import os from "node:os";
 import { type RemediationConfig, resolveDiskRemediationConfig } from "../remediation/config.js";
 import type { DeviceLaunchGate, DeviceLaunchGateDecision } from "./device-lease-manager.js";
 import { basename } from "./device-launch-commands.js";
@@ -31,6 +38,22 @@ import {
   detectNativeBuildIntents,
   type NativeBuildIntent,
 } from "./native-build-commands.js";
+import {
+  type BuildGateBurstConfig,
+  type BuildGateHardware,
+  type BuildGateMachineReading,
+  type BurstCheck,
+  type BurstHeadroomVerdict,
+  type BuildGateSlotDefaults,
+  deriveBuildGateDefaults,
+  describeDiskReserve,
+  diskReserveBytes,
+  evaluateBurstHeadroom,
+  recordSwapUse,
+  type ResolvedBurstConfig,
+  resolveBurstConfig,
+  type SwapUseReading,
+} from "./native-build-headroom.js";
 import {
   type NativeBuildScan,
   type RunningBuildRunner,
@@ -64,7 +87,6 @@ export const BUILD_GATE_GRANT_BACKSTOP_MS = 60 * 60_000;
  * until its native build has been seen and ended. One never seen building lets go after this.
  */
 export const BUILD_GATE_RUNNER_SETUP_MS = 30 * 60_000;
-const DEFAULT_MAX_CONCURRENT = 1;
 const DEFAULT_MAX_BUILD_MINUTES = 120;
 /** Characters a shell wraps a word in: `eval './gradlew assembleDebug'`. */
 const WORD_EDGES = /^['"`(){}[\];&|]+|['"`(){}[\];&|]+$/g;
@@ -72,8 +94,10 @@ const WORD_EDGES = /^['"`(){}[\];&|]+|['"`(){}[\];&|]+$/g;
 export interface BuildGateConfig {
   enabled?: boolean;
   dryRun?: boolean;
+  /** The guaranteed floor. Absent: derived from the machine (native-build-headroom.ts). */
   maxConcurrent?: number;
   maxBuildMinutes?: number;
+  burst?: BuildGateBurstConfig;
 }
 
 interface ResolvedBuildGateConfig {
@@ -81,6 +105,7 @@ interface ResolvedBuildGateConfig {
   dryRun: boolean;
   maxConcurrent: number;
   maxBuildMs: number;
+  burst: ResolvedBurstConfig;
 }
 
 interface BuildGateAgent {
@@ -121,6 +146,10 @@ export interface NativeBuildGateOptions {
   logger: BuildGateLogger;
   now?: () => number;
   sampleTimeoutMs?: number;
+  /** Cores and memory the slot defaults are derived from. Default: this machine, read once. */
+  readHardware?: () => BuildGateHardware;
+  /** Which signals the monitor reports (docs/resource-monitor.md). Default: this platform. */
+  platform?: NodeJS.Platform;
 }
 
 export interface NativeBuildGate extends DeviceLaunchGate {
@@ -129,6 +158,11 @@ export interface NativeBuildGate extends DeviceLaunchGate {
     rows: readonly ProcessSampleRow[];
     agentTrees: readonly AgentProcessTree[];
   }): void;
+  /**
+   * The resource monitor's reading of the machine, every sweep: what burst is judged on. With
+   * none, or an old one, no build is allowed above the floor.
+   */
+  observeMachine(reading: BuildGateMachineReading): void;
 }
 
 /** A build this gate allowed that the scan has not yet seen running. */
@@ -139,6 +173,8 @@ interface BuildGrant {
   atMs: number;
   /** How many counted builds the agent had when this was allowed. */
   baseline: number;
+  /** When the grant before this one was made, put back if this one is rolled back. */
+  priorGrantAtMs: number | undefined;
 }
 
 /** What holds slots in one sample. */
@@ -150,13 +186,22 @@ interface HeldSlots {
 
 type GateVerdict = { kind: "allow"; grant?: BuildGrant } | { kind: "deny"; message: string };
 
-function resolveConfig(config: BuildGateConfig | undefined): ResolvedBuildGateConfig {
+function resolveConfig(
+  config: BuildGateConfig | undefined,
+  defaults: BuildGateSlotDefaults,
+): ResolvedBuildGateConfig {
+  const maxConcurrent = Math.max(1, Math.floor(config?.maxConcurrent ?? defaults.maxConcurrent));
   return {
     enabled: config?.enabled ?? true,
     dryRun: config?.dryRun ?? false,
-    maxConcurrent: Math.max(1, Math.floor(config?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT)),
+    maxConcurrent,
     maxBuildMs: (config?.maxBuildMinutes ?? DEFAULT_MAX_BUILD_MINUTES) * 60_000,
+    burst: resolveBurstConfig(config?.burst, defaults, maxConcurrent),
   };
+}
+
+function defaultHardware(): BuildGateHardware {
+  return { cpuCount: os.cpus().length, memoryBytes: os.totalmem() };
 }
 
 function formatDuration(seconds: number): string {
@@ -219,16 +264,120 @@ function describeGrant(
   return `${whose}, allowed ${ago} ago and starting`;
 }
 
+/**
+ * Why a build was refused for want of a slot: `floor` when burst is off or its ceiling is no
+ * higher than the floor, `ceiling` when burst is full, `headroom` when a burst check failed,
+ * `disk-reserve` when a build within the floor would not leave the disk room for every build taken.
+ */
+type CapCause =
+  | { kind: "floor" }
+  | { kind: "ceiling" }
+  | { kind: "headroom"; check: BurstCheck; detail: string }
+  | { kind: "disk-reserve"; detail: string; requiredBytes: number };
+
+interface CapRefusal {
+  reason: "at-cap" | "at-burst-cap" | "no-headroom" | "disk-reserve";
+  cause: CapCause;
+}
+
+/** Whether a build at or over the floor is refused, and why. Undefined: it takes a burst slot. */
+function refuseAboveFloor(input: {
+  headroom: BurstHeadroomVerdict;
+  taken: number;
+  config: ResolvedBuildGateConfig;
+}): CapRefusal | undefined {
+  const { config, headroom } = input;
+  if (!config.burst.enabled || config.burst.maxConcurrent <= config.maxConcurrent) {
+    return { reason: "at-cap", cause: { kind: "floor" } };
+  }
+  if (input.taken >= config.burst.maxConcurrent) {
+    return { reason: "at-burst-cap", cause: { kind: "ceiling" } };
+  }
+  if (headroom.ok) return undefined;
+  return {
+    reason: "no-headroom",
+    cause: { kind: "headroom", check: headroom.check, detail: headroom.detail },
+  };
+}
+
+/**
+ * Whether a build within the floor is refused for disk. The first build needs only the low line,
+ * checked before the scan; each one after it also needs a reserve for every build taken and the
+ * new one, because builds already running have not finished writing. A failed free-disk read
+ * skips this, as it skips the low line: the floor fails open.
+ */
+function refuseForDiskReserve(input: {
+  config: ResolvedBuildGateConfig;
+  taken: number;
+  freeBytes: number | undefined;
+  lowFreeBytes: number;
+}): CapRefusal | undefined {
+  const { freeBytes } = input;
+  if (input.taken < 1 || freeBytes === undefined) return undefined;
+  const reserve = {
+    lowFreeBytes: input.lowFreeBytes,
+    perBuildDiskBytes: input.config.burst.perBuildDiskBytes,
+    taken: input.taken,
+  };
+  const requiredBytes = diskReserveBytes(reserve);
+  if (freeBytes >= requiredBytes) return undefined;
+  return {
+    reason: "disk-reserve",
+    cause: {
+      kind: "disk-reserve",
+      detail: describeDiskReserve({ ...reserve, freeBytes }),
+      requiredBytes,
+    },
+  };
+}
+
+const CHECK_LABELS: Record<BurstCheck, string> = {
+  reading: "machine reading",
+  memory: "memory",
+  swap: "swap",
+  cpu: "CPU",
+  disk: "disk",
+  settling: "settling",
+};
+
+function describeCapCause(input: {
+  held: number;
+  cause: CapCause;
+  config: ResolvedBuildGateConfig;
+}): string {
+  const { config, cause } = input;
+  const running = `${input.held} native build${input.held === 1 ? " is" : "s are"} running or starting`;
+  if (cause.kind === "floor") {
+    return `${running}, and the limit is ${config.maxConcurrent} at a time.`;
+  }
+  if (cause.kind === "ceiling") {
+    return (
+      `${running}, and both the guaranteed limit (${config.maxConcurrent}) and the burst ` +
+      `ceiling (${config.burst.maxConcurrent}) are reached.`
+    );
+  }
+  if (cause.kind === "disk-reserve") {
+    return (
+      `${running}, and the disk has no room for another beside them: ${cause.detail}. One ` +
+      "native build writes 10 to 34 GB."
+    );
+  }
+  return (
+    `${running}. The guaranteed limit is ${config.maxConcurrent}; a build above it is a burst ` +
+    `build (up to ${config.burst.maxConcurrent}), and burst needs headroom: the ` +
+    `${CHECK_LABELS[cause.check]} check failed: ${cause.detail}.`
+  );
+}
+
 function buildCapDenial(input: {
   intent: NativeBuildIntent;
   holders: readonly string[];
   config: ResolvedBuildGateConfig;
+  cause: CapCause;
 }): string {
-  const held = input.holders.length;
   return [
-    `Bozeo build gate: \`${input.intent.command}\` was not run: ${held} native ` +
-      `build${held === 1 ? " is" : "s are"} running or starting, and the limit is ` +
-      `${input.config.maxConcurrent} at a time.`,
+    `Bozeo build gate: \`${input.intent.command}\` was not run: ` +
+      describeCapCause({ held: input.holders.length, cause: input.cause, config: input.config }),
     ...input.holders.map((holder) => `- ${holder}`),
     "Wait for one to finish, then run the command again. Run `sleep 120` on its own first (not " +
       "chained in front of the build, which the gate sees at once), then retry, and repeat until " +
@@ -281,6 +430,8 @@ function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
 
 export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBuildGate {
   const now = options.now ?? Date.now;
+  const platform = options.platform ?? process.platform;
+  const slotDefaults = deriveBuildGateDefaults((options.readHardware ?? defaultHardware)());
   const sampleTimeoutMs = options.sampleTimeoutMs ?? BUILD_GATE_SAMPLE_TIMEOUT_MS;
   let grants: BuildGrant[] = [];
   let latest: { sample: BuildGateSample; scan: NativeBuildScan } | undefined;
@@ -293,6 +444,11 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
   const refusals = new Map<string, string>();
   let diskReadFailing = false;
   let sampleFailing = false;
+  /** The monitor's newest reading of the machine, and the swap it has shown lately. */
+  let machine: BuildGateMachineReading | undefined;
+  let swapHistory: SwapUseReading[] = [];
+  /** When this gate last allowed a build, floor or burst: a reading older than it has not seen it. */
+  let lastGrantAtMs: number | undefined;
 
   /** Takes a sample as the newest, and learns what it says about runners. */
   function adopt(sample: BuildGateSample): void {
@@ -420,6 +576,8 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
     intent: NativeBuildIntent;
     config: ResolvedBuildGateConfig;
     sample: BuildGateSample;
+    freeBytes: number | undefined;
+    lowFreeBytes: number;
     nowMs: number;
   }): GateVerdict {
     const { agentId, intent, config, sample, nowMs } = input;
@@ -427,7 +585,38 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
     const held = heldSlots(scan, config);
     judgeGrants(sample, held, nowMs);
     const taken = held.builds.length + held.runners.length + grants.length;
-    if (taken >= config.maxConcurrent) {
+    // Judged on every decision so the log shows the figures; only a build above the floor acts on it.
+    const headroom = evaluateBurstHeadroom({
+      platform,
+      nowMs,
+      reading: machine,
+      swapHistory,
+      taken,
+      unseen: grants.length,
+      freeDiskBytes: input.freeBytes,
+      lowFreeBytes: input.lowFreeBytes,
+      lastGrantAtMs,
+      config: config.burst,
+    });
+    const slots = {
+      running: held.builds.length,
+      settingUp: held.runners.length,
+      starting: grants.length,
+      max: config.maxConcurrent,
+      burstMax: config.burst.enabled ? config.burst.maxConcurrent : undefined,
+      sampleAgeMs: nowMs - sample.takenAtMs,
+      headroom: headroom.numbers,
+    };
+    const burst = taken >= config.maxConcurrent;
+    const refusal = burst
+      ? refuseAboveFloor({ headroom, taken, config })
+      : refuseForDiskReserve({
+          config,
+          taken,
+          freeBytes: input.freeBytes,
+          lowFreeBytes: input.lowFreeBytes,
+        });
+    if (refusal) {
       return refuse({
         agentId,
         intent,
@@ -436,14 +625,16 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
           intent,
           holders: describeHolders({ held, askingAgentId: agentId, nowMs }),
           config,
+          cause: refusal.cause,
         }),
         fields: {
-          reason: "at-cap",
-          running: held.builds.length,
-          settingUp: held.runners.length,
-          starting: grants.length,
-          max: config.maxConcurrent,
-          sampleAgeMs: nowMs - sample.takenAtMs,
+          reason: refusal.reason,
+          ...(refusal.cause.kind === "headroom" ? { check: refusal.cause.check } : {}),
+          ...(refusal.cause.kind === "disk-reserve"
+            ? { freeBytes: input.freeBytes, requiredBytes: refusal.cause.requiredBytes }
+            : {}),
+          burst: false,
+          ...slots,
           holders: [...held.builds, ...held.runners].map((entry) => ({
             pid: entry.pid,
             command: entry.command,
@@ -458,16 +649,16 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
       launcher: intent.launcher,
       atMs: nowMs,
       baseline: countOf(held, agentId),
+      priorGrantAtMs: lastGrantAtMs,
     };
     grants.push(grant);
+    lastGrantAtMs = nowMs;
     options.logger.info(
       {
         agentId,
         command: intent.command,
-        running: held.builds.length,
-        settingUp: held.runners.length,
-        starting: grants.length - 1,
-        max: config.maxConcurrent,
+        ...slots,
+        burst,
         dryRun: config.dryRun,
       },
       "Build gate allowed a native build",
@@ -525,14 +716,22 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
       return { kind: "allow" };
     }
     sampleFailing = false;
-    return decide({ agentId, intent, config, sample, nowMs: now() });
+    return decide({
+      agentId,
+      intent,
+      config,
+      sample,
+      freeBytes,
+      lowFreeBytes: minFreeBytes,
+      nowMs: now(),
+    });
   }
 
   return {
     async gateLaunch(input): Promise<DeviceLaunchGateDecision> {
       // A chained command runs its builds one after another, so it needs one slot.
       const intent = detectNativeBuildIntents(input.command)[0];
-      const config = resolveConfig(options.readConfig().buildGate);
+      const config = resolveConfig(options.readConfig().buildGate, slotDefaults);
       if (!intent || !config.enabled) return await options.inner.gateLaunch(input);
 
       const verdict = await evaluate(input.agentId, intent, config);
@@ -544,6 +743,7 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
       if (decision.decision === "deny" && verdict.grant) {
         // The device cap said no, so the build never starts: give its slot back.
         grants = grants.filter((grant) => grant !== verdict.grant);
+        if (lastGrantAtMs === verdict.grant.atMs) lastGrantAtMs = verdict.grant.priorGrantAtMs;
       }
       return decision;
     },
@@ -559,8 +759,18 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
       const nowMs = now();
       adopt({ ...sample, takenAtMs: nowMs });
       if (!latest) return;
-      const config = resolveConfig(options.readConfig().buildGate);
+      const config = resolveConfig(options.readConfig().buildGate, slotDefaults);
       judgeGrants(latest.sample, heldSlots(latest.scan, config), nowMs);
+    },
+    observeMachine(reading) {
+      if (machine && machine.takenAtMs > reading.takenAtMs) return;
+      machine = reading;
+      if (reading.systemMemory) {
+        swapHistory = recordSwapUse(swapHistory, {
+          atMs: reading.takenAtMs,
+          usedBytes: reading.systemMemory.swapUsedBytes,
+        });
+      }
     },
   };
 }
