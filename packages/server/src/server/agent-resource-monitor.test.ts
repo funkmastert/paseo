@@ -243,6 +243,7 @@ function createMonitor(params: {
   readFreeDiskBytes?: AgentResourceMonitorOptions["readFreeDiskBytes"];
   readDiskGrowth?: AgentResourceMonitorOptions["readDiskGrowth"];
   reportAttributedSample?: AgentResourceMonitorOptions["reportAttributedSample"];
+  reportMachineReading?: AgentResourceMonitorOptions["reportMachineReading"];
   /** The rest of the daemon config the monitor reads, beside `resourceMonitor`. */
   daemonConfig?: Omit<
     ReturnType<AgentResourceMonitorOptions["readDaemonConfig"]>,
@@ -282,6 +283,7 @@ function createMonitor(params: {
     ...(params.reportAttributedSample
       ? { reportAttributedSample: params.reportAttributedSample }
       : {}),
+    ...(params.reportMachineReading ? { reportMachineReading: params.reportMachineReading } : {}),
     // Never shells out to a real lsof in a test unless a test explicitly injects one.
     cwdResolver: params.cwdResolver ?? { resolve: async () => new Map() },
     // No test reaches a real lsof: by default every Metro is checked and has no client.
@@ -1502,6 +1504,78 @@ describe("AgentResourceMonitor hands its sample to the build gate", () => {
     const { monitor } = createMonitor({ sampler, reportAttributedSample: report });
     await monitor.tick();
     expect(report).not.toHaveBeenCalled();
+  });
+});
+
+describe("AgentResourceMonitor reports the machine to the build gate", () => {
+  const GIB = 1024 ** 3;
+
+  function lastReading(report: ReturnType<typeof vi.fn>) {
+    return report.mock.calls.at(-1)?.[0];
+  }
+
+  test("each sweep hands over its memory and load readings, with every brake and saturation off", async () => {
+    const report = vi.fn();
+    const clock = { ms: 1_000_000 };
+    const { monitor } = createMonitor({
+      systemMemory: macMemory(1, 4),
+      reportMachineReading: report,
+      now: () => clock.ms,
+    });
+    await monitor.tick();
+    expect(report).toHaveBeenCalledTimes(1);
+    expect(lastReading(report)).toMatchObject({
+      takenAtMs: 1_000_000,
+      systemMemory: { memoryPressureLevel: 1, swapUsedBytes: 4 * GIB },
+      systemLoad: { load: { kind: "loadavg", load1: 4 }, totalMemoryBytes: 64 * GIB },
+      memoryBrakeHeld: false,
+      diskBrakeHeld: false,
+      cpuSaturated: false,
+    });
+  });
+
+  test("the memory brake's hold is part of the reading", async () => {
+    const report = vi.fn();
+    const sampler = createFakeSampler({ systemMemory: macMemory(2, 0) });
+    const { monitor } = createMonitor({ sampler, reportMachineReading: report });
+    await monitor.tick();
+    expect(lastReading(report)).toMatchObject({ memoryBrakeHeld: true });
+  });
+
+  test("the disk brake's hold is part of the reading", async () => {
+    const report = vi.fn();
+    const { monitor } = createMonitor({
+      readFreeDiskBytes: async () => 10 * GIB,
+      reportMachineReading: report,
+    });
+    await monitor.tick();
+    expect(lastReading(report)).toMatchObject({ diskBrakeHeld: true });
+  });
+
+  test("an open saturation incident is part of the reading", async () => {
+    const report = vi.fn();
+    const sampler = createFakeSampler({ load: loadavg(40) });
+    const { monitor } = createMonitor({ sampler, reportMachineReading: report });
+    await monitor.tick();
+    expect(lastReading(report)).toMatchObject({ cpuSaturated: true });
+  });
+
+  test("a sweep whose ps failed still reports the machine", async () => {
+    const report = vi.fn();
+    const sampler = createFakeSampler({ systemMemory: macMemory(1, 0) });
+    failProcessSamples(sampler);
+    const { monitor } = createMonitor({ sampler, reportMachineReading: report });
+    await monitor.tick();
+    expect(report).toHaveBeenCalledTimes(1);
+    expect(lastReading(report)).toMatchObject({ systemMemory: { memoryPressureLevel: 1 } });
+  });
+
+  test("a gate that throws does not fail the sweep", async () => {
+    const report = vi.fn(() => {
+      throw new Error("gate is down");
+    });
+    const { monitor } = createMonitor({ reportMachineReading: report });
+    await expect(monitor.tick()).resolves.toBeUndefined();
   });
 });
 

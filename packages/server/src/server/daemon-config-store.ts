@@ -1116,7 +1116,8 @@ function mergeAskUserQuestionForPersist(
 
 type PersistedBuildGate = NonNullable<PersistedConfig["agents"]>["buildGate"];
 
-// Flat, like catastropheGate: scalars only, so a shallow merge keeps the rest.
+// Deep, like resourceMonitor: `burst` is a nested block, so a `{ burst: { enabled: false } }`
+// patch has to keep the rest of the burst settings on disk.
 function mergeBuildGateForPersist(
   persisted: PersistedBuildGate,
   patch: SupportedMutableConfigPatch["buildGate"],
@@ -1124,7 +1125,10 @@ function mergeBuildGateForPersist(
   if (patch === undefined) {
     return persisted;
   }
-  return { ...persisted, ...patch } as PersistedBuildGate;
+  return deepMerge(
+    (persisted ?? {}) as Record<string, unknown>,
+    patch as Record<string, unknown>,
+  ) as PersistedBuildGate;
 }
 
 type PersistedDiskSweeper = NonNullable<PersistedConfig["worktrees"]>["diskSweeper"];

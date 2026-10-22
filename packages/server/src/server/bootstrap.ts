@@ -3852,6 +3852,9 @@ export async function createPaseoDaemon(
                 nativeBuildGate.observeSample(sample);
                 daemonProcessOwnership.observeSample(sample);
               },
+              // Burst slots above the build gate's floor are judged on the monitor's own
+              // readings of memory, load, the brakes and saturation.
+              reportMachineReading: (reading) => nativeBuildGate.observeMachine(reading),
               // The physical-device lease manager's only process evidence (docs/device-leases.md
               // #physical-devices); its own detection is push-based, never a `ps` sample.
               reportPhysicalDeviceSample: (sample) =>

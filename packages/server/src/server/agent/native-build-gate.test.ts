@@ -6,6 +6,7 @@ import {
   type BuildGateConfig,
   createNativeBuildGate,
 } from "./native-build-gate.js";
+import type { BuildGateHardware, BuildGateMachineReading } from "./native-build-headroom.js";
 import { attributeProcessTrees } from "./process-attribution.js";
 import type { ProcessSampleRow, ProcessTableSample } from "./process-sampler.js";
 
@@ -18,7 +19,10 @@ const AGENTS = [
   { agentId: "agent-a", title: "Android release build" },
   { agentId: "agent-b", title: "iOS snapshot tests" },
   { agentId: "agent-c", title: "Pixel verify" },
+  { agentId: "agent-d", title: "Release notes" },
 ];
+/** The 16-core, 64 GiB Mac the defaults are sized for: a floor of 3 and a ceiling of 5. */
+const BIG_MACHINE: BuildGateHardware = { cpuCount: 16, memoryBytes: 64 * GIB };
 
 function row(pid: number, ppid: number, command: string, etime = "04:12"): ProcessSampleRow {
   return { pid, ppid, uid: 501, rssKb: 1000, cpuPercent: 0, etime, command };
@@ -54,6 +58,27 @@ function bashTool(command: string): string {
   );
 }
 
+function healthyMachine(takenAtMs: number): BuildGateMachineReading {
+  return {
+    takenAtMs,
+    systemMemory: {
+      totalPhysicalBytes: 64 * GIB,
+      swapTotalBytes: 20 * GIB,
+      swapUsedBytes: 4 * GIB,
+      availableBytes: 30 * GIB,
+      memoryPressureLevel: 1,
+    },
+    systemLoad: {
+      load: { kind: "loadavg", cores: 16, load1: 6, load5: 6, load15: 6 },
+      freeMemoryBytes: 2 * GIB,
+      totalMemoryBytes: 64 * GIB,
+    },
+    memoryBrakeHeld: false,
+    diskBrakeHeld: false,
+    cpuSaturated: false,
+  };
+}
+
 function setup(
   overrides: {
     config?: BuildGateConfig;
@@ -61,11 +86,18 @@ function setup(
     lowFreeGB?: number;
     sampleTimeoutMs?: number;
     sideProcesses?: ReadonlyMap<string, readonly number[]>;
+    hardware?: BuildGateHardware;
+    platform?: NodeJS.Platform;
   } = {},
 ) {
   const state = {
     rows: [] as ProcessSampleRow[],
-    config: { maxConcurrent: 1, ...overrides.config } as BuildGateConfig,
+    // Burst is off unless a test turns it on, so the floor's tests read as they always did.
+    config: {
+      maxConcurrent: 1,
+      burst: { enabled: false },
+      ...overrides.config,
+    } as BuildGateConfig,
     freeGiB: overrides.freeGiB ?? 200,
     diskFails: false,
     table: undefined as Promise<ProcessTableSample> | undefined,
@@ -102,6 +134,8 @@ function setup(
     sendSystemMessageToAgent: async (agentId, body) => void sent.push({ agentId, body }),
     logger,
     now: () => state.nowMs,
+    readHardware: () => overrides.hardware ?? BIG_MACHINE,
+    ...(overrides.platform ? { platform: overrides.platform } : {}),
     ...(overrides.sampleTimeoutMs !== undefined
       ? { sampleTimeoutMs: overrides.sampleTimeoutMs }
       : {}),
@@ -119,7 +153,30 @@ function setup(
   const advance = (ms: number) => {
     state.nowMs += ms;
   };
-  return { gate, state, inner, sampleProcessTable, sent, logger, ask, sweep, advance };
+  /** What the monitor hands the gate at the end of a sweep: the machine, healthy unless said. */
+  const machine = (changes: Partial<BuildGateMachineReading> = {}) =>
+    gate.observeMachine({ ...healthyMachine(state.nowMs), ...changes });
+  /** Three sweeps two minutes apart in all: enough swap history to say swap is steady. */
+  const warmUp = (changes: Partial<BuildGateMachineReading> = {}) => {
+    machine(changes);
+    advance(MINUTE);
+    machine(changes);
+    advance(MINUTE);
+    machine(changes);
+  };
+  return {
+    gate,
+    state,
+    inner,
+    sampleProcessTable,
+    sent,
+    logger,
+    ask,
+    sweep,
+    advance,
+    machine,
+    warmUp,
+  };
 }
 
 function denial(decision: DeviceLaunchGateDecision): string {
@@ -443,5 +500,340 @@ describe("native build gate: modes and explanations", () => {
       agentId: "agent-b",
       message: "Device cap: no slot",
     });
+  });
+});
+
+/** `n` builds started by hand, each under its own parent so each counts once. */
+function handBuilds(n: number): ProcessSampleRow[] {
+  return Array.from({ length: n }, (_, index) => {
+    const base = 500 + index * 10;
+    return [row(base, 1, "/bin/zsh -c build"), row(base + 1, base, gradlew("assembleDebug"))];
+  }).flat();
+}
+
+const BURST_ON = { maxConcurrent: 3, burst: { enabled: true } } satisfies BuildGateConfig;
+
+describe("native build gate: hardware defaults", () => {
+  test("with no maxConcurrent set, the floor comes from the machine: 3 on a 16-core, 64 GiB Mac", async () => {
+    const { state, ask, logger } = setup();
+    state.config = { burst: { enabled: false } };
+    state.rows = handBuilds(2);
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ max: 3, burst: false }),
+      "Build gate allowed a native build",
+    );
+    state.rows = handBuilds(3);
+    advanceBeyondGrant(state);
+    expect(denial(await ask("agent-d", "./gradlew assembleDebug"))).toContain("the limit is 3");
+  });
+
+  test("on a small machine the floor is 1 and there is no burst above it", async () => {
+    const { state, ask, warmUp } = setup({ hardware: { cpuCount: 8, memoryBytes: 16 * GIB } });
+    state.config = {};
+    warmUp();
+    state.rows = handBuilds(1);
+    const message = denial(await ask("agent-d", "./gradlew assembleDebug"));
+    expect(message).toContain("the limit is 1");
+    expect(message).not.toContain("burst");
+  });
+});
+
+/** Moves past the grace an allowance is given, so the next decision sees it as the scan sees it. */
+function advanceBeyondGrant(state: { nowMs: number }) {
+  state.nowMs += 10 * SECOND;
+}
+
+describe("native build gate: burst", () => {
+  test("a build above the floor passes when every headroom check does, and is logged as burst with the numbers", async () => {
+    const { state, ask, warmUp, logger, inner } = setup({ config: BURST_ON });
+    warmUp();
+    state.rows = handBuilds(3);
+
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+
+    expect(inner.gateLaunch).toHaveBeenCalledTimes(1);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "agent-d",
+        running: 3,
+        max: 3,
+        burst: true,
+        burstMax: 5,
+        headroom: expect.objectContaining({
+          availableGB: 30,
+          requiredMemoryGB: 8,
+          freeDiskGB: 200,
+          requiredDiskGB: 80,
+          loadPerCore: 0.38,
+        }),
+      }),
+      "Build gate allowed a native build",
+    );
+  });
+
+  test("a build within the floor is not a burst build", async () => {
+    const { state, ask, warmUp, logger } = setup({ config: BURST_ON });
+    warmUp();
+    state.rows = handBuilds(2);
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ burst: false, headroom: expect.any(Object) }),
+      "Build gate allowed a native build",
+    );
+  });
+
+  test.each([
+    ["the memory brake holds", { memoryBrakeHeld: true }, "memory check failed", "memory brake"],
+    [
+      "available memory is short",
+      {
+        systemMemory: {
+          totalPhysicalBytes: 64 * GIB,
+          swapTotalBytes: 20 * GIB,
+          swapUsedBytes: 4 * GIB,
+          availableBytes: 5 * GIB,
+          memoryPressureLevel: 1,
+        },
+      },
+      "memory check failed",
+      "5 GB of memory is available and 8 GB is needed",
+    ],
+    ["CPU saturation is open", { cpuSaturated: true }, "CPU check failed", "saturation"],
+    [
+      "load is over the line",
+      {
+        systemLoad: {
+          load: { kind: "loadavg" as const, cores: 16, load1: 20, load5: 20, load15: 20 },
+          freeMemoryBytes: 0,
+          totalMemoryBytes: 64 * GIB,
+        },
+      },
+      "CPU check failed",
+      "load is 20 on 16 cores",
+    ],
+    ["the disk brake holds", { diskBrakeHeld: true }, "disk check failed", "disk brake"],
+  ])(
+    "when %s, burst is refused and the refusal says which check",
+    async (_, overrides, check, detail) => {
+      const { state, ask, warmUp, logger, inner } = setup({ config: BURST_ON });
+      warmUp(overrides);
+      state.rows = handBuilds(3);
+
+      const message = denial(await ask("agent-d", "./gradlew assembleDebug"));
+
+      expect(message).toContain("The guaranteed limit is 3");
+      expect(message).toContain("burst build (up to 5)");
+      expect(message).toContain(check);
+      expect(message).toContain(detail);
+      expect(inner.gateLaunch).not.toHaveBeenCalled();
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reason: "no-headroom",
+          check: check.split(" ")[0]?.toLowerCase(),
+          burst: false,
+          headroom: expect.any(Object),
+        }),
+        "Build gate refused a native build",
+      );
+    },
+  );
+
+  test("swap that grew in the last minutes refuses burst", async () => {
+    const { state, ask, warmUp, advance, machine } = setup({ config: BURST_ON });
+    warmUp();
+    advance(10 * SECOND);
+    machine({
+      systemMemory: {
+        totalPhysicalBytes: 64 * GIB,
+        swapTotalBytes: 20 * GIB,
+        swapUsedBytes: 5 * GIB,
+        availableBytes: 30 * GIB,
+        memoryPressureLevel: 1,
+      },
+    });
+    state.rows = handBuilds(3);
+    const message = denial(await ask("agent-d", "./gradlew assembleDebug"));
+    expect(message).toContain("swap check failed");
+    expect(message).toContain("swap grew 1 GB in the last 5 minutes");
+  });
+
+  test("free disk must cover the low line plus a reserve for each build, including the new one", async () => {
+    const { state, ask, warmUp } = setup({ config: BURST_ON, freeGiB: 79 });
+    warmUp();
+    state.rows = handBuilds(3);
+    const message = denial(await ask("agent-d", "./gradlew assembleDebug"));
+    expect(message).toContain("disk check failed");
+    expect(message).toContain("79 GB of disk is free and 80 GB is needed");
+    state.freeGiB = 80;
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+  });
+
+  test("with no reading from the monitor, burst fails closed, and so does a stale one", async () => {
+    const none = setup({ config: BURST_ON });
+    none.state.rows = handBuilds(3);
+    expect(denial(await none.ask("agent-d", "./gradlew assembleDebug"))).toContain(
+      "the resource monitor has not reported a reading",
+    );
+
+    const stale = setup({ config: BURST_ON });
+    stale.warmUp();
+    stale.state.rows = handBuilds(3);
+    stale.advance(3 * MINUTE);
+    expect(denial(await stale.ask("agent-d", "./gradlew assembleDebug"))).toContain(
+      "last reading is 180s old",
+    );
+  });
+
+  test("a free-disk read that throws skips the floor's disk check but refuses burst", async () => {
+    const { state, ask, warmUp } = setup({ config: BURST_ON });
+    state.diskFails = true;
+    warmUp();
+    state.rows = handBuilds(2);
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+    state.rows = handBuilds(3);
+    advanceBeyondGrant(state);
+    expect(denial(await ask("agent-d", "./gradlew assembleDebug"))).toContain(
+      "free disk could not be read",
+    );
+  });
+
+  test("the burst ceiling holds even with every check passing", async () => {
+    const { state, ask, warmUp, logger } = setup({ config: BURST_ON });
+    warmUp();
+    state.rows = handBuilds(5);
+    const message = denial(await ask("agent-d", "./gradlew assembleDebug"));
+    expect(message).toContain(
+      "both the guaranteed limit (3) and the burst ceiling (5) are reached",
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "at-burst-cap", max: 3, burstMax: 5 }),
+      "Build gate refused a native build",
+    );
+  });
+
+  test("burst off leaves the floor as the limit, and says nothing of burst", async () => {
+    const { state, ask, warmUp, logger } = setup({
+      config: { maxConcurrent: 3, burst: { enabled: false } },
+    });
+    warmUp();
+    state.rows = handBuilds(3);
+    const message = denial(await ask("agent-d", "./gradlew assembleDebug"));
+    expect(message).toContain("the limit is 3 at a time");
+    expect(message).not.toContain("burst");
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "at-cap" }),
+      "Build gate refused a native build",
+    );
+  });
+
+  test("a ceiling at or under the floor is no burst", async () => {
+    const { state, ask, warmUp } = setup({
+      config: { maxConcurrent: 3, burst: { enabled: true, maxConcurrent: 2 } },
+    });
+    warmUp();
+    state.rows = handBuilds(3);
+    expect(denial(await ask("agent-d", "./gradlew assembleDebug"))).toContain(
+      "the limit is 3 at a time",
+    );
+  });
+
+  test("a second burst build waits for a reading that has seen the first one run", async () => {
+    const { state, ask, warmUp, advance, machine } = setup({ config: BURST_ON });
+    warmUp();
+    state.rows = handBuilds(3);
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+
+    advance(10 * SECOND);
+    machine();
+    expect(denial(await ask("agent-a", "./gradlew assembleRelease"))).toContain(
+      "settling check failed",
+    );
+
+    advance(100 * SECOND);
+    machine();
+    state.rows = [...handBuilds(3), ...agentRunning("agent-d", 400, gradlew("assembleDebug"))];
+    expect(await ask("agent-a", "./gradlew assembleRelease")).toEqual(ALLOW);
+    state.rows = [
+      ...handBuilds(3),
+      ...agentRunning("agent-d", 400, gradlew("assembleDebug")),
+      ...agentRunning("agent-a", 450, gradlew("assembleRelease")),
+    ];
+    advance(100 * SECOND);
+    machine();
+    expect(denial(await ask("agent-b", "./gradlew assembleDebug"))).toContain(
+      "burst ceiling (5) are reached",
+    );
+  });
+
+  test("a granted burst build is left alone when headroom drops; only the next build is refused", async () => {
+    const { state, ask, warmUp, advance, machine, inner } = setup({ config: BURST_ON });
+    warmUp();
+    state.rows = handBuilds(3);
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+
+    // The shell still runs the allowed command, so the allowance stands.
+    state.rows = [
+      ...handBuilds(3),
+      agentRoot(400, "agent-d"),
+      row(401, 400, "/bin/zsh -c ./gradlew assembleDebug"),
+    ];
+    advance(10 * SECOND);
+    machine({ memoryBrakeHeld: true });
+    const message = denial(await ask("agent-a", "./gradlew assembleRelease"));
+
+    expect(message).toContain("memory check failed");
+    expect(message).toContain('for "Release notes" (agent agent-d), allowed');
+    expect(inner.gateLaunch).toHaveBeenCalledTimes(1);
+  });
+
+  test("a burst build the device cap then refuses gives its slot back and does not delay the next", async () => {
+    const { state, ask, warmUp, inner } = setup({ config: BURST_ON });
+    warmUp();
+    state.rows = handBuilds(3);
+    state.innerDecision = { decision: "deny", message: "Device cap: no slot" };
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(state.innerDecision);
+
+    state.innerDecision = { decision: "allow" };
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+    expect(inner.gateLaunch).toHaveBeenCalledTimes(2);
+  });
+
+  test("dry run logs the headroom refusal and allows the build", async () => {
+    const { state, ask, logger } = setup({ config: { ...BURST_ON, dryRun: true } });
+    state.rows = handBuilds(3);
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ dryRun: true, reason: "no-headroom", check: "reading" }),
+      "Build gate would have refused a native build",
+    );
+  });
+
+  test("on Windows, burst needs no pressure level or swap: free memory, CPU busy share and disk decide", async () => {
+    const windows = {
+      systemMemory: undefined,
+      systemLoad: {
+        load: { kind: "cpu-busy" as const, cores: 16, busyFraction: 0.4, load1: 6.4 },
+        freeMemoryBytes: 20 * GIB,
+        totalMemoryBytes: 64 * GIB,
+      },
+    };
+    const { state, ask, machine, advance } = setup({ config: BURST_ON, platform: "win32" });
+    machine(windows);
+    state.rows = handBuilds(3);
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+
+    advance(10 * SECOND);
+    machine({
+      ...windows,
+      systemLoad: {
+        ...windows.systemLoad,
+        load: { kind: "cpu-busy", cores: 16, busyFraction: 0.9, load1: 14.4 },
+      },
+    });
+    state.rows = [...handBuilds(3), ...agentRunning("agent-d", 400, gradlew("assembleDebug"))];
+    expect(denial(await ask("agent-a", "./gradlew assembleRelease"))).toContain(
+      "the CPU is 90% busy",
+    );
   });
 });

@@ -223,7 +223,9 @@ Its open, a record every five minutes while it holds, any sweep that let a child
 
 ## The native build gate
 
-At most `maxConcurrent` native builds run at once across the machine, one by default, and none start while free disk is under the `disk-low` line. On 2026-10-08 an iOS build with UI tests and an Android Gradle build ran together for an hour; Gradle alone wrote 34 GB and the machine went down. Either build alone had not done that.
+`maxConcurrent` native builds are guaranteed a slot at once across the machine, and [burst](#burst) can add more while the machine has room. None start while free disk is under the `disk-low` line. On 2026-10-08 an iOS build with UI tests and an Android Gradle build ran together for an hour; Gradle alone wrote 34 GB and the machine went down. Either build alone had not done that.
+
+The floor defaults to what the machine can carry at its peak, not to 1: `clamp(min(floor(cores / 5), floor((GiB - 16) / 16)), 1, 4)`. A guaranteed build is sized at 5 cores (a Gradle JVM peaks near three, and the compilers and test runners beside it take the rest) and 16 GiB (its daemons, test JVMs and a device at their peak together), after 16 GiB for the OS, the editors and the daemon. That is 3 on the 16-core, 64 GiB Mac this was tuned on, and 1 on an 8-core laptop with 16 GiB. A flat limit of 1 or 2 refused 36 of 71 build attempts in one stretch on a machine that was mostly idle, and every refused agent sleeps 120 seconds before asking again.
 
 It follows [the device cap's layers](device-leases.md#three-layers-three-jobs), with no checkout:
 
@@ -238,18 +240,53 @@ What holds a slot:
 - **A runner setting up:** an `expo run`, `react-native run|build` or `eas build --local` whose native build has not appeared yet, for up to 30 minutes. Once its build has been seen, the build holds the slot, and the runner holds nothing after it: `expo run` stays up serving Metro and builds nothing.
 - **An allowance the scan has not seen start.** Each allowance names its launcher, the program and task the command runs (`gradlew` and `:app:assembleDebug`). It holds while a process in the agent's tree still carries both: the shell running the command, `heavy.sh` waiting for one of its slots, `npm run android`. It ends when the agent's build appears (the build holds the slot from then), when nothing in the agent's tree runs the command any more (it finished between scans, failed or never started), or after an hour. A sample taken less than 5 seconds after the allowance does not judge it: the provider has not started the command yet, and two builds asked for in one message must not both pass. A build the device cap then refuses gives its slot back.
 
-The refusal names everything holding a slot, by command, agent title and running time, or says it is outside every agent's process tree. It tells the agent to run `sleep 120` on its own and retry: chained in front of the build, the sleep would not help, because the gate reads the whole command line before anything runs. A refusal for disk tells it to wait for space with `sleep 300` and never to delete DerivedData, caches or simulators to get past it, since other agents may be using them; the disk conditions' remedies do the reclaiming. Codex and the ACP providers get the reason over the steer path, as the device cap's do.
+The refusal says why it is a refusal: the limit, the burst ceiling, or the one headroom check that failed, with its figures. It names everything holding a slot, by command, agent title and running time, or says it is outside every agent's process tree. It tells the agent to run `sleep 120` on its own and retry: chained in front of the build, the sleep would not help, because the gate reads the whole command line before anything runs. A refusal for disk tells it to wait for space with `sleep 300` and never to delete DerivedData, caches or simulators to get past it, since other agents may be using them; the disk conditions' remedies do the reclaiming. Codex and the ACP providers get the reason over the steer path, as the device cap's do.
 
-It fails open: a free-space read that throws skips the disk check, and with no sample in time and none recent the build is allowed, logged once per run of failures.
+The floor fails open: a free-space read that throws skips the disk check, and with no sample in time and none recent the build is allowed, logged once per run of failures. Burst fails closed.
 
-| Key (`agents.buildGate`) | Default | What it does                                         |
-| ------------------------ | ------- | ---------------------------------------------------- |
-| `enabled`                | `true`  | Off allows every build without a scan                |
-| `dryRun`                 | `false` | Log what would have been refused; refuse nothing     |
-| `maxConcurrent`          | 1       | Native builds at once, counting ones started by hand |
-| `maxBuildMinutes`        | 120     | A build older than this stops holding a slot         |
+### Burst
 
-The disk line is `agents.remediation.disk.lowFreeGB` (default 20), the [disk brake](#the-disk-brake)'s low line, not the 5 GB critical floor: one build writes 10 to 34 GB, so a build started at 6 GB free fills the volume ([docs/disk-pressure.md](disk-pressure.md)). `grep '"module":"build-gate"' daemon.log` shows each build allowed or refused with what was running.
+A build that would be refused at the floor is allowed while fewer than `burst.maxConcurrent` builds are taken and every headroom check below passes at that moment. The ceiling defaults to `clamp(min(floor(cores / 3), floor((GiB - 16) / 8)), floor, floor + 3)`: a burst build is sized at 3 cores and 8 GiB, since it only has to make steady progress beside builds that were already running. That is 5 on the 16-core, 64 GiB Mac. A ceiling at or under the floor, or `burst.enabled: false`, leaves the floor as the only limit.
+
+The checks run in this order and the first failure names itself in the refusal. `n` counts every slot taken: builds running, runners setting up and allowances not yet seen running.
+
+| Check      | Passes when                                                                                                                                                                  |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reading`  | The monitor's reading is under 150 seconds old and has every signal the platform reports, and free disk was read just now                                                    |
+| `memory`   | The [memory brake](#the-memory-brake) does not hold, macOS pressure is normal, and available memory is at least `perBuildMemoryGB` for the new build and each build starting |
+| `swap`     | Swap used rose under 512 MiB from its lowest point in the last 5 minutes, and at least 2 minutes of readings exist                                                           |
+| `cpu`      | No [saturation](#cpu-saturation) incident is open and load is under `maxLoadPerCore` × cores (busy share under `maxBusyFraction` on Windows)                                 |
+| `disk`     | The [disk brake](#the-disk-brake) does not hold and free space is at least the `disk-low` line plus `perBuildDiskGB` × (`n` + 1)                                             |
+| `settling` | The reading was taken at least 90 seconds after the last burst build was allowed                                                                                             |
+
+The signals are the resource monitor's own, handed over at the end of each sweep (`reportMachineReading`) after the brakes and the saturation detector have run on them, so the gate never disagrees with a hold the monitor already made. Free disk is read at decision time. The monitor being off, a sweep that died before its end, or a read that failed all mean no reading, and no burst.
+
+Why these numbers:
+
+- **Memory counts allowed-but-unseen builds.** The reading is up to a minute old, and a build asked for a few seconds ago has not allocated yet. Each one reserves `perBuildMemoryGB` against the reading, so two burst builds asked for together do not both pass on the same free memory.
+- **Settling.** A Gradle or Xcode build takes a minute or two to reach its memory. A reading taken sooner than 90 seconds after a burst grant has not seen it, so the next burst build waits for one that has. This also makes burst climb at most one build per 90 seconds.
+- **Swap by growth, not by amount.** For the reason [the memory brake](#the-memory-brake) gives: macOS swap is sticky. 512 MiB over 5 minutes is well over the tens of megabytes a calm Mac drifts and well under the brake's 1 GiB a sweep.
+- **Load at 1× cores.** One heavy build loads about 1× the cores and saturation opens at 2× ([CPU saturation](#cpu-saturation)), so 1× leaves a band between burst closing and the machine being declared saturated. The Windows busy share cannot exceed 1, so it has its own line at 0.75, the saturation release line.
+- **Disk reserves for every build running as well as the new one.** The 2026-10-08 incident was disk, and a build already running can still write the rest of its 10 to 34 GB. 15 GB is between a common build and the incident's worst, and the reserve is held once per build, so a figure at the top of that range would shut burst out on any disk under 150 GB. On a disk with 67 GB free, the fourth build needs 80 GB and does not get a slot; `perBuildDiskGB: 10` would let it through at 60 GB.
+
+A burst build that was allowed is never stopped when headroom later drops. Only the next build is refused, and the slot count still includes the running one. Windows has no memory pressure level or swap in its sample, so those two checks do not apply there: its available memory is `os.freemem()`. Linux has swap and no pressure level.
+
+| Key (`agents.buildGate`) | Default                                              | What it does                                                                  |
+| ------------------------ | ---------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `enabled`                | `true`                                               | Off allows every build without a scan                                         |
+| `dryRun`                 | `false`                                              | Log what would have been refused; refuse nothing                              |
+| `maxConcurrent`          | derived from cores and memory (3 on 16 cores/64 GiB) | The guaranteed floor, counting builds started by hand                         |
+| `maxBuildMinutes`        | 120                                                  | A build older than this stops holding a slot                                  |
+| `burst.enabled`          | `true`                                               | Off leaves the floor as the only limit                                        |
+| `burst.maxConcurrent`    | derived (5 on 16 cores/64 GiB)                       | The ceiling. At or under the floor, burst has no room                         |
+| `burst.perBuildMemoryGB` | 8                                                    | Available memory needed for the new build and for each one still starting     |
+| `burst.perBuildDiskGB`   | 15                                                   | Free disk needed above the `disk-low` line, per build running and the new one |
+| `burst.maxLoadPerCore`   | 1                                                    | macOS and Linux: load average per core that closes burst                      |
+| `burst.maxBusyFraction`  | 0.75                                                 | Windows: CPU busy share that closes burst                                     |
+
+`burst` is a nested block: patching one of its keys keeps the others. All of it is live-patchable and read on every decision. The derived defaults are computed once at daemon start from `os.cpus()` and `os.totalmem()`.
+
+The disk line is `agents.remediation.disk.lowFreeGB` (default 20), the [disk brake](#the-disk-brake)'s low line, not the 5 GB critical floor: one build writes 10 to 34 GB, so a build started at 6 GB free fills the volume ([docs/disk-pressure.md](disk-pressure.md)). `grep '"module":"build-gate"' daemon.log` shows each build allowed or refused with what was running. Every line carries `burst` (whether the build took a slot above the floor), the slot counts, `max` and `burstMax`, and `headroom`, the figures the checks saw (available memory, swap growth, load per core, free and needed disk). A refusal's `reason` is `at-cap` (the floor, burst off), `at-burst-cap` (the ceiling) or `no-headroom`, with `check` naming which one failed.
 
 ## Reaping abandoned build daemons
 
