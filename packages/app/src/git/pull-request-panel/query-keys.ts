@@ -12,6 +12,24 @@ export function prPaneTimelineQueryKey({
   return [prPaneTimelineQueryKind, serverId, cwd, prNumber] as const;
 }
 
+export const prPaneStatusByIdentityQueryKind = "prPaneStatusByIdentity";
+
+export function prPaneStatusByIdentityQueryKey({
+  serverId,
+  host,
+  repoOwner,
+  repoName,
+  number,
+}: {
+  serverId: string;
+  host: string;
+  repoOwner: string;
+  repoName: string;
+  number: number;
+}) {
+  return [prPaneStatusByIdentityQueryKind, serverId, host, repoOwner, repoName, number] as const;
+}
+
 export const prPanePipelineQueryKind = "prPanePipeline";
 
 export function prPanePipelineQueryKey({
