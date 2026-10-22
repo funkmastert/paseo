@@ -23,6 +23,7 @@ describe("detectPullRequestCreation", () => {
       repoName: "widgets",
       number: 42,
       url: "https://github.com/acme/widgets/pull/42",
+      forge: "github",
     });
   });
 
@@ -34,6 +35,7 @@ describe("detectPullRequestCreation", () => {
       repoName: "widgets",
       number: 7,
       url: "https://git.example.com/acme/widgets/pulls/7",
+      forge: "gitea",
     });
   });
 
@@ -46,6 +48,7 @@ describe("detectPullRequestCreation", () => {
       repoName: "widgets",
       number: 9,
       url: "https://github.com/acme/widgets/pull/9",
+      forge: "github",
     });
   });
 
@@ -70,6 +73,7 @@ describe("detectPullRequestCreation", () => {
       repoName: "widgets",
       number: 13,
       url: "https://github.com/acme/widgets/pull/13",
+      forge: "github",
     });
   });
 

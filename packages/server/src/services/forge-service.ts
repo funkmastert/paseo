@@ -472,6 +472,20 @@ export interface ForgeService {
       headRepositoryOwner?: string;
     } & ForgeReadOptions,
   ): Promise<CurrentPullRequestStatus | null>;
+  /**
+   * A PR's live status by explicit identity, independent of the checkout's current branch
+   * (docs/pull-request-ledger.md). `cwd` selects which authenticated CLI context to run from,
+   * not the PR's identity. Optional: an adapter without identity-based lookup is absent here,
+   * and the pull request ledger falls back to the PR URL for that forge.
+   */
+  getPullRequestStatusByIdentity?(
+    options: {
+      cwd: string;
+      repoOwner: string;
+      repoName: string;
+      number: number;
+    } & ForgeReadOptions,
+  ): Promise<CurrentPullRequestStatus | null>;
   getPullRequestTimeline(options: GetPullRequestTimelineOptions): Promise<PullRequestTimeline>;
   getCheckDetails(options: GetCheckDetailsOptions): Promise<CheckDetails>;
   searchIssuesAndPrs(options: SearchIssuesAndPrsOptions): Promise<SearchResult>;

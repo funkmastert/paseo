@@ -2176,6 +2176,38 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       });
     },
 
+    getPullRequestStatusByIdentity(input) {
+      return cached({
+        cwd: input.cwd,
+        method: "getPullRequestStatusByIdentity",
+        args: { repoOwner: input.repoOwner, repoName: input.repoName, number: input.number },
+        readOptions: input,
+        load: async () => {
+          const repo = `${input.repoOwner}/${input.repoName}`;
+          const stdout = await runCurrentPullRequestStatusCommand({
+            cwd: input.cwd,
+            run,
+            args: ["pr", "view", String(input.number), "--repo", repo],
+          });
+          const item = parseGitHubJsonOutput(stdout, CurrentPullRequestStatusSchema, {
+            args: [
+              "pr",
+              "view",
+              String(input.number),
+              "--repo",
+              repo,
+              "--json",
+              CURRENT_PR_STATUS_FIELDS,
+            ],
+            cwd: input.cwd,
+            emptyFallback: "{}",
+          });
+          const status = toCurrentPullRequestStatus(item, "");
+          return addCurrentPullRequestGithubFacts({ cwd: input.cwd, status, run });
+        },
+      });
+    },
+
     getPullRequestTimeline(input) {
       return cached({
         cwd: input.cwd,

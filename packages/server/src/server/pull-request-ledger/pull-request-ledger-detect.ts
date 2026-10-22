@@ -10,6 +10,9 @@ export interface DetectedPullRequest {
   repoName: string;
   number: number;
   url: string;
+  /** The facts-family tag the URL path shape implies (docs/forge-providers.md): GitHub uses
+   * `/pull/N`, the Gitea family (Gitea/Forgejo/Codeberg) uses `/pulls/N`. */
+  forge: "github" | "gitea";
 }
 
 const PR_CREATE_COMMAND = /^\s*gh\s+pr\s+create\b/;
@@ -27,12 +30,13 @@ function parsePullRequestUrl(url: string): DetectedPullRequest | null {
     return null;
   }
   // GitHub: /owner/repo/pull/N. Gitea/Forgejo/Codeberg: /owner/repo/pulls/N.
-  const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/(?:pull|pulls)\/(\d+)(?:\/|$)/);
+  const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/(pull|pulls)\/(\d+)(?:\/|$)/);
   if (!match) return null;
-  const [, repoOwner, repoName, numberText] = match;
+  const [, repoOwner, repoName, pathSegment, numberText] = match;
   const number = Number.parseInt(numberText, 10);
   if (!repoOwner || !repoName || !Number.isFinite(number)) return null;
-  return { host: parsed.host, repoOwner, repoName, number, url };
+  const forge = pathSegment === "pull" ? "github" : "gitea";
+  return { host: parsed.host, repoOwner, repoName, number, url, forge };
 }
 
 function findFirstPrUrl(text: string): DetectedPullRequest | null {
