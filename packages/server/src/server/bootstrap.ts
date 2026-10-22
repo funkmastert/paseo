@@ -1039,11 +1039,15 @@ function createPullRequestLedgerService(input: {
         agentManager
           .listAgents()
           .map((agent) => ({ id: agent.id, title: agent.config.title ?? null, cwd: agent.cwd })),
-      getAgentCwd: (agentId) => agentManager.getAgent(agentId)?.cwd ?? null,
+      getAgentSummary: (agentId) => {
+        const agent = agentManager.getAgent(agentId);
+        return agent ? { cwd: agent.cwd, title: agent.config.title ?? null } : null;
+      },
       getTimelineRows: (agentId) => agentManager.getTimelineRows(agentId),
       listAgentRecordsForPullRequestLedger: () =>
         agentManager.listAgentRecordsForPullRequestLedger(),
     },
+    logger: moduleLogger,
   });
   void store
     .load()

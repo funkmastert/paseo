@@ -19,18 +19,18 @@ export const PullRequestLedgerEntrySchema = z.object({
   // row should run from. Not the PR's own identity.
   creatingAgentCwd: z.string(),
   detectedAtMs: z.number(),
-  // Null until the first status poll completes.
-  status: CheckoutPrStatusSchema.nullable(),
+  // No status here: a row's live status is fetched per-row via
+  // checkout.forge.get_pull_request_status, never pre-populated in the list.
 });
 
 export const WorkspacePullRequestsListRequestSchema = z.object({
-  type: z.literal("workspace.pullRequests.list.request"),
+  type: z.literal("workspace.pull_requests.list.request"),
   workspaceId: z.string(),
   requestId: z.string(),
 });
 
 export const WorkspacePullRequestsListResponseSchema = z.object({
-  type: z.literal("workspace.pullRequests.list.response"),
+  type: z.literal("workspace.pull_requests.list.response"),
   payload: z.object({
     requestId: z.string(),
     workspaceId: z.string(),

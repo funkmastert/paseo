@@ -8,6 +8,7 @@ import { findExecutable } from "../executable-resolution/executable-resolution.j
 import { runGitCommand } from "../utils/run-git-command.js";
 import { execCommand, runWithSpawnPriority } from "../utils/spawn.js";
 import { resolveSshHostname } from "../utils/ssh-hostname.js";
+import { ForgePollPausedError } from "./forge-poll-paused-error.js";
 import {
   CLI_AUTH_PROBE_TIMEOUT_MS,
   createForgeCliRunner,
@@ -2177,10 +2178,22 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     },
 
     getPullRequestStatusByIdentity(input) {
+      const pauseUntil = getPollPauseUntil(input.cwd);
+      const args = { repoOwner: input.repoOwner, repoName: input.repoName, number: input.number };
+      if (pauseUntil > deps.now()) {
+        const key = buildCacheKey({
+          cwd: input.cwd,
+          method: "getPullRequestStatusByIdentity",
+          args,
+        });
+        const stale = cache.get(key);
+        if (stale) return Promise.resolve(stale.value as CurrentPullRequestStatus | null);
+        throw new ForgePollPausedError(pauseUntil);
+      }
       return cached({
         cwd: input.cwd,
         method: "getPullRequestStatusByIdentity",
-        args: { repoOwner: input.repoOwner, repoName: input.repoName, number: input.number },
+        args,
         readOptions: input,
         load: async () => {
           const repo = `${input.repoOwner}/${input.repoName}`;

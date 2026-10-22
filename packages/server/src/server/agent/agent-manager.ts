@@ -7192,7 +7192,11 @@ export class AgentManager {
     const row = this.timelineStore.append(agentId, item, options);
     this.enqueueDurableTimelineAppend(agentId, row);
     for (const listener of this.timelineRecordedListeners) {
-      listener(agentId, row);
+      try {
+        listener(agentId, row);
+      } catch (error) {
+        this.logger.warn({ err: error, agentId }, "Timeline recorded listener failed");
+      }
     }
     return row;
   }

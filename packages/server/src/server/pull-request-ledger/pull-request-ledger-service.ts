@@ -14,9 +14,10 @@ import {
 export interface PullRequestLedgerAgentManager {
   subscribeTimelineRecorded(listener: (agentId: string, row: AgentTimelineRow) => void): () => void;
   listResidentAgents(): Array<{ id: string; title: string | null; cwd: string }>;
-  /** The authenticated CLI context a status fetch for this agent's PRs should run from. Null
-   * when the agent is no longer resident (status fetch then uses the row's last-known cwd). */
-  getAgentCwd(agentId: string): string | null;
+  /** The authenticated CLI context a status fetch for this agent's PRs should run from, and the
+   * agent's display title. Null when the agent is no longer resident (status fetch then uses the
+   * row's last-known cwd). */
+  getAgentSummary(agentId: string): { cwd: string; title: string | null } | null;
   getTimelineRows(agentId: string): Promise<AgentTimelineRow[]>;
   listAgentRecordsForPullRequestLedger(): Promise<
     Array<{
@@ -28,11 +29,16 @@ export interface PullRequestLedgerAgentManager {
   >;
 }
 
+interface BackfillLogger {
+  warn: (obj: object, msg?: string) => void;
+}
+
 export interface PullRequestLedgerServiceOptions {
   store: PullRequestLedgerStore;
   agentManager: PullRequestLedgerAgentManager;
   now?: () => number;
   sweepIntervalMs?: number;
+  logger?: BackfillLogger;
 }
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
@@ -68,6 +74,7 @@ export class PullRequestLedgerService {
   private readonly agentManager: PullRequestLedgerAgentManager;
   private readonly now: () => number;
   private readonly sweepIntervalMs: number;
+  private readonly logger: BackfillLogger;
   private unsubscribeTimeline: (() => void) | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -76,6 +83,7 @@ export class PullRequestLedgerService {
     this.agentManager = options.agentManager;
     this.now = options.now ?? Date.now;
     this.sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
+    this.logger = options.logger ?? { warn: () => undefined };
   }
 
   /** Subscribes to live detection and starts the prune/flush sweep. Safe to call once. */
@@ -112,16 +120,26 @@ export class PullRequestLedgerService {
    */
   async backfillResidentAgents(): Promise<void> {
     for (const agent of this.agentManager.listResidentAgents()) {
-      const rows = await this.agentManager.getTimelineRows(agent.id);
-      for (const row of rows) {
-        this.detectAndUpsert(agent.id, agent.title, agent.cwd, row);
+      try {
+        const rows = await this.agentManager.getTimelineRows(agent.id);
+        for (const row of rows) {
+          this.detectAndUpsert(agent.id, agent.title, agent.cwd, row);
+        }
+      } catch (error) {
+        this.logger.warn(
+          { err: error, agentId: agent.id },
+          "Pull request ledger backfill failed for one agent; continuing with the rest",
+        );
       }
+      // One agent's timeline can be large; yield to the event loop between agents so backfill
+      // never blocks it for the whole resident set in one synchronous stretch.
+      await new Promise((resolve) => setImmediate(resolve));
     }
   }
 
   private onTimelineRecorded(agentId: string, row: AgentTimelineRow): void {
-    const cwd = this.agentManager.getAgentCwd(agentId);
-    this.detectAndUpsert(agentId, null, cwd, row);
+    const summary = this.agentManager.getAgentSummary(agentId);
+    this.detectAndUpsert(agentId, summary?.title ?? null, summary?.cwd ?? null, row);
   }
 
   private detectAndUpsert(
@@ -136,22 +154,69 @@ export class PullRequestLedgerService {
     if (!detected) return;
     const id = buildPullRequestLedgerRowId(detected);
     const existing = this.store.getRow(id);
+    const parsedTimestampMs = Date.parse(row.timestamp);
+    const detectedAtMs = existing?.detectedAtMs ?? parsedTimestampMs;
     const ledgerRow: PullRequestLedgerRow = {
       id,
-      agentId,
-      agentTitle: agentTitle ?? existing?.agentTitle ?? null,
-      agentCwd: agentCwd ?? existing?.agentCwd ?? "",
+      // The first observation wins: a later tool call touching the same PR (a retry, a
+      // follow-up `gh api` read) never reassigns credit away from whoever actually created it.
+      agentId: existing?.agentId ?? agentId,
+      agentTitle: existing?.agentTitle ?? agentTitle,
+      agentCwd: existing?.agentCwd ?? agentCwd ?? "",
       host: detected.host,
       repoOwner: detected.repoOwner,
       repoName: detected.repoName,
       number: detected.number,
       url: detected.url,
       forge: detected.forge,
-      detectedAtMs: existing?.detectedAtMs ?? this.now(),
+      detectedAtMs: Number.isFinite(detectedAtMs) ? detectedAtMs : this.now(),
       status: existing?.status ?? "open",
       lastStatusCheckedAtMs: existing?.lastStatusCheckedAtMs ?? null,
     };
     this.store.upsertRow(ledgerRow);
+  }
+
+  /** The store row for this identity, if tracked. */
+  getRow(id: string): PullRequestLedgerRow | undefined {
+    return this.store.getRow(id);
+  }
+
+  /**
+   * Tracks a PR discovered outside tool-call detection (the checkout's own current PR, read
+   * from the workspace's git/forge snapshot). A no-op when the identity is already tracked —
+   * this never overwrites a detected creator with a placeholder one.
+   */
+  ensureTracked(
+    identity: {
+      host: string;
+      repoOwner: string;
+      repoName: string;
+      number: number;
+      url: string;
+      forge: string;
+    },
+    creator: { agentId: string; agentTitle: string | null; agentCwd: string },
+  ): PullRequestLedgerRow {
+    const id = buildPullRequestLedgerRowId(identity);
+    const existing = this.store.getRow(id);
+    if (existing) return existing;
+    const row: PullRequestLedgerRow = {
+      id,
+      agentId: creator.agentId,
+      agentTitle: creator.agentTitle,
+      agentCwd: creator.agentCwd,
+      host: identity.host,
+      repoOwner: identity.repoOwner,
+      repoName: identity.repoName,
+      number: identity.number,
+      url: identity.url,
+      forge: identity.forge,
+      detectedAtMs: this.now(),
+      status: "open",
+      lastStatusCheckedAtMs: null,
+    };
+    this.store.upsertRow(row);
+    return row;
   }
 
   /** Marks a tracked PR's refreshed status, releasing it from the poll grid once terminal. */

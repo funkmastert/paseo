@@ -3084,3 +3084,61 @@ describe("detectGiteaFamilySoftware", () => {
     expect(software).toBe("gitea");
   });
 });
+
+describe("createGiteaService getPullRequestStatusByIdentity", () => {
+  it("fetches a PR by explicit owner/repo/number, independent of the checkout's branch", async () => {
+    const { service, calls } = makeService((args) => {
+      if (args[0] === "api" && args[1] === "repos/acme/widgets/pulls/42") {
+        return ok(
+          JSON.stringify(
+            currentPullRequestApi({
+              number: 42,
+              state: "open",
+              headRef: "feat/widgets",
+              headSha: "4444444444444444444444444444444444444444",
+            }),
+          ),
+        );
+      }
+      if (args[0] === "pr" && args[1] === "42") {
+        return ok(JSON.stringify({ ...STATUS_PR_VIEW, index: 42, headSha: undefined }));
+      }
+      throw new Error(`unexpected call: ${args.join(" ")}`);
+    });
+
+    const status = await service.getPullRequestStatusByIdentity?.({
+      cwd: "/repo",
+      repoOwner: "acme",
+      repoName: "widgets",
+      number: 42,
+    });
+
+    expect(status).toMatchObject({
+      number: 42,
+      url: "https://gitea.com/example-user/sample-repo/pulls/42",
+      state: "open",
+      isMerged: false,
+      repoOwner: "example-user",
+      repoName: "sample-repo",
+    });
+    expect(calls[0]).toEqual(["api", "repos/acme/widgets/pulls/42"]);
+  });
+
+  it("returns null for a 404 on the pulls collection item", async () => {
+    const { service } = makeService((args) => {
+      if (args[0] === "api" && args[1] === "repos/acme/widgets/pulls/999") {
+        throw new Error("tea: HTTP 404 Not Found");
+      }
+      throw new Error(`unexpected call: ${args.join(" ")}`);
+    });
+
+    const status = await service.getPullRequestStatusByIdentity?.({
+      cwd: "/repo",
+      repoOwner: "acme",
+      repoName: "widgets",
+      number: 999,
+    });
+
+    expect(status).toBeNull();
+  });
+});

@@ -213,7 +213,7 @@ import {
 } from "./session/compaction/compaction-session.js";
 import {
   createPullRequestsSession,
-  type PullRequestLedgerReader,
+  type PullRequestLedgerAccess,
   type PullRequestsSession,
 } from "./session/pull-requests/pull-requests-session.js";
 import type { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
@@ -607,7 +607,7 @@ export interface SessionOptions {
   tokenUsage?: TokenUsageReader;
   contextUsage?: AgentContextUsageService;
   compactionLedger?: CompactionLedgerReader;
-  pullRequestLedger?: PullRequestLedgerReader;
+  pullRequestLedger?: PullRequestLedgerAccess;
   /** The daemon's one sign-in launcher, shared by every connection. Absent: sign-in fails. */
   accountSignIn?: Pick<ClaudeAccountSignIn, "start">;
   jev?: JevService | null;
@@ -1109,8 +1109,9 @@ export class Session {
     });
     this.pullRequestsSession = createPullRequestsSession({
       host: { emit: (msg) => this.emit(msg) },
-      reader: pullRequestLedger,
+      ledger: pullRequestLedger,
       workspaceGitService: this.workspaceGitService,
+      workspaceRegistry: this.workspaceRegistry,
     });
     this.contextUsageSession = createContextUsageSession({
       host: { emit: (msg) => this.emit(msg) },
@@ -2391,7 +2392,7 @@ export class Session {
   private dispatchPullRequestsMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     if (!this.pullRequestsSession) return undefined;
     switch (msg.type) {
-      case "workspace.pullRequests.list.request":
+      case "workspace.pull_requests.list.request":
         return this.pullRequestsSession.handleListRequest(msg);
       case "checkout.forge.get_pull_request_status.request":
         return this.pullRequestsSession.handleGetStatusRequest(msg);

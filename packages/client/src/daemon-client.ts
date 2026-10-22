@@ -555,7 +555,7 @@ export type CompactionEpisodesSummaryPayload = Extract<
 >["payload"];
 export type WorkspacePullRequestsListPayload = Extract<
   SessionOutboundMessage,
-  { type: "workspace.pullRequests.list.response" }
+  { type: "workspace.pull_requests.list.response" }
 >["payload"];
 export type CheckoutForgeGetPullRequestStatusPayload = Extract<
   SessionOutboundMessage,
@@ -5558,11 +5558,12 @@ export class DaemonClient {
     workspaceId: string,
     options?: { requestId?: string },
   ): Promise<WorkspacePullRequestsListPayload> {
-    // COMPAT(pullRequestLedger): callers gate on `server_info.features.pullRequestLedger`; an
-    // older daemon answers an unknown request type with an `unknown_schema` rpc_error.
+    // COMPAT(pullRequestLedger): added in v0.9.x, remove after 2027-04-22. Callers gate on
+    // `server_info.features.pullRequestLedger`; an older daemon answers an unknown request type
+    // with an `unknown_schema` rpc_error.
     return this.sendNamespacedCorrelatedSessionRequest({
       requestId: options?.requestId,
-      message: { type: "workspace.pullRequests.list.request", workspaceId },
+      message: { type: "workspace.pull_requests.list.request", workspaceId },
     });
   }
 
@@ -5572,8 +5573,9 @@ export class DaemonClient {
     input: { cwd: string; host: string; repoOwner: string; repoName: string; number: number },
     options?: { requestId?: string },
   ): Promise<CheckoutForgeGetPullRequestStatusPayload> {
-    // COMPAT(pullRequestLedger): callers gate on `server_info.features.pullRequestLedger`; an
-    // older daemon answers an unknown request type with an `unknown_schema` rpc_error.
+    // COMPAT(pullRequestLedger): added in v0.9.x, remove after 2027-04-22. Callers gate on
+    // `server_info.features.pullRequestLedger`; an older daemon answers an unknown request type
+    // with an `unknown_schema` rpc_error.
     return this.sendNamespacedCorrelatedSessionRequest({
       requestId: options?.requestId,
       message: { type: "checkout.forge.get_pull_request_status.request", ...input },

@@ -48,8 +48,9 @@ function fakeAgentManager(options: {
     listResidentAgents() {
       return options.residentAgents ?? [];
     },
-    getAgentCwd(agentId: string) {
-      return options.agentCwds?.[agentId] ?? null;
+    getAgentSummary(agentId: string) {
+      const cwd = options.agentCwds?.[agentId];
+      return cwd ? { cwd, title: null } : null;
     },
     async getTimelineRows(agentId: string) {
       return options.residentTimelines?.[agentId] ?? [];
@@ -212,6 +213,136 @@ describe("PullRequestLedgerService", () => {
       const service = new PullRequestLedgerService({ store, agentManager });
 
       await expect(service.list("ws-unknown")).resolves.toEqual([]);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("re-detecting the same PR keeps the original creator, not the later one", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "pr-ledger-service-keep-creator-"));
+    try {
+      const store = new PullRequestLedgerStore({ rootDir, logger });
+      await store.load();
+      const agentManager = fakeAgentManager({
+        agentCwds: { "agent-1": "/repo-1", "agent-2": "/repo-2" },
+      });
+      const service = new PullRequestLedgerService({ store, agentManager });
+      service.start();
+
+      agentManager.emit(
+        "agent-1",
+        toolCallRow("Bash", "gh pr create --fill", "https://github.com/acme/widgets/pull/42", 1),
+      );
+      agentManager.emit(
+        "agent-2",
+        toolCallRow(
+          "Bash",
+          "gh api repos/acme/widgets/pulls -X POST",
+          JSON.stringify({ html_url: "https://github.com/acme/widgets/pull/42", number: 42 }),
+          2,
+        ),
+      );
+
+      const row = store.getRow("github.com/acme/widgets#42");
+      expect(row?.agentId).toBe("agent-1");
+      expect(row?.agentCwd).toBe("/repo-1");
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("detectedAtMs comes from the tool call's own timestamp, not wall-clock at detection time", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "pr-ledger-service-detected-at-"));
+    try {
+      const store = new PullRequestLedgerStore({ rootDir, logger });
+      await store.load();
+      const agentManager = fakeAgentManager({
+        residentAgents: [{ id: "agent-1", title: "Ship it", cwd: "/repo" }],
+        residentTimelines: {
+          "agent-1": [
+            toolCallRow(
+              "Bash",
+              "gh pr create --fill",
+              "https://github.com/acme/widgets/pull/42",
+              1_000,
+            ),
+          ],
+        },
+      });
+      const service = new PullRequestLedgerService({ store, agentManager, now: () => 99_999 });
+      await service.backfillResidentAgents();
+
+      const row = store.getRow("github.com/acme/widgets#42");
+      expect(row?.detectedAtMs).toBe(new Date(1_000).getTime());
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("backfill continues past one agent whose timeline read fails", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "pr-ledger-service-backfill-resilient-"));
+    try {
+      const store = new PullRequestLedgerStore({ rootDir, logger });
+      await store.load();
+      const residentTimelines: Record<string, AgentTimelineRow[]> = {
+        "agent-2": [
+          toolCallRow("Bash", "gh pr create --fill", "https://github.com/acme/widgets/pull/42", 1),
+        ],
+      };
+      const agentManager: PullRequestLedgerAgentManager = {
+        subscribeTimelineRecorded: () => () => undefined,
+        listResidentAgents: () => [
+          { id: "agent-1", title: "Fails", cwd: "/repo-1" },
+          { id: "agent-2", title: "Succeeds", cwd: "/repo-2" },
+        ],
+        getAgentSummary: () => null,
+        getTimelineRows: async (agentId: string) => {
+          if (agentId === "agent-1") throw new Error("timeline read failed");
+          return residentTimelines[agentId] ?? [];
+        },
+        listAgentRecordsForPullRequestLedger: async () => [],
+      };
+      const service = new PullRequestLedgerService({ store, agentManager });
+
+      await service.backfillResidentAgents();
+
+      const row = store.getRow("github.com/acme/widgets#42");
+      expect(row?.agentId).toBe("agent-2");
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("ensureTracked adds a row for a discovered identity but never overwrites an existing one", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "pr-ledger-service-ensure-tracked-"));
+    try {
+      const store = new PullRequestLedgerStore({ rootDir, logger });
+      await store.load();
+      const agentManager = fakeAgentManager({});
+      const service = new PullRequestLedgerService({ store, agentManager });
+
+      const identity = {
+        host: "github.com",
+        repoOwner: "acme",
+        repoName: "widgets",
+        number: 42,
+        url: "https://github.com/acme/widgets/pull/42",
+        forge: "github",
+      };
+      const first = service.ensureTracked(identity, {
+        agentId: "",
+        agentTitle: null,
+        agentCwd: "/repo",
+      });
+      expect(first.agentCwd).toBe("/repo");
+
+      const second = service.ensureTracked(identity, {
+        agentId: "agent-x",
+        agentTitle: "Someone else",
+        agentCwd: "/repo-2",
+      });
+      expect(second.agentCwd).toBe("/repo");
+      expect(second.agentId).toBe("");
     } finally {
       rmSync(rootDir, { recursive: true, force: true });
     }

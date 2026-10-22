@@ -1109,6 +1109,12 @@ function isAuthFailureText(text: string): boolean {
   );
 }
 
+function isGiteaNotFoundError(error: unknown): boolean {
+  const stderr = error instanceof ForgeCommandError ? error.stderr : "";
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b404\b|not found/i.test(`${message} ${stderr}`);
+}
+
 function classifyGiteaTimelineErrorKind(stderr: string): PullRequestTimelineErrorKind {
   const normalized = stderr.toLowerCase();
   if (normalized.includes("404") || normalized.includes("not found")) {
@@ -2007,6 +2013,24 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
         headRef: input.headRef,
         headSha: input.headSha,
       });
+    },
+
+    async getPullRequestStatusByIdentity(input): Promise<CurrentPullRequestStatus | null> {
+      const repoPath = `repos/${encodeURIComponent(input.repoOwner)}/${encodeURIComponent(input.repoName)}`;
+      let apiItem: GiteaCurrentPullRequestApi;
+      try {
+        apiItem = await runJson(
+          ["api", `${repoPath}/pulls/${input.number}`],
+          { cwd: input.cwd },
+          GiteaCurrentPullRequestApiSchema,
+        );
+      } catch (error) {
+        if (isGiteaNotFoundError(error)) return null;
+        throw error;
+      }
+      const listItem = currentPullRequestApiToListItem(apiItem);
+      const status = toCurrentPullRequestStatus(listItem);
+      return loadCurrentPullRequestChecks(input.cwd, listItem, status);
     },
 
     async getPullRequest(input: GetPullRequestOptions): Promise<PullRequestSummary> {
