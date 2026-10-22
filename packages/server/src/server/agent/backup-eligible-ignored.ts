@@ -40,17 +40,37 @@ export function resolveBackupIgnoredPaths(
   return resolveIgnoredPathPatterns(patterns, onRejectedPattern, { allowDirectory: true });
 }
 
-function matchesAnyPattern(path: string, patterns: readonly string[]): boolean {
+/**
+ * Named distinctly from `workspace-sweep-detector.ts`'s own `matchesAnyPattern`: that one is
+ * files-only (`regenerableIgnoredPaths`), this one also matches a directory and everything git
+ * lists individually underneath it (`backupIgnoredPaths`) -- same name, deliberately different
+ * behavior, so each stays in its own file rather than risk one edit silently applying to both.
+ */
+function matchesAnyBackupPattern(path: string, patterns: readonly string[]): boolean {
   if (patterns.length === 0) return false;
   const withoutTrailingSlash = path.endsWith("/") ? path.slice(0, -1) : path;
   // A directory entry's own trailing slash can hide it from the secret-name check (the JEV
   // globs are end-anchored), so both forms are tested.
   if (isSecretShapedPath(path) || isSecretShapedPath(withoutTrailingSlash)) return false;
-  return patterns.some(
-    (pattern) =>
+  return patterns.some((pattern) => {
+    if (
       globToRegExp(pattern, "u").test(path) ||
-      globToRegExp(pattern, "u").test(withoutTrailingSlash),
-  );
+      globToRegExp(pattern, "u").test(withoutTrailingSlash)
+    ) {
+      return true;
+    }
+    // Git does not always collapse a whole ignored directory to one entry -- once anything else
+    // under it is tracked (a `.gitignore`, a README), `git status --ignored=matching` lists each
+    // ignored file individually instead (`.worker-logs/final-compile2.log`, never
+    // `.worker-logs/`), so the plain suffix match above, anchored to the end of the string, never
+    // fires for them. `matchChildren` instead anchors the pattern to a path boundary on the left
+    // and accepts a `/` followed by anything after it, so it also matches everything under the
+    // directory, at any depth.
+    return (
+      pattern.endsWith("/") &&
+      globToRegExp(pattern.slice(0, -1), "u", { matchChildren: true }).test(withoutTrailingSlash)
+    );
+  });
 }
 
 export interface BackupEligibleIgnoredOptions {
@@ -119,7 +139,7 @@ export async function selectBackupEligibleIgnored(
   if (patterns.length === 0) return { entries, files };
   let totalBytes = 0;
   for (const entry of candidates) {
-    if (!matchesAnyPattern(entry, patterns)) continue;
+    if (!matchesAnyBackupPattern(entry, patterns)) continue;
     const collected = entry.endsWith("/")
       ? await collectEligibleFilesInDirectory(worktreePath, entry.slice(0, -1), maxFileBytes)
       : await collectEligibleFile(worktreePath, entry, maxFileBytes);

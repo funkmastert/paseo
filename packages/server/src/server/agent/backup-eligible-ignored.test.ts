@@ -134,6 +134,54 @@ describe("isBackupEligibleIgnoredPath", () => {
     ).resolves.toBe(true);
   });
 
+  // Git does not always collapse a whole ignored directory to one entry: once anything else
+  // under it is tracked (a README, here), `git status --ignored=matching` lists each ignored file
+  // individually instead, so the candidate passed in is the file itself, not the directory.
+  test("a file listed individually under a directory pattern is eligible", async () => {
+    mkdirSync(join(worktreePath, ".worker-logs"));
+    writeFileSync(join(worktreePath, ".worker-logs", "README.md"), "tracked\n");
+    writeFileSync(join(worktreePath, ".worker-logs", "final-compile2.log"), "log output\n");
+
+    await expect(
+      isBackupEligibleIgnoredPath({
+        worktreePath,
+        entry: ".worker-logs/final-compile2.log",
+        patterns: [".worker-logs/"],
+        maxFileBytes: 1024,
+      }),
+    ).resolves.toBe(true);
+  });
+
+  // Same as above, but nested two levels deep under the configured directory.
+  test("a file listed individually under a nested subdirectory of a directory pattern is eligible", async () => {
+    mkdirSync(join(worktreePath, ".worker-logs", "nested"), { recursive: true });
+    writeFileSync(join(worktreePath, ".worker-logs", "README.md"), "tracked\n");
+    writeFileSync(join(worktreePath, ".worker-logs", "nested", "followup-compile1.log"), "x\n");
+
+    await expect(
+      isBackupEligibleIgnoredPath({
+        worktreePath,
+        entry: ".worker-logs/nested/followup-compile1.log",
+        patterns: [".worker-logs/"],
+        maxFileBytes: 1024,
+      }),
+    ).resolves.toBe(true);
+  });
+
+  test("a file under a differently-named directory does not match a directory pattern", async () => {
+    mkdirSync(join(worktreePath, ".other-logs"));
+    writeFileSync(join(worktreePath, ".other-logs", "x.log"), "x\n");
+
+    await expect(
+      isBackupEligibleIgnoredPath({
+        worktreePath,
+        entry: ".other-logs/x.log",
+        patterns: [".worker-logs/"],
+        maxFileBytes: 1024,
+      }),
+    ).resolves.toBe(false);
+  });
+
   test("a directory with one oversized file inside is not eligible as a whole", async () => {
     mkdirSync(join(worktreePath, ".worker-logs"));
     writeFileSync(join(worktreePath, ".worker-logs", "small.log"), "small\n");
