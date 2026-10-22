@@ -45,6 +45,7 @@ function workspace(input: {
     diskUsage: null,
     completionState: null,
     completionNote: null,
+    agentId: null,
   };
 }
 

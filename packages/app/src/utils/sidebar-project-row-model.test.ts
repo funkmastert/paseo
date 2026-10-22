@@ -35,6 +35,7 @@ function workspace(overrides: Partial<SidebarWorkspaceEntry> = {}): SidebarWorks
     diskUsage: null,
     completionState: null,
     completionNote: null,
+    agentId: null,
     ...overrides,
     archivingAt: overrides.archivingAt ?? null,
   };

@@ -672,6 +672,11 @@ function StatusWorkspaceRowWithMenu({
     clipboard.copyBranchName(workspace);
   }, [clipboard, workspace]);
 
+  const handleCopyAgentId = useCallback(() => {
+    if (!workspace.agentId) return;
+    clipboard.copyAgentId(workspace.agentId);
+  }, [clipboard, workspace]);
+
   const handleOpenRename = useCallback(() => setIsRenameOpen(true), []);
   const handleCloseRename = useCallback(() => setIsRenameOpen(false), []);
   const isPinned = workspace.pinnedAt != null;
@@ -726,6 +731,7 @@ function StatusWorkspaceRowWithMenu({
         onArchive={handleArchive}
         onCopyBranchName={workspace.projectKind === "git" ? handleCopyBranchName : undefined}
         onCopyPath={handleCopyPath}
+        onCopyAgentId={workspace.agentId ? handleCopyAgentId : undefined}
         onRename={handleOpenRename}
         onMarkAsRead={hasClearableAttention ? handleMarkAsRead : undefined}
         onMarkAsUnread={canMarkUnread ? handleMarkAsUnread : undefined}
@@ -766,6 +772,7 @@ interface StatusWorkspaceRowInnerProps {
   onArchive?: () => void;
   onCopyBranchName?: () => void;
   onCopyPath?: () => void;
+  onCopyAgentId?: () => void;
   onRename?: () => void;
   onMarkAsRead?: () => void;
   onMarkAsUnread?: () => void;
@@ -815,6 +822,7 @@ function StatusWorkspaceRowInnerContent({
   onArchive,
   onCopyBranchName,
   onCopyPath,
+  onCopyAgentId,
   onRename,
   onMarkAsRead,
   onMarkAsUnread,
@@ -915,6 +923,7 @@ function StatusWorkspaceRowInnerContent({
               workspaceKey={workspace.workspaceKey}
               onCopyPath={onCopyPath}
               onCopyBranchName={onCopyBranchName}
+              onCopyAgentId={onCopyAgentId}
               onRename={onRename}
               onMarkAsRead={onMarkAsRead}
               onMarkAsUnread={onMarkAsUnread}
@@ -964,6 +973,7 @@ function StatusWorkspaceRowInnerContent({
                     onTogglePin={onTogglePin}
                     onCopyPath={onCopyPath}
                     onCopyBranchName={onCopyBranchName}
+                    onCopyAgentId={onCopyAgentId}
                     onRename={onRename}
                     onMarkAsRead={onMarkAsRead}
                     onMarkAsUnread={onMarkAsUnread}
@@ -995,6 +1005,7 @@ function StatusWorkspaceActionSlot({
   onTogglePin,
   onCopyPath,
   onCopyBranchName,
+  onCopyAgentId,
   onRename,
   onMarkAsRead,
   onMarkAsUnread,
@@ -1015,6 +1026,7 @@ function StatusWorkspaceActionSlot({
   onTogglePin?: () => void;
   onCopyPath?: () => void;
   onCopyBranchName?: () => void;
+  onCopyAgentId?: () => void;
   onRename?: () => void;
   onMarkAsRead?: () => void;
   onMarkAsUnread?: () => void;
@@ -1043,6 +1055,7 @@ function StatusWorkspaceActionSlot({
             workspaceLabels={workspace.labels}
             onCopyPath={onCopyPath}
             onCopyBranchName={onCopyBranchName}
+            onCopyAgentId={onCopyAgentId}
             onRename={onRename}
             onMarkAsRead={onMarkAsRead}
             onMarkAsUnread={onMarkAsUnread}

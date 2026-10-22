@@ -291,6 +291,7 @@ interface WorkspaceRowInnerProps {
   onArchive?: () => void;
   onCopyBranchName?: () => void;
   onCopyPath?: () => void;
+  onCopyAgentId?: () => void;
   onRename?: () => void;
   onMarkAsRead?: () => void;
   onMarkAsUnread?: () => void;
@@ -627,6 +628,7 @@ function WorkspaceRowRightGroup({
   onMarkAsUnread,
   onCopyBranchName,
   onCopyPath,
+  onCopyAgentId,
   onRename,
   isPinned,
   onTogglePin,
@@ -647,6 +649,7 @@ function WorkspaceRowRightGroup({
   onMarkAsUnread?: () => void;
   onCopyBranchName?: () => void;
   onCopyPath?: () => void;
+  onCopyAgentId?: () => void;
   onRename?: () => void;
   isPinned?: boolean;
   onTogglePin?: () => void;
@@ -694,6 +697,7 @@ function WorkspaceRowRightGroup({
                 workspaceLabels={workspace.labels}
                 onCopyPath={onCopyPath}
                 onCopyBranchName={onCopyBranchName}
+                onCopyAgentId={onCopyAgentId}
                 onRename={onRename}
                 onMarkAsRead={onMarkAsRead}
                 onMarkAsUnread={onMarkAsUnread}
@@ -1079,6 +1083,7 @@ function WorkspaceRowInner({
   onArchive,
   onCopyBranchName,
   onCopyPath,
+  onCopyAgentId,
   onRename,
   onMarkAsRead,
   onMarkAsUnread,
@@ -1155,6 +1160,7 @@ function WorkspaceRowInner({
               workspaceKey={workspace.workspaceKey}
               onCopyPath={onCopyPath}
               onCopyBranchName={onCopyBranchName}
+              onCopyAgentId={onCopyAgentId}
               onRename={onRename}
               onMarkAsRead={onMarkAsRead}
               onMarkAsUnread={onMarkAsUnread}
@@ -1208,6 +1214,7 @@ function WorkspaceRowInner({
                   onArchive={onArchive}
                   onCopyBranchName={onCopyBranchName}
                   onCopyPath={onCopyPath}
+                  onCopyAgentId={onCopyAgentId}
                   onRename={onRename}
                   onMarkAsRead={onMarkAsRead}
                   onMarkAsUnread={onMarkAsUnread}
@@ -1309,6 +1316,11 @@ function WorkspaceRowWithMenu({
     clipboard.copyBranchName(workspace);
   }, [clipboard, workspace]);
 
+  const handleCopyAgentId = useCallback(() => {
+    if (!workspace.agentId) return;
+    clipboard.copyAgentId(workspace.agentId);
+  }, [clipboard, workspace]);
+
   const handleOpenRename = useCallback(() => {
     setIsRenameOpen(true);
   }, []);
@@ -1387,6 +1399,7 @@ function WorkspaceRowWithMenu({
         onArchive={handleArchive}
         onCopyBranchName={canCopyBranchName ? handleCopyBranchName : undefined}
         onCopyPath={handleCopyPath}
+        onCopyAgentId={workspace.agentId ? handleCopyAgentId : undefined}
         onRename={handleOpenRename}
         onMarkAsRead={hasClearableAttention ? handleMarkAsRead : undefined}
         onMarkAsUnread={canMarkUnread ? handleMarkAsUnread : undefined}
