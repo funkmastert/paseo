@@ -1,5 +1,8 @@
 import { formatTokens } from "@/jev/jev-dashboard-model";
+import { formatDuration } from "@/utils/time";
 import type { CompactionEpisode, CompactionEpisodesSummary } from "./use-compaction-episodes";
+
+type CompactionStep = CompactionEpisode["steps"][number];
 
 /**
  * Pure formatting for the Insights screen's Compactions section and the timeline's compaction
@@ -15,6 +18,29 @@ export function formatEpisodeCost(episode: CompactionEpisode): string {
     return "not measured";
   }
   return formatCompactionTokens(episode.costWeightedTokens);
+}
+
+/** One step's own cost, or why it has none: a message steered into its turn shares the spend. */
+export function formatStepCost(step: CompactionStep): string {
+  if (step.costWeightedTokens !== null) return formatCompactionTokens(step.costWeightedTokens);
+  const steeredIn = step.steeredIn ?? 0;
+  if (steeredIn > 0) {
+    return `not measured: ${steeredIn} message${steeredIn === 1 ? "" : "s"} joined`;
+  }
+  return "not measured";
+}
+
+/** "Waited 7m for quiet" when the quiet gate held the start; null when it did not. */
+export function formatEpisodeQuietGate(episode: CompactionEpisode): string | null {
+  if (!episode.quietGate) return null;
+  return `Waited ${formatDuration(episode.quietGate.heldMs)} for quiet`;
+}
+
+/** "2 prompts carried" into the restore message; null when there were none. */
+export function formatEpisodePromptsCarried(episode: CompactionEpisode): string | null {
+  const count = episode.promptsCarried?.length ?? 0;
+  if (count === 0) return null;
+  return `${count} prompt${count === 1 ? "" : "s"} carried`;
 }
 
 /** The payback estimate: an em dash when nothing has been computed yet. */
@@ -134,6 +160,7 @@ export interface CompactionInsightsTile {
 export function buildCompactionInsightsTiles(
   summary: CompactionEpisodesSummary,
 ): CompactionInsightsTile[] {
+  const nothingMeasured = summary.measuredCount === 0;
   return [
     {
       id: "count",
@@ -147,13 +174,14 @@ export function buildCompactionInsightsTiles(
     {
       id: "total-cost",
       label: "Total cost",
-      value: formatCompactionTokens(summary.totalCostWeightedTokens),
+      // The server sums only measured episodes; with none, 0 would read as "free".
+      value: nothingMeasured ? "—" : formatCompactionTokens(summary.totalCostWeightedTokens),
       caption: "weighted tokens",
     },
     {
       id: "average-cost",
       label: "Average cost",
-      value: formatCompactionTokens(summary.averageCostWeightedTokens),
+      value: nothingMeasured ? "—" : formatCompactionTokens(summary.averageCostWeightedTokens),
       caption: "per measured compaction",
     },
     {

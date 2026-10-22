@@ -14,6 +14,8 @@ import {
   formatEpisodeContext,
   formatEpisodeCost,
   formatEpisodePayback,
+  formatEpisodePromptsCarried,
+  formatEpisodeQuietGate,
   formatEpisodeTrigger,
   type CompactionInsightsTile,
 } from "@/compactions/compaction-insights-model";
@@ -202,7 +204,11 @@ function TilesRow({ tiles }: { tiles: CompactionInsightsTile[] }) {
   return (
     <View style={[styles.tilesRow, isCompact ? styles.tilesRowCompact : null]}>
       {tiles.map((tile) => (
-        <View key={tile.id} style={styles.tile} testID={`insights-tile-${tile.id}`}>
+        <View
+          key={tile.id}
+          style={[styles.tile, isCompact ? styles.tileCompact : null]}
+          testID={`insights-tile-${tile.id}`}
+        >
           <Text style={styles.tileLabel}>{tile.label}</Text>
           <Text style={styles.tileValue}>{tile.value}</Text>
           <Text style={styles.tileCaption}>{tile.caption}</Text>
@@ -282,6 +288,8 @@ function CompactionEpisodeRow({
   episode: CompactionEpisode;
   bordered: boolean;
 }) {
+  const quietGateLine = formatEpisodeQuietGate(episode);
+  const promptsCarriedLine = formatEpisodePromptsCarried(episode);
   return (
     <View
       style={[styles.eventRow, bordered ? styles.featureRowBorder : null]}
@@ -301,15 +309,9 @@ function CompactionEpisodeRow({
       <Text style={styles.featureMeta}>
         Cost {formatEpisodeCost(episode)} · Payback {formatEpisodePayback(episode)}
       </Text>
-      {episode.quietGate ? (
+      {quietGateLine || promptsCarriedLine ? (
         <Text style={styles.featureMeta}>
-          Waited for {episode.quietGate.quietMinutes}m quiet, under{" "}
-          {episode.quietGate.ceilingTokens}
-        </Text>
-      ) : null}
-      {episode.promptsCarried !== null && episode.promptsCarried !== undefined ? (
-        <Text style={styles.featureMeta}>
-          {episode.promptsCarried} prompt{episode.promptsCarried === 1 ? "" : "s"} carried
+          {[quietGateLine, promptsCarriedLine].filter(Boolean).join(" · ")}
         </Text>
       ) : null}
     </View>
@@ -376,6 +378,10 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.colors.border,
     padding: theme.spacing[4],
     gap: theme.spacing[1],
+  },
+  // Stacked, the row's 160 basis would become each tile's height.
+  tileCompact: {
+    flexBasis: "auto",
   },
   tileLabel: {
     color: theme.colors.foregroundMuted,

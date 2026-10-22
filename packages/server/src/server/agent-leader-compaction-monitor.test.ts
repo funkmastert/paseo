@@ -87,6 +87,7 @@ function leader(overrides: Partial<LeaderCompactionAgentSummary> = {}) {
     contextWindowUsedTokens: 612_000,
     title: "Ship the thing",
     totalTokens: 1_000_000,
+    steersAccepted: 0,
     ...overrides,
   } satisfies LeaderCompactionAgentSummary;
 }
@@ -177,6 +178,23 @@ class RecordingEpisodeObserver implements LeaderCompactionEpisodeObserver {
 
   onStepFinished(input: Parameters<LeaderCompactionEpisodeObserver["onStepFinished"]>[0]): void {
     this.finished.push(input);
+  }
+
+  abandoned: Array<{ agentId: string; atMs: number }> = [];
+
+  onEpisodeAbandoned(input: { agentId: string; atMs: number }): void {
+    this.abandoned.push(input);
+  }
+}
+
+/** An observer that fails every call, as a broken ledger would. */
+class ThrowingEpisodeObserver implements LeaderCompactionEpisodeObserver {
+  onStepStarted(): void {
+    throw new Error("ledger exploded on start");
+  }
+
+  onStepFinished(): void {
+    throw new Error("ledger exploded on finish");
   }
 }
 
@@ -569,6 +587,196 @@ describe("AgentLeaderCompactionMonitor episode observer", () => {
 
     expect(observer.started).toEqual([]);
     expect(observer.finished).toEqual([]);
+  });
+});
+
+describe("AgentLeaderCompactionMonitor episode observer: failures, abandonment, shared turns", () => {
+  test("an observer that throws never stops the compaction, and is logged", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    fake.onTurn = (turn) => {
+      if (turn.prompt.startsWith("/compact")) {
+        fake.agents = [leader({ contextWindowUsedTokens: 31_000 })];
+      }
+    };
+    const { monitor, logs } = createMonitor(
+      fake,
+      { enabled: true },
+      undefined,
+      undefined,
+      new ThrowingEpisodeObserver(),
+    );
+
+    await sweep(monitor);
+    await sweep(monitor);
+    await sweep(monitor);
+
+    expect(fake.sent).toHaveLength(3);
+    expect(monitor.getState("leader-1")).toEqual({ phase: "settled", reason: "done" });
+    expect(logs.some((log) => log.msg === "Compaction ledger observer failed")).toBe(true);
+  });
+
+  test("an episode the planner drops (the context shrank on its own) is reported abandoned", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    fake.outcomes = [{ status: "canceled" }];
+    const observer = new RecordingEpisodeObserver();
+    let nowMs = 0;
+    const { monitor } = createMonitor(
+      fake,
+      { enabled: true, retryAfterMinutes: 30 },
+      undefined,
+      () => nowMs,
+      observer,
+    );
+
+    await sweep(monitor);
+    expect(monitor.getState("leader-1")?.phase).toBe("backoff");
+
+    // Claude's own auto-compact shrank it before the retry.
+    fake.agents = [leader({ contextWindowUsedTokens: 40_000 })];
+    nowMs = 31 * 60_000;
+    await sweep(monitor);
+
+    expect(monitor.isEpisodeOpen("leader-1")).toBe(false);
+    expect(observer.abandoned).toEqual([{ agentId: "leader-1", atMs: 31 * 60_000 }]);
+  });
+
+  test("turning the leg off mid-episode reports the open episode abandoned", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    fake.outcomes = [{ status: "canceled" }];
+    const observer = new RecordingEpisodeObserver();
+    const settings: LeaderCompactionSettings = { enabled: true };
+    const { monitor } = createMonitor(fake, settings, undefined, undefined, observer);
+
+    await sweep(monitor);
+    settings.enabled = false;
+    await sweep(monitor);
+
+    expect(observer.abandoned).toEqual([{ agentId: "leader-1", atMs: 0 }]);
+  });
+
+  test("a message steered into a step's turn is reported with the step", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    fake.outcomes = [{ status: "completed", finalText: "GOAL: ship it." }];
+    fake.onTurn = () => {
+      // Tyler's message joined the running prepare turn.
+      fake.agents = [leader({ totalTokens: 1_009_000, steersAccepted: 1 })];
+    };
+    const observer = new RecordingEpisodeObserver();
+    const { monitor } = createMonitor(fake, { enabled: true }, undefined, undefined, observer);
+
+    await sweep(monitor);
+
+    expect(observer.finished[0]).toMatchObject({ step: "prepare", steeredIn: 1 });
+  });
+});
+
+describe("AgentLeaderCompactionMonitor episode observer: quiet gate and carried prompts", () => {
+  test("a quiet-gate hold reaches the episode's first step as when it held and when it lifted", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    fake.onTurn = (turn) => {
+      if (turn.prompt.startsWith("/compact")) {
+        fake.agents = [leader({ contextWindowUsedTokens: 29_000 })];
+      }
+    };
+    const observer = new RecordingEpisodeObserver();
+    let nowMs = 0;
+    const { monitor } = createMonitor(
+      fake,
+      { enabled: true, quietMinutes: 10 },
+      undefined,
+      () => nowMs,
+      observer,
+    );
+
+    fake.humanPrompt("leader-1", "also fix the login bug", 0);
+    nowMs = 2 * 60_000;
+    await sweep(monitor);
+    nowMs = 6 * 60_000;
+    await sweep(monitor);
+    expect(observer.started).toEqual([]);
+
+    nowMs = 10 * 60_000 + 1;
+    await sweep(monitor);
+    await sweep(monitor);
+    await sweep(monitor);
+
+    expect(observer.started.map((entry) => entry.quietGate)).toEqual([
+      { heldFromMs: 2 * 60_000, heldUntilMs: 10 * 60_000 + 1 },
+      null,
+      null,
+    ]);
+  });
+
+  test("an episode the gate never held carries no quiet gate", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    const observer = new RecordingEpisodeObserver();
+    const { monitor } = createMonitor(fake, { enabled: true }, undefined, undefined, observer);
+
+    await sweep(monitor);
+
+    expect(observer.started[0]?.quietGate).toBeNull();
+  });
+
+  test("a dry-run hold is not left over for the next live episode", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    const observer = new RecordingEpisodeObserver();
+    let nowMs = 0;
+    const settings: LeaderCompactionSettings = { enabled: true, dryRun: true, quietMinutes: 10 };
+    const { monitor } = createMonitor(fake, settings, undefined, () => nowMs, observer);
+
+    fake.humanPrompt("leader-1", "hi", 0);
+    nowMs = 60_000;
+    await sweep(monitor); // held
+    nowMs = 11 * 60_000;
+    await sweep(monitor); // dry run "starts": settled, no step
+    settings.dryRun = false;
+    fake.agents = [leader({ contextWindowUsedTokens: 40_000 })];
+    await sweep(monitor); // back under the line: re-armed
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    nowMs = 30 * 60_000;
+    await sweep(monitor);
+
+    expect(observer.started[0]?.quietGate).toBeNull();
+  });
+
+  test("carried prompts reach the observer: at each step start, and as carried at the end", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 600_000 })];
+    fake.onTurn = (turn) => {
+      if (turn.prompt.startsWith("/compact")) {
+        fake.humanPrompt("leader-1", "please also check the CI run", 500);
+        fake.agents = [leader({ contextWindowUsedTokens: 29_000 })];
+      }
+    };
+    const observer = new RecordingEpisodeObserver();
+    const { monitor } = createMonitor(
+      fake,
+      { enabled: true, quietMinutes: 10 },
+      undefined,
+      () => 1_000,
+      observer,
+    );
+    fake.humanPrompt("leader-1", "also fix the login bug", 0);
+
+    await sweep(monitor);
+    await sweep(monitor);
+    await sweep(monitor);
+
+    expect(observer.started[0]?.carriedPrompts).toEqual([
+      { atMs: 0, text: "also fix the login bug" },
+    ]);
+    const restoreFinish = observer.finished.find((entry) => entry.step === "restore");
+    expect(restoreFinish?.carriedPrompts).toEqual([
+      { atMs: 0, text: "also fix the login bug" },
+      { atMs: 500, text: "please also check the CI run" },
+    ]);
   });
 });
 

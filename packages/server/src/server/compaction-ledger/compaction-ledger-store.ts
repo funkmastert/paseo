@@ -10,7 +10,8 @@ import { writeFileAtomic } from "../atomic-file.js";
  *
  * It is a history, so rows are bounded on two axes (docs/insights.md): a hard row-count cap
  * (oldest `startedAtMs` evicted first) and a retention-days cutoff. A file that will not parse is
- * replaced; the store starts empty and the daemon's live monitor and backfill repopulate it.
+ * set aside as `state.json.corrupt-<ms>` and the store starts empty; one that exists but cannot be
+ * read is never written over. Fields added after the first release are optional on read.
  */
 
 export type CompactionStepName = "prepare" | "compact" | "restore";
@@ -24,6 +25,8 @@ export interface CompactionStepRecord {
   outcome: CompactionStepOutcome;
   /** Weighted tokens this step's own turn spent (docs/token-burn.md); null when unmeasured. */
   costWeightedTokens: number | null;
+  /** Messages steered into this step's turn; when set, its cost is null (it was shared). */
+  steeredIn?: number;
 }
 
 export type CompactionEpisodeSource = "monitor" | "native" | "manual" | "backfill";
@@ -31,9 +34,17 @@ export type CompactionEpisodeTrigger = "line" | "early" | "auto" | "manual" | "u
 export type CompactionEpisodeOutcome = "done" | "gaveUp" | "cancelled" | "interrupted" | "unknown";
 export type CompactionCostBasis = "measured" | "unmeasured";
 
+/** How long the quiet gate held the episode's start (docs/leader-compaction.md). */
 export interface CompactionQuietGate {
-  quietMinutes: number;
-  ceilingTokens: number;
+  heldFromMs: number;
+  heldUntilMs: number;
+  heldMs: number;
+}
+
+/** A human prompt the episode carried into its restore message. */
+export interface CompactionCarriedPrompt {
+  atMs: number;
+  text: string;
 }
 
 export interface CompactionEpisodeRow {
@@ -50,8 +61,9 @@ export interface CompactionEpisodeRow {
   contextAfterTokens: number | null;
   outcome: CompactionEpisodeOutcome;
   noteLength: number | null;
-  /** Optional until the quiet-gate branch lands (docs/leader-compaction.md); filled when present. */
-  promptsCarried: number | null;
+  /** The human prompts carried into the restore message; null when there were none. */
+  promptsCarried: CompactionCarriedPrompt[] | null;
+  /** Set when the quiet gate held the episode's start. */
   quietGate: CompactionQuietGate | null;
   costWeightedTokens: number | null;
   costBasis: CompactionCostBasis;
@@ -101,6 +113,7 @@ const STEP_SCHEMA = z.object({
   endedAtMs: z.number().nullable(),
   outcome: STEP_OUTCOME_SCHEMA,
   costWeightedTokens: z.number().nullable(),
+  steeredIn: z.number().optional(),
 });
 const ROW_SCHEMA = z.object({
   id: z.string(),
@@ -116,8 +129,14 @@ const ROW_SCHEMA = z.object({
   contextAfterTokens: z.number().nullable(),
   outcome: z.enum(["done", "gaveUp", "cancelled", "interrupted", "unknown"]),
   noteLength: z.number().nullable(),
-  promptsCarried: z.number().nullable(),
-  quietGate: z.object({ quietMinutes: z.number(), ceilingTokens: z.number() }).nullable(),
+  promptsCarried: z
+    .array(z.object({ atMs: z.number(), text: z.string() }))
+    .nullable()
+    .optional(),
+  quietGate: z
+    .object({ heldFromMs: z.number(), heldUntilMs: z.number(), heldMs: z.number() })
+    .nullable()
+    .optional(),
   costWeightedTokens: z.number().nullable(),
   costBasis: z.enum(["measured", "unmeasured"]),
   estimatedSavedWeightedTokens: z.number().nullable(),
@@ -148,6 +167,8 @@ export class CompactionLedgerStore {
   private readonly limits: CompactionLedgerLimits;
   private readonly flushIntervalMs: number;
   private loaded = false;
+  /** False when the file exists but could not be read: writing would destroy what is in it. */
+  private writable = true;
   private loadPromise: Promise<void> | null = null;
   private backfillDoneAtMs: number | null = null;
   private readonly rows = new Map<string, CompactionEpisodeRow>();
@@ -247,14 +268,22 @@ export class CompactionLedgerStore {
     if (state) {
       this.backfillDoneAtMs = state.backfillDoneAtMs;
       for (const row of state.rows) {
-        this.rows.set(row.id, row);
+        // A row the daemon is already building since boot is newer than its saved copy.
+        if (this.rows.has(row.id)) continue;
+        this.rows.set(row.id, {
+          ...row,
+          promptsCarried: row.promptsCarried ?? null,
+          quietGate: row.quietGate ?? null,
+        });
       }
     }
     this.loaded = true;
   }
 
   private async writeDirty(): Promise<void> {
-    if (!this.dirty) return;
+    // Before the load, the rows in memory are only what arrived since boot: writing them would
+    // drop every saved row.
+    if (!this.dirty || !this.loaded || !this.writable) return;
     try {
       this.dirty = false;
       await writeFileAtomic(
@@ -280,16 +309,25 @@ export class CompactionLedgerStore {
     let text: string;
     try {
       text = await fs.readFile(this.statePath(), "utf8");
-    } catch {
+    } catch (error) {
+      if (isMissingFile(error)) return null;
+      this.writable = false;
+      this.logger.warn(
+        { err: error, rootDir: this.rootDir },
+        "Cannot read the compaction ledger file; leaving it alone and not saving this session",
+      );
       return null;
     }
     try {
       return STATE_FILE_SCHEMA.parse(JSON.parse(text));
     } catch (error) {
-      // Rebuildable: a file that will not parse starts over and the next flush replaces it.
+      // Measured costs cannot be rebuilt from the log, so keep the bytes for a person to look at
+      // before the next flush writes a fresh file.
+      const asidePath = `${this.statePath()}.corrupt-${Date.now()}`;
+      await fs.rename(this.statePath(), asidePath).catch(() => undefined);
       this.logger.warn(
-        { err: error, rootDir: this.rootDir },
-        "Ignoring unreadable compaction ledger file",
+        { err: error, rootDir: this.rootDir, asidePath },
+        "Set aside an unparseable compaction ledger file",
       );
       return null;
     }
@@ -298,4 +336,8 @@ export class CompactionLedgerStore {
   private statePath(): string {
     return path.join(this.rootDir, "state.json");
   }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }

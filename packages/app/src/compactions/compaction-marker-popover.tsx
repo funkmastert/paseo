@@ -6,17 +6,21 @@ import { FloatingScrollView } from "@/components/ui/floating";
 import { formatDuration } from "@/utils/time";
 import {
   compactionOutcomeLabel,
-  formatCompactionTokens,
   formatEpisodePayback,
+  formatEpisodePromptsCarried,
+  formatEpisodeQuietGate,
+  formatStepCost,
 } from "./compaction-insights-model";
 import type { CompactionEpisode } from "./use-compaction-episodes";
 
 // Matches JevMarkerChip's popover sizing (jev-marker-chip.tsx) -- the same tap/hover detail
 // popover shape, tuned for the same column width.
 const MARKER_POPOVER_MAX_HEIGHT = 320;
+/** A carried prompt is quoted, not replayed: enough lines to recognise it. */
+const CARRIED_PROMPT_LINES = 4;
 
-function formatStepCost(costWeightedTokens: number | null): string {
-  return costWeightedTokens === null ? "not measured" : formatCompactionTokens(costWeightedTokens);
+function formatClockTime(atMs: number): string {
+  return new Date(atMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 function formatStepDuration(startedAtMs: number, endedAtMs: number | null): string {
@@ -36,6 +40,8 @@ export function CompactionMarkerPopover({
   episode: CompactionEpisode;
   children: ReactNode;
 }) {
+  const quietGateLine = formatEpisodeQuietGate(episode);
+  const promptsCarriedLine = formatEpisodePromptsCarried(episode);
   return (
     <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile>
       <TooltipTrigger accessibilityLabel="Compaction details" testID="compaction-marker-trigger">
@@ -51,20 +57,29 @@ export function CompactionMarkerPopover({
                 <Text style={styles.muted}>
                   {formatStepDuration(step.startedAtMs, step.endedAtMs)}
                 </Text>
-                <Text style={styles.cost}>{formatStepCost(step.costWeightedTokens)}</Text>
+                <Text style={styles.cost}>{formatStepCost(step)}</Text>
               </View>
             ))}
             <Text style={styles.muted}>Payback {formatEpisodePayback(episode)}</Text>
-            {episode.quietGate ? (
-              <Text style={styles.muted}>
-                Waited {episode.quietGate.quietMinutes}m quiet, under{" "}
-                {formatCompactionTokens(episode.quietGate.ceilingTokens)}
+            {quietGateLine && episode.quietGate ? (
+              <Text style={styles.muted} testID="compaction-marker-quiet-gate">
+                {quietGateLine}, {formatClockTime(episode.quietGate.heldFromMs)} to{" "}
+                {formatClockTime(episode.quietGate.heldUntilMs)}
               </Text>
             ) : null}
-            {episode.promptsCarried !== null && episode.promptsCarried !== undefined ? (
-              <Text style={styles.muted}>
-                {episode.promptsCarried} prompt{episode.promptsCarried === 1 ? "" : "s"} carried
-              </Text>
+            {promptsCarriedLine && episode.promptsCarried ? (
+              <View style={styles.prompts} testID="compaction-marker-prompts">
+                <Text style={styles.muted}>{promptsCarriedLine}</Text>
+                {episode.promptsCarried.map((prompt) => (
+                  <Text
+                    key={`${prompt.atMs}-${prompt.text.length}`}
+                    style={styles.prompt}
+                    numberOfLines={CARRIED_PROMPT_LINES}
+                  >
+                    {formatClockTime(prompt.atMs)} “{prompt.text}”
+                  </Text>
+                ))}
+              </View>
             ) : null}
           </View>
         </FloatingScrollView>
@@ -98,6 +113,14 @@ const styles = StyleSheet.create((theme) => ({
   },
   muted: {
     color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    lineHeight: theme.fontSize.sm * 1.4,
+  },
+  prompts: {
+    gap: theme.spacing[1],
+  },
+  prompt: {
+    color: theme.colors.foreground,
     fontSize: theme.fontSize.sm,
     lineHeight: theme.fontSize.sm * 1.4,
   },

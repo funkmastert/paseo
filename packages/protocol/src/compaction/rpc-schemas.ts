@@ -23,11 +23,22 @@ export const CompactionStepSchema = z.object({
   endedAtMs: z.number().nullable(),
   outcome: CompactionStepOutcomeSchema,
   costWeightedTokens: z.number().nullable(),
+  // Messages steered into this step's turn. Set only when there were some; the step's cost is
+  // then null, since its spend includes answering them.
+  steeredIn: z.number().optional(),
 });
 
+// How long the quiet gate held the episode's start (docs/leader-compaction.md, "Quiet gate").
 export const CompactionQuietGateSchema = z.object({
-  quietMinutes: z.number(),
-  ceilingTokens: z.number(),
+  heldFromMs: z.number(),
+  heldUntilMs: z.number(),
+  heldMs: z.number(),
+});
+
+// A human prompt the episode carried into its restore message, text as the leader saw it.
+export const CompactionCarriedPromptSchema = z.object({
+  atMs: z.number(),
+  text: z.string(),
 });
 
 export const CompactionEpisodeSchema = z.object({
@@ -44,9 +55,9 @@ export const CompactionEpisodeSchema = z.object({
   contextAfterTokens: z.number().nullable(),
   outcome: CompactionEpisodeOutcomeSchema,
   noteLength: z.number().nullable(),
-  // Optional until the quiet-gate branch lands (docs/leader-compaction.md); absent on an older
-  // daemon or an episode that predates it.
-  promptsCarried: z.number().nullable().optional(),
+  // Absent or null on an episode the quiet gate never held / that carried no prompts, and on an
+  // older daemon.
+  promptsCarried: z.array(CompactionCarriedPromptSchema).nullable().optional(),
   quietGate: CompactionQuietGateSchema.nullable().optional(),
   costWeightedTokens: z.number().nullable(),
   costBasis: CompactionCostBasisSchema,
@@ -100,6 +111,7 @@ export const CompactionEpisodesSummaryResponseSchema = z.object({
 export type CompactionRange = z.infer<typeof CompactionRangeSchema>;
 export type CompactionStep = z.infer<typeof CompactionStepSchema>;
 export type CompactionQuietGate = z.infer<typeof CompactionQuietGateSchema>;
+export type CompactionCarriedPrompt = z.infer<typeof CompactionCarriedPromptSchema>;
 export type CompactionEpisode = z.infer<typeof CompactionEpisodeSchema>;
 export type CompactionEpisodesListRequest = z.infer<typeof CompactionEpisodesListRequestSchema>;
 export type CompactionEpisodesListResponse = z.infer<typeof CompactionEpisodesListResponseSchema>;

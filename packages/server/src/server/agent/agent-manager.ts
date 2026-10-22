@@ -582,6 +582,8 @@ export interface LeaderCompactionAgentSummary {
   title: string | null;
   /** Lifetime weighted-token spend (docs/token-burn.md); the compaction ledger's cost signal. */
   totalTokens: number | undefined;
+  /** Prompts steered into a running turn so far (live-only); the ledger's shared-step signal. */
+  steersAccepted: number;
 }
 
 /** How a turn started by {@link AgentManager.startTurnIfIdle} ended. */
@@ -895,6 +897,12 @@ interface ManagedAgentBase {
   tokenRateBuckets?: AgentTokenRateBucket[];
   /** Live-only lifetime token total, alongside tokenRateBuckets — same clearing rules. */
   totalTokens?: number;
+  /**
+   * Live-only count of prompts steered into this agent's running turn. The compaction ledger
+   * compares it across a step: a step another message joined also spent tokens answering it, so
+   * its `totalTokens` diff is not the compaction's own cost (docs/insights.md).
+   */
+  steersAccepted?: number;
   /**
    * Live-only breach state set by AgentTokenBurnMonitor via setTokenBurnAlert/clearTokenBurnAlert.
    * Not persisted, cleared on rewind alongside tokenRateBuckets/totalTokens. Deliberately not
@@ -2207,6 +2215,7 @@ export class AgentManager {
       contextWindowUsedTokens: agent.lastUsage?.contextWindowUsedTokens,
       title: agent.config.title ?? null,
       totalTokens: agent.totalTokens,
+      steersAccepted: agent.steersAccepted ?? 0,
     }));
   }
 
@@ -4922,6 +4931,7 @@ export class AgentManager {
         expectedTurnId,
       });
       if (admission.status === "accepted") {
+        agent.steersAccepted = (agent.steersAccepted ?? 0) + 1;
         this.releaseQuietTurn(agent);
         await this.recordAcceptedSteer(agent, prompt, options?.clientMessageId, expectedTurnId);
       }

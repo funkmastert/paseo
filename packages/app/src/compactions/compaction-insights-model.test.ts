@@ -10,7 +10,10 @@ import {
   formatEpisodeCost,
   formatEpisodeMarkerLine,
   formatEpisodePayback,
+  formatEpisodePromptsCarried,
+  formatEpisodeQuietGate,
   formatEpisodeTrigger,
+  formatStepCost,
 } from "./compaction-insights-model";
 
 function episode(overrides: Partial<CompactionEpisode> = {}): CompactionEpisode {
@@ -152,6 +155,21 @@ describe("buildCompactionInsightsTiles", () => {
     });
   });
 
+  it("shows a dash, not 0, for the cost tiles when nothing in range was measured", () => {
+    const tiles = buildCompactionInsightsTiles({
+      count: 3,
+      totalCostWeightedTokens: 0,
+      averageCostWeightedTokens: 0,
+      totalEstimatedSavedWeightedTokens: 0,
+      measuredCount: 0,
+      unmeasuredCount: 3,
+    });
+
+    expect(tiles.find((tile) => tile.id === "total-cost")?.value).toBe("—");
+    expect(tiles.find((tile) => tile.id === "average-cost")?.value).toBe("—");
+    expect(tiles.find((tile) => tile.id === "count")?.caption).toBe("0 of 3 measured");
+  });
+
   it("names the partial-measurement count when some episodes are unmeasured", () => {
     const tiles = buildCompactionInsightsTiles({
       count: 4,
@@ -210,5 +228,65 @@ describe("formatEpisodeMarkerLine", () => {
     expect(
       formatEpisodeMarkerLine(episode({ costBasis: "unmeasured", costWeightedTokens: null })),
     ).toContain("cost not measured");
+  });
+});
+
+describe("formatEpisodeQuietGate", () => {
+  it("says how long the gate waited for quiet", () => {
+    expect(
+      formatEpisodeQuietGate(
+        episode({ quietGate: { heldFromMs: 0, heldUntilMs: 7 * 60_000, heldMs: 7 * 60_000 } }),
+      ),
+    ).toBe("Waited 7m for quiet");
+  });
+
+  it("is null when the gate never held the episode, or the daemon predates it", () => {
+    expect(formatEpisodeQuietGate(episode({ quietGate: null }))).toBeNull();
+    expect(formatEpisodeQuietGate(episode())).toBeNull();
+  });
+});
+
+describe("formatEpisodePromptsCarried", () => {
+  it("counts the carried prompts", () => {
+    expect(formatEpisodePromptsCarried(episode({ promptsCarried: [{ atMs: 1, text: "a" }] }))).toBe(
+      "1 prompt carried",
+    );
+    expect(
+      formatEpisodePromptsCarried(
+        episode({
+          promptsCarried: [
+            { atMs: 1, text: "a" },
+            { atMs: 2, text: "b" },
+          ],
+        }),
+      ),
+    ).toBe("2 prompts carried");
+  });
+
+  it("is null when there were none", () => {
+    expect(formatEpisodePromptsCarried(episode({ promptsCarried: null }))).toBeNull();
+    expect(formatEpisodePromptsCarried(episode({ promptsCarried: [] }))).toBeNull();
+    expect(formatEpisodePromptsCarried(episode())).toBeNull();
+  });
+});
+
+describe("formatStepCost", () => {
+  const base = { step: "prepare", startedAtMs: 0, endedAtMs: 1, outcome: "completed" };
+
+  it("shows a measured step's figure", () => {
+    expect(formatStepCost({ ...base, costWeightedTokens: 12_400 })).toBe("12.4k");
+  });
+
+  it("says why a shared step was not measured", () => {
+    expect(formatStepCost({ ...base, costWeightedTokens: null, steeredIn: 1 })).toBe(
+      "not measured: 1 message joined",
+    );
+    expect(formatStepCost({ ...base, costWeightedTokens: null, steeredIn: 2 })).toBe(
+      "not measured: 2 messages joined",
+    );
+  });
+
+  it("says not measured otherwise", () => {
+    expect(formatStepCost({ ...base, costWeightedTokens: null })).toBe("not measured");
   });
 });

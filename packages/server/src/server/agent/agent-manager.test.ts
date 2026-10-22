@@ -8359,6 +8359,25 @@ describe("a quiet idle turn", () => {
     expect(finishedTurns).toEqual([agentId]);
   });
 
+  test("an accepted steer counts toward steersAccepted, which the leader compaction monitor reads", async () => {
+    const { manager, agentId } = await quietTurnFixture();
+    const question = manager.startQuietTurnIfIdle(agentId, "are you done?");
+    if (!question) throw new Error("expected the idle agent to take the question");
+    await manager.waitForAgentRunStart(agentId);
+    const before = manager
+      .listAgentsForLeaderCompaction()
+      .find((agent) => agent.id === agentId)?.steersAccepted;
+
+    await manager.steerIntoActiveTurn(agentId, "also, fix the test", { clientMessageId: "m1" });
+    await manager.steerIntoActiveTurn(agentId, "and the docs", { clientMessageId: "m2" });
+
+    const after = manager
+      .listAgentsForLeaderCompaction()
+      .find((agent) => agent.id === agentId)?.steersAccepted;
+    expect(before).toBe(0);
+    expect(after).toBe(2);
+  });
+
   test("its handle cancels its own turn, quietly", async () => {
     const { session, manager, agentId, finishedTurns } = await quietTurnFixture();
     const question = manager.startQuietTurnIfIdle(agentId, "are you done?");

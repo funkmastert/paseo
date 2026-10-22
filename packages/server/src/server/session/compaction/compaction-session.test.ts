@@ -64,6 +64,10 @@ describe("CompactionSession", () => {
       expect(payload.requestId).toBe("req-1");
       expect(payload.episodes.map((episode) => episode.agentId)).toEqual(["leader-2", "leader-1"]);
       expect(payload.nextCursor).toBeNull();
+      // The store's own payback bookkeeping stays off the wire.
+      expect(
+        payload.episodes.every((episode) => !("requestsSincePaybackCountedThrough" in episode)),
+      ).toBe(true);
     } finally {
       await fs.rm(rootDir, { recursive: true, force: true });
     }

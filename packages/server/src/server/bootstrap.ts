@@ -1,8 +1,7 @@
 import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
 import express from "express";
 import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "http";
-import { constants, createReadStream, existsSync, unlinkSync } from "fs";
-import { createInterface } from "node:readline";
+import { constants, existsSync, unlinkSync } from "fs";
 import { open, rm, statfs } from "fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, hostname as getHostname } from "node:os";
@@ -980,8 +979,7 @@ function createTokenUsageService(input: {
  * `leaderCompactionMonitor` once it is constructed, below) and by the one-time log backfill.
  * Neither the store's load nor the backfill is awaited here, so startup is never held up by
  * them; a request that lands before the load resolves just sees an empty ledger, same as a
- * fresh daemon would. The backfill is guarded by its own marker, so a slow or missing daemon log
- * never repeats it.
+ * fresh daemon would. Once loaded, rows a previous daemon left open are closed as interrupted.
  */
 function createCompactionLedgerService(input: {
   paseoHome: string;
@@ -999,25 +997,14 @@ function createCompactionLedgerService(input: {
   });
   void store
     .load()
-    .then(() =>
-      runCompactionLedgerBackfill({
+    .then(() => {
+      service.reconcileAfterLoad();
+      return runCompactionLedgerBackfill({
         store,
         logPath: path.join(input.paseoHome, "daemon.log"),
-        // Streamed rather than `readFile` + `split("\n")`: daemon.log can be large, and reading
-        // it whole plus materializing the split array would transiently double the memory it
-        // takes to extract three rare message types.
-        readLines: async (logPath) => {
-          const lines: string[] = [];
-          const rl = createInterface({
-            input: createReadStream(logPath, { encoding: "utf8" }),
-            crlfDelay: Number.POSITIVE_INFINITY,
-          });
-          for await (const line of rl) lines.push(line);
-          return lines;
-        },
         logger: moduleLogger,
-      }),
-    )
+      });
+    })
     .catch((error: unknown) => {
       moduleLogger.warn({ err: error }, "Compaction ledger load or backfill failed");
     });
@@ -4213,10 +4200,11 @@ export async function createPaseoDaemon(
     await tokenUsageService?.stop().catch((error: unknown) => {
       logger.warn({ err: error }, "Failed to save token usage");
     });
+    stopMonitorsAndSweeps();
+    // After the leader compaction monitor stops: a step it applied on the way down still lands.
     await compactionLedgerService?.stop().catch((error: unknown) => {
       logger.warn({ err: error }, "Failed to save the compaction ledger");
     });
-    stopMonitorsAndSweeps();
     // Before the savings callers: the observer's queued judgments still land their records.
     await readCheckObserver.observer.stop();
     spawnHintSavings.stop();

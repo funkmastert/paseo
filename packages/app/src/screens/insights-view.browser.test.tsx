@@ -52,42 +52,51 @@ function mount(node: ReactNode, width: number): HTMLDivElement {
 const NOOP = () => undefined;
 
 const SUMMARY_FIXTURE = {
-  count: 3,
-  totalCostWeightedTokens: 525,
-  averageCostWeightedTokens: 175,
-  totalEstimatedSavedWeightedTokens: 114_000,
-  measuredCount: 2,
+  count: 2,
+  totalCostWeightedTokens: 23_700,
+  averageCostWeightedTokens: 23_700,
+  totalEstimatedSavedWeightedTokens: 1_220_000,
+  measuredCount: 1,
   unmeasuredCount: 1,
 };
 
+// A real afternoon, not epoch-adjacent fixtures: the dates render as they would for Tyler.
+const T0 = new Date(2026, 9, 21, 14, 2, 0).getTime();
+const MINUTE = 60 * 1000;
+
 const EPISODES_FIXTURE: CompactionEpisode[] = [
   {
-    id: "leader-1:3000",
+    id: `leader-1:${T0}`,
     agentId: "leader-1",
     agentTitle: "Ship the thing",
     source: "monitor",
     trigger: "line",
     triggerReason: null,
-    startedAtMs: 3000,
-    endedAtMs: 3700,
+    startedAtMs: T0,
+    endedAtMs: T0 + 4 * MINUTE,
     steps: [],
     contextBeforeTokens: 612_000,
     contextAfterTokens: 31_000,
     outcome: "done",
-    noteLength: 120,
-    costWeightedTokens: 175,
+    noteLength: 1_840,
+    quietGate: { heldFromMs: T0 - 7 * MINUTE, heldUntilMs: T0, heldMs: 7 * MINUTE },
+    promptsCarried: [
+      { atMs: T0 - 8 * MINUTE, text: "also fix the login bug on the settings page" },
+      { atMs: T0 + 2 * MINUTE, text: "please check the CI run on PR 41 when you're back" },
+    ],
+    costWeightedTokens: 23_700,
     costBasis: "measured",
-    estimatedSavedWeightedTokens: 38_000,
+    estimatedSavedWeightedTokens: 1_220_000,
   },
   {
-    id: "leader-2:2000",
+    id: `leader-2:${T0 - 95 * MINUTE}`,
     agentId: "leader-2",
     agentTitle: null,
     source: "backfill",
     trigger: "unknown",
     triggerReason: null,
-    startedAtMs: 2000,
-    endedAtMs: 2500,
+    startedAtMs: T0 - 95 * MINUTE,
+    endedAtMs: T0 - 91 * MINUTE,
     steps: [],
     contextBeforeTokens: 500_000,
     contextAfterTokens: 20_000,
@@ -203,13 +212,28 @@ describe("InsightsReadyContent", () => {
       DESKTOP_WIDTH,
     );
     const measuredRow = container.querySelector(
-      '[data-testid="insights-compaction-leader-1:3000"]',
+      `[data-testid="insights-compaction-leader-1:${T0}"]`,
     );
-    expect(measuredRow?.textContent).toContain("Cost 175");
+    expect(measuredRow?.textContent).toContain("Cost 23.7k");
     const unmeasuredRow = container.querySelector(
-      '[data-testid="insights-compaction-leader-2:2000"]',
+      `[data-testid="insights-compaction-leader-2:${T0 - 95 * MINUTE}"]`,
     );
     expect(unmeasuredRow?.textContent).toContain("not measured");
+  });
+
+  it("shows the wait for quiet and the carried-prompt count, only on the episode that had them", () => {
+    const container = mount(
+      <ReadyContentHarness width={DESKTOP_WIDTH} episodes={EPISODES_FIXTURE} />,
+      DESKTOP_WIDTH,
+    );
+    const heldRow = container.querySelector(`[data-testid="insights-compaction-leader-1:${T0}"]`);
+    expect(heldRow?.textContent).toContain("Waited 7m for quiet · 2 prompts carried");
+    expect(heldRow?.textContent).toContain(new Date(T0).toLocaleString());
+    const otherRow = container.querySelector(
+      `[data-testid="insights-compaction-leader-2:${T0 - 95 * MINUTE}"]`,
+    );
+    expect(otherRow?.textContent).not.toContain("for quiet");
+    expect(otherRow?.textContent).not.toContain("carried");
   });
 
   it("renders newest first", () => {
@@ -223,8 +247,8 @@ describe("InsightsReadyContent", () => {
         ?.querySelectorAll('[data-testid^="insights-compaction-leader-"]') ?? [],
     );
     expect(rows.map((row) => row.getAttribute("data-testid"))).toEqual([
-      "insights-compaction-leader-1:3000",
-      "insights-compaction-leader-2:2000",
+      `insights-compaction-leader-1:${T0}`,
+      `insights-compaction-leader-2:${T0 - 95 * MINUTE}`,
     ]);
   });
 

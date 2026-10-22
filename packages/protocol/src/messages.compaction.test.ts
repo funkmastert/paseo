@@ -101,6 +101,23 @@ describe("compaction.episodes.list", () => {
     expect(SessionOutboundMessageSchema.safeParse(message).success).toBe(true);
   });
 
+  test("a quiet-gate hold, carried prompts and a shared step parse, generated validator included", () => {
+    const held = {
+      ...episode,
+      quietGate: { heldFromMs: 400, heldUntilMs: 1000, heldMs: 600 },
+      promptsCarried: [{ atMs: 900, text: "also fix the login bug" }],
+      steps: [{ ...episode.steps[0], costWeightedTokens: null, steeredIn: 1 }],
+    };
+    const message = {
+      type: "compaction.episodes.list.response",
+      payload: { requestId: "req-1", episodes: [held], nextCursor: null },
+    };
+
+    const parsed = SessionOutboundMessageSchema.parse(message);
+    expect(parsed).toEqual(message);
+    expect(validateWSOutboundMessage({ type: "session", message }).success).toBe(true);
+  });
+
   test("accepts a trigger, source or outcome an older client doesn't know yet", () => {
     // Open strings, not closed enums (docs/protocol-compatibility.md -- never narrow): a daemon
     // that adds a new trigger kind, episode source, or outcome must not fail validation on an

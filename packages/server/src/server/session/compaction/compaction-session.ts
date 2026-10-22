@@ -1,11 +1,6 @@
+import type { CompactionEpisode } from "@getpaseo/protocol/compaction/rpc-schemas";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
-import type {
-  CompactionEpisodeRow,
-  CompactionEpisodeSource,
-  CompactionEpisodeTrigger,
-  CompactionEpisodeOutcome,
-  CompactionStepOutcome,
-} from "../../compaction-ledger/compaction-ledger-store.js";
+import type { CompactionEpisodeRow } from "../../compaction-ledger/compaction-ledger-store.js";
 import type {
   CompactionEpisodeSummary,
   CompactionRange,
@@ -37,15 +32,10 @@ export interface CompactionSessionOptions {
 }
 
 // The row's own closed string unions are open on the wire (docs/protocol-compatibility.md --
-// never narrow); this cast is the one place that boundary is crossed, since the row is otherwise
-// identical in shape to the wire schema.
-function episodeOnWire(row: CompactionEpisodeRow) {
-  return row as CompactionEpisodeRow & {
-    source: CompactionEpisodeSource | string;
-    trigger: CompactionEpisodeTrigger | string;
-    outcome: CompactionEpisodeOutcome | string;
-    steps: Array<{ outcome: CompactionStepOutcome | string }>;
-  };
+// never narrow); the store's payback bookkeeping is not part of it.
+function episodeOnWire(row: CompactionEpisodeRow): CompactionEpisode {
+  const { requestsSincePaybackCountedThrough: _counted, ...episode } = row;
+  return episode;
 }
 
 /** Serves `compaction.episodes.list` / `.summary` (docs/insights.md). Read-only; the service's

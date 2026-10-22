@@ -10,6 +10,8 @@ export const AGENT_COMPACTION_EPISODES_POLL_MS = 15 * 1000;
 const AGENT_COMPACTION_EPISODES_STALE_TIME_MS = 5 * 1000;
 /** Comfortably above how many compactions one agent accrues before this screen is revisited. */
 const AGENT_COMPACTION_EPISODES_LIMIT = 100;
+/** One empty list for every render without data: a fresh `[]` would re-render the stream's rows. */
+const NO_EPISODES: CompactionEpisode[] = [];
 
 export function agentCompactionEpisodesQueryKey(
   serverId: string | null | undefined,
@@ -56,5 +58,5 @@ export function useAgentCompactionEpisodes(
     refetchInterval: AGENT_COMPACTION_EPISODES_POLL_MS,
   });
 
-  return { episodes: enabled ? (query.data ?? []) : [], isSupported };
+  return { episodes: enabled ? (query.data ?? NO_EPISODES) : NO_EPISODES, isSupported };
 }

@@ -63,7 +63,7 @@ Opus 5.5 ties each thinking block to the exact history before it. Accounts creat
 
 ## The ledger
 
-Every episode is recorded: an optional `episodeObserver` on `AgentLeaderCompactionMonitor` fires around each step, and `CompactionLedgerService` turns that into a durable row with the episode's cost (`agent.totalTokens`, [docs/token-burn.md](token-burn.md), snapshotted at each step's start and end) and an estimated payback. See [docs/insights.md](insights.md) for the ledger, the RPC, and where it surfaces in the app — this doc stays about the compaction sequence itself.
+The monitor reports every step, every dropped episode, the quiet-gate hold and the carried prompts to an optional `episodeObserver`, and each call is isolated: an observer that throws is logged and never stops a step. [docs/insights.md](insights.md) owns what the compaction ledger does with them.
 
 ## Config
 

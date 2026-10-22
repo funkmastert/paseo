@@ -2,6 +2,7 @@ import type { LeaderCompactionEpisodeObserver } from "../agent-leader-compaction
 import { estimatedSavedWeightedTokens, stepCost } from "./compaction-ledger-cost.js";
 import {
   emptyCompactionEpisodeTail,
+  type CompactionCarriedPrompt,
   type CompactionEpisodeOutcome,
   type CompactionEpisodeRow,
   type CompactionEpisodeSource,
@@ -32,18 +33,44 @@ export interface CompactionEpisodeSummary {
   unmeasuredCount: number;
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
+/** The same cut the monitor applies to the restore message (MAX_PROMPT_CHARS). */
+const MAX_STORED_PROMPT_CHARS = 2_000;
+
+/** Local midnight `daysBack` days before `nowMs`'s day: the host's day, as the JEV dashboard counts. */
+function startOfLocalDayMs(nowMs: number, daysBack: number): number {
+  const now = new Date(nowMs);
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysBack).getTime();
+}
 
 function rangeStartMs(range: CompactionRange | undefined, nowMs: number): number {
   switch (range) {
     case "today":
-      return nowMs - (nowMs % DAY_MS);
+      return startOfLocalDayMs(nowMs, 0);
     case "7d":
-      return nowMs - 7 * DAY_MS;
+      return startOfLocalDayMs(nowMs, 6);
     default:
       return Number.NEGATIVE_INFINITY;
   }
+}
+
+function storedPrompts(
+  prompts: readonly CompactionCarriedPrompt[] | undefined,
+): CompactionCarriedPrompt[] | null {
+  if (!prompts || prompts.length === 0) return null;
+  return prompts.map((prompt) => ({
+    atMs: prompt.atMs,
+    text:
+      prompt.text.length > MAX_STORED_PROMPT_CHARS
+        ? `${prompt.text.slice(0, MAX_STORED_PROMPT_CHARS)}…`
+        : prompt.text,
+  }));
+}
+
+/** When an episode that stopped early ended: its last step's end, or start if that never ended. */
+function lastActivityMs(episode: CompactionEpisodeRow): number {
+  const last = episode.steps[episode.steps.length - 1];
+  return last ? (last.endedAtMs ?? last.startedAtMs) : episode.startedAtMs;
 }
 
 export interface CompactionLedgerServiceOptions {
@@ -97,8 +124,39 @@ export class CompactionLedgerService implements LeaderCompactionEpisodeObserver 
     await this.store.close();
   }
 
+  /**
+   * Closes rows a previous daemon left open (docs/insights.md): their episode died with that
+   * process, so nothing will ever finish them. Also resumes payback counting for each agent's
+   * newest closed episode. Call once, after the store has loaded.
+   */
+  reconcileAfterLoad(): void {
+    const newestClosed = new Map<string, CompactionEpisodeRow>();
+    for (const row of this.store.listEpisodes()) {
+      if (row.endedAtMs === null && !this.openEpisodes.has(row.agentId)) {
+        const closed: CompactionEpisodeRow = { ...row, steps: [...row.steps] };
+        this.closeEpisode(closed, "interrupted", lastActivityMs(closed));
+        this.store.upsertEpisode(closed);
+        continue;
+      }
+      if (row.endedAtMs === null) continue;
+      const newest = newestClosed.get(row.agentId);
+      if (!newest || row.startedAtMs > newest.startedAtMs) newestClosed.set(row.agentId, row);
+    }
+    for (const [agentId, row] of newestClosed) {
+      if (!this.openEpisodes.has(agentId) && !this.payingBackEpisodeId.has(agentId)) {
+        this.payingBackEpisodeId.set(agentId, row.id);
+      }
+    }
+  }
+
   onStepStarted(input: Parameters<LeaderCompactionEpisodeObserver["onStepStarted"]>[0]): void {
     let episode = this.openEpisodes.get(input.agentId);
+    // A first prepare attempt always begins a new episode. One still open here was dropped
+    // without the monitor saying so; close it rather than append to it.
+    if (episode && input.step === "prepare" && input.attempt === 1) {
+      this.abandon(episode, lastActivityMs(episode));
+      episode = undefined;
+    }
     if (!episode) {
       episode = this.openEpisode(
         input.agentId,
@@ -107,10 +165,17 @@ export class CompactionLedgerService implements LeaderCompactionEpisodeObserver 
         input.usedTokens,
         input.atMs,
       );
+      if (input.quietGate) {
+        episode.quietGate = {
+          ...input.quietGate,
+          heldMs: input.quietGate.heldUntilMs - input.quietGate.heldFromMs,
+        };
+      }
       this.openEpisodes.set(input.agentId, episode);
       // A new episode starting ends the previous one's payback-counting window.
       this.payingBackEpisodeId.delete(input.agentId);
     }
+    if (input.carriedPrompts) episode.promptsCarried = storedPrompts(input.carriedPrompts);
     episode.steps.push({
       step: input.step,
       startedAtMs: input.atMs,
@@ -128,11 +193,17 @@ export class CompactionLedgerService implements LeaderCompactionEpisodeObserver 
     if (stepRecord && stepRecord.step === input.step) {
       stepRecord.endedAtMs = input.atMs;
       stepRecord.outcome = input.outcome as CompactionStepOutcome;
-      stepRecord.costWeightedTokens = stepCost(input.totalTokensAtStart, input.totalTokensAtEnd);
+      const steeredIn = input.steeredIn ?? 0;
+      // Another message joined the turn: its spend includes answering that, so it is not the
+      // compaction's own cost (docs/insights.md).
+      stepRecord.costWeightedTokens =
+        steeredIn > 0 ? null : stepCost(input.totalTokensAtStart, input.totalTokensAtEnd);
+      if (steeredIn > 0) stepRecord.steeredIn = steeredIn;
     }
     if (input.compactedFromTokens !== null) episode.contextBeforeTokens = input.compactedFromTokens;
     if (input.compactedToTokens !== null) episode.contextAfterTokens = input.compactedToTokens;
     if (input.noteLength !== null) episode.noteLength = input.noteLength;
+    if (input.carriedPrompts) episode.promptsCarried = storedPrompts(input.carriedPrompts);
 
     if (input.episodeEnded) {
       this.closeEpisode(episode, input.episodeEnded, input.atMs);
@@ -140,6 +211,12 @@ export class CompactionLedgerService implements LeaderCompactionEpisodeObserver 
       this.payingBackEpisodeId.set(input.agentId, episode.id);
     }
     this.store.upsertEpisode({ ...episode, steps: [...episode.steps] });
+  }
+
+  /** The monitor dropped the episode without finishing it (`onEpisodeAbandoned`). */
+  onEpisodeAbandoned(input: { agentId: string; atMs: number }): void {
+    const episode = this.openEpisodes.get(input.agentId);
+    if (episode) this.abandon(episode, input.atMs);
   }
 
   /** Claude's own auto-compact, or a user's manual `/compact` (docs/leader-compaction.md). No
@@ -247,9 +324,17 @@ export class CompactionLedgerService implements LeaderCompactionEpisodeObserver 
     };
   }
 
+  /** Closes an open episode that stopped early, keeping what its finished steps cost. */
+  private abandon(episode: CompactionEpisodeRow, atMs: number): void {
+    this.closeEpisode(episode, "interrupted", atMs);
+    this.openEpisodes.delete(episode.agentId);
+    this.payingBackEpisodeId.set(episode.agentId, episode.id);
+    this.store.upsertEpisode({ ...episode, steps: [...episode.steps] });
+  }
+
   private closeEpisode(
     episode: CompactionEpisodeRow,
-    reason: "done" | "gaveUp",
+    reason: "done" | "gaveUp" | "interrupted",
     atMs: number,
   ): void {
     episode.endedAtMs = atMs;

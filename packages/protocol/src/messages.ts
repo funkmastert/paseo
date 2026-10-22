@@ -4492,7 +4492,7 @@ export const ServerInfoStatusPayloadSchema = z
         // section's release/reserve/shutdown actions (docs/device-leases.md); an older daemon
         // only supports the read-only device_status_update the deviceLeases flag above gates.
         deviceManagement: z.boolean().optional(),
-        // COMPAT(compactionLedger): added in v0.9.x, remove gate after 2027-04-21. Whether the
+        // COMPAT(compactionLedger): added in v0.8.x, remove gate after 2027-04-21. Whether the
         // daemon serves compaction.episodes.list/.summary (docs/insights.md).
         compactionLedger: z.boolean().optional(),
       })

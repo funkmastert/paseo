@@ -1818,7 +1818,7 @@ export class VoiceAssistantWebSocketServer {
         codexGuardStatus: true,
         // COMPAT(deviceManagement): added in v0.8.x, remove gate after 2027-09-30.
         deviceManagement: true,
-        // COMPAT(compactionLedger): added in v0.9.x, remove gate after 2027-04-21.
+        // COMPAT(compactionLedger): added in v0.8.x, remove gate after 2027-04-21.
         ...(this.compactionLedger ? { compactionLedger: true } : {}),
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported

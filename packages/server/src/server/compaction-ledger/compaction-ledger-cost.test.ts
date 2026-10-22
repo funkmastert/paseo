@@ -6,16 +6,19 @@ describe("stepCost", () => {
     expect(stepCost(100_000, 100_450)).toBe(450);
   });
 
-  test("is null when the start snapshot is missing", () => {
-    expect(stepCost(undefined, 100_450)).toBeNull();
+  test("counts from zero when the start snapshot is missing: the counter had not started yet", () => {
+    // `agent.totalTokens` stays undefined until an agent's first request after it loads, and
+    // the first one sets it to that request's spend, so the whole end figure is this step's.
+    expect(stepCost(undefined, 100_450)).toBe(100_450);
   });
 
   test("is null when the end snapshot is missing", () => {
     expect(stepCost(100_000, undefined)).toBeNull();
   });
 
-  test("clamps a negative diff to zero rather than reporting a negative cost", () => {
-    expect(stepCost(100_450, 100_000)).toBe(0);
+  test("is null when the counter went backwards: it was reset mid-step, so nothing was measured", () => {
+    // A rewind or a failover successor restarts `totalTokens` (docs/token-burn.md).
+    expect(stepCost(100_450, 100_000)).toBeNull();
   });
 });
 

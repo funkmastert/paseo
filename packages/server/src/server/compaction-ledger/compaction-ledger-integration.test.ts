@@ -31,6 +31,10 @@ class FakeAgents {
     this.onTurn(String(prompt));
     return Promise.resolve(this.outcomes.shift() ?? { status: "completed", finalText: "" });
   }
+
+  subscribeOperatorSignals(): () => void {
+    return () => undefined;
+  }
 }
 
 function leader(
@@ -48,6 +52,7 @@ function leader(
     contextWindowUsedTokens: 612_000,
     title: "Ship the thing",
     totalTokens: 1_000_000,
+    steersAccepted: 0,
     ...overrides,
   };
 }
@@ -100,7 +105,12 @@ describe("CompactionLedgerService wired to a real AgentLeaderCompactionMonitor",
         contextBeforeTokens: 612_000,
         contextAfterTokens: 31_000,
       });
-      expect(rows[0]?.costWeightedTokens).toBeGreaterThan(0);
+      expect(rows[0]?.steps.map((step) => [step.step, step.costWeightedTokens])).toEqual([
+        ["prepare", 0],
+        ["compact", 2_000],
+        ["restore", 500],
+      ]);
+      expect(rows[0]?.costWeightedTokens).toBe(2_500);
       expect(rows[0]?.costBasis).toBe("measured");
     } finally {
       rmSync(rootDir, { recursive: true, force: true });

@@ -14,6 +14,7 @@ import {
   type LeaderCompactionCarriedPrompt,
   type LeaderCompactionConfig,
   type LeaderCompactionEpisode,
+  type LeaderCompactionPlan,
   type LeaderCompactionSettings,
   type LeaderCompactionState,
   type LeaderCompactionStep,
@@ -27,10 +28,19 @@ import type { LeaderCompactionTimingPort } from "./agent/leader-compaction-timin
 import type { PushNotificationSender } from "./push/index.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
 
+/** How long the quiet gate held an episode's start (docs/leader-compaction.md, "Quiet gate"). */
+export interface LeaderCompactionQuietHold {
+  /** The first sweep the gate held the would-be start. */
+  heldFromMs: number;
+  /** The sweep the gate let it through and the episode opened. */
+  heldUntilMs: number;
+}
+
 /**
  * The compaction ledger's view onto each step, added without touching the planner's pure types
- * (docs/insights.md). `episode` is the pre-step state the planner already tracked; `totalTokens`
- * is `ActiveManagedAgent.totalTokens` (docs/token-burn.md), the ledger's cost signal.
+ * (docs/insights.md). `totalTokens` is `ActiveManagedAgent.totalTokens` (docs/token-burn.md), the
+ * ledger's cost signal. Every call is isolated: an observer that throws is logged, never allowed
+ * to stop the step it reports on.
  */
 export interface LeaderCompactionEpisodeObserver {
   onStepStarted(input: {
@@ -42,6 +52,10 @@ export interface LeaderCompactionEpisodeObserver {
     usedTokens: number | undefined;
     totalTokensAtStart: number | undefined;
     atMs: number;
+    /** Set on the episode's first step when the quiet gate held its start; null otherwise. */
+    quietGate?: LeaderCompactionQuietHold | null;
+    /** The human prompts the episode carries so far. */
+    carriedPrompts?: readonly LeaderCompactionCarriedPrompt[];
   }): void;
   onStepFinished(input: {
     agentId: string;
@@ -55,7 +69,26 @@ export interface LeaderCompactionEpisodeObserver {
     totalTokensAtStart: number | undefined;
     totalTokensAtEnd: number | undefined;
     atMs: number;
+    /** Messages steered into this step's turn: its spend then includes answering them. */
+    steeredIn?: number;
+    /** The human prompts the episode carries as of this step's end. */
+    carriedPrompts?: readonly LeaderCompactionCarriedPrompt[];
   }): void;
+  /**
+   * The episode stopped without finishing: the planner dropped it (the context shrank on its own,
+   * the agent stopped being a candidate) or the leg was turned off. No step is in flight.
+   */
+  onEpisodeAbandoned?(input: { agentId: string; atMs: number }): void;
+}
+
+/** What `startStep` read off the agent as the step began, for the ledger's diff at its end. */
+interface StepStartSnapshot {
+  totalTokens: number | undefined;
+  steersAccepted: number;
+}
+
+function isOpenPhase(phase: LeaderCompactionState["phase"] | undefined): boolean {
+  return phase === "waiting" || phase === "inFlight" || phase === "backoff";
 }
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
@@ -297,8 +330,12 @@ export class AgentLeaderCompactionMonitor {
   /** Turns this monitor started and has not seen end. Tests await them through `settle()`. */
   private readonly turns = new Set<Promise<void>>();
   private readonly unsubscribeOperatorSignals: () => void;
-  /** `agent.totalTokens` as of each in-flight step's start, for the ledger's cost diff. */
-  private readonly stepStartTotals = new Map<string, number | undefined>();
+  /** Each in-flight step's start snapshot, for the ledger's cost diff. */
+  private readonly stepStarts = new Map<string, StepStartSnapshot>();
+  /** When the quiet gate first held each agent's would-be episode, while it still holds. */
+  private readonly quietHoldSince = new Map<string, number>();
+  /** A hold that ended with an episode opening, waiting for that episode's first step to start. */
+  private readonly episodeQuietHolds = new Map<string, LeaderCompactionQuietHold>();
 
   constructor(options: AgentLeaderCompactionMonitorOptions) {
     this.options = options;
@@ -393,8 +430,7 @@ export class AgentLeaderCompactionMonitor {
 
   /** An episode has started and not ended: its own turns are not the leader's work. */
   isEpisodeOpen(agentId: string): boolean {
-    const phase = this.states.get(agentId)?.phase;
-    return phase === "waiting" || phase === "inFlight" || phase === "backoff";
+    return isOpenPhase(this.states.get(agentId)?.phase);
   }
 
   /** Dedup/quiet-gate bookkeeping, keyed only on agent id: reclaimed for a dead agent whether or
@@ -409,6 +445,12 @@ export class AgentLeaderCompactionMonitor {
     for (const agentId of this.lastHumanPrompt.keys()) {
       if (!liveIds.has(agentId)) this.lastHumanPrompt.delete(agentId);
     }
+    for (const agentId of this.quietHoldSince.keys()) {
+      if (!liveIds.has(agentId)) this.quietHoldSince.delete(agentId);
+    }
+    for (const agentId of this.episodeQuietHolds.keys()) {
+      if (!liveIds.has(agentId)) this.episodeQuietHolds.delete(agentId);
+    }
   }
 
   private sweep(): void {
@@ -420,9 +462,14 @@ export class AgentLeaderCompactionMonitor {
     if (settings?.enabled !== true) {
       // A turn already started still ends and is applied; everything else starts over when the
       // leg comes back, the same as after a restart.
+      const nowMs = this.now();
       for (const [agentId, state] of this.states) {
-        if (state.phase !== "inFlight") this.states.delete(agentId);
+        if (state.phase === "inFlight") continue;
+        this.states.delete(agentId);
+        if (isOpenPhase(state.phase)) this.notifyEpisodeAbandoned(agentId, nowMs);
       }
+      this.quietHoldSince.clear();
+      this.episodeQuietHolds.clear();
       return;
     }
     const config = resolveLeaderCompactionConfig(settings);
@@ -430,22 +477,73 @@ export class AgentLeaderCompactionMonitor {
     for (const [agentId, state] of this.states) {
       if (!liveIds.has(agentId) && state.phase !== "inFlight") {
         this.states.delete(agentId);
+        if (isOpenPhase(state.phase)) this.notifyEpisodeAbandoned(agentId, nowMs);
       }
     }
 
     for (const agent of agents) {
       const timing = this.timingFor(agent.id, config);
+      const previous = this.states.get(agent.id);
       const plan = planLeaderCompactionStep({
-        state: this.states.get(agent.id),
+        state: previous,
         agent,
         config,
         nowMs,
         timing,
         lastHumanPrompt: this.lastHumanPrompt.get(agent.id) ?? null,
       });
+      this.trackQuietHold(agent.id, previous, plan, nowMs);
+      // A sweep, not a step's outcome, closed an open episode: the planner dropped it.
+      if (isOpenPhase(previous?.phase) && !isOpenPhase(plan.state.phase)) {
+        this.notifyEpisodeAbandoned(agent.id, nowMs);
+      }
       this.setState(agent.id, plan.state);
       this.act(agent, plan.action, timing, config);
     }
+  }
+
+  /**
+   * Follows the quiet gate for the ledger: from the first sweep it holds a would-be start to the
+   * sweep the episode opens. A hold that ends any other way (the trigger went away, a dry run)
+   * is dropped, so it can never attach to a later episode.
+   */
+  private trackQuietHold(
+    agentId: string,
+    previous: LeaderCompactionState | undefined,
+    plan: LeaderCompactionPlan,
+    nowMs: number,
+  ): void {
+    if (plan.action.kind === "quietHold") {
+      if (!this.quietHoldSince.has(agentId)) this.quietHoldSince.set(agentId, nowMs);
+      return;
+    }
+    const heldFromMs = this.quietHoldSince.get(agentId);
+    this.quietHoldSince.delete(agentId);
+    if (!isOpenPhase(plan.state.phase)) {
+      this.episodeQuietHolds.delete(agentId);
+      return;
+    }
+    if (heldFromMs !== undefined && !isOpenPhase(previous?.phase)) {
+      this.episodeQuietHolds.set(agentId, { heldFromMs, heldUntilMs: nowMs });
+    }
+  }
+
+  /** Runs one observer call; a ledger failure is logged and never reaches the compaction. */
+  private observe(
+    agentId: string,
+    call: (observer: LeaderCompactionEpisodeObserver) => void,
+  ): void {
+    const observer = this.options.episodeObserver;
+    if (!observer) return;
+    try {
+      call(observer);
+    } catch (error) {
+      this.options.logger.warn({ err: error, agentId }, "Compaction ledger observer failed");
+    }
+  }
+
+  private notifyEpisodeAbandoned(agentId: string, atMs: number): void {
+    this.observe(agentId, (observer) => observer.onEpisodeAbandoned?.({ agentId, atMs }));
   }
 
   private act(
@@ -616,17 +714,26 @@ export class AgentLeaderCompactionMonitor {
       },
       "Leader compaction started a step",
     );
-    this.stepStartTotals.set(agent.id, agent.totalTokens);
-    this.options.episodeObserver?.onStepStarted({
-      agentId: agent.id,
-      agentTitle: agent.title ?? null,
-      step,
-      attempt: episode.attempts + 1,
-      trigger: episode.trigger,
-      usedTokens: agent.contextWindowUsedTokens,
-      totalTokensAtStart: agent.totalTokens,
-      atMs: this.now(),
+    this.stepStarts.set(agent.id, {
+      totalTokens: agent.totalTokens,
+      steersAccepted: agent.steersAccepted,
     });
+    const quietGate = this.episodeQuietHolds.get(agent.id) ?? null;
+    this.episodeQuietHolds.delete(agent.id);
+    this.observe(agent.id, (observer) =>
+      observer.onStepStarted({
+        agentId: agent.id,
+        agentTitle: agent.title ?? null,
+        step,
+        attempt: episode.attempts + 1,
+        trigger: episode.trigger,
+        usedTokens: agent.contextWindowUsedTokens,
+        totalTokensAtStart: agent.totalTokens,
+        atMs: this.now(),
+        quietGate,
+        carriedPrompts: episode.carriedPrompts,
+      }),
+    );
     const tracked = this.finishStep(agent, step, episode, started, config).finally(() => {
       this.turns.delete(tracked);
     });
@@ -646,10 +753,10 @@ export class AgentLeaderCompactionMonitor {
     } catch (error) {
       result = { status: "failed", error: error instanceof Error ? error.message : String(error) };
     }
-    const totalTokensAfter = this.options.agentManager
+    const after = this.options.agentManager
       .listAgentsForLeaderCompaction()
-      .find((candidate) => candidate.id === agent.id)?.totalTokens;
-    this.applyResult(agent, step, episode, result, config, totalTokensAfter);
+      .find((candidate) => candidate.id === agent.id);
+    this.applyResult(agent, step, episode, result, config, after);
   }
 
   /** Reads the context size after the turn: for `/compact`, the only proof it took. */
@@ -669,10 +776,10 @@ export class AgentLeaderCompactionMonitor {
     step: LeaderCompactionStep,
     episode: LeaderCompactionEpisode,
     applied: LeaderCompactionTurnApplied,
-    totalTokensAfter: number | undefined,
+    after: LeaderCompactionAgentSummary | undefined,
   ): void {
-    const totalTokensAtStart = this.stepStartTotals.get(agentId);
-    this.stepStartTotals.delete(agentId);
+    const start = this.stepStarts.get(agentId);
+    this.stepStarts.delete(agentId);
     if (applied.failure?.kind === "busy") {
       return;
     }
@@ -680,22 +787,27 @@ export class AgentLeaderCompactionMonitor {
       applied.state.phase === "waiting" || applied.state.phase === "backoff"
         ? applied.state.episode
         : episode;
-    this.options.episodeObserver?.onStepFinished({
-      agentId,
-      step,
-      outcome: applied.failure?.kind ?? "completed",
-      gaveUp: applied.gaveUp,
-      episodeEnded:
-        applied.state.phase === "settled" && applied.state.reason !== "dryRun"
-          ? applied.state.reason
-          : null,
-      compactedFromTokens: resultingEpisode.compactedFromTokens,
-      compactedToTokens: resultingEpisode.compactedToTokens,
-      noteLength: resultingEpisode.note?.length ?? null,
-      totalTokensAtStart,
-      totalTokensAtEnd: totalTokensAfter,
-      atMs: this.now(),
-    });
+    const steeredIn = start && after ? Math.max(0, after.steersAccepted - start.steersAccepted) : 0;
+    this.observe(agentId, (observer) =>
+      observer.onStepFinished({
+        agentId,
+        step,
+        outcome: applied.failure?.kind ?? "completed",
+        gaveUp: applied.gaveUp,
+        episodeEnded:
+          applied.state.phase === "settled" && applied.state.reason !== "dryRun"
+            ? applied.state.reason
+            : null,
+        compactedFromTokens: resultingEpisode.compactedFromTokens,
+        compactedToTokens: resultingEpisode.compactedToTokens,
+        noteLength: resultingEpisode.note?.length ?? null,
+        totalTokensAtStart: start?.totalTokens,
+        totalTokensAtEnd: after?.totalTokens,
+        atMs: this.now(),
+        steeredIn,
+        carriedPrompts: resultingEpisode.carriedPrompts,
+      }),
+    );
   }
 
   private applyResult(
@@ -704,7 +816,7 @@ export class AgentLeaderCompactionMonitor {
     episode: LeaderCompactionEpisode,
     result: LeaderCompactionTurnResult,
     config: LeaderCompactionConfig,
-    totalTokensAfter?: number,
+    after?: LeaderCompactionAgentSummary,
   ): void {
     // A prompt sent while this step's turn was running was carried by mutating `this.states`
     // directly (`onOperatorSignal`), not the `episode` this call was started with. Read it back so
@@ -720,7 +832,7 @@ export class AgentLeaderCompactionMonitor {
       nowMs: this.now(),
     });
     this.setState(agent.id, applied.state);
-    this.notifyStepFinished(agent.id, step, episode, applied, totalTokensAfter);
+    this.notifyStepFinished(agent.id, step, currentEpisode, applied, after);
     if (
       !applied.failure &&
       step === "prepare" &&

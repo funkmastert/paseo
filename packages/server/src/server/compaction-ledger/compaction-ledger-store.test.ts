@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -77,6 +77,115 @@ describe("CompactionLedgerStore", () => {
       const store = new CompactionLedgerStore({ rootDir, logger });
       await expect(store.load()).resolves.toBeUndefined();
       expect(store.listEpisodes()).toEqual([]);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unreadable state file is set aside before the next flush replaces it", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "compaction-ledger-set-aside-"));
+    try {
+      writeFileSync(join(rootDir, "state.json"), "{ not json");
+      const store = new CompactionLedgerStore({ rootDir, logger });
+      await store.load();
+      store.upsertEpisode(row());
+      await store.flush();
+
+      const corrupt = readdirSync(rootDir).filter((name) => name.startsWith("state.json.corrupt-"));
+      expect(corrupt).toHaveLength(1);
+      expect(readFileSync(join(rootDir, corrupt[0] ?? ""), "utf8")).toBe("{ not json");
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a state file that cannot be read (not missing) is never overwritten", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "compaction-ledger-unreadable-"));
+    const statePath = join(rootDir, "state.json");
+    try {
+      const original = JSON.stringify({ v: 1, backfillDoneAtMs: 5, rows: [row()] });
+      writeFileSync(statePath, original);
+      chmodSync(statePath, 0o000);
+      const store = new CompactionLedgerStore({ rootDir, logger });
+      await store.load();
+      store.upsertEpisode(row({ id: "leader-2:3000", agentId: "leader-2", startedAtMs: 3000 }));
+      await store.flush();
+
+      chmodSync(statePath, 0o600);
+      expect(readFileSync(statePath, "utf8")).toBe(original);
+    } finally {
+      chmodSync(statePath, 0o600);
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a flush before the load has finished writes nothing over the file", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "compaction-ledger-early-flush-"));
+    const statePath = join(rootDir, "state.json");
+    try {
+      const original = JSON.stringify({ v: 1, backfillDoneAtMs: 5, rows: [row()] });
+      writeFileSync(statePath, original);
+      const store = new CompactionLedgerStore({ rootDir, logger });
+      store.upsertEpisode(row({ id: "leader-2:3000", agentId: "leader-2", startedAtMs: 3000 }));
+      await store.flush();
+      expect(readFileSync(statePath, "utf8")).toBe(original);
+
+      await store.load();
+      await store.flush();
+      const reloaded = new CompactionLedgerStore({ rootDir, logger });
+      await reloaded.load();
+      expect(
+        reloaded
+          .listEpisodes()
+          .map((entry) => entry.id)
+          .sort(),
+      ).toEqual(["leader-1:1000", "leader-2:3000"]);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("rows written before the quiet-gate fields existed still load", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "compaction-ledger-older-row-"));
+    try {
+      const { promptsCarried: _prompts, quietGate: _gate, ...older } = row();
+      writeFileSync(
+        join(rootDir, "state.json"),
+        JSON.stringify({ v: 1, backfillDoneAtMs: null, rows: [older] }),
+      );
+      const store = new CompactionLedgerStore({ rootDir, logger });
+      await store.load();
+      expect(store.getEpisode("leader-1:1000")).toEqual(row());
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("round-trips the quiet-gate hold, carried prompts and a shared step", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "compaction-ledger-quiet-gate-"));
+    try {
+      const store = new CompactionLedgerStore({ rootDir, logger });
+      await store.load();
+      const withGate = row({
+        quietGate: { heldFromMs: 400, heldUntilMs: 1000, heldMs: 600 },
+        promptsCarried: [{ atMs: 900, text: "also fix the login bug" }],
+        steps: [
+          {
+            step: "prepare",
+            startedAtMs: 1000,
+            endedAtMs: 1100,
+            outcome: "completed",
+            costWeightedTokens: null,
+            steeredIn: 1,
+          },
+        ],
+      });
+      store.upsertEpisode(withGate);
+      await store.flush();
+
+      const reloaded = new CompactionLedgerStore({ rootDir, logger });
+      await reloaded.load();
+      expect(reloaded.getEpisode("leader-1:1000")).toEqual(withGate);
     } finally {
       rmSync(rootDir, { recursive: true, force: true });
     }
