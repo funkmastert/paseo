@@ -88,10 +88,18 @@ On a daemon serving `server_info.features.pullRequestLedger`, Explorer's PR tab 
 ([docs/pull-request-ledger.md](pull-request-ledger.md)): every PR the workspace's agent or any
 descendant subagent created, not only the checkout's own branch PR, and present unconditionally on
 git workspaces rather than only when a branch PR exists. Tapping a row drills into the same
-checks/timeline view the single-PR tab used, in place inside the Explorer dock — it does not use
-the three-way routing above, since `ExplorerSidebarContent` renders identically for compact and
-native-wide docks and there is no separate "wide" placement to route through. On a host without
-the feature, the tab falls back to exactly the old single-PR "PR #N" behavior.
+checks/timeline view the single-PR tab used, in place inside the Explorer tab.
+
+Compact layouts and native-wide docks render this directly inside `ExplorerSidebarContent` — no
+separate "wide" placement to route through there, since both presentations share one
+`ExplorerSidebarContent` instance. A split-pane desktop/web layout does have a separate wide
+placement: it opens the `pull_requests` panel kind (`VIEW_TARGETS.pr` in
+`workspace-tabs/explorer-sidebar.ts`), which renders the same list/detail content as a pane tab
+instead of the old single-PR `pull_request` panel it replaces. That replacement is unconditional —
+it does not check `pullRequestLedger` before opening the new panel kind, so a split-pane layout
+against an old daemon shows an empty PRs list rather than falling back to the single-PR panel the
+way compact layouts do (docs/pull-request-ledger.md, "Not done yet"). On a host without the
+feature, compact and dock layouts fall back to exactly the old single-PR "PR #N" behavior.
 
 Panels request an implicit open through the narrow `openPreferredTarget(target, source)` pane
 contract. Entry points outside panels use `openPreferredWorkspaceTarget`. Do not branch on a
