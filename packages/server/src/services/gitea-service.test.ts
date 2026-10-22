@@ -3141,4 +3141,57 @@ describe("createGiteaService getPullRequestStatusByIdentity", () => {
 
     expect(status).toBeNull();
   });
+
+  it("does not swallow a non-404 error whose text happens to say 'not found'", async () => {
+    const { service } = makeService(() => {
+      throw new Error("mirror sync failed: upstream repository not found in configuration");
+    });
+
+    await expect(
+      service.getPullRequestStatusByIdentity?.({
+        cwd: "/repo",
+        repoOwner: "acme",
+        repoName: "widgets",
+        number: 42,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("loads checks from the already-fetched head sha instead of re-running `tea pr` in cwd", async () => {
+    const { service, calls } = makeService((args) => {
+      if (args[0] === "api" && args[1] === "repos/acme/widgets/pulls/42") {
+        return ok(
+          JSON.stringify(
+            currentPullRequestApi({
+              number: 42,
+              state: "open",
+              headRef: "feat/widgets",
+              headSha: "4444444444444444444444444444444444444444",
+            }),
+          ),
+        );
+      }
+      if (
+        args[0] === "api" &&
+        args[1] ===
+          "repos/example-user/sample-repo/commits/4444444444444444444444444444444444444444/status"
+      ) {
+        return ok(JSON.stringify(SAMPLE_COMBINED_STATUS));
+      }
+      // `cwd` here belongs to whichever workspace is viewing this PR, not necessarily
+      // acme/widgets -- `tea pr 42` run there could resolve to a different repo's PR #42
+      // entirely, so the sha from the identity API fetch above must be used instead.
+      throw new Error(`unexpected call: ${args.join(" ")}`);
+    });
+
+    const status = await service.getPullRequestStatusByIdentity?.({
+      cwd: "/unrelated-repo",
+      repoOwner: "acme",
+      repoName: "widgets",
+      number: 42,
+    });
+
+    expect(calls.some((args) => args[0] === "pr")).toBe(false);
+    expect(status?.checksStatus).toBe("pending");
+  });
 });

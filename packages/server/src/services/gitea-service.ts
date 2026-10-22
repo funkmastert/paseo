@@ -1109,10 +1109,13 @@ function isAuthFailureText(text: string): boolean {
   );
 }
 
+// HTTP status only, not the text "not found" -- that phrase shows up in unrelated
+// errors (a missing mirror config, a bad remote) that must still propagate rather
+// than be swallowed into a false not-found.
 function isGiteaNotFoundError(error: unknown): boolean {
   const stderr = error instanceof ForgeCommandError ? error.stderr : "";
   const message = error instanceof Error ? error.message : String(error);
-  return /\b404\b|not found/i.test(`${message} ${stderr}`);
+  return /\b404\b/.test(`${message} ${stderr}`);
 }
 
 function classifyGiteaTimelineErrorKind(stderr: string): PullRequestTimelineErrorKind {
@@ -1712,12 +1715,35 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       if (!pr.headSha) {
         return status;
       }
-      const checksInput = {
+      return loadPullRequestChecksForSha(
         cwd,
-        repoOwner: status.repoOwner,
-        repoName: status.repoName,
-        sha: pr.headSha,
-      };
+        status.repoOwner,
+        status.repoName,
+        pr.headSha,
+        status,
+      );
+    } catch {
+      return status;
+    }
+  }
+
+  /**
+   * Loads checks for an already-known head sha, skipping the `tea pr` lookup
+   * `loadCurrentPullRequestChecks` otherwise needs to discover it. The identity-based
+   * lookup already has the sha from its own REST fetch, and `tea pr <n>` runs relative
+   * to `cwd` -- which, for an identity lookup, is the viewing workspace's cwd and may
+   * not even be a checkout of this PR's repo, so re-deriving the sha from it there
+   * risks reading a different repo's PR #<n>.
+   */
+  async function loadPullRequestChecksForSha(
+    cwd: string,
+    repoOwner: string,
+    repoName: string,
+    sha: string,
+    status: CurrentPullRequestStatus,
+  ): Promise<CurrentPullRequestStatus> {
+    try {
+      const checksInput = { cwd, repoOwner, repoName, sha };
       const [combined, actionTasks] = await Promise.all([
         loadCombinedCommitStatusBestEffort(checksInput),
         loadActionTasksBestEffort(checksInput),
@@ -2030,7 +2056,16 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       }
       const listItem = currentPullRequestApiToListItem(apiItem);
       const status = toCurrentPullRequestStatus(listItem);
-      return loadCurrentPullRequestChecks(input.cwd, listItem, status);
+      if (!status.repoOwner || !status.repoName) {
+        return status;
+      }
+      return loadPullRequestChecksForSha(
+        input.cwd,
+        status.repoOwner,
+        status.repoName,
+        apiItem.head.sha,
+        status,
+      );
     },
 
     async getPullRequest(input: GetPullRequestOptions): Promise<PullRequestSummary> {
