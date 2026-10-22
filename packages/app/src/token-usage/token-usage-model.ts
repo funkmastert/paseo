@@ -61,6 +61,11 @@ function sumCostUsd(rows: readonly TokenUsageRow[]): number | null {
   return sum;
 }
 
+/** `formatUsd`, passing `null` through — the shared shape for every priced-or-unpriced field. */
+function formatCostOrNull(costUsd: number | null): string | null {
+  return costUsd === null ? null : formatUsd(costUsd);
+}
+
 export function totalForUnit(row: TokenUsageRow, unit: TokenUsageUnit): number {
   return unit === "weighted" ? row.weighted : rawTotal(row);
 }
@@ -208,7 +213,7 @@ function buildModelBar(
     share: entry.total / maxTotal,
     segments,
     costUsd,
-    formattedCost: costUsd === null ? null : formatUsd(costUsd),
+    formattedCost: formatCostOrNull(costUsd),
   };
 }
 
@@ -243,7 +248,7 @@ export function buildTokenUsageRoleTotals(
       total,
       formattedTotal: formatCompactTokens(total),
       costUsd,
-      formattedCost: costUsd === null ? null : formatUsd(costUsd),
+      formattedCost: formatCostOrNull(costUsd),
     };
   });
 }
@@ -274,7 +279,7 @@ export function buildTokenUsageCostSummary(
   const unpricedTokens = breakdown.unpricedTokens ?? 0;
   return {
     totalCostUsd,
-    formattedTotal: totalCostUsd === null ? null : formatUsd(totalCostUsd),
+    formattedTotal: formatCostOrNull(totalCostUsd),
     unpricedTokens,
     hasUnpriced: unpricedTokens > 0,
   };
