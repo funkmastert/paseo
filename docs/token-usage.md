@@ -59,7 +59,18 @@ Zod-validated, `v: 1`, atomic writes at most every five minutes and on shutdown.
 
 ## The RPC
 
-`usage.tokens.get_breakdown.request` / `.response`, gated on `server_info.features.tokenUsage`, permission `daemon.read`, controller in `session/token-usage/`, client method `getTokenUsageBreakdown({ range })`. The request names `24h`, `7d` or `30d`; the range starts on the hour, so `24h` covers 24 to 25 hours. The response has one row per provider, model and role with any usage in the range (`model` is `unknown` when a response named none), the weighted total per row, and `coverage`: whether recording is on, when it started, and the backfill's state (`pending`, `running`, `done`, `off`) with files read out of files in the window. A failed read answers with the payload's `error` and no rows.
+`usage.tokens.get_breakdown.request` / `.response`, gated on `server_info.features.tokenUsage`, permission `daemon.read`, controller in `session/token-usage/`, client method `getTokenUsageBreakdown({ range })`. The request names `24h`, `7d` or `30d`; the range starts on the hour, so `24h` covers 24 to 25 hours. The response has one row per provider, model and role with any usage in the range (`model` is `unknown` when a response named none), the weighted total per row, a cost per row, range cost totals, and `coverage`: whether recording is on, when it started, and the backfill's state (`pending`, `running`, `done`, `off`) with files read out of files in the window. A failed read answers with the payload's `error` and no rows.
+
+## Cost
+
+Each row carries `costUsd`: what that row's tokens would cost at API list prices, in US dollars — never money billed, since Tyler's Claude accounts are flat-rate subscriptions. The response also carries `totalCostUsd` (the sum across priced rows) and `unpricedTokens` (raw tokens across rows with no listed price). Both ride on `usage.tokens.get_breakdown.response` as additive-optional fields, gated on a second flag, `server_info.features.tokenUsageCost`, so an app that predates cost support still parses the response and simply doesn't see the new fields.
+
+The price table lives in `packages/server/src/server/token-usage/token-usage-pricing.ts`: a static, hand-reviewed table of $/MTok by model and token category (fresh input, cache write, cache read, output), not a live price feed, sourced from Anthropic's and OpenAI's own pricing pages with an "as of" date in the file. A model absent from the table prices as `costUsd: null` — never guessed — and its tokens count toward `unpricedTokens` instead of a silent zero. Claude model ids are canonicalized through the same `normalizeClaudeRuntimeModelId` the model-divergence detector uses (dated snapshots, `[1m]` suffixes) before the price lookup; Codex ids are matched exactly, since they carry no such variation.
+
+Two assumptions the stored hourly buckets can't resolve, so the price table makes them explicit instead of modeling them:
+
+- **Cache writes price at the 5-minute rate.** `cache_creation_input_tokens` is summed into one `cacheWrite` bucket with no 5-minute/1-hour split (see "Transcript facts" above), and Claude Code's own cache breakpoints default to the 5-minute TTL.
+- **Claude Haiku 5.5 prices at its <=100K-token-prompt tier.** Haiku 5.5 is the only current Claude model billed by prompt length rather than a flat per-MTok rate, and the buckets carry no per-request prompt length to split on. This undercounts cost on long-prompt Haiku 5.5 calls.
 
 ## Checking it against the transcripts
 
