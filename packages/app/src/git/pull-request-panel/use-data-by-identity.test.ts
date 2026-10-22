@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { prPaneStatusByIdentityQueryKey } from "./query-keys.js";
+import { prPaneStatusByIdentityQueryKey } from "./query-keys";
 
 describe("prPaneStatusByIdentityQueryKey", () => {
   it("differs for two different identities under the same serverId/cwd", () => {

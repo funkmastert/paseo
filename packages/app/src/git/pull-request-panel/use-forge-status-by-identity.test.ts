@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isUnsupportedForgeStatusError,
   nextStatusRefetchInterval,
-} from "./use-forge-status-by-identity.js";
+} from "./use-forge-status-by-identity";
 
 const STATUS_REFETCH_INTERVAL_MS = 60_000;
 

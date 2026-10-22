@@ -3,7 +3,7 @@ import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-
 import type { CheckoutForgeGetPullRequestStatusResponse } from "@getpaseo/protocol/pull-requests/rpc-schemas";
 import { normalizeForge, type Forge } from "@/git/forge";
 import { useFetchQuery } from "@/data/query";
-import { prPaneStatusByIdentityQueryKey } from "./query-keys.js";
+import { prPaneStatusByIdentityQueryKey } from "./query-keys";
 
 export interface PullRequestIdentity {
   host: string;
