@@ -75,7 +75,9 @@ Bounded, and every step is logged.
    the rung has one retry interval to find it reachable.
 3. **Operator.** One `notice` push ([notification-policy.md](notification-policy.md)) (`data.reason: "finish_report_undelivered"`, outside the closed
    `attentionReason` enum), and the child is flagged for attention without a second, generic push.
-   Terminal whether or not the push itself went out.
+   Under the default dial (`minPostLevel: alert`) a `notice` is ledger-only: it reaches the
+   phone only if Tyler lowers `minPostLevel`; the in-app attention flag on the child still shows
+   either way. Terminal whether or not the push itself went out.
 
 An owner that is archived releases the report: whoever archived it ended that tree, and the child
 keeps its result on its own record. A `create_agent` report is also released when the child is

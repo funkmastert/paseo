@@ -3,6 +3,7 @@ import {
   attentionPushLevel,
   computeNotificationPlan,
   isPushEligibleAttentionReason,
+  isQuestionEndingMessage,
   type ClientPresenceState,
   PRESENCE_THRESHOLD_MS,
 } from "./agent-attention-policy.js";
@@ -235,11 +236,69 @@ describe("isPushEligibleAttentionReason", () => {
 });
 
 describe("attentionPushLevel", () => {
-  it("makes every finish a notice, root agents included", () => {
+  it("makes an ordinary finish a notice, root agents included", () => {
     expect(attentionPushLevel("finished")).toBe("notice");
+    expect(
+      attentionPushLevel("finished", {
+        isRootAgent: true,
+        finalMessage: "Done. No action needed.",
+      }),
+    ).toBe("notice");
   });
 
   it("keeps a permission request an alert", () => {
     expect(attentionPushLevel("permission")).toBe("alert");
+  });
+
+  it("keeps an error an alert", () => {
+    expect(attentionPushLevel("error")).toBe("alert");
+  });
+
+  it("raises a root agent's question-ending finish to an alert", () => {
+    expect(
+      attentionPushLevel("finished", { isRootAgent: true, finalMessage: "Should I proceed?" }),
+    ).toBe("alert");
+  });
+
+  it("never raises a delegated child's question-ending finish", () => {
+    expect(
+      attentionPushLevel("finished", { isRootAgent: false, finalMessage: "Should I proceed?" }),
+    ).toBe("notice");
+  });
+});
+
+describe("isQuestionEndingMessage", () => {
+  it("matches a plain question at the end of the message", () => {
+    expect(isQuestionEndingMessage("I've reviewed the PR. Should I merge it?")).toBe(true);
+  });
+
+  it("ignores trailing markdown, quotes and whitespace after the question mark", () => {
+    expect(isQuestionEndingMessage("**Should I proceed?**  ")).toBe(true);
+    expect(isQuestionEndingMessage('He asked, "should I proceed?"')).toBe(true);
+  });
+
+  it("does not match an ordinary finish with no question", () => {
+    expect(isQuestionEndingMessage("Done. Updated the README.")).toBe(false);
+  });
+
+  it("does not match null or empty messages", () => {
+    expect(isQuestionEndingMessage(null)).toBe(false);
+    expect(isQuestionEndingMessage("")).toBe(false);
+  });
+
+  it("ignores a question mark inside a trailing fenced code block", () => {
+    const message = ["Here is the check:", "```", "ok?", "```"].join("\n");
+    expect(isQuestionEndingMessage(message)).toBe(false);
+  });
+
+  it("ignores a question mark inside inline code, mid-message", () => {
+    expect(isQuestionEndingMessage("I ran `is this ok?` and it passed. All done.")).toBe(false);
+  });
+
+  it("ignores a quoted question mark that is not the message's own ask", () => {
+    const message = ['The log said: "did it work?"', "I confirmed it did. No action needed."].join(
+      "\n",
+    );
+    expect(isQuestionEndingMessage(message)).toBe(false);
   });
 });

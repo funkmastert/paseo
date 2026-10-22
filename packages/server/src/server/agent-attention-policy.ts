@@ -80,13 +80,43 @@ export function isPushEligibleAttentionReason(reason: AgentAttentionReason): boo
   return reason !== "error";
 }
 
+const CODE_SPANS = /```[\s\S]*?```|`[^`\n]*`/g;
+/** Trailing markdown emphasis/link marks and quote marks, straight or curly, folded by NFKC. */
+const TRAILING_WRAPPER_CHARS = /[\s"'`*_)\]>‘’‛′ʼ＇“”]+$/;
+
+/**
+ * Whether a root agent's finish asks something in plain text instead of through
+ * `AskUserQuestion` — the gap a Claude root agent's Stop hook already catches
+ * (docs/ask-user-question.md), but Codex, Pi, OMP, Copilot and OpenCode have no hook for. Only
+ * the final message's last non-empty line counts, after code spans and trailing markdown or
+ * quote marks are stripped: a `?` earlier in the message, or inside a code block or inline code,
+ * is not an ask.
+ */
+export function isQuestionEndingMessage(finalMessage: string | null): boolean {
+  if (!finalMessage) return false;
+  const withoutCode = finalMessage.normalize("NFKC").replace(CODE_SPANS, " ");
+  const lines = withoutCode.split("\n");
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i]!.trim();
+    if (line.length === 0) continue;
+    return line.replace(TRAILING_WRAPPER_CHARS, "").endsWith("?");
+  }
+  return false;
+}
+
 /**
  * How urgent an agent's attention push is. A permission request blocks the agent on a person, so
- * it is an alert. Every finish, root agents included, is a notice: nothing a finish reports needs
- * interrupting Tyler for, and anything he must actually answer arrives as a permission request
- * instead. A child whose finish never reaches its parent is escalated separately
- * (docs/finish-reports.md).
+ * it is an alert. A finish is a notice — nothing it reports needs interrupting Tyler for, and
+ * anything he must actually answer arrives as a permission request instead — unless a ROOT
+ * agent's finish asks something in plain text (`isQuestionEndingMessage`): nothing catches that
+ * for the providers with no Stop hook, so it is kept an alert instead of silently dropping to a
+ * digest. A delegated child's question is never promoted; its parent reads the result in-band. A
+ * child whose finish never reaches its parent is escalated separately (docs/finish-reports.md).
  */
-export function attentionPushLevel(reason: AgentAttentionReason): NotifyLevel {
-  return reason === "finished" ? "notice" : "alert";
+export function attentionPushLevel(
+  reason: AgentAttentionReason,
+  input?: { isRootAgent: boolean; finalMessage: string | null },
+): NotifyLevel {
+  if (reason !== "finished") return "alert";
+  return input?.isRootAgent && isQuestionEndingMessage(input.finalMessage) ? "alert" : "notice";
 }

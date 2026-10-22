@@ -340,6 +340,63 @@ describe("VoiceAssistantWebSocketServer notification payloads", () => {
     expect(pushNotifications.levels).toEqual(["notice", "notice"]);
   });
 
+  it("raises a root agent's question-ending finish to an alert, titled as a question", async () => {
+    const getLastAssistantMessage = vi.fn(async () => "I've pushed the fix. Should I open a PR?");
+    const { server, pushNotifications } = createServer({
+      getAgent: vi.fn(() => ({
+        config: { title: null },
+        cwd: "/tmp/worktree",
+        workspaceId: WORKSPACE_ID,
+        labels: {},
+        pendingPermissions: new Map(),
+      })),
+      getLastAssistantMessage,
+    });
+
+    await asInternals<WebSocketServerInternals>(server).broadcastAgentAttention({
+      agentId: "agent-root",
+      provider: "claude",
+      reason: "finished",
+    });
+
+    expect(pushNotifications.levels).toEqual(["alert"]);
+    expect(pushNotifications.sent).toEqual([
+      {
+        title: "Agent has a question",
+        body: "I've pushed the fix. Should I open a PR?",
+        data: {
+          serverId: "srv-test",
+          workspaceId: WORKSPACE_ID,
+          agentId: "agent-root",
+          reason: "finished",
+          isQuestion: true,
+        },
+      },
+    ]);
+  });
+
+  it("never raises a delegated child's question-ending finish past a notice", async () => {
+    const getLastAssistantMessage = vi.fn(async () => "I've pushed the fix. Should I open a PR?");
+    const { server, pushNotifications } = createServer({
+      getAgent: vi.fn(() => ({
+        config: { title: null },
+        cwd: "/tmp/worktree",
+        workspaceId: WORKSPACE_ID,
+        labels: { "paseo.parent-agent-id": "agent-root" },
+        pendingPermissions: new Map(),
+      })),
+      getLastAssistantMessage,
+    });
+
+    await asInternals<WebSocketServerInternals>(server).broadcastAgentAttention({
+      agentId: "agent-child",
+      provider: "claude",
+      reason: "finished",
+    });
+
+    expect(pushNotifications.levels).toEqual(["notice"]);
+  });
+
   it("routes a hidden stale focused browser tab's notification to the present Electron web client", async () => {
     const { server, pushNotifications } = createServer();
     const nowMs = Date.now();

@@ -71,6 +71,7 @@ import type { VoiceCallerContext, VoiceSpeakHandler } from "./voice-types.js";
 import {
   computeNotificationPlan,
   isPushEligibleAttentionReason,
+  isQuestionEndingMessage,
   type ClientPresenceState,
   attentionPushLevel,
 } from "./agent-attention-policy.js";
@@ -85,6 +86,7 @@ import {
   buildAgentAttentionNotificationPayload,
   findLatestPermissionRequest,
 } from "@getpaseo/protocol/agent-attention-notification";
+import { isDelegatedAgent } from "@getpaseo/protocol/agent-labels";
 import { createGitHubService } from "../services/github-service.js";
 import type { ForgeService } from "../services/forge-service.js";
 import {
@@ -2751,6 +2753,9 @@ export class VoiceAssistantWebSocketServer {
     const allStates = clientEntries.map((e) => e.state);
     const nowMs = Date.now();
     const assistantMessage = await this.agentManager.getLastAssistantMessage(params.agentId);
+    const isRootAgent = !isDelegatedAgent(agent);
+    const finishAsksQuestion =
+      params.reason === "finished" && isRootAgent && isQuestionEndingMessage(assistantMessage);
     const notification = buildAgentAttentionNotificationPayload({
       reason: params.reason,
       serverId: this.serverId,
@@ -2758,6 +2763,7 @@ export class VoiceAssistantWebSocketServer {
       agentId: params.agentId,
       assistantMessage,
       permissionRequest: findLatestPermissionRequest(agent.pendingPermissions),
+      isQuestion: finishAsksQuestion,
     });
 
     const plan = computeNotificationPlan({
@@ -2768,14 +2774,18 @@ export class VoiceAssistantWebSocketServer {
     });
 
     if (plan.shouldPush) {
-      // Every finish is already a notice (attentionPushLevel), so feature 3b's triage
-      // (docs/jev.md) never fires here now — it only ever lowered an alert. Detached, so the
-      // in-app messages below never wait on JEV. It never rejects; the catch stays because the
-      // daemon exits on an unhandled rejection.
+      // Most finishes are a notice (attentionPushLevel); a root agent's plain-text question is
+      // kept an alert instead. Either way feature 3b's triage (docs/jev.md) finds its own
+      // question-mark veto before it would ask JEV, so a question-ending finish is never
+      // delayed or re-judged. Detached, so the in-app messages below never wait on JEV. It never
+      // rejects; the catch stays because the daemon exits on an unhandled rejection.
       const jev = this.jev;
       void sendAttentionPush({
         reason: params.reason,
-        base: attentionPushLevel(params.reason),
+        base: attentionPushLevel(params.reason, {
+          isRootAgent,
+          finalMessage: assistantMessage,
+        }),
         agentId: params.agentId,
         finalMessage: assistantMessage,
         jev,

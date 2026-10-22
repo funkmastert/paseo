@@ -59,6 +59,10 @@ import { showProviderNoticeToast } from "@/utils/provider-notice-toast";
 import { applyCheckoutStatusUpdateFromEvent } from "@/git/checkout-status-cache";
 import { useProviderSubagentStore } from "@/subagents/provider-store";
 import { revalidateSessionAfterResume } from "@/contexts/session-resume-revalidation";
+import {
+  shouldOsNotifyAgentAttention,
+  shouldOsNotifyTerminalAttention,
+} from "@/contexts/attention-notify-gate";
 
 // Re-export types from session-store and draft-store for backward compatibility
 export type { DraftInput } from "@/stores/draft-store";
@@ -301,22 +305,6 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       const appState = appStateRef.current;
       const session = useSessionStore.getState().sessions[serverId];
       const attentionFocusedAgentId = session?.focusedAgentId ?? null;
-      // Only a permission/question blocks the agent on Tyler; a finish needs nobody now.
-      if (params.reason !== "permission") {
-        return;
-      }
-      const isActivelyVisible = getIsAppActivelyVisible(appState);
-      const isAwayFromAgent = !isActivelyVisible || attentionFocusedAgentId !== params.agentId;
-      if (!isAwayFromAgent) {
-        return;
-      }
-
-      const timestampMs = new Date(params.timestamp).getTime();
-      const lastNotified = attentionNotifiedRef.current.get(params.agentId);
-      if (lastNotified && lastNotified >= timestampMs) {
-        return;
-      }
-      attentionNotifiedRef.current.set(params.agentId, timestampMs);
 
       const head = session?.agentStreamHead.get(params.agentId) ?? [];
       const tail = session?.agentStreamTail.get(params.agentId) ?? [];
@@ -337,6 +325,31 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       if (!notification) {
         return;
       }
+
+      // A permission blocks the agent on Tyler; a finish only does when it is a root agent's
+      // plain-text question (`notification.data.isQuestion`, set server-side). Everything else
+      // needs nobody now.
+      if (
+        !shouldOsNotifyAgentAttention({
+          reason: params.reason,
+          isQuestion: notification.data.isQuestion === true,
+        })
+      ) {
+        return;
+      }
+
+      const isActivelyVisible = getIsAppActivelyVisible(appState);
+      const isAwayFromAgent = !isActivelyVisible || attentionFocusedAgentId !== params.agentId;
+      if (!isAwayFromAgent) {
+        return;
+      }
+
+      const timestampMs = new Date(params.timestamp).getTime();
+      const lastNotified = attentionNotifiedRef.current.get(params.agentId);
+      if (lastNotified && lastNotified >= timestampMs) {
+        return;
+      }
+      attentionNotifiedRef.current.set(params.agentId, timestampMs);
 
       void sendOsNotification({
         title: notification.title,
@@ -748,8 +761,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       if (!message.payload.shouldNotify) {
         return;
       }
-      // A finished terminal needs nobody now; only one waiting on input blocks on Tyler.
-      if (message.payload.reason !== "needs_input") {
+      if (!shouldOsNotifyTerminalAttention(message.payload.reason)) {
         return;
       }
       void sendOsNotification({
