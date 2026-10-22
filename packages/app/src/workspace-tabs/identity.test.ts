@@ -120,7 +120,7 @@ describe("orchestration tab identity", () => {
 });
 
 describe("workspace utility panel identity", () => {
-  it.each(["files", "pull_request", "orchestration"] as const)(
+  it.each(["files", "pull_request", "pull_requests", "orchestration"] as const)(
     "normalizes and deterministically keys %s",
     (kind) => {
       const target = { kind };

@@ -553,6 +553,14 @@ export type CompactionEpisodesSummaryPayload = Extract<
   SessionOutboundMessage,
   { type: "compaction.episodes.summary.response" }
 >["payload"];
+export type WorkspacePullRequestsListPayload = Extract<
+  SessionOutboundMessage,
+  { type: "workspace.pull_requests.list.response" }
+>["payload"];
+export type CheckoutForgeGetPullRequestStatusPayload = Extract<
+  SessionOutboundMessage,
+  { type: "checkout.forge.get_pull_request_status.response" }
+>["payload"];
 type DaemonStatusPayload = DaemonGetStatusResponse["payload"];
 type DaemonPairingOfferPayload = DaemonGetPairingOfferResponse["payload"];
 type DiagnosticsPayload = DiagnosticsResponse["payload"];
@@ -5542,6 +5550,35 @@ export class DaemonClient {
     return this.sendNamespacedCorrelatedSessionRequest({
       requestId: options?.requestId,
       message: { type: "compaction.episodes.summary.request", ...query },
+    });
+  }
+
+  /** Every PR a workspace's agent or its descendants created. See docs/pull-request-ledger.md. */
+  async workspacePullRequestsList(
+    workspaceId: string,
+    options?: { requestId?: string },
+  ): Promise<WorkspacePullRequestsListPayload> {
+    // COMPAT(pullRequestLedger): added in v0.9.x, remove after 2027-04-22. Callers gate on
+    // `server_info.features.pullRequestLedger`; an older daemon answers an unknown request type
+    // with an `unknown_schema` rpc_error.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "workspace.pull_requests.list.request", workspaceId },
+    });
+  }
+
+  /** A PR's live status by explicit identity, not the checkout's current branch. See
+   * docs/pull-request-ledger.md. */
+  async checkoutForgeGetPullRequestStatus(
+    input: { cwd: string; host: string; repoOwner: string; repoName: string; number: number },
+    options?: { requestId?: string },
+  ): Promise<CheckoutForgeGetPullRequestStatusPayload> {
+    // COMPAT(pullRequestLedger): added in v0.9.x, remove after 2027-04-22. Callers gate on
+    // `server_info.features.pullRequestLedger`; an older daemon answers an unknown request type
+    // with an `unknown_schema` rpc_error.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "checkout.forge.get_pull_request_status.request", ...input },
     });
   }
 

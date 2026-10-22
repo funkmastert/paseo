@@ -78,9 +78,28 @@ Desktop **Settings → Layout → Open location** has independent Main panel or 
 Explorer Files, diffs, chat files, files opened from diffs, and subagents. They default to Main
 panel. Mobile ignores them.
 
-Pull requests have a three-way open location: Main panel, On the side, or Explorer sidebar. Explorer
-sidebar is the default. Compact layouts always open pull requests in Explorer regardless of this
-desktop preference.
+A single checkout's own branch PR, opened standalone (not through the Explorer tab below), keeps a
+three-way open location: Main panel, On the side, or Explorer sidebar. Explorer sidebar is the
+default. Compact layouts always open it in Explorer regardless of this desktop preference.
+
+## Pull requests
+
+On a daemon serving `server_info.features.pullRequestLedger`, Explorer's PR tab is "PRs"
+([docs/pull-request-ledger.md](pull-request-ledger.md)): every PR the workspace's agent or any
+descendant subagent created, not only the checkout's own branch PR, and present unconditionally on
+git workspaces rather than only when a branch PR exists. Tapping a row drills into the same
+checks/timeline view the single-PR tab used, in place inside the Explorer tab.
+
+Compact layouts and native-wide docks render this directly inside `ExplorerSidebarContent` — no
+separate "wide" placement to route through there, since both presentations share one
+`ExplorerSidebarContent` instance. A split-pane desktop/web layout does have a separate wide
+placement: it opens the `pull_requests` panel kind (`VIEW_TARGETS.pr` in
+`workspace-tabs/explorer-sidebar.ts`), which renders the same list/detail content as a pane tab
+instead of the old single-PR `pull_request` panel it replaces. Opening that panel kind is
+unconditional, but the panel itself (`PullRequestsTabPanel` in
+`panels/pull-requests-tab-panel.tsx`) checks `pullRequestLedger` and renders the old single-PR
+content (`PullRequestContent`) when the daemon predates the feature — the same fallback compact
+and dock layouts use.
 
 Panels request an implicit open through the narrow `openPreferredTarget(target, source)` pane
 contract. Entry points outside panels use `openPreferredWorkspaceTarget`. Do not branch on a

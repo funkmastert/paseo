@@ -686,6 +686,7 @@ export const ru: TranslationResources = {
         toggle: "Переключить боковую панель",
         changes: "Изменения",
         files: "Файлы",
+        prs: "PR",
       },
       toasts: {
         copyFailed: "Не удалось скопировать",
@@ -1920,6 +1921,28 @@ export const ru: TranslationResources = {
       subtitle: "Сведения о PR",
       emptyTitle: "PR пока нет",
       emptyDescription: "Создайте PR для этой рабочей копии, чтобы увидеть здесь сведения о нём.",
+      unsupportedForgeDescription:
+        "Эта платформа не поддерживает получение статуса PR таким способом.",
+      openInBrowser: "Открыть в браузере",
+    },
+    pullRequests: {
+      subtitle: "Пул-реквесты, открытые этим агентом или его подагентами",
+      back: "Назад",
+      untitled: "PR #{{number}}",
+      emptyTitle: "Пока нет PR",
+      emptyDescription: "Здесь появятся PR, открытые этим агентом или его подагентами.",
+      errorTitle: "Не удалось загрузить PR",
+      errorDescription: "Произошла ошибка при получении PR этого воркспейса.",
+      checks: {
+        success: "Проверки пройдены",
+        failure: "Проверки не пройдены",
+        pending: "Проверки выполняются",
+      },
+      review: {
+        approved: "Одобрено",
+        changesRequested: "Запрошены изменения",
+        pending: "Ожидает проверки",
+      },
     },
     orchestration: {
       label: "Оркестрация",

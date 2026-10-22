@@ -58,6 +58,11 @@ const manifests = {
     supportedHosts: ["main", "explorer"],
     resourceKey: () => "pull_request",
   },
+  pull_requests: {
+    kind: "pull_requests",
+    supportedHosts: ["explorer"],
+    resourceKey: () => "pull_requests",
+  },
   // Explorer hosting deferred — see docs/plans/2026-09-11-001-feat-orchestration-visibility-plan.md.
   orchestration: {
     kind: "orchestration",

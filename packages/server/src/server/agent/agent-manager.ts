@@ -586,6 +586,14 @@ export interface LeaderCompactionAgentSummary {
   steersAccepted: number;
 }
 
+/** Every agent record's identity bits the pull request ledger's descendant walk needs. */
+export interface PullRequestLedgerAgentRecordSummary {
+  id: string;
+  workspaceId: string | null;
+  parentAgentId: string | null;
+  title: string | null;
+}
+
 /** How a turn started by {@link AgentManager.startTurnIfIdle} ended. */
 export type IdleTurnOutcome =
   | { status: "completed"; finalText: string }
@@ -1378,6 +1386,10 @@ export class AgentManager {
   private readonly operatorSignalListeners = new Set<(signal: AgentOperatorSignal) => void>();
   /** The compaction ledger's request counter (docs/token-burn.md: one event per request). */
   private readonly tokenBurnListeners = new Set<(agentId: string, tokens: number) => void>();
+  /** The pull request ledger's live detection source (docs/pull-request-ledger.md). */
+  private readonly timelineRecordedListeners = new Set<
+    (agentId: string, row: AgentTimelineRow) => void
+  >();
   private readonly idFactory: () => string;
   private readonly registry?: AgentStorage;
   private readonly durableTimelineStore?: AgentTimelineStore;
@@ -2219,6 +2231,22 @@ export class AgentManager {
     }));
   }
 
+  /**
+   * Every agent record on disk, archived included — the pull request ledger's descendant-tree
+   * source (docs/pull-request-ledger.md): a workspace's PRs include ones opened by archived
+   * descendants, not only live ones. Empty when the daemon has no registry (tests).
+   */
+  async listAgentRecordsForPullRequestLedger(): Promise<PullRequestLedgerAgentRecordSummary[]> {
+    if (!this.registry) return [];
+    const records = await this.registry.list();
+    return records.map((record) => ({
+      id: record.id,
+      workspaceId: record.workspaceId ?? null,
+      parentAgentId: getParentAgentIdFromLabels(record.labels) ?? null,
+      title: record.title ?? null,
+    }));
+  }
+
   private isAgentBusy(agent: ManagedAgent): boolean {
     return (
       Boolean(agent.activeForegroundTurnId) ||
@@ -2241,6 +2269,16 @@ export class AgentManager {
     this.tokenBurnListeners.add(listener);
     return () => {
       this.tokenBurnListeners.delete(listener);
+    };
+  }
+
+  /** One call per timeline row appended to any agent, live. Returns the unsubscribe. */
+  subscribeTimelineRecorded(
+    listener: (agentId: string, row: AgentTimelineRow) => void,
+  ): () => void {
+    this.timelineRecordedListeners.add(listener);
+    return () => {
+      this.timelineRecordedListeners.delete(listener);
     };
   }
 
@@ -7153,6 +7191,13 @@ export class AgentManager {
     item = limitAgentTimelineItemContent(item);
     const row = this.timelineStore.append(agentId, item, options);
     this.enqueueDurableTimelineAppend(agentId, row);
+    for (const listener of this.timelineRecordedListeners) {
+      try {
+        listener(agentId, row);
+      } catch (error) {
+        this.logger.warn({ err: error, agentId }, "Timeline recorded listener failed");
+      }
+    }
     return row;
   }
 

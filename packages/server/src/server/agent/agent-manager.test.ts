@@ -7584,6 +7584,32 @@ test("onAgentTurnFinished fires once per running->idle transition, even while tu
   expect(onAgentTurnFinished).toHaveBeenNthCalledWith(2, { agentId: snapshot.id, cwd: workdir });
 });
 
+test("a throwing timelineRecorded listener does not stop other listeners or escape recordTimeline", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-timeline-listener-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => randomUUID(),
+  });
+
+  manager.subscribeTimelineRecorded(() => {
+    throw new Error("boom");
+  });
+  const goodListener = vi.fn();
+  manager.subscribeTimelineRecorded(goodListener);
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  await manager.runAgent(snapshot.id, "say hello", { clientMessageId: "client-msg-1" });
+  await manager.flush();
+
+  expect(goodListener).toHaveBeenCalled();
+});
+
 test("onAgentClosed fires when an agent is closed", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-closed-"));
   const storage = new AgentStorage(join(workdir, "agents"), logger);

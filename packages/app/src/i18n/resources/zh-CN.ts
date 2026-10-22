@@ -681,6 +681,7 @@ export const zhCN: TranslationResources = {
         toggle: "切换侧边面板",
         changes: "变更",
         files: "文件",
+        prs: "拉取请求",
       },
       toasts: {
         copyFailed: "复制失败",
@@ -1868,6 +1869,27 @@ export const zhCN: TranslationResources = {
       subtitle: "拉取请求详情",
       emptyTitle: "尚无拉取请求",
       emptyDescription: "为此检出创建拉取请求后，可在此处查看其详情。",
+      unsupportedForgeDescription: "该代码托管平台不支持以此方式获取拉取请求的状态。",
+      openInBrowser: "在浏览器中打开",
+    },
+    pullRequests: {
+      subtitle: "该代理或其子代理打开的拉取请求",
+      back: "返回",
+      untitled: "拉取请求 #{{number}}",
+      emptyTitle: "暂无拉取请求",
+      emptyDescription: "此代理或其子代理创建的拉取请求将显示在此处。",
+      errorTitle: "无法加载拉取请求",
+      errorDescription: "获取此工作区的拉取请求时出错。",
+      checks: {
+        success: "检查通过",
+        failure: "检查失败",
+        pending: "检查进行中",
+      },
+      review: {
+        approved: "已批准",
+        changesRequested: "已请求修改",
+        pending: "待审核",
+      },
     },
     orchestration: {
       label: "编排",

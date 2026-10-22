@@ -90,6 +90,7 @@ function resolveTabLabel(
     case "files":
       return labels.files;
     case "pull_request":
+    case "pull_requests":
       return labels.pullRequest;
     case "commit_diff":
       return target.sha.slice(0, 7);

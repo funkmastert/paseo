@@ -686,6 +686,7 @@ export const fr: TranslationResources = {
         toggle: "Basculer le panneau latéral",
         changes: "Changements",
         files: "Fichiers",
+        prs: "Demandes de fusion",
       },
       toasts: {
         copyFailed: "Échec de la copie",
@@ -1940,6 +1941,30 @@ export const fr: TranslationResources = {
       emptyTitle: "Aucune demande de fusion pour le moment",
       emptyDescription:
         "Créez une demande de fusion pour cette copie de travail afin d’afficher ses détails ici.",
+      unsupportedForgeDescription:
+        "Cette forge ne permet pas de récupérer le statut d’une demande de fusion de cette façon.",
+      openInBrowser: "Ouvrir dans le navigateur",
+    },
+    pullRequests: {
+      subtitle: "Demandes de fusion ouvertes par cet agent ou ses sous-agents",
+      back: "Retour",
+      untitled: "Demande de fusion #{{number}}",
+      emptyTitle: "Aucune demande de fusion pour le moment",
+      emptyDescription:
+        "Les demandes de fusion ouvertes par cet agent ou ses sous-agents s’afficheront ici.",
+      errorTitle: "Impossible de charger les demandes de fusion",
+      errorDescription:
+        "Une erreur s’est produite lors de la récupération des demandes de fusion de cet espace de travail.",
+      checks: {
+        success: "Vérifications réussies",
+        failure: "Vérifications échouées",
+        pending: "Vérifications en cours",
+      },
+      review: {
+        approved: "Approuvée",
+        changesRequested: "Modifications demandées",
+        pending: "Relecture en attente",
+      },
     },
     orchestration: {
       label: "Orchestration",

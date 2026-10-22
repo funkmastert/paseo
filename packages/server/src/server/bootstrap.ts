@@ -245,6 +245,8 @@ import { AgentLeaderCompactionMonitor } from "./agent-leader-compaction-monitor.
 import { runCompactionLedgerBackfill } from "./compaction-ledger/compaction-ledger-backfill.js";
 import { CompactionLedgerService } from "./compaction-ledger/compaction-ledger-service.js";
 import { CompactionLedgerStore } from "./compaction-ledger/compaction-ledger-store.js";
+import { PullRequestLedgerService } from "./pull-request-ledger/pull-request-ledger-service.js";
+import { PullRequestLedgerStore } from "./pull-request-ledger/pull-request-ledger-store.js";
 import {
   COMPACTION_TIMING_READ_ROWS,
   LeaderCompactionTimingAdvisor,
@@ -1007,6 +1009,51 @@ function createCompactionLedgerService(input: {
     })
     .catch((error: unknown) => {
       moduleLogger.warn({ err: error }, "Compaction ledger load or backfill failed");
+    });
+  service.start();
+  return service;
+}
+
+/**
+ * The pull request ledger (docs/pull-request-ledger.md): which PRs a workspace's agent or its
+ * descendants created, fed by live tool-call detection plus a one-time boot scan of already-
+ * resident agents' timelines. Neither the store's load nor the backfill is awaited here, so
+ * startup is never held up by them.
+ */
+function createPullRequestLedgerService(input: {
+  paseoHome: string;
+  agentManager: AgentManager;
+  logger: Logger;
+}): PullRequestLedgerService {
+  const moduleLogger = input.logger.child({ module: "pull-request-ledger" });
+  const store = new PullRequestLedgerStore({
+    rootDir: path.join(input.paseoHome, "pull-requests"),
+    logger: moduleLogger,
+  });
+  const agentManager = input.agentManager;
+  const service = new PullRequestLedgerService({
+    store,
+    agentManager: {
+      subscribeTimelineRecorded: (listener) => agentManager.subscribeTimelineRecorded(listener),
+      listResidentAgents: () =>
+        agentManager
+          .listAgents()
+          .map((agent) => ({ id: agent.id, title: agent.config.title ?? null, cwd: agent.cwd })),
+      getAgentSummary: (agentId) => {
+        const agent = agentManager.getAgent(agentId);
+        return agent ? { cwd: agent.cwd, title: agent.config.title ?? null } : null;
+      },
+      getTimelineRows: (agentId) => agentManager.getTimelineRows(agentId),
+      listAgentRecordsForPullRequestLedger: () =>
+        agentManager.listAgentRecordsForPullRequestLedger(),
+    },
+    logger: moduleLogger,
+  });
+  void store
+    .load()
+    .then(() => service.backfillResidentAgents())
+    .catch((error: unknown) => {
+      moduleLogger.warn({ err: error }, "Pull request ledger load or backfill failed");
     });
   service.start();
   return service;
@@ -1891,6 +1938,7 @@ export async function createPaseoDaemon(
   let budgetPacingMonitor: AgentBudgetPacingMonitor | null = null;
   let leaderCompactionMonitor: AgentLeaderCompactionMonitor | null = null;
   let compactionLedgerService: CompactionLedgerService | null = null;
+  let pullRequestLedgerService: PullRequestLedgerService | null = null;
   let doneJanitor: AgentDoneJanitor | null = null;
   let remediationLadder: RemediationLadder | null = null;
   let tokenAuditJob: TokenAuditJob | null = null;
@@ -3573,6 +3621,11 @@ export async function createPaseoDaemon(
               agentManager,
               logger,
             });
+            pullRequestLedgerService = createPullRequestLedgerService({
+              paseoHome: config.paseoHome,
+              agentManager,
+              logger,
+            });
             wsServer = new VoiceAssistantWebSocketServer(
               httpServer,
               logger,
@@ -3592,6 +3645,7 @@ export async function createPaseoDaemon(
                 autoPinExpiry,
                 tokenUsage,
                 compactionLedger: compactionLedgerService,
+                pullRequestLedger: pullRequestLedgerService,
               },
               workspaceAutoName,
               config.auth,
@@ -4204,6 +4258,9 @@ export async function createPaseoDaemon(
     // After the leader compaction monitor stops: a step it applied on the way down still lands.
     await compactionLedgerService?.stop().catch((error: unknown) => {
       logger.warn({ err: error }, "Failed to save the compaction ledger");
+    });
+    await pullRequestLedgerService?.stop().catch((error: unknown) => {
+      logger.warn({ err: error }, "Failed to save the pull request ledger");
     });
     // Before the savings callers: the observer's queued judgments still land their records.
     await readCheckObserver.observer.stop();

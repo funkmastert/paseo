@@ -686,6 +686,7 @@ export const ja: TranslationResources = {
         toggle: "サイドパネルを切り替え",
         changes: "変更",
         files: "ファイル",
+        prs: "プルリクエスト",
       },
       toasts: {
         copyFailed: "コピーに失敗しました",
@@ -1907,6 +1908,29 @@ export const ja: TranslationResources = {
       emptyTitle: "プルリクエストはまだありません",
       emptyDescription:
         "このチェックアウトのプルリクエストを作成すると、ここに詳細が表示されます。",
+      unsupportedForgeDescription:
+        "このフォージではこの方法でプルリクエストの状態を取得できません。",
+      openInBrowser: "ブラウザで開く",
+    },
+    pullRequests: {
+      subtitle: "このエージェントまたはそのサブエージェントが開いたプルリクエスト",
+      back: "戻る",
+      untitled: "プルリクエスト #{{number}}",
+      emptyTitle: "プルリクエストはまだありません",
+      emptyDescription:
+        "このエージェントまたはそのサブエージェントが作成したプルリクエストがここに表示されます。",
+      errorTitle: "プルリクエストを読み込めませんでした",
+      errorDescription: "このワークスペースのプルリクエストの取得中に問題が発生しました。",
+      checks: {
+        success: "チェックが成功しました",
+        failure: "チェックが失敗しました",
+        pending: "チェックを実行中",
+      },
+      review: {
+        approved: "承認済み",
+        changesRequested: "変更を要求",
+        pending: "レビュー待ち",
+      },
     },
     orchestration: {
       label: "オーケストレーション",

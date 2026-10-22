@@ -211,6 +211,11 @@ import {
   type CompactionLedgerReader,
   type CompactionSession,
 } from "./session/compaction/compaction-session.js";
+import {
+  createPullRequestsSession,
+  type PullRequestLedgerAccess,
+  type PullRequestsSession,
+} from "./session/pull-requests/pull-requests-session.js";
 import type { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
 import { createJevSession, type JevSession } from "./session/jev/jev-session.js";
 import {
@@ -602,6 +607,7 @@ export interface SessionOptions {
   tokenUsage?: TokenUsageReader;
   contextUsage?: AgentContextUsageService;
   compactionLedger?: CompactionLedgerReader;
+  pullRequestLedger?: PullRequestLedgerAccess;
   /** The daemon's one sign-in launcher, shared by every connection. Absent: sign-in fails. */
   accountSignIn?: Pick<ClaudeAccountSignIn, "start">;
   jev?: JevService | null;
@@ -870,6 +876,7 @@ export class Session {
   private readonly tokenUsageSession: TokenUsageSession | null;
   private readonly contextUsageSession: ContextUsageSession | null;
   private readonly compactionSession: CompactionSession | null;
+  private readonly pullRequestsSession: PullRequestsSession | null;
   private readonly jevSession: JevSession | null;
   private readonly codexGuardSession: CodexGuardSession;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
@@ -929,6 +936,7 @@ export class Session {
       tokenUsage,
       contextUsage,
       compactionLedger,
+      pullRequestLedger,
       accountSignIn,
       jev,
       serviceProxy,
@@ -1098,6 +1106,12 @@ export class Session {
     this.compactionSession = createCompactionSession({
       host: { emit: (msg) => this.emit(msg) },
       reader: compactionLedger,
+    });
+    this.pullRequestsSession = createPullRequestsSession({
+      host: { emit: (msg) => this.emit(msg) },
+      ledger: pullRequestLedger,
+      workspaceGitService: this.workspaceGitService,
+      workspaceRegistry: this.workspaceRegistry,
     });
     this.contextUsageSession = createContextUsageSession({
       host: { emit: (msg) => this.emit(msg) },
@@ -2358,7 +2372,8 @@ export class Session {
       this.dispatchContextUsageMessage(msg) ??
       this.dispatchJevMessage(msg) ??
       this.dispatchCodexGuardMessage(msg) ??
-      this.dispatchCompactionMessage(msg)
+      this.dispatchCompactionMessage(msg) ??
+      this.dispatchPullRequestsMessage(msg)
     );
   }
 
@@ -2369,6 +2384,18 @@ export class Session {
         return this.compactionSession.handleListRequest(msg);
       case "compaction.episodes.summary.request":
         return this.compactionSession.handleSummaryRequest(msg);
+      default:
+        return undefined;
+    }
+  }
+
+  private dispatchPullRequestsMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (!this.pullRequestsSession) return undefined;
+    switch (msg.type) {
+      case "workspace.pull_requests.list.request":
+        return this.pullRequestsSession.handleListRequest(msg);
+      case "checkout.forge.get_pull_request_status.request":
+        return this.pullRequestsSession.handleGetStatusRequest(msg);
       default:
         return undefined;
     }

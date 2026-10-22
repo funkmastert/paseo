@@ -182,6 +182,8 @@ interface WebSocketServerConfig {
   tokenUsage?: SessionOptions["tokenUsage"];
   /** The compaction episode ledger; the `compactionLedger` feature is advertised only with it. */
   compactionLedger?: SessionOptions["compactionLedger"];
+  /** The pull request ledger; the `pullRequestLedger` feature is advertised only with it. */
+  pullRequestLedger?: SessionOptions["pullRequestLedger"];
 }
 
 type WebSocketRuntimeMetrics = SessionRuntimeMetrics & CheckoutDiffMetrics;
@@ -639,6 +641,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly autoPinExpiry: SessionOptions["autoPinExpiry"];
   private readonly tokenUsage: SessionOptions["tokenUsage"];
   private readonly compactionLedger: SessionOptions["compactionLedger"];
+  private readonly pullRequestLedger: SessionOptions["pullRequestLedger"];
 
   constructor(
     server: HTTPServer,
@@ -700,6 +703,7 @@ export class VoiceAssistantWebSocketServer {
     this.autoPinExpiry = wsConfig.autoPinExpiry;
     this.tokenUsage = wsConfig.tokenUsage;
     this.compactionLedger = wsConfig.compactionLedger;
+    this.pullRequestLedger = wsConfig.pullRequestLedger;
     this.advertiseRelayConfig = wsConfig.relayConfig !== false;
     this.connectionLifecycle = wsConfig.startPaused === true ? "starting" : "accepting";
     this.serverId = serverId;
@@ -1578,6 +1582,7 @@ export class VoiceAssistantWebSocketServer {
       usageHistory: this.usageHistoryStore,
       tokenUsage: this.tokenUsage,
       compactionLedger: this.compactionLedger,
+      pullRequestLedger: this.pullRequestLedger,
       contextUsage: this.contextUsageService,
       jev: this.jev,
       hubExecutionAgents: options.hubExecutionAgents,
@@ -1820,6 +1825,8 @@ export class VoiceAssistantWebSocketServer {
         deviceManagement: true,
         // COMPAT(compactionLedger): added in v0.8.x, remove gate after 2027-04-21.
         ...(this.compactionLedger ? { compactionLedger: true } : {}),
+        // COMPAT(pullRequestLedger): added in v0.9.x, remove gate after 2027-04-22.
+        ...(this.pullRequestLedger ? { pullRequestLedger: true } : {}),
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported
         // daemon floor is >= v0.2.0.
