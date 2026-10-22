@@ -9,10 +9,12 @@ export interface RowPullRequestStatus {
   reviewDecision: string | null | undefined;
 }
 
-/** The creating agent's cwd selects which authenticated CLI context a status fetch runs from;
- * fall back to the viewing workspace's own cwd once that agent is gone (archived, restarted). */
+/** The viewing workspace's own cwd selects which authenticated CLI context a status fetch runs
+ * from -- the creating agent's cwd is usually a deleted child worktree by the time a row renders.
+ * The server enforces the host authorization check independent of which cwd is used, so this
+ * only falls back to the creating agent's cwd when the viewing workspace has none. */
 export function resolveStatusCwd(creatingAgentCwd: string, fallbackCwd: string | null): string {
-  return creatingAgentCwd || fallbackCwd || "";
+  return fallbackCwd || creatingAgentCwd || "";
 }
 
 export function resolveRowState(

@@ -95,11 +95,11 @@ separate "wide" placement to route through there, since both presentations share
 `ExplorerSidebarContent` instance. A split-pane desktop/web layout does have a separate wide
 placement: it opens the `pull_requests` panel kind (`VIEW_TARGETS.pr` in
 `workspace-tabs/explorer-sidebar.ts`), which renders the same list/detail content as a pane tab
-instead of the old single-PR `pull_request` panel it replaces. That replacement is unconditional —
-it does not check `pullRequestLedger` before opening the new panel kind, so a split-pane layout
-against an old daemon shows an empty PRs list rather than falling back to the single-PR panel the
-way compact layouts do (docs/pull-request-ledger.md, "Not done yet"). On a host without the
-feature, compact and dock layouts fall back to exactly the old single-PR "PR #N" behavior.
+instead of the old single-PR `pull_request` panel it replaces. Opening that panel kind is
+unconditional, but the panel itself (`PullRequestsTabPanel` in
+`panels/pull-requests-tab-panel.tsx`) checks `pullRequestLedger` and renders the old single-PR
+content (`PullRequestContent`) when the daemon predates the feature — the same fallback compact
+and dock layouts use.
 
 Panels request an implicit open through the narrow `openPreferredTarget(target, source)` pane
 contract. Entry points outside panels use `openPreferredWorkspaceTarget`. Do not branch on a

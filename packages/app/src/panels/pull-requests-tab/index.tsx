@@ -26,8 +26,8 @@ export interface PullRequestsTabContentProps {
   isOpen: boolean;
 }
 
-/** The creating agent's cwd selects which authenticated CLI context a status fetch runs from —
- * fall back to the viewing workspace's own cwd when that agent is gone (archived, restarted). */
+/** See `resolveStatusCwd` -- prefers the viewing workspace's own cwd, falling back to the
+ * creating agent's cwd only when that workspace has none. */
 function toIdentity(
   entry: PullRequestLedgerEntry,
   fallbackCwd: string | null,

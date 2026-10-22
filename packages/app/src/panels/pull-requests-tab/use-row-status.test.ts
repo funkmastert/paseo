@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { resolveRowState, resolveStatusCwd } from "./use-row-status";
 
 describe("resolveStatusCwd", () => {
-  it("prefers the creating agent's cwd when present", () => {
-    expect(resolveStatusCwd("/agent-repo", "/workspace-repo")).toBe("/agent-repo");
+  it("prefers the viewing workspace's cwd when present", () => {
+    expect(resolveStatusCwd("/agent-repo", "/workspace-repo")).toBe("/workspace-repo");
   });
 
-  it("falls back to the viewing workspace's cwd when the creating agent's is gone", () => {
-    expect(resolveStatusCwd("", "/workspace-repo")).toBe("/workspace-repo");
+  it("falls back to the creating agent's cwd when the viewing workspace has none", () => {
+    expect(resolveStatusCwd("/agent-repo", null)).toBe("/agent-repo");
   });
 
   it("falls back to an empty string when neither cwd is available", () => {

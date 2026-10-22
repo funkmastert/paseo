@@ -203,7 +203,3 @@ On a host without the feature, the sidebar falls back to exactly the old single-
   relying on it being opened to backfill.
 - A slower background poll cadence for an open PR's row once its tab goes hidden — polling stops
   today rather than continuing at a reduced rate.
-- On a split-pane desktop/web layout, the `pull_requests` panel degrades to an empty list (not the
-  old single-PR fallback) when the daemon predates the `pullRequestLedger` feature — the compact/
-  dock layouts' old-daemon fallback (`usePullRequestPanelAvailability`) has no pane-layout
-  equivalent yet.
