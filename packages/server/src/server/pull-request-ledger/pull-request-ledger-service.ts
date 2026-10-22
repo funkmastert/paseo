@@ -160,7 +160,9 @@ export class PullRequestLedgerService {
       id,
       // The first observation wins: a later tool call touching the same PR (a retry, a
       // follow-up `gh api` read) never reassigns credit away from whoever actually created it.
-      agentId: existing?.agentId ?? agentId,
+      // `||`, not `??`: an existing row can carry the "" placeholder `ensureTracked` stores for
+      // an unknown creator, and that falsy id should still be adopted by a real one.
+      agentId: existing?.agentId || agentId,
       agentTitle: existing?.agentTitle ?? agentTitle,
       agentCwd: existing?.agentCwd ?? agentCwd ?? "",
       host: detected.host,

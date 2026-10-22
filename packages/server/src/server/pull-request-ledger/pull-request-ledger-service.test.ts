@@ -347,4 +347,37 @@ describe("PullRequestLedgerService", () => {
       rmSync(rootDir, { recursive: true, force: true });
     }
   });
+
+  test("a tool-call detection adopts the real creator for a row ensureTracked left with an unknown one", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "pr-ledger-service-adopt-creator-"));
+    try {
+      const store = new PullRequestLedgerStore({ rootDir, logger });
+      await store.load();
+      const agentManager = fakeAgentManager({ agentCwds: { "agent-1": "/repo-1" } });
+      const service = new PullRequestLedgerService({ store, agentManager });
+      service.start();
+
+      service.ensureTracked(
+        {
+          host: "github.com",
+          repoOwner: "acme",
+          repoName: "widgets",
+          number: 42,
+          url: "https://github.com/acme/widgets/pull/42",
+          forge: "github",
+        },
+        { agentId: "", agentTitle: null, agentCwd: "/repo" },
+      );
+
+      agentManager.emit(
+        "agent-1",
+        toolCallRow("Bash", "gh pr create --fill", "https://github.com/acme/widgets/pull/42", 1),
+      );
+
+      const row = store.getRow("github.com/acme/widgets#42");
+      expect(row?.agentId).toBe("agent-1");
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
 });
