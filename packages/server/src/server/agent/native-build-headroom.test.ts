@@ -6,6 +6,8 @@ import {
   type BurstHeadroomInput,
   type BuildGateMachineReading,
   deriveBuildGateDefaults,
+  describeDiskReserve,
+  diskReserveBytes,
   evaluateBurstHeadroom,
   recordSwapUse,
   resolveBurstConfig,
@@ -53,13 +55,31 @@ describe("resolveBurstConfig", () => {
       maxConcurrent: 5,
       perBuildMemoryBytes: 8 * GIB,
       perBuildDiskBytes: 15 * GIB,
-      maxLoadPerCore: 1,
+      maxLoadPerCore: 1.5,
       maxBusyFraction: 0.75,
     });
   });
 
   test("a configured floor above the ceiling raises the ceiling to the floor, which turns burst into nothing", () => {
     expect(resolveBurstConfig({ maxConcurrent: 2 }, defaults, 6).maxConcurrent).toBe(6);
+  });
+
+  test("a floor configured at the derived floor gets the derived ceiling, as the legacy { maxConcurrent: 3 } does", () => {
+    expect(resolveBurstConfig(undefined, defaults, 3).maxConcurrent).toBe(5);
+  });
+
+  test("a floor configured under the derived one turns burst off, not up to the derived ceiling", () => {
+    expect(resolveBurstConfig(undefined, defaults, 1).maxConcurrent).toBe(1);
+    expect(resolveBurstConfig(undefined, defaults, 2).maxConcurrent).toBe(2);
+  });
+
+  test("a floor configured above the derived one gets at most the derived ceiling, or none", () => {
+    expect(resolveBurstConfig(undefined, defaults, 4).maxConcurrent).toBe(5);
+    expect(resolveBurstConfig(undefined, defaults, 8).maxConcurrent).toBe(8);
+  });
+
+  test("a ceiling that is configured is kept even when the floor is under the derived one", () => {
+    expect(resolveBurstConfig({ maxConcurrent: 4 }, defaults, 1).maxConcurrent).toBe(4);
   });
 
   test("configured values win", () => {
@@ -128,7 +148,7 @@ function input(overrides: Partial<BurstHeadroomInput> = {}): BurstHeadroomInput 
     unseen: 0,
     freeDiskBytes: 200 * GIB,
     lowFreeBytes: 20 * GIB,
-    lastBurstGrantAtMs: undefined,
+    lastGrantAtMs: undefined,
     config: resolveBurstConfig(undefined, { maxConcurrent: 3, burstMaxConcurrent: 5 }, 3),
     ...overrides,
   };
@@ -267,15 +287,17 @@ describe("evaluateBurstHeadroom", () => {
     ).toMatchObject({ ok: false, check: "cpu" });
   });
 
-  test("load at the per-core line refuses; under it passes", () => {
-    const at = reading({
-      systemLoad: {
-        load: { kind: "loadavg", cores: 16, load1: 16, load5: 16, load15: 16 },
-        freeMemoryBytes: 0,
-        totalMemoryBytes: 64 * GIB,
-      },
-    });
-    expect(evaluateBurstHeadroom(input({ reading: at }))).toMatchObject({
+  test("load at the per-core line (1.5 x cores) refuses; the 1.2 x cores three builds put on a 16-core Mac passes", () => {
+    const loaded = (load1: number) =>
+      reading({
+        systemLoad: {
+          load: { kind: "loadavg", cores: 16, load1, load5: load1, load15: load1 },
+          freeMemoryBytes: 0,
+          totalMemoryBytes: 64 * GIB,
+        },
+      });
+    expect(evaluateBurstHeadroom(input({ reading: loaded(19.2) })).ok).toBe(true);
+    expect(evaluateBurstHeadroom(input({ reading: loaded(24) }))).toMatchObject({
       ok: false,
       check: "cpu",
     });
@@ -311,16 +333,60 @@ describe("evaluateBurstHeadroom", () => {
     });
   });
 
-  test("a burst build waits for a reading that has seen the previous one run", () => {
+  test("a burst build waits for a reading that has seen the previous build, floor or burst, run", () => {
     const grantedAt = NOW - 40_000;
-    expect(evaluateBurstHeadroom(input({ lastBurstGrantAtMs: grantedAt }))).toMatchObject({
+    expect(evaluateBurstHeadroom(input({ lastGrantAtMs: grantedAt }))).toMatchObject({
       ok: false,
       check: "settling",
     });
     const later = reading({ takenAtMs: grantedAt + BURST_SETTLE_MS });
-    expect(evaluateBurstHeadroom(input({ reading: later, lastBurstGrantAtMs: grantedAt })).ok).toBe(
+    expect(evaluateBurstHeadroom(input({ reading: later, lastGrantAtMs: grantedAt })).ok).toBe(
       true,
     );
+  });
+
+  test("on macOS the reclaimable figure is what memory is judged on, not the strict available one", () => {
+    const memory = reading().systemMemory;
+    const cached = reading({
+      systemMemory: memory && {
+        ...memory,
+        availableBytes: 3.5 * GIB,
+        reclaimableBytes: 15 * GIB,
+      },
+    });
+    const verdict = evaluateBurstHeadroom(input({ reading: cached }));
+    expect(verdict.ok).toBe(true);
+    expect(verdict.numbers.availableGB).toBe(15);
+    const tight = reading({
+      systemMemory: memory && { ...memory, availableBytes: 30 * GIB, reclaimableBytes: 6 * GIB },
+    });
+    expect(evaluateBurstHeadroom(input({ reading: tight }))).toMatchObject({
+      ok: false,
+      check: "memory",
+    });
+  });
+
+  test("with no reclaimable figure (Linux's MemAvailable already is one) the available figure is used", () => {
+    const memory = reading().systemMemory;
+    const linux = reading({
+      systemMemory: memory && {
+        ...memory,
+        memoryPressureLevel: undefined,
+        availableBytes: 9 * GIB,
+      },
+    });
+    expect(evaluateBurstHeadroom(input({ platform: "linux", reading: linux })).ok).toBe(true);
+  });
+
+  test("memory pressure above normal still refuses with plenty reclaimable", () => {
+    const memory = reading().systemMemory;
+    const pressured = reading({
+      systemMemory: memory && { ...memory, reclaimableBytes: 40 * GIB, memoryPressureLevel: 2 },
+    });
+    expect(evaluateBurstHeadroom(input({ reading: pressured }))).toMatchObject({
+      ok: false,
+      check: "memory",
+    });
   });
 
   test("Windows has no pressure level or swap, so only memory, CPU busy share and disk apply", () => {
@@ -365,5 +431,28 @@ describe("evaluateBurstHeadroom", () => {
       systemMemory: memory && { ...memory, memoryPressureLevel: undefined },
     });
     expect(evaluateBurstHeadroom(input({ platform: "linux", reading: linux })).ok).toBe(true);
+  });
+});
+
+describe("the disk reserve", () => {
+  const lowFreeBytes = 20 * GIB;
+  const perBuildDiskBytes = 15 * GIB;
+
+  test("is the low line plus the reserve for every build taken and the new one", () => {
+    expect(diskReserveBytes({ lowFreeBytes, perBuildDiskBytes, taken: 0 })).toBe(35 * GIB);
+    expect(diskReserveBytes({ lowFreeBytes, perBuildDiskBytes, taken: 2 })).toBe(65 * GIB);
+    expect(diskReserveBytes({ lowFreeBytes, perBuildDiskBytes, taken: 3 })).toBe(80 * GIB);
+  });
+
+  test("describes the free and needed figures and how the need adds up", () => {
+    const text = describeDiskReserve({
+      freeBytes: 64 * GIB,
+      lowFreeBytes,
+      perBuildDiskBytes,
+      taken: 2,
+    });
+    expect(text).toBe(
+      "64 GB of disk is free and 65 GB is needed: the 20 GB low line plus 15 GB for each of 3 builds",
+    );
   });
 });

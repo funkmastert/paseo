@@ -621,11 +621,13 @@ const AgentBuildGateSchema = z
     burst: z
       .object({
         enabled: z.boolean().optional(),
-        // The ceiling. Absent: derived from the machine; one at or under the floor is burst off.
+        // The ceiling. Absent: derived from the machine and held to floor + 3; with a floor under
+        // the derived one, burst is off. One at or under the floor is burst off.
         maxConcurrent: z.number().int().positive().optional(),
-        // Memory that must be available beyond what is in use, per build running or starting.
+        // Reclaimable memory needed, per build starting and for the new one.
         perBuildMemoryGB: z.number().positive().optional(),
-        // Free disk needed above the disk-low line, per build running and the new one.
+        // Free disk needed above the disk-low line, per build running and the new one. Also the
+        // reserve for every floor build after the first.
         perBuildDiskGB: z.number().positive().optional(),
         // macOS and Linux: load average per core under which burst is allowed.
         maxLoadPerCore: z.number().positive().optional(),

@@ -528,6 +528,32 @@ describe("native build gate: hardware defaults", () => {
     expect(denial(await ask("agent-d", "./gradlew assembleDebug"))).toContain("the limit is 3");
   });
 
+  test("the legacy { maxConcurrent: 3 } with no burst block is a floor of 3 and a ceiling of 5", async () => {
+    const { state, ask, warmUp, logger } = setup();
+    state.config = { maxConcurrent: 3 };
+    warmUp();
+    state.rows = handBuilds(3);
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ max: 3, burstMax: 5, burst: true }),
+      "Build gate allowed a native build",
+    );
+  });
+
+  test("a floor configured under the derived one is not given the derived burst ceiling", async () => {
+    const { state, ask, warmUp, logger } = setup();
+    state.config = { maxConcurrent: 1 };
+    warmUp();
+    state.rows = handBuilds(1);
+    const message = denial(await ask("agent-d", "./gradlew assembleDebug"));
+    expect(message).toContain("the limit is 1 at a time");
+    expect(message).not.toContain("burst");
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "at-cap", max: 1, burstMax: 1 }),
+      "Build gate refused a native build",
+    );
+  });
+
   test("on a small machine the floor is 1 and there is no burst above it", async () => {
     const { state, ask, warmUp } = setup({ hardware: { cpuCount: 8, memoryBytes: 16 * GIB } });
     state.config = {};
@@ -604,13 +630,13 @@ describe("native build gate: burst", () => {
       "load is over the line",
       {
         systemLoad: {
-          load: { kind: "loadavg" as const, cores: 16, load1: 20, load5: 20, load15: 20 },
+          load: { kind: "loadavg" as const, cores: 16, load1: 30, load5: 30, load15: 30 },
           freeMemoryBytes: 0,
           totalMemoryBytes: 64 * GIB,
         },
       },
       "CPU check failed",
-      "load is 20 on 16 cores",
+      "load is 30 on 16 cores",
     ],
     ["the disk brake holds", { diskBrakeHeld: true }, "disk check failed", "disk brake"],
   ])(
@@ -764,6 +790,117 @@ describe("native build gate: burst", () => {
     expect(denial(await ask("agent-b", "./gradlew assembleDebug"))).toContain(
       "burst ceiling (5) are reached",
     );
+  });
+
+  test("a floor build counts for settling: a burst build is not judged on a reading that predates floor builds the scan has since seen", async () => {
+    const { state, ask, warmUp, machine, advance, logger } = setup({ config: BURST_ON });
+    warmUp();
+    advance(40 * SECOND);
+    // Three floor builds are allowed one after the other, on an idle machine's reading.
+    expect(await ask("agent-a", "./gradlew assembleDebug")).toEqual(ALLOW);
+    state.rows = agentRunning("agent-a", 400, gradlew("assembleDebug"));
+    expect(await ask("agent-b", "./gradlew assembleDebug")).toEqual(ALLOW);
+    state.rows = [...state.rows, ...agentRunning("agent-b", 410, gradlew("assembleDebug"))];
+    expect(await ask("agent-c", "./gradlew assembleDebug")).toEqual(ALLOW);
+
+    // The gate's own ps now sees all three; the monitor's reading, 55 s old, has not.
+    advance(15 * SECOND);
+    state.rows = [...state.rows, ...agentRunning("agent-c", 420, gradlew("assembleDebug"))];
+    const message = denial(await ask("agent-d", "./gradlew assembleDebug"));
+
+    expect(message).toContain("settling check failed");
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "no-headroom", check: "settling", running: 3 }),
+      "Build gate refused a native build",
+    );
+
+    // A reading taken 90 s after the last floor grant has seen them all run.
+    advance(80 * SECOND);
+    machine();
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+  });
+
+  test("a rolled-back floor grant does not hold burst back", async () => {
+    const { state, ask, warmUp, advance, machine } = setup({ config: BURST_ON });
+    warmUp();
+    state.rows = handBuilds(2);
+    state.innerDecision = { decision: "deny", message: "Device cap: no slot" };
+    await ask("agent-d", "./gradlew assembleDebug");
+    state.innerDecision = { decision: "allow" };
+    state.rows = handBuilds(3);
+    advance(10 * SECOND);
+    machine();
+    expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+  });
+
+  describe("the floor's disk reserve", () => {
+    const FLOOR_ONLY = { maxConcurrent: 3, burst: { enabled: false } } satisfies BuildGateConfig;
+
+    test("a first build needs only the low line; each further floor build also needs a reserve for every build taken", async () => {
+      const { state, ask, logger } = setup({ config: FLOOR_ONLY, freeGiB: 24 });
+      expect(await ask("agent-a", "./gradlew assembleDebug")).toEqual(ALLOW);
+
+      state.freeGiB = 64;
+      state.rows = handBuilds(1);
+      advanceBeyondGrant(state);
+      // 20 + 15 x (1 + 1) = 50
+      expect(await ask("agent-b", "./gradlew assembleDebug")).toEqual(ALLOW);
+
+      state.rows = handBuilds(2);
+      advanceBeyondGrant(state);
+      // 20 + 15 x (2 + 1) = 65
+      const message = denial(await ask("agent-c", "./gradlew assembleDebug"));
+      expect(message).toContain("64 GB of disk is free and 65 GB is needed");
+      expect(message).toContain("the 20 GB low line plus 15 GB for each of 3 builds");
+      expect(message).toContain("2 native builds are running or starting");
+      expect(message).toContain("Wait for one to finish");
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reason: "disk-reserve",
+          freeBytes: 64 * GIB,
+          requiredBytes: 65 * GIB,
+          running: 2,
+        }),
+        "Build gate refused a native build",
+      );
+
+      state.freeGiB = 65;
+      expect(await ask("agent-c", "./gradlew assembleDebug")).toEqual(ALLOW);
+    });
+
+    test("a free-disk read that throws still lets a floor build through", async () => {
+      const { state, ask } = setup({ config: FLOOR_ONLY });
+      state.diskFails = true;
+      state.rows = handBuilds(2);
+      expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+    });
+
+    test("it holds with burst on, and the reserve is perBuildDiskGB", async () => {
+      const { state, ask } = setup({
+        config: { maxConcurrent: 3, burst: { enabled: true, perBuildDiskGB: 10 } },
+        freeGiB: 49,
+      });
+      state.rows = handBuilds(2);
+      // 20 + 10 x 3 = 50
+      expect(denial(await ask("agent-d", "./gradlew assembleDebug"))).toContain(
+        "49 GB of disk is free and 50 GB is needed",
+      );
+      state.freeGiB = 50;
+      expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+    });
+
+    test("dry run logs the refusal and allows the build", async () => {
+      const { state, ask, logger } = setup({
+        config: { ...FLOOR_ONLY, dryRun: true },
+        freeGiB: 40,
+      });
+      state.rows = handBuilds(2);
+      expect(await ask("agent-d", "./gradlew assembleDebug")).toEqual(ALLOW);
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ dryRun: true, reason: "disk-reserve" }),
+        "Build gate would have refused a native build",
+      );
+    });
   });
 
   test("a granted burst build is left alone when headroom drops; only the next build is refused", async () => {

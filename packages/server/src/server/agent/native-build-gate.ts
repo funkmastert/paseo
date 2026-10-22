@@ -46,6 +46,8 @@ import {
   type BurstHeadroomVerdict,
   type BuildGateSlotDefaults,
   deriveBuildGateDefaults,
+  describeDiskReserve,
+  diskReserveBytes,
   evaluateBurstHeadroom,
   recordSwapUse,
   type ResolvedBurstConfig,
@@ -171,10 +173,8 @@ interface BuildGrant {
   atMs: number;
   /** How many counted builds the agent had when this was allowed. */
   baseline: number;
-  /** Allowed above the floor. */
-  burst: boolean;
-  /** When the burst grant before this one was made, put back if this one is rolled back. */
-  priorBurstGrantAtMs: number | undefined;
+  /** When the grant before this one was made, put back if this one is rolled back. */
+  priorGrantAtMs: number | undefined;
 }
 
 /** What holds slots in one sample. */
@@ -265,16 +265,18 @@ function describeGrant(
 }
 
 /**
- * Why a build at the guaranteed floor was refused: `floor` when burst is off or its ceiling is no
- * higher than the floor, `ceiling` when burst is full, `headroom` when a check failed.
+ * Why a build was refused for want of a slot: `floor` when burst is off or its ceiling is no
+ * higher than the floor, `ceiling` when burst is full, `headroom` when a burst check failed,
+ * `disk-reserve` when a build within the floor would not leave the disk room for every build taken.
  */
 type CapCause =
   | { kind: "floor" }
   | { kind: "ceiling" }
-  | { kind: "headroom"; check: BurstCheck; detail: string };
+  | { kind: "headroom"; check: BurstCheck; detail: string }
+  | { kind: "disk-reserve"; detail: string; requiredBytes: number };
 
 interface CapRefusal {
-  reason: "at-cap" | "at-burst-cap" | "no-headroom";
+  reason: "at-cap" | "at-burst-cap" | "no-headroom" | "disk-reserve";
   cause: CapCause;
 }
 
@@ -295,6 +297,37 @@ function refuseAboveFloor(input: {
   return {
     reason: "no-headroom",
     cause: { kind: "headroom", check: headroom.check, detail: headroom.detail },
+  };
+}
+
+/**
+ * Whether a build within the floor is refused for disk. The first build needs only the low line,
+ * checked before the scan; each one after it also needs a reserve for every build taken and the
+ * new one, because builds already running have not finished writing. A failed free-disk read
+ * skips this, as it skips the low line: the floor fails open.
+ */
+function refuseForDiskReserve(input: {
+  config: ResolvedBuildGateConfig;
+  taken: number;
+  freeBytes: number | undefined;
+  lowFreeBytes: number;
+}): CapRefusal | undefined {
+  const { freeBytes } = input;
+  if (input.taken < 1 || freeBytes === undefined) return undefined;
+  const reserve = {
+    lowFreeBytes: input.lowFreeBytes,
+    perBuildDiskBytes: input.config.burst.perBuildDiskBytes,
+    taken: input.taken,
+  };
+  const requiredBytes = diskReserveBytes(reserve);
+  if (freeBytes >= requiredBytes) return undefined;
+  return {
+    reason: "disk-reserve",
+    cause: {
+      kind: "disk-reserve",
+      detail: describeDiskReserve({ ...reserve, freeBytes }),
+      requiredBytes,
+    },
   };
 }
 
@@ -321,6 +354,12 @@ function describeCapCause(input: {
     return (
       `${running}, and both the guaranteed limit (${config.maxConcurrent}) and the burst ` +
       `ceiling (${config.burst.maxConcurrent}) are reached.`
+    );
+  }
+  if (cause.kind === "disk-reserve") {
+    return (
+      `${running}, and the disk has no room for another beside them: ${cause.detail}. One ` +
+      "native build writes 10 to 34 GB."
     );
   }
   return (
@@ -408,7 +447,8 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
   /** The monitor's newest reading of the machine, and the swap it has shown lately. */
   let machine: BuildGateMachineReading | undefined;
   let swapHistory: SwapUseReading[] = [];
-  let lastBurstGrantAtMs: number | undefined;
+  /** When this gate last allowed a build, floor or burst: a reading older than it has not seen it. */
+  let lastGrantAtMs: number | undefined;
 
   /** Takes a sample as the newest, and learns what it says about runners. */
   function adopt(sample: BuildGateSample): void {
@@ -555,7 +595,7 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
       unseen: grants.length,
       freeDiskBytes: input.freeBytes,
       lowFreeBytes: input.lowFreeBytes,
-      lastBurstGrantAtMs,
+      lastGrantAtMs,
       config: config.burst,
     });
     const slots = {
@@ -568,7 +608,14 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
       headroom: headroom.numbers,
     };
     const burst = taken >= config.maxConcurrent;
-    const refusal = burst ? refuseAboveFloor({ headroom, taken, config }) : undefined;
+    const refusal = burst
+      ? refuseAboveFloor({ headroom, taken, config })
+      : refuseForDiskReserve({
+          config,
+          taken,
+          freeBytes: input.freeBytes,
+          lowFreeBytes: input.lowFreeBytes,
+        });
     if (refusal) {
       return refuse({
         agentId,
@@ -583,6 +630,9 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
         fields: {
           reason: refusal.reason,
           ...(refusal.cause.kind === "headroom" ? { check: refusal.cause.check } : {}),
+          ...(refusal.cause.kind === "disk-reserve"
+            ? { freeBytes: input.freeBytes, requiredBytes: refusal.cause.requiredBytes }
+            : {}),
           burst: false,
           ...slots,
           holders: [...held.builds, ...held.runners].map((entry) => ({
@@ -599,11 +649,10 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
       launcher: intent.launcher,
       atMs: nowMs,
       baseline: countOf(held, agentId),
-      burst,
-      priorBurstGrantAtMs: lastBurstGrantAtMs,
+      priorGrantAtMs: lastGrantAtMs,
     };
     grants.push(grant);
-    if (burst) lastBurstGrantAtMs = nowMs;
+    lastGrantAtMs = nowMs;
     options.logger.info(
       {
         agentId,
@@ -694,9 +743,7 @@ export function createNativeBuildGate(options: NativeBuildGateOptions): NativeBu
       if (decision.decision === "deny" && verdict.grant) {
         // The device cap said no, so the build never starts: give its slot back.
         grants = grants.filter((grant) => grant !== verdict.grant);
-        if (verdict.grant.burst && lastBurstGrantAtMs === verdict.grant.atMs) {
-          lastBurstGrantAtMs = verdict.grant.priorBurstGrantAtMs;
-        }
+        if (lastGrantAtMs === verdict.grant.atMs) lastGrantAtMs = verdict.grant.priorGrantAtMs;
       }
       return decision;
     },

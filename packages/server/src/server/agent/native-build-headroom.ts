@@ -24,9 +24,11 @@ export const BURST_SWAP_MIN_SPAN_MS = 2 * 60_000;
  */
 export const BURST_SWAP_GROWTH_BYTES = 512 * 1024 ** 2;
 /**
- * A burst build is judged only by a reading taken this long after the previous burst grant. A
- * Gradle or Xcode build takes a minute or two to reach its memory, so a reading taken sooner has
- * not seen the last grant's footprint and a second grant on it would stack on an unseen one.
+ * A burst build is judged only by a reading taken this long after the previous grant, a floor
+ * grant as much as a burst one. A Gradle or Xcode build takes a minute or two to reach its memory,
+ * so a reading taken sooner has not seen the last grant's footprint, and a burst build judged on
+ * it would stack on an unseen one. The gate's own `ps` sees a build the moment it starts, which
+ * is why the unseen count alone cannot cover this: the build is counted, its memory is not.
  */
 export const BURST_SETTLE_MS = 90_000;
 
@@ -37,8 +39,12 @@ const DEFAULT_PER_BUILD_MEMORY_GB = 8;
  * new one, so a figure at the top of that range would forbid burst on any disk under 150 GB.
  */
 const DEFAULT_PER_BUILD_DISK_GB = 15;
-/** One heavy build loads about 1x the cores; saturation opens at 2x (docs/resource-monitor.md). */
-const DEFAULT_MAX_LOAD_PER_CORE = 1;
+/**
+ * One heavy build loads about 1x the cores, so the three floor builds a burst build waits behind
+ * already put the load near 1.2x; saturation opens at 2x (docs/resource-monitor.md). 1.5x opens
+ * burst on that machine and still closes it well before saturation, which stays the hard stop.
+ */
+const DEFAULT_MAX_LOAD_PER_CORE = 1.5;
 /** Windows only: the busy share saturation opens at is 0.9, and the release line is 0.75. */
 const DEFAULT_MAX_BUSY_FRACTION = 0.75;
 
@@ -117,6 +123,17 @@ export interface ResolvedBurstConfig {
   maxBusyFraction: number;
 }
 
+/**
+ * The ceiling when `burst.maxConcurrent` is not set. A floor the machine can carry gets the
+ * derived ceiling, held to `MAX_BURST_ABOVE_FLOOR` above it. A floor configured under the derived
+ * one is a deliberate lower cap, not an invitation to burst up to the derived ceiling: burst is
+ * off there.
+ */
+function defaultCeiling(defaults: BuildGateSlotDefaults, floor: number): number {
+  if (floor < defaults.maxConcurrent) return floor;
+  return Math.min(defaults.burstMaxConcurrent, floor + MAX_BURST_ABOVE_FLOOR);
+}
+
 export function resolveBurstConfig(
   config: BuildGateBurstConfig | undefined,
   defaults: BuildGateSlotDefaults,
@@ -126,7 +143,7 @@ export function resolveBurstConfig(
     enabled: config?.enabled ?? true,
     maxConcurrent: Math.max(
       floor,
-      Math.floor(config?.maxConcurrent ?? defaults.burstMaxConcurrent),
+      Math.floor(config?.maxConcurrent ?? defaultCeiling(defaults, floor)),
     ),
     perBuildMemoryBytes: (config?.perBuildMemoryGB ?? DEFAULT_PER_BUILD_MEMORY_GB) * GIBIBYTE,
     perBuildDiskBytes: (config?.perBuildDiskGB ?? DEFAULT_PER_BUILD_DISK_GB) * GIBIBYTE,
@@ -198,7 +215,8 @@ export interface BurstHeadroomInput {
   unseen: number;
   freeDiskBytes: number | undefined;
   lowFreeBytes: number;
-  lastBurstGrantAtMs: number | undefined;
+  /** When the gate last allowed a build of any kind, floor or burst. */
+  lastGrantAtMs: number | undefined;
   config: ResolvedBurstConfig;
 }
 
@@ -232,11 +250,18 @@ function readingProblem(input: BurstHeadroomInput, numbers: BurstHeadroomNumbers
   return `the resource monitor's last reading is ${Math.round(ageMs / 1000)}s old (limit ${BURST_READING_MAX_AGE_MS / 1000}s)`;
 }
 
-/** Available memory as this platform reports it: `os.freemem()` on Windows, the sampler elsewhere. */
+/**
+ * Memory a new build could be given as this platform reports it: `os.freemem()` on Windows, which
+ * already counts the standby cache; on macOS the sampler's reclaimable figure (free, file-backed
+ * and purgeable pages), not the stricter `availableBytes` the device cap uses, which leaves out
+ * the file cache macOS keeps most of RAM in and so read 4.9 GiB on a machine macOS called 70%
+ * free. The pressure level and swap growth checks are what catch a machine that is actually
+ * short. Linux's `MemAvailable` already is a reclaimable figure, so it has no second one.
+ */
 function availableMemoryOf(platform: NodeJS.Platform, reading: BuildGateMachineReading) {
-  return platform === "win32"
-    ? reading.systemLoad.freeMemoryBytes
-    : reading.systemMemory?.availableBytes;
+  if (platform === "win32") return reading.systemLoad.freeMemoryBytes;
+  const memory = reading.systemMemory;
+  return memory?.reclaimableBytes ?? memory?.availableBytes;
 }
 
 /** A signal this platform reports that the reading lacks. */
@@ -333,21 +358,38 @@ function checkCpu({ signals, config }: CheckInput): string | undefined {
   return `the CPU is ${Math.round(load.busyFraction * 100)}% busy (limit ${Math.round(config.maxBusyFraction * 100)}%)`;
 }
 
-function checkDisk({ signals, config, taken, lowFreeBytes }: CheckInput): string | undefined {
-  if (signals.reading.diskBrakeHeld) return "the disk brake is holding new work";
-  const requiredBytes = lowFreeBytes + config.perBuildDiskBytes * (taken + 1);
-  if (signals.freeDiskBytes >= requiredBytes) return undefined;
-  return `${gb(signals.freeDiskBytes)} GB of disk is free and ${gb(requiredBytes)} GB is needed: the ${gb(lowFreeBytes)} GB low line plus ${gb(config.perBuildDiskBytes)} GB for each of ${taken + 1} builds`;
+interface DiskReserveInput {
+  lowFreeBytes: number;
+  perBuildDiskBytes: number;
+  /** Slots taken before the build being decided. */
+  taken: number;
 }
 
-function checkSettling({ signals, nowMs, lastBurstGrantAtMs }: CheckInput): string | undefined {
-  if (
-    lastBurstGrantAtMs === undefined ||
-    signals.reading.takenAtMs >= lastBurstGrantAtMs + BURST_SETTLE_MS
-  ) {
+/**
+ * Free disk a build needs: the low line, plus a reserve for every build taken and the new one.
+ * A build already running can still write the rest of its 10 to 34 GB.
+ */
+export function diskReserveBytes(input: DiskReserveInput): number {
+  return input.lowFreeBytes + input.perBuildDiskBytes * (input.taken + 1);
+}
+
+export function describeDiskReserve(input: DiskReserveInput & { freeBytes: number }): string {
+  const requiredBytes = diskReserveBytes(input);
+  return `${gb(input.freeBytes)} GB of disk is free and ${gb(requiredBytes)} GB is needed: the ${gb(input.lowFreeBytes)} GB low line plus ${gb(input.perBuildDiskBytes)} GB for each of ${input.taken + 1} builds`;
+}
+
+function checkDisk({ signals, config, taken, lowFreeBytes }: CheckInput): string | undefined {
+  if (signals.reading.diskBrakeHeld) return "the disk brake is holding new work";
+  const reserve = { lowFreeBytes, perBuildDiskBytes: config.perBuildDiskBytes, taken };
+  if (signals.freeDiskBytes >= diskReserveBytes(reserve)) return undefined;
+  return describeDiskReserve({ ...reserve, freeBytes: signals.freeDiskBytes });
+}
+
+function checkSettling({ signals, nowMs, lastGrantAtMs }: CheckInput): string | undefined {
+  if (lastGrantAtMs === undefined || signals.reading.takenAtMs >= lastGrantAtMs + BURST_SETTLE_MS) {
     return undefined;
   }
-  return `the last burst build was allowed ${Math.round((nowMs - lastBurstGrantAtMs) / 1000)}s ago and no reading has seen it run for ${BURST_SETTLE_MS / 1000}s yet`;
+  return `the last build was allowed ${Math.round((nowMs - lastGrantAtMs) / 1000)}s ago and no reading has seen it run for ${BURST_SETTLE_MS / 1000}s yet`;
 }
 
 const CHECKS: ReadonlyArray<
@@ -370,7 +412,13 @@ export function evaluateBurstHeadroom(input: BurstHeadroomInput): BurstHeadroomV
   const { config } = input;
   const numbers: BurstHeadroomNumbers = {
     requiredMemoryGB: gb(config.perBuildMemoryBytes * (input.unseen + 1)),
-    requiredDiskGB: gb(input.lowFreeBytes + config.perBuildDiskBytes * (input.taken + 1)),
+    requiredDiskGB: gb(
+      diskReserveBytes({
+        lowFreeBytes: input.lowFreeBytes,
+        perBuildDiskBytes: config.perBuildDiskBytes,
+        taken: input.taken,
+      }),
+    ),
   };
   const read = readSignals(input, numbers);
   if (!read.ok) return { ok: false, check: "reading", detail: read.detail, numbers };

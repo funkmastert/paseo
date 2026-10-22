@@ -233,7 +233,7 @@ describe("PersistedConfigSchema agents.buildGate burst config", () => {
     maxConcurrent: 5,
     perBuildMemoryGB: 8,
     perBuildDiskGB: 15,
-    maxLoadPerCore: 1,
+    maxLoadPerCore: 1.5,
     maxBusyFraction: 0.75,
   };
 
@@ -242,6 +242,13 @@ describe("PersistedConfigSchema agents.buildGate burst config", () => {
       PersistedConfigSchema.parse({ agents: { buildGate: { maxConcurrent: 3, burst } } }).agents
         ?.buildGate,
     ).toEqual({ maxConcurrent: 3, burst });
+  });
+
+  test("a config from before burst, with only a floor, still validates and adds no burst block", () => {
+    expect(
+      PersistedConfigSchema.parse({ agents: { buildGate: { maxConcurrent: 3 } } }).agents
+        ?.buildGate,
+    ).toEqual({ maxConcurrent: 3 });
   });
 
   test("rejects an unknown burst key, a non-integer ceiling and a busy share over 1", () => {
