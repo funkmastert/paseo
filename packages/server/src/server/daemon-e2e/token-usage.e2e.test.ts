@@ -70,6 +70,7 @@ describe("usage.tokens.get_breakdown against an isolated daemon", () => {
 
   test("advertises the feature and serves the backfilled breakdown over the real protocol", async () => {
     expect(client.getLastServerInfoMessage()?.features?.tokenUsage).toBe(true);
+    expect(client.getLastServerInfoMessage()?.features?.tokenUsageCost).toBe(true);
 
     await vi.waitFor(
       async () => {
@@ -93,7 +94,10 @@ describe("usage.tokens.get_breakdown against an isolated daemon", () => {
         role: "outside",
         output: 150,
         responses: 2,
+        costUsd: expect.any(Number),
       }),
     ]);
+    expect(payload.totalCostUsd).toBeGreaterThan(0);
+    expect(payload.unpricedTokens).toBe(0);
   });
 });

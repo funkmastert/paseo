@@ -1809,6 +1809,9 @@ export class VoiceAssistantWebSocketServer {
         usageHistory: true,
         // COMPAT(tokenUsage): added in v0.8.x, remove gate after 2027-10-07.
         ...(this.tokenUsage ? { tokenUsage: true } : {}),
+        // COMPAT(tokenUsageCost): added in v0.9.x, remove gate after 2027-10-22. Rides on the
+        // same service as `tokenUsage`.
+        ...(this.tokenUsage ? { tokenUsageCost: true } : {}),
         // COMPAT(agentContextUsage): added in v0.8.2, remove gate after 2027-09-24.
         agentContextUsage: true,
         // COMPAT(jev): added in v0.8.x, remove gate after 2027-03-28.

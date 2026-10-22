@@ -150,4 +150,57 @@ describe("usage.tokens.get_breakdown", () => {
     expect(parsed.features?.tokenUsage).toBe(true);
     expect(older.features?.tokenUsage).toBeUndefined();
   });
+
+  test("server_info carries the tokenUsageCost capability independently of tokenUsage", () => {
+    const parsed = ServerInfoStatusPayloadSchema.parse({
+      status: "server_info",
+      serverId: "srv",
+      features: { tokenUsage: true, tokenUsageCost: true },
+    });
+    const older = ServerInfoStatusPayloadSchema.parse({
+      status: "server_info",
+      serverId: "srv",
+      features: { tokenUsage: true },
+    });
+
+    expect(parsed.features?.tokenUsageCost).toBe(true);
+    expect(older.features?.tokenUsageCost).toBeUndefined();
+  });
+
+  test("an old-shaped payload with no cost fields still parses against the new schema", () => {
+    const message = { type: "usage.tokens.get_breakdown.response", payload };
+
+    expect(SessionOutboundMessageSchema.safeParse(message).success).toBe(true);
+  });
+
+  test("a row's costUsd may be null (unpriced model) or a nonnegative amount", () => {
+    const message = {
+      type: "usage.tokens.get_breakdown.response",
+      payload: {
+        ...payload,
+        rows: [
+          { ...payload.rows[0], costUsd: 0.42 },
+          { ...payload.rows[1], costUsd: null },
+        ],
+        totalCostUsd: 0.42,
+        unpricedTokens: 0,
+      },
+    };
+
+    expect(SessionOutboundMessageSchema.parse(message)).toEqual(message);
+  });
+
+  test("rejects a negative costUsd or totalCostUsd", () => {
+    const negativeRow = {
+      type: "usage.tokens.get_breakdown.response",
+      payload: { ...payload, rows: [{ ...payload.rows[0], costUsd: -1 }] },
+    };
+    const negativeTotal = {
+      type: "usage.tokens.get_breakdown.response",
+      payload: { ...payload, totalCostUsd: -1 },
+    };
+
+    expect(SessionOutboundMessageSchema.safeParse(negativeRow).success).toBe(false);
+    expect(SessionOutboundMessageSchema.safeParse(negativeTotal).success).toBe(false);
+  });
 });

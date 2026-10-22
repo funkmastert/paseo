@@ -30,6 +30,10 @@ export interface TokenUsageBreakdown {
   rangeStartMs: number;
   rows: TokenUsageRow[];
   coverage: TokenUsageCoverage;
+  /** Sum of `costUsd` across priced rows. `null` when disabled. */
+  totalCostUsd: number | null;
+  /** Raw tokens (input+cacheWrite+cacheRead+output) summed across rows with no listed price. */
+  unpricedTokens: number;
 }
 
 interface ServiceLogger {
@@ -198,10 +202,18 @@ export class TokenUsageService {
           recordingSinceMs: null,
           backfill: { state: "off", filesDone: 0, filesTotal: 0 },
         },
+        totalCostUsd: null,
+        unpricedTokens: 0,
       };
     }
     await this.store.load();
-    return { ...base, rows: this.store.query(rangeStartMs), coverage: this.coverage() };
+    const rows = this.store.query(rangeStartMs);
+    return {
+      ...base,
+      rows,
+      coverage: this.coverage(),
+      ...totalTokenUsageCost(rows),
+    };
   }
 
   private coverage(): TokenUsageCoverage {
@@ -258,6 +270,25 @@ export class TokenUsageService {
 /** A range starts on the hour, since buckets are hours: "24h" covers 24 to 25 hours. */
 export function tokenUsageRangeStartMs(range: TokenUsageRange, nowMs: number): number {
   return Math.floor((nowMs - RANGE_MS[range]) / HOUR_MS) * HOUR_MS;
+}
+
+/**
+ * Sums `costUsd` across priced rows and raw tokens across unpriced ones (docs/token-usage.md,
+ * "Cost") — one pass over rows the store already materialized, no re-pricing.
+ */
+function totalTokenUsageCost(
+  rows: readonly TokenUsageRow[],
+): Pick<TokenUsageBreakdown, "totalCostUsd" | "unpricedTokens"> {
+  let totalCostUsd = 0;
+  let unpricedTokens = 0;
+  for (const row of rows) {
+    if (row.costUsd === null || row.costUsd === undefined) {
+      unpricedTokens += row.input + row.cacheWrite + row.cacheRead + row.output;
+    } else {
+      totalCostUsd += row.costUsd;
+    }
+  }
+  return { totalCostUsd, unpricedTokens };
 }
 
 /** `agents.tokenUsage.enabled` out of a parsed `config.json`. On unless explicitly false. */

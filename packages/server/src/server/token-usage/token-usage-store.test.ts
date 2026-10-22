@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { priceTokenUsage } from "./token-usage-pricing.js";
 import { TokenUsageStore, type UsageBooking } from "./token-usage-store.js";
 
 const HOUR = 3_600_000;
@@ -58,6 +59,14 @@ describe("TokenUsageStore", () => {
         output: 1_000,
         weighted: 10 + 125 + 100 + 5_000,
         responses: 1,
+        costUsd: priceTokenUsage({
+          provider: "claude",
+          model: "claude-opus-5-5",
+          input: 10,
+          cacheWrite: 100,
+          cacheRead: 1_000,
+          output: 1_000,
+        }),
       },
       {
         provider: "claude",
@@ -69,6 +78,14 @@ describe("TokenUsageStore", () => {
         output: 45,
         weighted: 20 + 250 + 200 + 225,
         responses: 2,
+        costUsd: priceTokenUsage({
+          provider: "claude",
+          model: "claude-opus-5-5",
+          input: 20,
+          cacheWrite: 200,
+          cacheRead: 2_000,
+          output: 45,
+        }),
       },
       {
         provider: "codex",
@@ -80,8 +97,20 @@ describe("TokenUsageStore", () => {
         output: 20,
         weighted: 10 + 125 + 100 + 100,
         responses: 1,
+        // Not in the Codex price table: unpriced, never guessed.
+        costUsd: null,
       },
     ]);
+  });
+
+  it("prices a row with a known model and leaves an unknown model's row unpriced", async () => {
+    const store = newStore();
+    await store.load();
+    store.add(booking({ model: "unknown" }));
+
+    const [row] = store.query(0);
+
+    expect(row.costUsd).toBeNull();
   });
 
   it("counts only the hours from the range start", async () => {
