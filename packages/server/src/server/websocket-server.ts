@@ -111,6 +111,7 @@ import {
 } from "./lifecycle-reasons.js";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 import type { EffectiveAvailability } from "./notify-policy/availability.js";
+import type { NotifyLevel } from "./notify-policy/levels.js";
 import type { BrowserAutomationExecuteResponse } from "@getpaseo/protocol/browser-automation/rpc-schemas";
 import {
   BrowserAutomationHostCapabilitySchema,
@@ -214,6 +215,11 @@ function resolveTerminalAttentionReason(input: {
 
 function terminalAttentionTitle(reason: TerminalAttentionReason): string {
   return reason === "needs_input" ? "Terminal needs input" : "Terminal finished";
+}
+
+/** A terminal has no parent to report a finish to, but a finish still needs nobody right now. */
+function terminalAttentionPushLevel(reason: TerminalAttentionReason): NotifyLevel {
+  return reason === "needs_input" ? "alert" : "notice";
 }
 
 function createFallbackWorkspaceGitSnapshot(cwd: string): WorkspaceGitRuntimeSnapshot {
@@ -2887,7 +2893,7 @@ export class VoiceAssistantWebSocketServer {
               ...(workspaceId ? { workspaceId } : {}),
             },
           },
-          { level: "alert" },
+          { level: terminalAttentionPushLevel(params.reason) },
         )
         .catch((err) => {
           this.logger.warn(

@@ -199,7 +199,7 @@ describe("share_build", () => {
       workspaceId: "workspace-1",
       externalUrl: url,
     });
-    expect(meta?.level).toBe("alert");
+    expect(meta?.level).toBe("notice");
     expect(meta?.dedupeKey).toMatch(/^shared-build:[0-9a-f]{64}$/);
     expect(payload["tylerSees"]).toEqual({ title: push.title, body: push.body });
 
@@ -389,7 +389,10 @@ describe("share_build", () => {
 
   describe("push outcome", () => {
     test("sent when the push goes to a phone now", async () => {
-      const { push, delivered } = realPushStack({ devices: 1 });
+      const { push, delivered } = realPushStack({
+        devices: 1,
+        settings: { minPostLevel: "notice", minInterruptLevel: "notice" },
+      });
       await writeFile("app-debug.apk", fakeApk());
       const payload = parse(
         await setup({ callerAgentId: "agent-1", push })({ path: "app-debug.apk" }, {}),
@@ -399,7 +402,10 @@ describe("share_build", () => {
     });
 
     test("folded when the same build was pushed within the hour", async () => {
-      const { push, delivered } = realPushStack({ devices: 1 });
+      const { push, delivered } = realPushStack({
+        devices: 1,
+        settings: { minPostLevel: "notice", minInterruptLevel: "notice" },
+      });
       await writeFile("app-debug.apk", fakeApk());
       const tool = setup({ callerAgentId: "agent-1", push });
       await tool({ path: "app-debug.apk" }, {});
@@ -410,7 +416,10 @@ describe("share_build", () => {
     });
 
     test("no-device when no phone is registered", async () => {
-      const { push, delivered } = realPushStack({ devices: 0 });
+      const { push, delivered } = realPushStack({
+        devices: 0,
+        settings: { minPostLevel: "notice", minInterruptLevel: "notice" },
+      });
       await writeFile("app-debug.apk", fakeApk());
       const payload = parse(
         await setup({ callerAgentId: "agent-1", push })({ path: "app-debug.apk" }, {}),
@@ -419,10 +428,10 @@ describe("share_build", () => {
       expect(delivered).toEqual([]);
     });
 
-    test("digest when alerts wait for the digest", async () => {
+    test("digest when notices wait for the digest", async () => {
       const { push, delivered } = realPushStack({
         devices: 1,
-        settings: { minInterruptLevel: "urgent" },
+        settings: { minPostLevel: "notice", minInterruptLevel: "urgent" },
       });
       await writeFile("app-debug.apk", fakeApk());
       const payload = parse(

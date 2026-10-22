@@ -301,7 +301,8 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       const appState = appStateRef.current;
       const session = useSessionStore.getState().sessions[serverId];
       const attentionFocusedAgentId = session?.focusedAgentId ?? null;
-      if (params.reason === "error") {
+      // Only a permission/question blocks the agent on Tyler; a finish needs nobody now.
+      if (params.reason !== "permission") {
         return;
       }
       const isActivelyVisible = getIsAppActivelyVisible(appState);
@@ -745,6 +746,10 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
         return;
       }
       if (!message.payload.shouldNotify) {
+        return;
+      }
+      // A finished terminal needs nobody now; only one waiting on input blocks on Tyler.
+      if (message.payload.reason !== "needs_input") {
         return;
       }
       void sendOsNotification({

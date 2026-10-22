@@ -129,11 +129,20 @@ describe("NotifyPolicy", () => {
       expect(transport.sent[0]?.delivery).toEqual({ quiet: false, timeSensitive: true });
     });
 
-    test("a notice is held instead of pushed", async () => {
+    test("a notice is held instead of pushed, once it is postable", async () => {
       const { policy } = create();
+      await policy.updateSettings({ minPostLevel: "notice" });
       await policy.submit(payload("Agent is burning tokens fast"), { level: "notice" });
       expect(transport.sent).toHaveLength(0);
       expect(policy.getStatus().heldCount).toBe(1);
+    });
+
+    test("a notice is only logged under the default dials", async () => {
+      const { policy } = create();
+      await policy.submit(payload("Agent is burning tokens fast"), { level: "notice" });
+      expect(transport.sent).toHaveLength(0);
+      expect(policy.getStatus().heldCount).toBe(0);
+      expect(policy.listLedger()).toMatchObject([{ outcome: "log", state: "recorded" }]);
     });
 
     test("a record never leaves the ledger", async () => {
@@ -148,6 +157,7 @@ describe("NotifyPolicy", () => {
 
     test("a push with no level is a notice, and the ledger says it was not declared", async () => {
       const { policy } = create();
+      await policy.updateSettings({ minPostLevel: "notice" });
       await policy.submit(payload("Something new"));
       expect(transport.sent).toHaveLength(0);
       expect(policy.listLedger()).toMatchObject([
@@ -157,7 +167,7 @@ describe("NotifyPolicy", () => {
 
     test("the interrupt dial can promote notices to interrupts", async () => {
       const { policy } = create();
-      await policy.updateSettings({ minInterruptLevel: "notice" });
+      await policy.updateSettings({ minPostLevel: "notice", minInterruptLevel: "notice" });
       await policy.submit(payload("Agent is burning tokens fast"), { level: "notice" });
       expect(transport.sent).toHaveLength(1);
     });
@@ -175,6 +185,7 @@ describe("NotifyPolicy", () => {
   describe("digests", () => {
     test("held notices go out as one quiet digest once the interval passes", async () => {
       const { policy } = create();
+      await policy.updateSettings({ minPostLevel: "notice" });
       await policy.submit(payload("Agent is burning tokens fast", { agentId: "a" }), {
         level: "notice",
       });
@@ -203,6 +214,7 @@ describe("NotifyPolicy", () => {
 
     test("a digest of one is that notification, sent quietly", async () => {
       const { policy } = create();
+      await policy.updateSettings({ minPostLevel: "notice" });
       await policy.submit(payload("Agent moved to a new account", { agentId: "a" }), {
         level: "notice",
       });
@@ -216,6 +228,7 @@ describe("NotifyPolicy", () => {
 
     test("each notice is delivered exactly once", async () => {
       const { policy } = create();
+      await policy.updateSettings({ minPostLevel: "notice" });
       await policy.submit(payload("One"), { level: "notice" });
       now += HOUR;
       await policy.tick();
@@ -227,6 +240,7 @@ describe("NotifyPolicy", () => {
 
     test("held notices survive a daemon restart and are sent by the new process", async () => {
       const first = create();
+      await first.policy.updateSettings({ minPostLevel: "notice" });
       await first.policy.submit(payload("One"), { level: "notice" });
       first.policy.stop();
 
@@ -253,7 +267,7 @@ describe("NotifyPolicy", () => {
 
     test("focus stretches the digest to two hours", async () => {
       const { policy } = create();
-      await policy.updateSettings({ availability: { mode: "focus" } });
+      await policy.updateSettings({ minPostLevel: "notice", availability: { mode: "focus" } });
       await policy.submit(payload("One"), { level: "notice" });
       now += HOUR + 50 * MINUTE;
       await policy.tick();
@@ -275,7 +289,7 @@ describe("NotifyPolicy", () => {
 
     test("coming back from away sends what waited, once", async () => {
       const { policy } = create();
-      await policy.updateSettings({ availability: { mode: "away" } });
+      await policy.updateSettings({ minPostLevel: "notice", availability: { mode: "away" } });
       await policy.submit(payload("One"), { level: "notice" });
       now += 3 * HOUR;
       await policy.tick();
@@ -288,7 +302,7 @@ describe("NotifyPolicy", () => {
 
     test("coming back from away sends the digest at once, without waiting out the interval", async () => {
       const { policy } = create();
-      await policy.updateSettings({ availability: { mode: "away" } });
+      await policy.updateSettings({ minPostLevel: "notice", availability: { mode: "away" } });
       await policy.submit(payload("One"), { level: "notice" });
       now += 5 * MINUTE;
       await policy.updateSettings({ availability: { mode: "available" } });
@@ -306,7 +320,10 @@ describe("NotifyPolicy", () => {
     test("a mode with an end time reverts by itself and sends the digest", async () => {
       const { policy } = create();
       const until = new Date(now + 2 * HOUR).toISOString();
-      await policy.updateSettings({ availability: { mode: "away", until } });
+      await policy.updateSettings({
+        minPostLevel: "notice",
+        availability: { mode: "away", until },
+      });
       await policy.submit(payload("One"), { level: "notice" });
       expect(policy.getStatus().effectiveAvailability.mode).toBe("away");
 
@@ -374,6 +391,7 @@ describe("NotifyPolicy", () => {
   describe("previewDelivery", () => {
     test("says what submit would do now, without recording or sending anything", async () => {
       const { policy } = create();
+      await policy.updateSettings({ minPostLevel: "notice" });
       expect(policy.previewDelivery({ level: "alert" })).toEqual({
         outcome: "interrupt",
         devices: 1,
@@ -449,6 +467,7 @@ describe("NotifyPolicy", () => {
 
     test("a notice inside a digest that failed is unreached too", async () => {
       const { policy } = create();
+      await policy.updateSettings({ minPostLevel: "notice" });
       transport.failWith = "InvalidCredentials";
       await policy.submit(payload("One"), { level: "notice" });
       await policy.submit(payload("Two"), { level: "notice" });
@@ -532,7 +551,7 @@ describe("NotifyPolicy", () => {
 
     test("a notice that fails is not retried", async () => {
       const { policy, ledger } = create();
-      await policy.updateSettings({ minInterruptLevel: "notice" });
+      await policy.updateSettings({ minPostLevel: "notice", minInterruptLevel: "notice" });
       failTransport("fetch failed");
       await policy.submit(payload("Agent is burning tokens fast"), { level: "notice" });
       expect(transport.sent).toHaveLength(1);
@@ -596,10 +615,10 @@ describe("NotifyPolicy", () => {
   });
 
   describe("settings", () => {
-    test("the defaults are quieter than before the policy existed", () => {
+    test("the defaults post only what needs a person", () => {
       const { policy } = create();
       expect(policy.getStatus().settings).toEqual({
-        minPostLevel: "notice",
+        minPostLevel: "alert",
         minInterruptLevel: "alert",
         digestIntervalMinutes: 30,
         availability: { mode: "available", until: null },

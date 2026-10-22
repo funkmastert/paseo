@@ -487,11 +487,35 @@ describe("VoiceAssistantWebSocketServer terminal attention notifications", () =>
 
     expect(pushNotifications.sent).toHaveLength(1);
     expect(pushNotifications.sent[0]?.title).toBe("Terminal finished");
-    expect(pushNotifications.levels).toEqual(["alert"]);
+    expect(pushNotifications.levels).toEqual(["notice"]);
     expect(pushNotifications.sent[0]?.data).toMatchObject({
       serverId: "srv-test",
       terminalId: "term-1",
       workspaceId: "ws-1",
     });
+  });
+
+  it("pushes needs_input at alert, not notice", async () => {
+    const { manager, emit } = createTerminalManager();
+    const { pushNotifications } = createServer(
+      manager,
+      createWorkspaceRegistry([workspaceRecord()]),
+    );
+    // No connected clients
+
+    emit(
+      transition({
+        previousState: "working",
+        previousChangedAt: 1000,
+        state: "attention",
+        changedAt: 15000,
+      }),
+    );
+
+    await flushAsync();
+
+    expect(pushNotifications.sent).toHaveLength(1);
+    expect(pushNotifications.sent[0]?.title).toBe("Terminal needs input");
+    expect(pushNotifications.levels).toEqual(["alert"]);
   });
 });

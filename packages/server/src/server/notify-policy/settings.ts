@@ -9,7 +9,7 @@ import {
 import { ensurePrivateFile, writePrivateFileAtomicSync } from "../private-files.js";
 
 export const DEFAULT_NOTIFY_POLICY_SETTINGS: NotifyPolicySettings = {
-  minPostLevel: "notice",
+  minPostLevel: "alert",
   minInterruptLevel: "alert",
   digestIntervalMinutes: 30,
   availability: { mode: "available", until: null },
