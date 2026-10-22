@@ -2246,6 +2246,10 @@ export const en = {
   tokenUsage: {
     byModelTitle: "Tokens by model",
     byRoleTitle: "Tokens by role",
+    costLabel: "API-equivalent cost",
+    costCaption:
+      "What this usage would cost at API list prices — not what a flat-rate subscription bills.",
+    unpricedFooter: "{{count}} tokens have no listed price and aren't included in the total",
   },
   review: {
     comment: {

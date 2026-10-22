@@ -26,6 +26,9 @@ export const TokenUsageRowSchema = z.object({
   output: z.number().nonnegative(),
   weighted: z.number().nonnegative(),
   responses: z.number().nonnegative(),
+  // API-equivalent cost in USD at list prices (docs/token-usage.md, "Cost"). `null` when the
+  // model has no listed price; absent on a daemon older than `tokenUsageCost`.
+  costUsd: z.number().nonnegative().nullable().optional(),
 });
 
 export const TokenUsageBackfillSchema = z.object({
@@ -65,6 +68,10 @@ export const TokenUsageGetBreakdownResponseSchema = z.object({
     rows: z.array(TokenUsageRowSchema),
     coverage: TokenUsageCoverageSchema,
     error: z.string().optional(),
+    // Sum of `costUsd` across priced rows. `null` when disabled or on an older daemon.
+    totalCostUsd: z.number().nonnegative().nullable().optional(),
+    // Raw tokens (input+cacheWrite+cacheRead+output) summed across rows with no listed price.
+    unpricedTokens: z.number().nonnegative().optional(),
   }),
 });
 

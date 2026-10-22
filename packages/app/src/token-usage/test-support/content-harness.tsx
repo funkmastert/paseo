@@ -65,10 +65,12 @@ export function ContentHarness({
   width,
   variant = "data",
   onRetry = NOOP,
+  costSupported = true,
 }: {
   width: number;
   variant?: HarnessVariant;
   onRetry?: () => void;
+  costSupported?: boolean;
 }) {
   const breakdown = breakdownFor(variant);
   const style = React.useMemo(() => ({ width }), [width]);
@@ -83,6 +85,7 @@ export function ContentHarness({
         onUnitChange={NOOP}
         range="7d"
         onRangeChange={NOOP}
+        costSupported={costSupported}
       />
     </div>
   );

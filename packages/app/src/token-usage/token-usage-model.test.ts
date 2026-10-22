@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildTokenUsageCostSummary,
   buildTokenUsageModelBars,
   buildTokenUsageRoleTotals,
   formatCompactTokens,
+  formatUsd,
   hasIncompleteAttribution,
   normalizeTokenUsageRole,
   resolveTokenUsageDisplayState,
@@ -192,6 +194,126 @@ describe("resolveTokenUsageDisplayState", () => {
       },
     });
     expect(state).toEqual({ kind: "disabled" });
+  });
+});
+
+describe("buildTokenUsageModelBars cost", () => {
+  it("sums costUsd across rows for the same provider/model", () => {
+    const rows: TokenUsageRow[] = [
+      row({ role: "leader", weighted: 100, costUsd: 1.2 }),
+      row({ role: "worker", weighted: 100, costUsd: 0.3 }),
+    ];
+
+    const bars = buildTokenUsageModelBars(rows, "weighted");
+
+    expect(bars[0]?.costUsd).toBeCloseTo(1.5, 6);
+    expect(bars[0]?.formattedCost).toBe(formatUsd(1.5));
+  });
+
+  it("sums the priced rows and flags a lower bound when some rows are unpriced", () => {
+    const rows: TokenUsageRow[] = [
+      row({ role: "leader", weighted: 100, costUsd: 1.2 }),
+      row({ role: "worker", weighted: 100, costUsd: null }),
+    ];
+
+    const bars = buildTokenUsageModelBars(rows, "weighted");
+
+    expect(bars[0]?.costUsd).toBeCloseTo(1.2, 6);
+    expect(bars[0]?.isCostLowerBound).toBe(true);
+    expect(bars[0]?.formattedCost).toBe(`≥${formatUsd(1.2)}`);
+  });
+
+  it("is null, not a lower bound, when every contributing row is unpriced", () => {
+    const rows: TokenUsageRow[] = [row({ role: "leader", weighted: 100, costUsd: null })];
+
+    const bars = buildTokenUsageModelBars(rows, "weighted");
+
+    expect(bars[0]?.costUsd).toBeNull();
+    expect(bars[0]?.isCostLowerBound).toBe(false);
+    expect(bars[0]?.formattedCost).toBeNull();
+  });
+
+  it("doesn't stack a lower-bound marker onto an already-rounded tiny amount", () => {
+    const rows: TokenUsageRow[] = [
+      row({ role: "leader", weighted: 100, costUsd: 0.002 }),
+      row({ role: "worker", weighted: 100, costUsd: null }),
+    ];
+
+    const bars = buildTokenUsageModelBars(rows, "weighted");
+
+    expect(bars[0]?.isCostLowerBound).toBe(true);
+    expect(bars[0]?.formattedCost).toBe("<$0.01");
+  });
+});
+
+describe("buildTokenUsageRoleTotals cost", () => {
+  it("sums costUsd per role", () => {
+    const rows: TokenUsageRow[] = [
+      row({ role: "leader", weighted: 100, costUsd: 1.2 }),
+      row({ role: "leader", weighted: 100, costUsd: 0.3 }),
+    ];
+
+    const totals = buildTokenUsageRoleTotals(rows, "weighted");
+
+    expect(totals.find((entry) => entry.role === "leader")?.costUsd).toBeCloseTo(1.5, 6);
+    expect(totals.find((entry) => entry.role === "worker")?.costUsd).toBe(0);
+  });
+
+  it("is null for a role where every row is unpriced", () => {
+    const rows: TokenUsageRow[] = [row({ role: "outside", weighted: 100, costUsd: null })];
+
+    const totals = buildTokenUsageRoleTotals(rows, "weighted");
+
+    const outside = totals.find((entry) => entry.role === "outside");
+    expect(outside?.costUsd).toBeNull();
+    expect(outside?.isCostLowerBound).toBe(false);
+  });
+
+  it("sums priced rows as a lower bound when a role has both priced and unpriced rows", () => {
+    const rows: TokenUsageRow[] = [
+      row({ role: "outside", weighted: 100, costUsd: 2.0 }),
+      row({ role: "outside", weighted: 100, costUsd: null }),
+    ];
+
+    const totals = buildTokenUsageRoleTotals(rows, "weighted");
+
+    const outside = totals.find((entry) => entry.role === "outside");
+    expect(outside?.costUsd).toBeCloseTo(2.0, 6);
+    expect(outside?.isCostLowerBound).toBe(true);
+    expect(outside?.formattedCost).toBe(`≥${formatUsd(2.0)}`);
+  });
+});
+
+describe("buildTokenUsageCostSummary", () => {
+  it("formats a priced total and reports no unpriced tokens", () => {
+    const summary = buildTokenUsageCostSummary({ totalCostUsd: 12.34, unpricedTokens: 0 });
+    expect(summary.formattedTotal).toBe("$12.34");
+    expect(summary.hasUnpriced).toBe(false);
+  });
+
+  it("reports unpriced tokens when present, and renders the partial total as a lower bound", () => {
+    const summary = buildTokenUsageCostSummary({ totalCostUsd: 1, unpricedTokens: 500 });
+    expect(summary.hasUnpriced).toBe(true);
+    expect(summary.unpricedTokens).toBe(500);
+    expect(summary.formattedTotal).toBe(`≥${formatUsd(1)}`);
+  });
+
+  it("treats a missing totalCostUsd as null (feature-unsupported shape)", () => {
+    const summary = buildTokenUsageCostSummary({});
+    expect(summary.totalCostUsd).toBeNull();
+    expect(summary.formattedTotal).toBeNull();
+    expect(summary.unpricedTokens).toBe(0);
+  });
+});
+
+describe("formatUsd", () => {
+  it.each([
+    [0, "$0.00"],
+    [0.003, "<$0.01"],
+    [1.2345, "$1.23"],
+    [1_234.5, "$1,234.50"],
+  ])("formats %d as %s", (value, expected) => {
+    expect(formatUsd(value)).toBe(expected);
   });
 });
 

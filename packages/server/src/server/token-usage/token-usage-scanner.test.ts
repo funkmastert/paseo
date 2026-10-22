@@ -350,6 +350,7 @@ describe("TokenUsageScanner", () => {
         output: 30,
         weighted: 700 + 230 + 150,
         responses: 2,
+        costUsd: null,
       },
     ]);
   });

@@ -1,17 +1,20 @@
 import { useMemo, type ReactElement } from "react";
 import { Text, View } from "react-native";
+import { useTranslation } from "react-i18next";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
 import {
+  buildTokenUsageCostSummary,
   buildTokenUsageModelBars,
   buildTokenUsageRoleTotals,
   formatCompactTokens,
   hasIncompleteAttribution,
   resolveTokenUsageDisplayState,
   type TokenUsageBreakdown,
+  type TokenUsageCostSummary,
   type TokenUsageRange,
   type TokenUsageUnit,
 } from "./token-usage-model";
@@ -97,6 +100,8 @@ export interface TokenUsageContentProps {
   onUnitChange: (unit: TokenUsageUnit) => void;
   range: TokenUsageRange;
   onRangeChange: (range: TokenUsageRange) => void;
+  /** Whether the host daemon advertises `tokenUsageCost` — hides all cost UI when it doesn't. */
+  costSupported: boolean;
 }
 
 function RetryButton({ onRetry, testID }: { onRetry: () => void; testID: string }) {
@@ -104,6 +109,49 @@ function RetryButton({ onRetry, testID }: { onRetry: () => void; testID: string 
     <Button variant="outline" size="sm" onPress={onRetry} testID={testID}>
       Retry
     </Button>
+  );
+}
+
+/** The range-total cost line (R4) shown above the model/role cards, only when the host supports
+ * the `tokenUsageCost` feature (KTD-6). */
+function CostSummary({ summary }: { summary: TokenUsageCostSummary }) {
+  const { t } = useTranslation();
+  return (
+    <View testID="token-usage-cost-summary">
+      <View style={styles.costSummaryRow}>
+        <Text style={styles.costSummaryLabel}>{t("tokenUsage.costLabel")}</Text>
+        <Text style={styles.costSummaryValue} testID="token-usage-cost-summary-value">
+          {summary.formattedTotal ?? "—"}
+        </Text>
+      </View>
+      <Text style={styles.costSummaryCaption}>{t("tokenUsage.costCaption")}</Text>
+      {summary.hasUnpriced ? (
+        <Text style={styles.footerNote} testID="token-usage-cost-unpriced-footer">
+          {t("tokenUsage.unpricedFooter", { count: formatCompactTokens(summary.unpricedTokens) })}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
+/** The populated-data body: model/role cards plus the cost summary (R4), when supported. */
+function TokenUsageDataSection({
+  bars,
+  roleTotals,
+  costSupported,
+  costSummary,
+}: {
+  bars: ReturnType<typeof buildTokenUsageModelBars>;
+  roleTotals: ReturnType<typeof buildTokenUsageRoleTotals>;
+  costSupported: boolean;
+  costSummary: TokenUsageCostSummary | null;
+}) {
+  return (
+    <>
+      {costSupported && costSummary ? <CostSummary summary={costSummary} /> : null}
+      <TokensByModelCard bars={bars} costSupported={costSupported} />
+      <TokensByRoleCard totals={roleTotals} costSupported={costSupported} />
+    </>
   );
 }
 
@@ -116,6 +164,7 @@ export function TokenUsageContent({
   onUnitChange,
   range,
   onRangeChange,
+  costSupported,
 }: TokenUsageContentProps): ReactElement {
   const displayState = breakdown ? resolveTokenUsageDisplayState(breakdown) : null;
   const bars = useMemo(
@@ -127,6 +176,10 @@ export function TokenUsageContent({
     [breakdown, unit],
   );
   const incompleteAttribution = breakdown ? hasIncompleteAttribution(breakdown.rows, unit) : false;
+  const costSummary = useMemo(
+    () => (breakdown ? buildTokenUsageCostSummary(breakdown) : null),
+    [breakdown],
+  );
 
   return (
     <View style={styles.readyColumn}>
@@ -195,10 +248,12 @@ export function TokenUsageContent({
         </Text>
       ) : null}
       {displayState?.kind === "data" ? (
-        <>
-          <TokensByModelCard bars={bars} />
-          <TokensByRoleCard totals={roleTotals} />
-        </>
+        <TokenUsageDataSection
+          bars={bars}
+          roleTotals={roleTotals}
+          costSupported={costSupported}
+          costSummary={costSummary}
+        />
       ) : null}
       {incompleteAttribution ? (
         <Text style={styles.footerNote} testID="token-usage-attribution-footer">
@@ -242,6 +297,26 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.spacing[8],
   },
   footerNote: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+  },
+  costSummaryRow: {
+    flexDirection: "row",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: theme.spacing[2],
+  },
+  costSummaryLabel: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+  },
+  costSummaryValue: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.lg,
+    fontVariant: ["tabular-nums"],
+  },
+  costSummaryCaption: {
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
   },

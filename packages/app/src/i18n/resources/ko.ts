@@ -2248,6 +2248,10 @@ export const ko: TranslationResources = {
   tokenUsage: {
     byModelTitle: "모델별 토큰",
     byRoleTitle: "역할별 토큰",
+    costLabel: "API 환산 비용",
+    costCaption:
+      "이 사용량을 API 정가로 계산했을 때의 비용입니다 — 고정 요금제에서 청구되는 금액이 아닙니다.",
+    unpricedFooter: "{{count}} 토큰은 알려진 가격이 없어 합계에 포함되지 않습니다",
   },
   review: {
     comment: {

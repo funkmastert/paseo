@@ -5,6 +5,7 @@ import { z } from "zod";
 import { weighTokenUsage } from "../agent/token-rate-tracker.js";
 import { writeFileAtomic } from "../atomic-file.js";
 import type { TokenUsageInternalRole } from "./token-usage-attribution.js";
+import { priceTokenUsage } from "./token-usage-pricing.js";
 import { UNKNOWN_MODEL, type TokenCounts } from "./transcript-parsers.js";
 
 /**
@@ -239,6 +240,7 @@ export class TokenUsageStore {
         output: 0,
         weighted: 0,
         responses: 0,
+        costUsd: null,
       };
       row.input += input;
       row.cacheWrite += cacheWrite;
@@ -255,6 +257,7 @@ export class TokenUsageStore {
         cacheReadInputTokens: row.cacheRead,
         outputTokens: row.output,
       });
+      row.costUsd = priceTokenUsage(row);
       if (row.responses > 0 || row.weighted > 0) result.push(row);
     }
     return result.sort((a, b) => b.weighted - a.weighted || a.model.localeCompare(b.model));

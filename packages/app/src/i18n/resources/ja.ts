@@ -2258,6 +2258,10 @@ export const ja: TranslationResources = {
   tokenUsage: {
     byModelTitle: "モデル別トークン",
     byRoleTitle: "ロール別トークン",
+    costLabel: "API相当コスト",
+    costCaption:
+      "この使用量をAPIの定価で計算した費用です — 固定料金プランで課金される金額ではありません。",
+    unpricedFooter: "{{count}} トークンは価格が不明なため、合計に含まれていません",
   },
   review: {
     comment: {

@@ -2271,6 +2271,10 @@ export const ptBR: TranslationResources = {
   tokenUsage: {
     byModelTitle: "Tokens por modelo",
     byRoleTitle: "Tokens por função",
+    costLabel: "Custo equivalente de API",
+    costCaption:
+      "O que esse uso custaria nos preços de tabela da API — não o que uma assinatura de taxa fixa cobra.",
+    unpricedFooter: "{{count}} tokens não têm preço conhecido e não estão incluídos no total",
   },
   review: {
     comment: {

@@ -43,25 +43,43 @@ function ModelBarTrack({ bar }: { bar: TokenUsageModelBar }) {
   );
 }
 
-function ModelRow({ bar, bordered }: { bar: TokenUsageModelBar; bordered: boolean }) {
+function ModelRow({
+  bar,
+  bordered,
+  costSupported,
+}: {
+  bar: TokenUsageModelBar;
+  bordered: boolean;
+  costSupported: boolean;
+}) {
   return (
     <View
-      style={[styles.row, bordered ? settingsStyles.rowBorder : null]}
+      style={[styles.rowContainer, bordered ? settingsStyles.rowBorder : null]}
       testID={`tokens-by-model-row-${bar.id}`}
     >
-      <Text
-        style={bar.isUnattributed ? styles.labelMuted : styles.label}
-        numberOfLines={1}
-        testID={`tokens-by-model-label-${bar.id}`}
-      >
-        {bar.label}
-      </Text>
-      <View style={styles.trackWrap}>
-        <ModelBarTrack bar={bar} />
+      <View style={styles.row}>
+        <Text
+          style={bar.isUnattributed ? styles.labelMuted : styles.label}
+          numberOfLines={1}
+          testID={`tokens-by-model-label-${bar.id}`}
+        >
+          {bar.label}
+        </Text>
+        <View style={styles.trackWrap}>
+          <ModelBarTrack bar={bar} />
+        </View>
+        <Text style={styles.value} testID={`tokens-by-model-value-${bar.id}`}>
+          {bar.formattedTotal}
+        </Text>
       </View>
-      <Text style={styles.value} testID={`tokens-by-model-value-${bar.id}`}>
-        {bar.formattedTotal}
-      </Text>
+      {/* Own line, not squeezed into a fixed-width column next to the token total: a lower-bound
+          "≥$X" cost can run longer than the plain total, and at phone widths the label plus both
+          values left no room for the bar track (docs/token-usage.md). */}
+      {costSupported ? (
+        <Text style={styles.costLine} testID={`tokens-by-model-cost-${bar.id}`}>
+          {bar.formattedCost ?? "—"}
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -71,14 +89,20 @@ function ModelRow({ bar, bordered }: { bar: TokenUsageModelBar; bordered: boolea
  * segments. Pure in its props — `buildTokenUsageModelBars` does the sorting and fraction math, this
  * only renders it.
  */
-export function TokensByModelCard({ bars }: { bars: TokenUsageModelBar[] }) {
+export function TokensByModelCard({
+  bars,
+  costSupported,
+}: {
+  bars: TokenUsageModelBar[];
+  costSupported: boolean;
+}) {
   const { t } = useTranslation();
   return (
     <SettingsSection title={t("tokenUsage.byModelTitle")} testID="tokens-by-model-card">
       <Legend />
       <View style={settingsStyles.card}>
         {bars.map((bar, index) => (
-          <ModelRow key={bar.id} bar={bar} bordered={index > 0} />
+          <ModelRow key={bar.id} bar={bar} bordered={index > 0} costSupported={costSupported} />
         ))}
       </View>
     </SettingsSection>
@@ -107,20 +131,27 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
   },
+  rowContainer: {
+    paddingVertical: theme.spacing[3],
+    paddingHorizontal: theme.spacing[4],
+  },
   row: {
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[3],
-    paddingVertical: theme.spacing[3],
-    paddingHorizontal: theme.spacing[4],
   },
+  // Was a fixed 180px, which left the bar track almost no room on a phone-width row (R7):
+  // `flexShrink` plus a smaller cap lets the label give way to the track instead of taking its
+  // full content width whenever the row has slack to spare.
   label: {
-    width: 180,
+    flexShrink: 1,
+    maxWidth: 120,
     color: theme.colors.foreground,
     fontSize: theme.fontSize.sm,
   },
   labelMuted: {
-    width: 180,
+    flexShrink: 1,
+    maxWidth: 120,
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
   },
@@ -144,6 +175,13 @@ const styles = StyleSheet.create((theme) => ({
   value: {
     minWidth: 56,
     color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    fontVariant: ["tabular-nums"],
+    textAlign: "right",
+  },
+  costLine: {
+    marginTop: theme.spacing[1],
+    color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
     fontVariant: ["tabular-nums"],
     textAlign: "right",

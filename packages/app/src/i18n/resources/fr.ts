@@ -2292,6 +2292,10 @@ export const fr: TranslationResources = {
   tokenUsage: {
     byModelTitle: "Tokens par modèle",
     byRoleTitle: "Tokens par rôle",
+    costLabel: "Coût équivalent API",
+    costCaption:
+      "Ce que cet usage coûterait aux prix catalogue de l'API — pas ce que facture un abonnement à tarif fixe.",
+    unpricedFooter: "{{count}} tokens n'ont pas de prix connu et ne sont pas inclus dans le total",
   },
   review: {
     comment: {

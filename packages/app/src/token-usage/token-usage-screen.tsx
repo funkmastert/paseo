@@ -31,6 +31,7 @@ function TokenUsageScreenContent(): ReactElement {
   const serverId = useActiveHostServerId();
   const connected = useHostRuntimeIsConnected(serverId ?? "");
   const supported = useHostFeature(serverId, "tokenUsage");
+  const costSupported = useHostFeature(serverId, "tokenUsageCost");
   const availability = resolveTokenUsageAvailability({
     hasHost: serverId !== null,
     connected,
@@ -66,6 +67,7 @@ function TokenUsageScreenContent(): ReactElement {
               onUnitChange={setUnit}
               range={range}
               onRangeChange={setRange}
+              costSupported={costSupported}
             />
           ) : null}
         </View>

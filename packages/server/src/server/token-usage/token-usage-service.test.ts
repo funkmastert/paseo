@@ -72,7 +72,60 @@ describe("TokenUsageService", () => {
       recordingSinceMs: null,
       backfill: { state: "off", filesDone: 0, filesTotal: 0 },
     });
+    expect(breakdown.totalCostUsd).toBeNull();
+    expect(breakdown.unpricedTokens).toBe(0);
     await expect(fs.stat(rootDir)).rejects.toThrow();
+  });
+
+  it("sums cost across priced rows and raw tokens across unpriced ones", async () => {
+    await writeTranscript(FAKE_CLAUDE_SESSION, [
+      claudeAssistantLine({ messageId: "priced", input: 1_000_000 }),
+    ]);
+    await writeTranscript("unpriced-session", [
+      claudeAssistantLine({
+        messageId: "unpriced",
+        sessionId: "unpriced-session",
+        model: "claude-opus-99",
+        input: 500,
+        cacheWrite: 0,
+        cacheRead: 0,
+        output: 0,
+      }),
+    ]);
+    const service = createService();
+
+    await service.runSweep();
+    const breakdown = await service.getBreakdown("24h");
+    await service.stop();
+
+    const pricedRow = breakdown.rows.find((row) => row.model === "claude-opus-5-5");
+    const unpricedRow = breakdown.rows.find((row) => row.model === "claude-opus-99");
+    expect(pricedRow?.costUsd).toBeGreaterThan(0);
+    expect(unpricedRow?.costUsd).toBeNull();
+    expect(breakdown.totalCostUsd).toBeCloseTo(pricedRow?.costUsd ?? 0, 6);
+    expect(breakdown.unpricedTokens).toBe(500);
+  });
+
+  it("reports totalCostUsd as null, not 0, when no row in range is priced", async () => {
+    await writeTranscript(FAKE_CLAUDE_SESSION, [
+      claudeAssistantLine({
+        messageId: "unpriced",
+        model: "claude-opus-99",
+        input: 500,
+        cacheWrite: 0,
+        cacheRead: 0,
+        output: 0,
+      }),
+    ]);
+    const service = createService();
+
+    await service.runSweep();
+    const breakdown = await service.getBreakdown("24h");
+    await service.stop();
+
+    expect(breakdown.rows.length).toBeGreaterThan(0);
+    expect(breakdown.totalCostUsd).toBeNull();
+    expect(breakdown.unpricedTokens).toBe(500);
   });
 
   it("reports the backfill pending, then running with progress, then done", async () => {

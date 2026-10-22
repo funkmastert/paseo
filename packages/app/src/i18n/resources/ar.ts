@@ -2236,6 +2236,10 @@ export const ar: TranslationResources = {
   tokenUsage: {
     byModelTitle: "الرموز حسب النموذج",
     byRoleTitle: "الرموز حسب الدور",
+    costLabel: "التكلفة المعادلة لواجهة API",
+    costCaption:
+      "ما ستكلفه هذه الاستخدامات بأسعار قائمة واجهة API — وليس ما يفوتَر به اشتراك بسعر ثابت.",
+    unpricedFooter: "{{count}} رمز بلا سعر معروف وغير مدرجة في الإجمالي",
   },
   review: {
     comment: {
