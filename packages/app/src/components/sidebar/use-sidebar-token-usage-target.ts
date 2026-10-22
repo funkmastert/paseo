@@ -9,7 +9,7 @@ export interface SidebarTokenUsageTarget {
 /**
  * Resolves the sidebar's "Tokens" entry target: the active host, when it is connected and speaks
  * `server_info.features.tokenUsage`. Null covers every case the row should render nothing for — no
- * host, a disconnected host, or an older daemon — mirroring `useSidebarJevDashboardTarget`.
+ * host, a disconnected host, or an older daemon.
  */
 export function useSidebarTokenUsageTarget(): SidebarTokenUsageTarget | null {
   const activeServerId = useActiveHostServerId();
