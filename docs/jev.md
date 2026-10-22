@@ -1811,8 +1811,8 @@ The global view of what JEV did on a host: tokens saved, live and would-have kep
 
 ### Where it lives
 
-- **The button.** `SidebarFooter` (`components/left-sidebar.tsx:450`) renders the footer of the desktop sidebar (`:825`) and of the phone's overlay (`:645`). Its icon row gains a JEV button just before `SidebarSupportSlot` (`:520`), which shows "Agent roles" beside the settings gear. A new hook, `components/sidebar/use-sidebar-jev-dashboard-target.ts`, resolves the active host as `use-sidebar-agent-roles-target.ts` does, and returns null unless that host is connected and `useHostFeature(serverId, "jevSavings")` is true. Null renders no button, so the footer never shows a dead one. Label "JEV dashboard"; icon `Gauge`. On the phone overlay the button closes the sidebar behind it (`SidebarFooter`'s `closeSidebar` prop, present only there); "Agent roles" got the same fix on the way, since it had the same gap.
-- **The route.** `/jev`, app-wide like `/ask-jev` (`app/ask-jev.tsx`), rendering `screens/jev-dashboard-screen.tsx`, registered where Ask JEV is (`app/_layout.tsx`, `utils/host-routes.ts`) and with a command-center action in `command-center/root-registration.tsx`. JEV belongs to a host, not a workspace. With more than one host the screen has a host picker, opening on the button's host (`?host=<serverId>`); `?agent=<id>` filters the recent list to that agent on load.
+- **The link.** The dashboard opens from Insights (`screens/insights-view.tsx`'s `DashboardLinkRow` labeled "JEV dashboard", wired in `screens/insights-screen.tsx`'s `openJevDashboard`). It has no entry of its own in the sidebar footer.
+- **The route.** `/jev`, app-wide like `/ask-jev` (`app/ask-jev.tsx`), rendering `screens/jev-dashboard-screen.tsx`, registered where Ask JEV is (`app/_layout.tsx`, `utils/host-routes.ts`) and with a command-center action in `command-center/root-registration.tsx`. JEV belongs to a host, not a workspace. With more than one host the screen has a host picker, opening on the active host (`?host=<serverId>`); `?agent=<id>` filters the recent list to that agent on load.
 - **The screen is split in two.** `jev-dashboard-screen.tsx` is the hook-wiring shell (host resolution, the two queries, the focus check that pauses polling, `router.push` for navigation); `jev-dashboard-view.tsx` holds every presentational piece and takes its data and callbacks as props, so it and its browser test mount with fixture data and no host, query client or navigation container behind them — the same split `account-budget-strip-view.tsx` uses.
 - **One screen for desktop, web and phone.** On a compact form factor (`useIsCompactFormFactor()`) the tiles stack two by two and the feature table becomes cards.
 
@@ -1858,8 +1858,7 @@ The ledger is merged: `JevService.savings` is a real `JevSavingsLedger`, and `we
 
 - `jev/jev-dashboard-model.test.ts`: tiles from a summary fixture; shadow never summed into live; the net; each tile's dollar line and its kind (list price or billed); a non-token feature has no token figure; each evidence state; `jevFeatureStateLabel`'s away-reply dry-run case.
 - `screens/jev-dashboard-view.browser.test.tsx`: `resolveJevDashboardAvailability`'s five states; `NotConfiguredBanner` per state; the ready content with fixture data — tiles, feature order including the dormant and dry-run labels, the feature-row filter callback, opening an agent from the top list, "Load more", the loading row; desktop and phone screenshots.
-- `components/sidebar/use-sidebar-jev-dashboard-target.test.ts`: null for no host, a disconnected host and an older daemon.
-- Verify: `npx vitest run packages/app/src/jev packages/app/src/screens/jev-dashboard-screen.tsx packages/app/src/screens/jev-dashboard-view.tsx packages/app/src/components/sidebar/use-sidebar-jev-dashboard-target.test.ts --bail=1`.
+- Verify: `npx vitest run packages/app/src/jev packages/app/src/screens/jev-dashboard-screen.tsx packages/app/src/screens/jev-dashboard-view.tsx --bail=1`.
 
 ## Feature 17: session title refresh
 
