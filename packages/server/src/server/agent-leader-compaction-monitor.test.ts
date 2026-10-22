@@ -379,6 +379,24 @@ describe("AgentLeaderCompactionMonitor with the quiet gate and carried prompts",
     const restore = fake.sent.at(-1)?.prompt ?? "";
     expect(restore).not.toContain("messages around the compaction");
   });
+
+  test("prepare's next-step bullet carries the newest queued prompt, not the first", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000, busy: true })];
+    const { monitor } = createMonitor(fake, { enabled: true, quietMinutes: 10 });
+
+    // The trigger fires while the leader is busy, so `prepare` stays in `waiting` across sweeps
+    // and queues both prompts before it ever starts.
+    await sweep(monitor);
+    fake.humanPrompt("leader-1", "first question", 1_000);
+    fake.humanPrompt("leader-1", "second question", 2_000);
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000, busy: false })];
+    await sweep(monitor);
+
+    const prepare = fake.sent.at(0)?.prompt ?? "";
+    expect(prepare).toContain('"second question"');
+    expect(prepare).not.toContain('"first question"');
+  });
 });
 
 describe("AgentLeaderCompactionMonitor with compaction timing", () => {

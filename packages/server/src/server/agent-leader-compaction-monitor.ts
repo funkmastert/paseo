@@ -200,7 +200,7 @@ function formatStepPrompt(
         episode.triggeredAtTokens,
         config,
         episode.trigger,
-        episode.carriedPrompts[0] ?? null,
+        episode.carriedPrompts.at(-1) ?? null,
       );
     case "compact":
       return formatCompactCommand(cutPoint);
