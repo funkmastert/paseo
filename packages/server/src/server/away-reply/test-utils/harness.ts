@@ -198,7 +198,7 @@ export function harness(options: HarnessOptions = {}) {
     messageSeq += 1;
     const clientMessageId = `tyler-${messageSeq}`;
     fleet.append(agentId, [{ at, item: { type: "user_message", text, clientMessageId } }]);
-    signal({ kind: "human-prompt", agentId, at: new Date(at), clientMessageId });
+    signal({ kind: "human-prompt", agentId, at: new Date(at), clientMessageId, text });
   }
 
   /** A leader Tyler asked something of, now waiting on him with `message`. */

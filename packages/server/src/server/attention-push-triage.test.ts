@@ -458,7 +458,7 @@ describe("sendAttentionPush", () => {
 
 describe("FinishFollowups", () => {
   function signal(agentId: string, atMs: number): AgentOperatorSignal {
-    return { kind: "human-prompt", agentId, at: new Date(atMs), clientMessageId: null };
+    return { kind: "human-prompt", agentId, at: new Date(atMs), clientMessageId: null, text: "" };
   }
 
   it("records how soon Tyler messaged a triaged agent, or that he did not within 2 hours", () => {
@@ -594,6 +594,8 @@ describe("the savings ledger (docs/jev.md, Savings)", () => {
       kind: "human-prompt",
       agentId: "agent-1",
       at: new Date(now),
+      clientMessageId: null,
+      text: "",
     } as AgentOperatorSignal);
 
     const [validated] = jev.savings.events({ range: "all" }).events;

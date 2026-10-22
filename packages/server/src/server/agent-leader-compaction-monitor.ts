@@ -1,5 +1,6 @@
 import type {
   AgentManager,
+  AgentOperatorSignal,
   IdleTurnOutcome,
   LeaderCompactionAgentSummary,
 } from "./agent/agent-manager.js";
@@ -10,6 +11,7 @@ import {
   type LeaderCompactionAction,
   planLeaderCompactionStep,
   resolveLeaderCompactionConfig,
+  type LeaderCompactionCarriedPrompt,
   type LeaderCompactionConfig,
   type LeaderCompactionEpisode,
   type LeaderCompactionSettings,
@@ -30,6 +32,10 @@ const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
  * whole: it goes back into a context this whole sequence exists to keep small.
  */
 const MAX_NOTE_CHARS = 20_000;
+/** A carried prompt longer than this is cut the same way: readable without ballooning the step. */
+const MAX_PROMPT_CHARS = 2_000;
+/** A stuck episode can stay open through hours of retries; keep only the most recent of these. */
+const MAX_CARRIED_PROMPTS = 20;
 
 interface LeaderCompactionMonitorLogger {
   info: (obj: object, msg?: string) => void;
@@ -38,7 +44,10 @@ interface LeaderCompactionMonitorLogger {
 }
 
 export interface AgentLeaderCompactionMonitorOptions {
-  agentManager: Pick<AgentManager, "listAgentsForLeaderCompaction" | "startTurnIfIdle">;
+  agentManager: Pick<
+    AgentManager,
+    "listAgentsForLeaderCompaction" | "startTurnIfIdle" | "subscribeOperatorSignals"
+  >;
   pushNotificationSender: PushNotificationSender;
   serverId: string;
   readDaemonConfig: () => { leaderCompaction?: LeaderCompactionSettings };
@@ -67,6 +76,7 @@ export function formatPrepareMessage(
   usedTokens: number,
   config: LeaderCompactionConfig,
   trigger: LeaderCompactionTrigger = { kind: "line" },
+  recentPrompt: LeaderCompactionCarriedPrompt | null = null,
 ): string {
   const size = `Your conversation is ${formatTokens(usedTokens)} tokens`;
   const line = formatTokens(config.prepareAtTokens);
@@ -75,6 +85,11 @@ export function formatPrepareMessage(
       ? `${size}. That is under the ${line} line, but ${trigger.reason}, so this is a clean ` +
         "point to compact it."
       : `${size}, over the ${line} line.`;
+  const nextStepBullet = recentPrompt
+    ? "- The exact next step. The user also sent you this, possibly not yet done: " +
+      `"${truncateAt(recentPrompt.text, MAX_PROMPT_CHARS, "message")}". If it is not done, make ` +
+      "answering it the next step."
+    : "- The exact next step.";
   return formatSystemNotificationPrompt(
     [
       `${LEADER_COMPACTION_MESSAGE_HEADER} 1 of 3. ${why} Every request you make ` +
@@ -91,7 +106,7 @@ export function formatPrepareMessage(
         "- What is done: commits, branches, PRs, files, with ids and paths.",
         "- What is in flight: each subagent id you are waiting on and what it is doing.",
         "- Decisions made and why, and dead ends not to try again.",
-        "- The exact next step.",
+        nextStepBullet,
       ].join("\n"),
       "Keep it under about 1,500 words. Facts over narrative.",
     ].join("\n\n"),
@@ -124,9 +139,29 @@ function describeCompaction(episode: LeaderCompactionEpisode): string {
   return `from ${formatTokens(from)} tokens; the history is now a ${formatTokens(to)}-token summary`;
 }
 
-function truncateNote(note: string): string {
-  if (note.length <= MAX_NOTE_CHARS) return note;
-  return `${note.slice(0, MAX_NOTE_CHARS)}\n\n[note cut at ${MAX_NOTE_CHARS} characters]`;
+function truncateAt(text: string, max: number, noun: string): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n\n[${noun} cut at ${max} characters]`;
+}
+
+/**
+ * The human prompts the leader got from shortly before `prepare` through to the start of
+ * `restore` (docs/leader-compaction.md, "Quiet gate and carried prompts"). Null when there were
+ * none: a quiet episode quotes nothing rather than saying so.
+ */
+function formatCarriedPrompts(prompts: readonly LeaderCompactionCarriedPrompt[]): string | null {
+  if (prompts.length === 0) return null;
+  const quoted = prompts
+    .map(
+      (prompt) => `<message>\n${truncateAt(prompt.text, MAX_PROMPT_CHARS, "message")}\n</message>`,
+    )
+    .join("\n");
+  return [
+    "The user sent you these messages around the compaction:",
+    quoted,
+    "Check that each one is answered or already in progress. Handle any that is not before you " +
+      "carry on from the note.",
+  ].join("\n\n");
 }
 
 /** Step 3. What happened, why, what did not change, and the note itself. */
@@ -134,23 +169,23 @@ export function formatRestoreMessage(episode: LeaderCompactionEpisode): string {
   const noteSection = episode.note
     ? [
         "Your restore note, written by you just before the compaction:",
-        `<restore-note>\n${truncateNote(episode.note)}\n</restore-note>`,
+        `<restore-note>\n${truncateAt(episode.note, MAX_NOTE_CHARS, "note")}\n</restore-note>`,
       ].join("\n\n")
     : "You did not leave a restore note, so the summary above is all that carried over. Check " +
       "the state of your work (git, your subagents) before acting on it.";
-  return formatSystemNotificationPrompt(
-    [
-      `${LEADER_COMPACTION_MESSAGE_HEADER} 3 of 3, done. Your conversation was compacted to cut ` +
-        `the cost of every request you make: ${describeCompaction(episode)}. Earlier ` +
-        "turns are now a summary, and your reasoning from before it is gone, so where the " +
-        "summary and the note disagree, trust the note. Nothing else changed: same agent id, " +
-        "same workspace, and your subagents are still running and still report to you.",
-      noteSection,
-      "Carry on from the note's next step. If you were waiting on subagents, there is nothing " +
-        "to do now; their finish notifications will wake you. Re-read a file before editing " +
-        "it rather than trusting the summary's memory of it.",
-    ].join("\n\n"),
-  );
+  const sections = [
+    `${LEADER_COMPACTION_MESSAGE_HEADER} 3 of 3, done. Your conversation was compacted to cut ` +
+      `the cost of every request you make: ${describeCompaction(episode)}. Earlier ` +
+      "turns are now a summary, and your reasoning from before it is gone, so where the " +
+      "summary and the note disagree, trust the note. Nothing else changed: same agent id, " +
+      "same workspace, and your subagents are still running and still report to you.",
+    noteSection,
+    formatCarriedPrompts(episode.carriedPrompts),
+    "Carry on from the note's next step. If you were waiting on subagents, there is nothing " +
+      "to do now; their finish notifications will wake you. Re-read a file before editing " +
+      "it rather than trusting the summary's memory of it.",
+  ].filter((section): section is string => section !== null);
+  return formatSystemNotificationPrompt(sections.join("\n\n"));
 }
 
 function formatStepPrompt(
@@ -161,7 +196,12 @@ function formatStepPrompt(
 ): string {
   switch (step) {
     case "prepare":
-      return formatPrepareMessage(episode.triggeredAtTokens, config, episode.trigger);
+      return formatPrepareMessage(
+        episode.triggeredAtTokens,
+        config,
+        episode.trigger,
+        episode.carriedPrompts.at(-1) ?? null,
+      );
     case "compact":
       return formatCompactCommand(cutPoint);
     case "restore":
@@ -215,14 +255,46 @@ export class AgentLeaderCompactionMonitor {
   private readonly states = new Map<string, LeaderCompactionState>();
   /** The `defer` verdict last reported per agent, so a verdict standing over many sweeps logs once. */
   private readonly reportedDeferrals = new Map<string, LeaderCompactionTiming>();
+  /** The quiet-gate hold last reported per agent, keyed on when it lifts, for the same reason. */
+  private readonly reportedQuietHolds = new Map<string, number>();
+  /** The leader's most recent human prompt the daemon has seen (the quiet gate; carried prompts
+   * come from the episode itself, appended live below). */
+  private readonly lastHumanPrompt = new Map<string, LeaderCompactionCarriedPrompt>();
   /** Turns this monitor started and has not seen end. Tests await them through `settle()`. */
   private readonly turns = new Set<Promise<void>>();
+  private readonly unsubscribeOperatorSignals: () => void;
 
   constructor(options: AgentLeaderCompactionMonitorOptions) {
     this.options = options;
     this.sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     this.now = options.now ?? Date.now;
     this.modeLog = new MonitorModeLog(options.logger);
+    // From construction, not `start`: a message sent before the first sweep still counts.
+    this.unsubscribeOperatorSignals = options.agentManager.subscribeOperatorSignals((signal) =>
+      this.onOperatorSignal(signal),
+    );
+  }
+
+  /**
+   * Tracks the leader's most recent human prompt, and carries it into an episode already open —
+   * through the start of `restore` (docs/leader-compaction.md): once that turn has started, the
+   * message it sent is already built, so anything after it is just a new message.
+   */
+  private onOperatorSignal(signal: AgentOperatorSignal): void {
+    if (signal.kind !== "human-prompt") return;
+    const prompt: LeaderCompactionCarriedPrompt = { atMs: signal.at.getTime(), text: signal.text };
+    this.lastHumanPrompt.set(signal.agentId, prompt);
+    const state = this.states.get(signal.agentId);
+    if (!state) return;
+    if (state.phase !== "waiting" && state.phase !== "backoff" && state.phase !== "inFlight") {
+      return;
+    }
+    if (state.phase === "inFlight" && state.step === "restore") return;
+    const carriedPrompts = [...state.episode.carriedPrompts, prompt].slice(-MAX_CARRIED_PROMPTS);
+    this.states.set(signal.agentId, {
+      ...state,
+      episode: { ...state.episode, carriedPrompts },
+    });
   }
 
   start(): void {
@@ -244,6 +316,7 @@ export class AgentLeaderCompactionMonitor {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.unsubscribeOperatorSignals();
   }
 
   reportMode(): void {
@@ -288,9 +361,26 @@ export class AgentLeaderCompactionMonitor {
     return phase === "waiting" || phase === "inFlight" || phase === "backoff";
   }
 
+  /** Dedup/quiet-gate bookkeeping, keyed only on agent id: reclaimed for a dead agent whether or
+   * not the monitor is enabled, so turning it off doesn't leave these growing forever. */
+  private pruneTrackingMaps(liveIds: ReadonlySet<string>): void {
+    for (const agentId of this.reportedDeferrals.keys()) {
+      if (!liveIds.has(agentId)) this.reportedDeferrals.delete(agentId);
+    }
+    for (const agentId of this.reportedQuietHolds.keys()) {
+      if (!liveIds.has(agentId)) this.reportedQuietHolds.delete(agentId);
+    }
+    for (const agentId of this.lastHumanPrompt.keys()) {
+      if (!liveIds.has(agentId)) this.lastHumanPrompt.delete(agentId);
+    }
+  }
+
   private sweep(): void {
     this.reportMode();
     const settings = this.options.readDaemonConfig().leaderCompaction;
+    const agents = this.options.agentManager.listAgentsForLeaderCompaction();
+    const liveIds = new Set(agents.map((agent) => agent.id));
+    this.pruneTrackingMaps(liveIds);
     if (settings?.enabled !== true) {
       // A turn already started still ends and is applied; everything else starts over when the
       // leg comes back, the same as after a restart.
@@ -301,15 +391,10 @@ export class AgentLeaderCompactionMonitor {
     }
     const config = resolveLeaderCompactionConfig(settings);
     const nowMs = this.now();
-    const agents = this.options.agentManager.listAgentsForLeaderCompaction();
-    const liveIds = new Set(agents.map((agent) => agent.id));
-    for (const agentId of this.states.keys()) {
-      if (!liveIds.has(agentId) && this.states.get(agentId)?.phase !== "inFlight") {
+    for (const [agentId, state] of this.states) {
+      if (!liveIds.has(agentId) && state.phase !== "inFlight") {
         this.states.delete(agentId);
       }
-    }
-    for (const agentId of this.reportedDeferrals.keys()) {
-      if (!liveIds.has(agentId)) this.reportedDeferrals.delete(agentId);
     }
 
     for (const agent of agents) {
@@ -320,6 +405,7 @@ export class AgentLeaderCompactionMonitor {
         config,
         nowMs,
         timing,
+        lastHumanPrompt: this.lastHumanPrompt.get(agent.id) ?? null,
       });
       this.setState(agent.id, plan.state);
       this.act(agent, plan.action, timing, config);
@@ -339,7 +425,14 @@ export class AgentLeaderCompactionMonitor {
         if (action.trigger.kind === "early") {
           this.options.timing?.noteEarlyStart(agent.id, { dryRun: true });
         }
-        this.reportDryRun(agent, action.usedTokens, action.startsNow, action.trigger, config);
+        this.reportDryRun(
+          agent,
+          action.usedTokens,
+          action.startsNow,
+          action.trigger,
+          action.recentPrompt,
+          config,
+        );
         return;
       case "defer":
         // The same verdict stands over every sweep until the next turn; say so once.
@@ -347,6 +440,13 @@ export class AgentLeaderCompactionMonitor {
           this.reportedDeferrals.set(agent.id, timing);
           this.options.timing?.noteDefer(agent.id, { dryRun: config.dryRun });
           this.reportDefer(agent, action.usedTokens, action.reason, config);
+        }
+        return;
+      case "quietHold":
+        // The same hold stands until it lifts or a new prompt arrives; say so once.
+        if (this.reportedQuietHolds.get(agent.id) !== action.quietUntilMs) {
+          this.reportedQuietHolds.set(agent.id, action.quietUntilMs);
+          this.reportQuietHold(agent, action.usedTokens, action.quietUntilMs, config);
         }
         return;
       case "startTurn":
@@ -383,6 +483,7 @@ export class AgentLeaderCompactionMonitor {
     usedTokens: number,
     startsNow: boolean,
     trigger: LeaderCompactionTrigger,
+    recentPrompt: LeaderCompactionCarriedPrompt | null,
     config: LeaderCompactionConfig,
   ): void {
     this.options.logger.info(
@@ -397,10 +498,31 @@ export class AgentLeaderCompactionMonitor {
         startsNow,
         trigger: trigger.kind,
         ...(trigger.kind === "early" ? { reason: trigger.reason } : {}),
-        prepareMessage: formatPrepareMessage(usedTokens, config, trigger),
+        prepareMessage: formatPrepareMessage(usedTokens, config, trigger, recentPrompt),
         compactCommand: formatCompactCommand(),
       },
       describeDryRunStart(trigger, startsNow),
+    );
+  }
+
+  private reportQuietHold(
+    agent: LeaderCompactionAgentSummary,
+    usedTokens: number,
+    quietUntilMs: number,
+    config: LeaderCompactionConfig,
+  ): void {
+    this.options.logger.info(
+      {
+        dryRun: config.dryRun,
+        agentId: agent.id,
+        title: agent.title,
+        usedTokens,
+        prepareAtTokens: config.prepareAtTokens,
+        quietUntil: new Date(quietUntilMs).toISOString(),
+      },
+      config.dryRun
+        ? "Leader compaction would hold: the leader messaged recently"
+        : "Leader compaction held: the leader messaged recently",
     );
   }
 
@@ -498,9 +620,15 @@ export class AgentLeaderCompactionMonitor {
     result: LeaderCompactionTurnResult,
     config: LeaderCompactionConfig,
   ): void {
+    // A prompt sent while this step's turn was running was carried by mutating `this.states`
+    // directly (`onOperatorSignal`), not the `episode` this call was started with. Read it back so
+    // that carry isn't lost under the outcome built here.
+    const live = this.states.get(agent.id);
+    const currentEpisode =
+      live && live.phase === "inFlight" && live.step === step ? live.episode : episode;
     const applied = applyLeaderCompactionTurnOutcome({
       step,
-      episode,
+      episode: currentEpisode,
       result,
       config,
       nowMs: this.now(),

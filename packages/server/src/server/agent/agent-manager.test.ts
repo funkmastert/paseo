@@ -8196,14 +8196,19 @@ test("a cancelled turn raises a turn-canceled signal with who cancelled it; a fi
   await manager.flush();
   expect(signals).toHaveLength(1);
 
-  manager.recordHumanPrompt(agent.id, "client-msg-1");
+  manager.recordHumanPrompt(agent.id, "client-msg-1", "hello again");
   manager.recordHumanPermissionResponse(agent.id, "req-1", { behavior: "deny" });
   expect(signals.slice(1)).toMatchObject([
-    { kind: "human-prompt", agentId: agent.id, clientMessageId: "client-msg-1" },
+    {
+      kind: "human-prompt",
+      agentId: agent.id,
+      clientMessageId: "client-msg-1",
+      text: "hello again",
+    },
     { kind: "human-permission-response", agentId: agent.id, requestId: "req-1" },
   ]);
   unsubscribe();
-  manager.recordHumanPrompt(agent.id, "client-msg-2");
+  manager.recordHumanPrompt(agent.id, "client-msg-2", "and again");
   expect(signals).toHaveLength(3);
 });
 

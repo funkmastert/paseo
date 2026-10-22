@@ -4076,8 +4076,8 @@ export class Session {
    * app, desktop or web UI; the CLI and MCP tools, which agents use too, never are. The away
    * auto-reply counts only these as Tyler (docs/jev.md, "Feature 14").
    */
-  private recordHumanPrompt(agentId: string, messageId: string | null): void {
-    if (this.clientActivity) this.agentManager.recordHumanPrompt(agentId, messageId);
+  private recordHumanPrompt(agentId: string, messageId: string | null, text: string): void {
+    if (this.clientActivity) this.agentManager.recordHumanPrompt(agentId, messageId, text);
   }
 
   /**
@@ -4124,7 +4124,7 @@ export class Session {
         clearPendingPermissions: true,
         logger: this.sessionLogger,
       });
-      this.recordHumanPrompt(delivered.agentId, messageId ?? null);
+      this.recordHumanPrompt(delivered.agentId, messageId ?? null, text);
       return { ok: true };
     } catch (error) {
       this.handleAgentRunError(agentId, error, "Failed to send agent message");
@@ -8393,7 +8393,7 @@ export class Session {
       } else {
         await send();
       }
-      this.recordHumanPrompt(agentId, msg.messageId ?? null);
+      this.recordHumanPrompt(agentId, msg.messageId ?? null, msg.text);
 
       this.emit({
         type: "send_agent_message_response",

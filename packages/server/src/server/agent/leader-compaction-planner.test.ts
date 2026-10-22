@@ -37,6 +37,7 @@ const episode: LeaderCompactionEpisode = {
   note: null,
   compactedFromTokens: null,
   compactedToTokens: null,
+  carriedPrompts: [],
 };
 
 function plan(state: LeaderCompactionState | undefined, agent: LeaderCompactionAgentInput) {
@@ -93,6 +94,7 @@ describe("planLeaderCompactionStep", () => {
       usedTokens: 500_000,
       startsNow: false,
       trigger: { kind: "line" },
+      recentPrompt: null,
     });
     const second = planLeaderCompactionStep({
       state: first.state,
@@ -237,6 +239,7 @@ describe("planLeaderCompactionStep with a compaction-timing verdict", () => {
       note: null,
       compactedFromTokens: null,
       compactedToTokens: null,
+      carriedPrompts: [],
     };
     expect(planWith(null, leader({ contextWindowUsedTokens: 450_000 }))).toEqual({
       state: { phase: "inFlight", step: "prepare", episode: lineEpisode },
@@ -250,6 +253,7 @@ describe("planLeaderCompactionStep with a compaction-timing verdict", () => {
         usedTokens: 450_000,
         startsNow: true,
         trigger: { kind: "line" },
+        recentPrompt: null,
       },
     });
   });
@@ -274,6 +278,7 @@ describe("planLeaderCompactionStep with a compaction-timing verdict", () => {
         usedTokens: 260_000,
         startsNow: true,
         trigger: { kind: "early", reason: "your last turn finished a unit of work" },
+        recentPrompt: null,
       },
     });
     const held = planWith(defer, leader({ contextWindowUsedTokens: 450_000 }), dry);
@@ -295,6 +300,84 @@ describe("planLeaderCompactionStep with a compaction-timing verdict", () => {
     });
     expect(plan(waiting, leader({ contextWindowUsedTokens: 40_000 })).state).toEqual({
       phase: "armed",
+    });
+  });
+});
+
+describe("planLeaderCompactionStep with the quiet gate", () => {
+  const quietConfig = resolveLeaderCompactionConfig({
+    enabled: true,
+    prepareAtTokens: 400_000,
+    quietMinutes: 10,
+    ceilingTokens: 550_000,
+  });
+
+  function planAt(nowMs: number, lastHumanPrompt: { atMs: number; text: string } | null) {
+    return planLeaderCompactionStep({
+      state: undefined,
+      agent: leader(),
+      config: quietConfig,
+      nowMs,
+      lastHumanPrompt,
+    });
+  }
+
+  test("holds a would-be start while the leader's last human prompt is recent", () => {
+    const result = planAt(5 * 60_000, { atMs: 0, text: "also fix the login bug" });
+    expect(result).toEqual({
+      state: { phase: "armed" },
+      action: { kind: "quietHold", usedTokens: 500_000, quietUntilMs: 10 * 60_000 },
+    });
+  });
+
+  test("starts once the leader has been quiet for quietMinutes, without carrying the stale prompt", () => {
+    const result = planAt(10 * 60_000, { atMs: 0, text: "also fix the login bug" });
+    expect(result.action).toMatchObject({ kind: "startTurn", step: "prepare" });
+    expect(result.state).toMatchObject({
+      phase: "inFlight",
+      step: "prepare",
+      episode: { carriedPrompts: [] },
+    });
+  });
+
+  test("starts at the ceiling despite a recent prompt, and carries it", () => {
+    const result = planLeaderCompactionStep({
+      state: undefined,
+      agent: leader({ contextWindowUsedTokens: 600_000 }),
+      config: quietConfig,
+      nowMs: 1_000,
+      lastHumanPrompt: { atMs: 0, text: "also fix the login bug" },
+    });
+    expect(result.action).toMatchObject({ kind: "startTurn", step: "prepare" });
+    expect(result.state).toMatchObject({
+      phase: "inFlight",
+      step: "prepare",
+      episode: { carriedPrompts: [{ atMs: 0, text: "also fix the login bug" }] },
+    });
+  });
+
+  test("no human prompt ever seen: no gate, same as today", () => {
+    const result = planAt(0, null);
+    expect(result.action).toMatchObject({ kind: "startTurn", step: "prepare" });
+  });
+
+  test("a dry run's recentPrompt matches what a live run would carry", () => {
+    const dry = resolveLeaderCompactionConfig({
+      enabled: true,
+      dryRun: true,
+      prepareAtTokens: 400_000,
+      ceilingTokens: 550_000,
+    });
+    const result = planLeaderCompactionStep({
+      state: undefined,
+      agent: leader({ contextWindowUsedTokens: 600_000 }),
+      config: dry,
+      nowMs: 1_000,
+      lastHumanPrompt: { atMs: 0, text: "also fix the login bug" },
+    });
+    expect(result.action).toMatchObject({
+      kind: "reportDryRun",
+      recentPrompt: { atMs: 0, text: "also fix the login bug" },
     });
   });
 });

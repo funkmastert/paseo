@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
 import type { AgentPromptInput } from "./agent/agent-sdk-types.js";
-import type { IdleTurnOutcome, LeaderCompactionAgentSummary } from "./agent/agent-manager.js";
+import type {
+  AgentOperatorSignal,
+  IdleTurnOutcome,
+  LeaderCompactionAgentSummary,
+} from "./agent/agent-manager.js";
 import { AgentLeaderCompactionMonitor } from "./agent-leader-compaction-monitor.js";
 import type { LeaderCompactionSettings } from "./agent/leader-compaction-planner.js";
 import type {
@@ -14,7 +18,7 @@ interface SentTurn {
 }
 
 /**
- * Stands in for AgentManager's two methods the monitor uses. Each started turn runs a scripted
+ * Stands in for AgentManager's three methods the monitor uses. Each started turn runs a scripted
  * outcome; `onTurn` lets a test change the agent (shrink its context, as a real /compact does).
  */
 class FakeAgents {
@@ -22,6 +26,7 @@ class FakeAgents {
   sent: SentTurn[] = [];
   outcomes: IdleTurnOutcome[] = [];
   onTurn: (turn: SentTurn) => void = () => undefined;
+  private readonly operatorSignalListeners = new Set<(signal: AgentOperatorSignal) => void>();
 
   listAgentsForLeaderCompaction(): LeaderCompactionAgentSummary[] {
     return this.agents.map((agent) => ({ ...agent }));
@@ -34,6 +39,35 @@ class FakeAgents {
     this.sent.push(turn);
     this.onTurn(turn);
     return Promise.resolve(this.outcomes.shift() ?? { status: "completed", finalText: "" });
+  }
+
+  subscribeOperatorSignals(listener: (signal: AgentOperatorSignal) => void): () => void {
+    this.operatorSignalListeners.add(listener);
+    return () => this.operatorSignalListeners.delete(listener);
+  }
+
+  /** As `session.ts` does for a message from the app/web/mobile client — never the CLI or MCP. */
+  humanPrompt(agentId: string, text: string, atMs: number): void {
+    const signal: AgentOperatorSignal = {
+      kind: "human-prompt",
+      agentId,
+      at: new Date(atMs),
+      clientMessageId: null,
+      text,
+    };
+    for (const listener of this.operatorSignalListeners) listener(signal);
+  }
+
+  /** A signal kind the monitor must not treat as a human prompt. */
+  permissionResponse(agentId: string, atMs: number): void {
+    const signal: AgentOperatorSignal = {
+      kind: "human-permission-response",
+      agentId,
+      at: new Date(atMs),
+      requestId: "req-1",
+      response: { behavior: "allow" },
+    };
+    for (const listener of this.operatorSignalListeners) listener(signal);
   }
 }
 
@@ -97,7 +131,12 @@ function defer(live: boolean): LeaderCompactionTimingVerdict {
   };
 }
 
-function createMonitor(fake: FakeAgents, settings: LeaderCompactionSettings, timing?: FakeTiming) {
+function createMonitor(
+  fake: FakeAgents,
+  settings: LeaderCompactionSettings,
+  timing?: FakeTiming,
+  now: () => number = () => 0,
+) {
   const pushes: Array<{ title: string; body: string; level?: string }> = [];
   const logs: Array<{ msg: string; obj: object }> = [];
   const logger = {
@@ -115,7 +154,7 @@ function createMonitor(fake: FakeAgents, settings: LeaderCompactionSettings, tim
     serverId: "server-1",
     readDaemonConfig: () => ({ leaderCompaction: settings }),
     logger,
-    now: () => 0,
+    now,
     timing,
   });
   return { monitor, pushes, logs };
@@ -226,6 +265,137 @@ describe("AgentLeaderCompactionMonitor", () => {
     // Automation has run out of tries and only a person can compact it now.
     expect(pushes[0]?.level).toBe("alert");
     expect(monitor.getState("leader-1")).toEqual({ phase: "settled", reason: "gaveUp" });
+  });
+});
+
+describe("AgentLeaderCompactionMonitor with the quiet gate and carried prompts", () => {
+  test("holds the start while the leader's last human prompt is recent, then starts without carrying the stale prompt", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    let nowMs = 0;
+    const { monitor, logs } = createMonitor(
+      fake,
+      { enabled: true, quietMinutes: 10 },
+      undefined,
+      () => nowMs,
+    );
+
+    fake.humanPrompt("leader-1", "also fix the login bug", 0);
+    nowMs = 5 * 60_000;
+    await sweep(monitor);
+    expect(fake.sent).toEqual([]);
+    expect(
+      logs.some((log) =>
+        /Leader compaction (would hold|held): the leader messaged recently/.test(log.msg),
+      ),
+    ).toBe(true);
+
+    nowMs = 10 * 60_000 + 1;
+    await sweep(monitor);
+    expect(fake.sent).toHaveLength(1);
+    expect(fake.sent[0]?.prompt).not.toContain("also fix the login bug");
+  });
+
+  test("starts at the ceiling despite a recent prompt, and carries it into prepare and restore", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 600_000 })];
+    fake.onTurn = (turn) => {
+      if (turn.prompt.startsWith("/compact")) {
+        fake.agents = [leader({ contextWindowUsedTokens: 29_000 })];
+      }
+    };
+    const { monitor } = createMonitor(
+      fake,
+      { enabled: true, quietMinutes: 10 },
+      undefined,
+      () => 1_000,
+    );
+    fake.humanPrompt("leader-1", "also fix the login bug", 0);
+
+    await sweep(monitor);
+    await sweep(monitor);
+    await sweep(monitor);
+
+    const [prepare, , restore] = fake.sent.map((turn) => turn.prompt);
+    expect(prepare).toContain("also fix the login bug");
+    expect(restore).toContain("also fix the login bug");
+    expect(restore).toContain("Check that each one is answered or already in progress");
+  });
+
+  test("a non-human operator signal never gates a start or appears in the restore message", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    fake.onTurn = (turn) => {
+      if (turn.prompt.startsWith("/compact")) {
+        fake.agents = [leader({ contextWindowUsedTokens: 29_000 })];
+      }
+    };
+    const { monitor } = createMonitor(fake, { enabled: true, quietMinutes: 10 });
+    fake.permissionResponse("leader-1", 0);
+
+    await sweep(monitor);
+    expect(fake.sent).toHaveLength(1);
+    await sweep(monitor);
+    await sweep(monitor);
+
+    const restore = fake.sent.at(-1)?.prompt ?? "";
+    expect(restore).not.toContain("messages around the compaction");
+  });
+
+  test("a prompt sent while a step is in flight is carried into the restore message", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 612_000 })];
+    fake.onTurn = (turn) => {
+      if (turn.prompt.startsWith("/compact")) {
+        fake.humanPrompt("leader-1", "please also check the CI run", 500);
+        fake.agents = [leader({ contextWindowUsedTokens: 31_000 })];
+      }
+    };
+    const { monitor } = createMonitor(fake, { enabled: true });
+
+    await sweep(monitor);
+    await sweep(monitor);
+    await sweep(monitor);
+
+    const restore = fake.sent.at(-1)?.prompt ?? "";
+    expect(restore).toContain("please also check the CI run");
+    expect(restore).toContain("Check that each one is answered or already in progress");
+  });
+
+  test("none quoted when there were none", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    fake.onTurn = (turn) => {
+      if (turn.prompt.startsWith("/compact")) {
+        fake.agents = [leader({ contextWindowUsedTokens: 29_000 })];
+      }
+    };
+    const { monitor } = createMonitor(fake, { enabled: true });
+
+    await sweep(monitor);
+    await sweep(monitor);
+    await sweep(monitor);
+
+    const restore = fake.sent.at(-1)?.prompt ?? "";
+    expect(restore).not.toContain("messages around the compaction");
+  });
+
+  test("prepare's next-step bullet carries the newest queued prompt, not the first", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000, busy: true })];
+    const { monitor } = createMonitor(fake, { enabled: true, quietMinutes: 10 });
+
+    // The trigger fires while the leader is busy, so `prepare` stays in `waiting` across sweeps
+    // and queues both prompts before it ever starts.
+    await sweep(monitor);
+    fake.humanPrompt("leader-1", "first question", 1_000);
+    fake.humanPrompt("leader-1", "second question", 2_000);
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000, busy: false })];
+    await sweep(monitor);
+
+    const prepare = fake.sent.at(0)?.prompt ?? "";
+    expect(prepare).toContain('"second question"');
+    expect(prepare).not.toContain('"first question"');
   });
 });
 
