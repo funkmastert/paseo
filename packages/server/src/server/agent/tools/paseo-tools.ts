@@ -125,6 +125,7 @@ import {
   resolveCurrentBranchWithGit,
 } from "../catastrophe-gate.js";
 import { TypedTerminalLines } from "../typed-terminal-lines.js";
+import { resolveAgentIdentifier } from "../resolve-agent-identifier.js";
 
 /**
  * The lines agents have typed into each terminal, for the catastrophe gate. One per daemon: a
@@ -635,6 +636,15 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     resolveCallerContext,
     logger,
   } = options;
+
+  async function resolveToolAgentId(identifier: string): Promise<string> {
+    const resolved = await resolveAgentIdentifier(identifier, { agentStorage, agentManager });
+    if (!resolved.ok) {
+      throw new Error(resolved.error);
+    }
+    return resolved.agentId;
+  }
+
   const childLogger = logger.child({ module: "agent", component: "paseo-tool-catalog" });
   const callerContext = callerAgentId ? (resolveCallerContext?.(callerAgentId) ?? null) : null;
 
@@ -1234,7 +1244,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     .object(legacyTopLevelCreateAgentInputSchema)
     .strict();
   const commonSendAgentPromptInputSchema = {
-    agentId: z.string(),
+    agentId: z.string().describe("Agent ID or unique prefix (the 7-char short ID works)."),
     prompt: z.string(),
     sessionMode: z.string().optional().describe("Optional mode to set before running the prompt."),
   };
@@ -2111,6 +2121,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       background = Boolean(callerAgentId),
       notifyOnFinish = Boolean(callerAgentId),
     }) => {
+      const resolvedAgentId = await resolveToolAgentId(requestedAgentId);
       const shouldNotifyOnFinish = Boolean(callerAgentId && notifyOnFinish && background);
 
       // A handle account failover retired delivers to where its conversation lives now, and
@@ -2118,18 +2129,18 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       const { agentId } = await sendPromptToAgent({
         agentManager,
         agentStorage,
-        agentId: requestedAgentId,
+        agentId: resolvedAgentId,
         prompt,
         sessionMode,
         logger: childLogger,
       });
       const moved =
-        agentId === requestedAgentId
+        agentId === resolvedAgentId
           ? null
           : {
               deliveredToAgentId: agentId,
               note:
-                `${requestedAgentId} moved to ${agentId} (account failover), so the prompt went ` +
+                `${resolvedAgentId} moved to ${agentId} (account failover), so the prompt went ` +
                 `to ${agentId}. Address ${agentId} from now on.`,
             };
 
@@ -2200,7 +2211,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         "labels and activity. Compact by default; full=true adds the provider resume handle, " +
         "capabilities, the mode catalogue and MCP server status.",
       inputSchema: {
-        agentId: z.string(),
+        agentId: z.string().describe("Agent ID or unique prefix (the 7-char short ID works)."),
         full: z
           .boolean()
           .optional()
@@ -2215,7 +2226,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         }),
       },
     },
-    async ({ agentId, full = false }) => {
+    async ({ agentId: requestedAgentId, full = false }) => {
+      const agentId = await resolveToolAgentId(requestedAgentId);
       const shapeSnapshot = <T extends z.infer<typeof AgentSnapshotPayloadSchema>>(snapshot: T) =>
         full ? snapshot : toCompactAgentSnapshot(snapshot);
       const snapshot = agentManager.getAgent(agentId);
@@ -2341,13 +2353,14 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       title: "Cancel agent run",
       description: "Abort the agent's current run but keep the agent alive for future tasks.",
       inputSchema: {
-        agentId: z.string(),
+        agentId: z.string().describe("Agent ID or unique prefix (the 7-char short ID works)."),
       },
       outputSchema: {
         success: z.boolean(),
       },
     },
-    async ({ agentId }) => {
+    async ({ agentId: requestedAgentId }) => {
+      const agentId = await resolveToolAgentId(requestedAgentId);
       const { cancelled } = await cancelAgentRunCommand(
         { agentManager, logger: childLogger },
         agentId,
@@ -2366,13 +2379,14 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       description:
         "Archive an agent (soft-delete). The agent is interrupted if running and removed from the active list.",
       inputSchema: {
-        agentId: z.string(),
+        agentId: z.string().describe("Agent ID or unique prefix (the 7-char short ID works)."),
       },
       outputSchema: {
         success: z.boolean(),
       },
     },
-    async ({ agentId }) => {
+    async ({ agentId: requestedAgentId }) => {
+      const agentId = await resolveToolAgentId(requestedAgentId);
       await archiveAgentCommand(
         {
           agentManager,
@@ -2394,13 +2408,14 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       title: "Kill agent",
       description: "Terminate an agent session permanently.",
       inputSchema: {
-        agentId: z.string(),
+        agentId: z.string().describe("Agent ID or unique prefix (the 7-char short ID works)."),
       },
       outputSchema: {
         success: z.boolean(),
       },
     },
-    async ({ agentId }) => {
+    async ({ agentId: requestedAgentId }) => {
+      const agentId = await resolveToolAgentId(requestedAgentId);
       await closeAgentCommand({ agentManager }, agentId);
       return {
         content: [],
@@ -2415,7 +2430,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       title: "Update agent",
       description: "Update an agent name, labels, and/or runtime settings.",
       inputSchema: {
-        agentId: z.string(),
+        agentId: z.string().describe("Agent ID or unique prefix (the 7-char short ID works)."),
         name: z.string().optional(),
         labels: z.record(z.string(), z.string()).optional().describe("Labels to set on the agent"),
         settings: UpdateAgentSettingsInputSchema.optional().describe(
@@ -2426,7 +2441,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         success: z.boolean(),
       },
     },
-    async ({ agentId, name, labels, settings }) => {
+    async ({ agentId: requestedAgentId, name, labels, settings }) => {
+      const agentId = await resolveToolAgentId(requestedAgentId);
       if (settings?.modeId !== undefined) {
         await agentManager.setAgentMode(agentId, settings.modeId);
       }
@@ -2468,7 +2484,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         agentId: z
           .string()
           .optional()
-          .describe("Target a child you created. Omit to target yourself."),
+          .describe(
+            "Target a child you created. Omit to target yourself. Agent ID or unique prefix (the 7-char short ID works).",
+          ),
       },
       outputSchema: {
         success: z.boolean(),
@@ -2482,6 +2500,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!callerAgentId) {
         throw new Error("set_completion_state requires a caller agent");
       }
+      const resolvedAgentId = agentId !== undefined ? await resolveToolAgentId(agentId) : undefined;
       const toCompletionStateAgentView = (agent: ReturnType<AgentManager["getAgent"]>) =>
         agent && {
           id: agent.id,
@@ -2503,7 +2522,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           },
           workspaceRegistry: options.workspaceRegistry,
         },
-        { callerAgentId, agentId, state, note },
+        { callerAgentId, agentId: resolvedAgentId, state, note },
       );
       return {
         content: [],
@@ -3384,7 +3403,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         `Return recent agent timeline entries as a curated summary. Shows the last ${COMPACT_ACTIVITY_LIMIT} ` +
         "entries unless you pass limit or full=true.",
       inputSchema: {
-        agentId: z.string(),
+        agentId: z.string().describe("Agent ID or unique prefix (the 7-char short ID works)."),
         limit: z
           .number()
           .optional()
@@ -3401,7 +3420,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         content: z.string(),
       },
     },
-    async ({ agentId, limit: requestedLimit, full = false }) => {
+    async ({ agentId: requestedAgentId, limit: requestedLimit, full = false }) => {
+      const agentId = await resolveToolAgentId(requestedAgentId);
       const limit = requestedLimit ?? (full ? undefined : COMPACT_ACTIVITY_LIMIT);
       await ensureAgentLoaded(agentId, {
         agentManager,
@@ -3446,7 +3466,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       description:
         "Switch the agent's session mode (plan, bypassPermissions, read-only, auto, etc.).",
       inputSchema: {
-        agentId: z.string(),
+        agentId: z.string().describe("Agent ID or unique prefix (the 7-char short ID works)."),
         modeId: z.string(),
       },
       outputSchema: {
@@ -3454,7 +3474,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         newMode: z.string(),
       },
     },
-    async ({ agentId, modeId }) => {
+    async ({ agentId: requestedAgentId, modeId }) => {
+      const agentId = await resolveToolAgentId(requestedAgentId);
       const result = await setAgentModeCommand({ agentManager }, { agentId, modeId });
       return {
         content: [],
@@ -3504,7 +3525,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       description:
         "Approve or deny a pending permission request with an AgentManager-compatible response payload.",
       inputSchema: {
-        agentId: z.string(),
+        agentId: z.string().describe("Agent ID or unique prefix (the 7-char short ID works)."),
         requestId: z.string(),
         response: AgentPermissionResponseSchema,
       },
@@ -3512,7 +3533,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         success: z.boolean(),
       },
     },
-    async ({ agentId, requestId, response }) => {
+    async ({ agentId: requestedAgentId, requestId, response }) => {
+      const agentId = await resolveToolAgentId(requestedAgentId);
       await respondToAgentPermission({
         agentManager,
         agentId,
