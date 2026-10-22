@@ -1900,8 +1900,12 @@ export const ko: TranslationResources = {
       subtitle: "풀 리퀘스트 세부 정보",
       emptyTitle: "아직 풀 리퀘스트가 없습니다",
       emptyDescription: "이 체크아웃에 풀 리퀘스트를 만들면 세부 정보가 여기에 표시됩니다.",
+      unsupportedForgeDescription:
+        "이 포지는 이 방식으로 풀 리퀘스트 상태를 가져오는 것을 지원하지 않습니다.",
+      openInBrowser: "브라우저에서 열기",
     },
     pullRequests: {
+      subtitle: "이 에이전트 또는 그 하위 에이전트가 연 풀 리퀘스트",
       back: "뒤로",
       untitled: "풀 리퀘스트 #{{number}}",
       emptyTitle: "아직 풀 리퀘스트가 없습니다",

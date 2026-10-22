@@ -50,6 +50,8 @@ export function usePullRequests({
     enabled: queryEnabled,
     refetchInterval: queryEnabled ? REFETCH_INTERVAL_MS : false,
     refetchOnWindowFocus: false,
+    // The fixed interval above is already the retry.
+    retry: false,
   });
 
   return {

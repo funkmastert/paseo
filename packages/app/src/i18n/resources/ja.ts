@@ -1908,8 +1908,12 @@ export const ja: TranslationResources = {
       emptyTitle: "プルリクエストはまだありません",
       emptyDescription:
         "このチェックアウトのプルリクエストを作成すると、ここに詳細が表示されます。",
+      unsupportedForgeDescription:
+        "このフォージではこの方法でプルリクエストの状態を取得できません。",
+      openInBrowser: "ブラウザで開く",
     },
     pullRequests: {
+      subtitle: "このエージェントまたはそのサブエージェントが開いたプルリクエスト",
       back: "戻る",
       untitled: "プルリクエスト #{{number}}",
       emptyTitle: "プルリクエストはまだありません",

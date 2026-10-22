@@ -1890,8 +1890,11 @@ export const ar: TranslationResources = {
       subtitle: "تفاصيل طلب السحب",
       emptyTitle: "لا يوجد طلب سحب بعد",
       emptyDescription: "أنشئ طلب سحب لنسخة العمل هذه لعرض تفاصيله هنا.",
+      unsupportedForgeDescription: "لا تدعم هذه المنصة جلب حالة طلب السحب بهذه الطريقة.",
+      openInBrowser: "فتح في المتصفح",
     },
     pullRequests: {
+      subtitle: "طلبات السحب التي فتحها هذا الوكيل أو وكلاؤه الفرعيون",
       back: "رجوع",
       untitled: "طلب السحب #{{number}}",
       emptyTitle: "لا توجد طلبات سحب بعد",

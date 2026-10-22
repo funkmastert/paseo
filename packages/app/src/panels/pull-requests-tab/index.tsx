@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { Linking, Pressable, Text, View } from "react-native";
+import { useCallback, useState } from "react";
+import { FlatList, Pressable, Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { ChevronLeft } from "lucide-react-native";
 import { useTranslation } from "react-i18next";
@@ -13,8 +13,11 @@ import {
   usePrPaneDataByIdentity,
   type PullRequestIdentity,
 } from "@/git/pull-request-panel/use-data-by-identity";
+import { openExternalUrl } from "@/utils/open-external-url";
+import { useWorkspaceDirectory } from "@/stores/session-store-hooks";
 import type { PullRequestLedgerEntry } from "@getpaseo/protocol/pull-requests/rpc-schemas";
 import { usePullRequests } from "./use-pull-requests";
+import { resolveStatusCwd } from "./use-row-status";
 import { PullRequestRow } from "./row";
 
 export interface PullRequestsTabContentProps {
@@ -23,13 +26,18 @@ export interface PullRequestsTabContentProps {
   isOpen: boolean;
 }
 
-function toIdentity(entry: PullRequestLedgerEntry): PullRequestIdentity {
+/** The creating agent's cwd selects which authenticated CLI context a status fetch runs from —
+ * fall back to the viewing workspace's own cwd when that agent is gone (archived, restarted). */
+function toIdentity(
+  entry: PullRequestLedgerEntry,
+  fallbackCwd: string | null,
+): PullRequestIdentity {
   return {
     host: entry.host,
     repoOwner: entry.repoOwner,
     repoName: entry.repoName,
     number: entry.number,
-    cwd: entry.creatingAgentCwd,
+    cwd: resolveStatusCwd(entry.creatingAgentCwd, fallbackCwd),
   };
 }
 
@@ -37,30 +45,42 @@ function PullRequestDetail({
   serverId,
   workspaceId,
   entry,
+  isOpen,
   onBack,
 }: {
   serverId: string;
   workspaceId?: string | null;
   entry: PullRequestLedgerEntry;
+  isOpen: boolean;
   onBack: () => void;
 }) {
   const { t } = useTranslation();
-  const identity = toIdentity(entry);
-  const prPane = usePrPaneDataByIdentity({ serverId, identity });
+  const fallbackCwd = useWorkspaceDirectory(serverId, workspaceId ?? null);
+  const identity = toIdentity(entry, fallbackCwd);
+  const prPane = usePrPaneDataByIdentity({ serverId, identity, enabled: isOpen });
 
-  const handleRetry = useCallback(() => {
-    void Linking.openURL(entry.url);
+  const handleOpenInBrowser = useCallback(() => {
+    void openExternalUrl(entry.url);
   }, [entry.url]);
 
-  // A forge with no identity-based status lookup opens the PR URL instead of a broken detail
-  // view (docs/pull-request-ledger.md).
-  useEffect(() => {
-    if (prPane.unsupportedForge) void Linking.openURL(entry.url);
-  }, [prPane.unsupportedForge, entry.url]);
-
   const renderContent = () => {
+    // A forge with no identity-based status lookup can't drive a detail view; let the person
+    // open the PR itself instead of showing a skeleton that never resolves.
     if (prPane.unsupportedForge) {
-      return <PullRequestPaneSkeleton />;
+      return (
+        <View style={styles.empty} testID="pull-request-detail-unsupported">
+          <Text style={styles.emptyDescription}>
+            {t("panels.pullRequest.unsupportedForgeDescription")}
+          </Text>
+          <Pressable
+            onPress={handleOpenInBrowser}
+            accessibilityRole="button"
+            testID="pull-request-detail-open-in-browser"
+          >
+            <Text style={styles.link}>{t("panels.pullRequest.openInBrowser")}</Text>
+          </Pressable>
+        </View>
+      );
     }
     if (prPane.data) {
       return (
@@ -78,7 +98,7 @@ function PullRequestDetail({
       );
     }
     if (prPane.error) {
-      return <PullRequestPaneError onRetry={handleRetry} />;
+      return <PullRequestPaneError onRetry={prPane.refetch} />;
     }
     return <PullRequestPaneSkeleton />;
   };
@@ -106,14 +126,28 @@ export function PullRequestsTabContent({
   isOpen,
 }: PullRequestsTabContentProps) {
   const { t } = useTranslation();
-  const [selected, setSelected] = useState<PullRequestLedgerEntry | null>(null);
+  const [selected, setSelectedState] = useState<PullRequestLedgerEntry | null>(null);
+  const fallbackCwd = useWorkspaceDirectory(serverId, workspaceId ?? null);
   const { pullRequests, isLoading, isError } = usePullRequests({
     serverId,
     workspaceId,
     enabled: isOpen,
   });
 
-  const handleBack = useCallback(() => setSelected(null), []);
+  const handleBack = useCallback(() => setSelectedState(null), [setSelectedState]);
+  const renderRow = useCallback(
+    ({ item }: { item: PullRequestLedgerEntry }) => (
+      <PullRequestRow
+        serverId={serverId}
+        entry={item}
+        fallbackCwd={fallbackCwd}
+        isOpen={isOpen}
+        onPress={setSelectedState}
+      />
+    ),
+    [serverId, fallbackCwd, isOpen, setSelectedState],
+  );
+  const keyExtractor = useCallback((entry: PullRequestLedgerEntry) => entry.id, []);
 
   if (selected) {
     return (
@@ -121,12 +155,15 @@ export function PullRequestsTabContent({
         serverId={serverId}
         workspaceId={workspaceId}
         entry={selected}
+        isOpen={isOpen}
         onBack={handleBack}
       />
     );
   }
 
-  if (isError) {
+  // An error with cached rows to show still shows them, with an inline note — only a bare
+  // error (no prior successful fetch) replaces the list entirely.
+  if (isError && pullRequests.length === 0) {
     return (
       <View style={styles.empty} testID="pull-requests-error-state">
         <Text style={styles.emptyTitle}>{t("panels.pullRequests.errorTitle")}</Text>
@@ -146,21 +183,26 @@ export function PullRequestsTabContent({
 
   return (
     <View style={styles.list} testID="pull-requests-list">
-      {pullRequests.map((entry) => (
-        <PullRequestRow
-          key={entry.id}
-          serverId={serverId}
-          entry={entry}
-          isOpen={isOpen}
-          onPress={setSelected}
-        />
-      ))}
+      {isError ? (
+        <Text style={styles.inlineError} testID="pull-requests-inline-error">
+          {t("panels.pullRequests.errorTitle")}
+        </Text>
+      ) : null}
+      <FlatList
+        data={pullRequests}
+        keyExtractor={keyExtractor}
+        renderItem={renderRow}
+        style={styles.flatList}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
   list: {
+    flex: 1,
+  },
+  flatList: {
     flex: 1,
   },
   detail: {
@@ -188,5 +230,15 @@ const styles = StyleSheet.create((theme) => ({
   },
   emptyDescription: {
     color: theme.colors.foregroundMuted,
+    textAlign: "center",
+  },
+  inlineError: {
+    color: theme.colors.statusDanger,
+    fontSize: theme.fontSize.sm,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+  },
+  link: {
+    color: theme.colors.accent,
   },
 }));

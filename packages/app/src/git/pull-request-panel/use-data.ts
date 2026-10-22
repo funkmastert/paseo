@@ -14,7 +14,10 @@ import { mapPrPaneData, type PrPaneData } from "./data";
 import { prPaneTimelineQueryKey } from "./query-keys";
 
 type CheckoutPrStatus = CheckoutPrStatusResponse["payload"]["status"];
-type CheckoutPrStatusPayloadError = CheckoutPrStatusResponse["payload"]["error"];
+// Widened to the shape every caller actually reads (`.message`): the cwd-scoped checkout status
+// RPC's error carries `{code, message}`, while the by-identity RPC's carries `{kind, message}` —
+// this accepts either without the by-identity hook forging a fake `code`.
+type CheckoutPrStatusPayloadError = { message: string } | null;
 type PullRequestTimeline = PullRequestTimelineResponse["payload"];
 
 export interface UsePrPaneDataOptions {

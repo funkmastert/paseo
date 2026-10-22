@@ -1936,8 +1936,12 @@ export const es: TranslationResources = {
       subtitle: "Detalles de la solicitud de extracción",
       emptyTitle: "Aún no hay ninguna solicitud de extracción",
       emptyDescription: "Crea una solicitud para este checkout y consulta aquí sus detalles.",
+      unsupportedForgeDescription:
+        "Este forge no admite obtener el estado de una solicitud de extracción de esta forma.",
+      openInBrowser: "Abrir en el navegador",
     },
     pullRequests: {
+      subtitle: "Solicitudes de extracción abiertas por este agente o sus subagentes",
       back: "Atrás",
       untitled: "Solicitud de extracción n.°{{number}}",
       emptyTitle: "Aún no hay solicitudes de extracción",

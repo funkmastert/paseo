@@ -1921,8 +1921,12 @@ export const ru: TranslationResources = {
       subtitle: "Сведения о PR",
       emptyTitle: "PR пока нет",
       emptyDescription: "Создайте PR для этой рабочей копии, чтобы увидеть здесь сведения о нём.",
+      unsupportedForgeDescription:
+        "Эта платформа не поддерживает получение статуса PR таким способом.",
+      openInBrowser: "Открыть в браузере",
     },
     pullRequests: {
+      subtitle: "Пул-реквесты, открытые этим агентом или его подагентами",
       back: "Назад",
       untitled: "PR #{{number}}",
       emptyTitle: "Пока нет PR",

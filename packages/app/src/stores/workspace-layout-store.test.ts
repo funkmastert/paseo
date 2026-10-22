@@ -1379,6 +1379,7 @@ describe("workspace-layout-store actions", () => {
       changes_tree: { kind: "changes_tree" },
       files: { kind: "files" },
       pull_request: { kind: "pull_request" },
+      pull_requests: { kind: "pull_requests" },
       orchestration: { kind: "orchestration" },
       file: { kind: "file", path: "src/a.ts" },
       working_diff: { kind: "working_diff" },

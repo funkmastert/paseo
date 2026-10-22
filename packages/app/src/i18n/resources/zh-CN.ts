@@ -1869,8 +1869,11 @@ export const zhCN: TranslationResources = {
       subtitle: "拉取请求详情",
       emptyTitle: "尚无拉取请求",
       emptyDescription: "为此检出创建拉取请求后，可在此处查看其详情。",
+      unsupportedForgeDescription: "该代码托管平台不支持以此方式获取拉取请求的状态。",
+      openInBrowser: "在浏览器中打开",
     },
     pullRequests: {
+      subtitle: "该代理或其子代理打开的拉取请求",
       back: "返回",
       untitled: "拉取请求 #{{number}}",
       emptyTitle: "暂无拉取请求",

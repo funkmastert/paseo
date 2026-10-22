@@ -11,8 +11,9 @@ import {
   unsupportedTimelineKey,
   type UsePrPaneDataResult,
 } from "./use-data.js";
-import { prPaneTimelineQueryKey } from "./query-keys.js";
+import { prPaneTimelineByIdentityQueryKey } from "./query-keys.js";
 import {
+  STATUS_STALE_TIME_MS,
   useForgeStatusByIdentity,
   type PullRequestIdentity,
 } from "./use-forge-status-by-identity.js";
@@ -41,7 +42,10 @@ export function usePrPaneDataByIdentity({
   identity,
   enabled = true,
   timelineEnabled = enabled,
-}: UsePrPaneDataByIdentityOptions): UsePrPaneDataResult & { unsupportedForge: boolean } {
+}: UsePrPaneDataByIdentityOptions): UsePrPaneDataResult & {
+  unsupportedForge: boolean;
+  refetch: () => void;
+} {
   const { t } = useTranslation();
   const daemonClient = useHostRuntimeClient(serverId);
   const isConnected = useHostRuntimeIsConnected(serverId);
@@ -69,12 +73,22 @@ export function usePrPaneDataByIdentity({
 
   const timelineQuery = useFetchQuery<PullRequestTimeline>({
     dataShape: "value",
-    // Once fetched, a timeline page is treated as immutable (refetch only on explicit
-    // invalidation), matching the cwd-derived hook's `staleTime: Infinity`.
-    immutableWhen: () => true,
+    // A finite stale time (matching the status cadence) rather than treating the page as
+    // immutable forever — new timeline activity (comments, reviews) should surface on remount.
+    staleTimeMs: STATUS_STALE_TIME_MS,
+    // A distinct kind from the cwd-scoped hook's prPaneTimelineQueryKey, keyed by forge identity
+    // rather than cwd: two different repos never collide just because their creating agents
+    // happened to share a cwd value.
     queryKey: useMemo(
-      () => prPaneTimelineQueryKey({ serverId, cwd: identity.cwd, prNumber: identity.number }),
-      [serverId, identity.cwd, identity.number],
+      () =>
+        prPaneTimelineByIdentityQueryKey({
+          serverId,
+          host: identity.host,
+          repoOwner: identity.repoOwner,
+          repoName: identity.repoName,
+          number: identity.number,
+        }),
+      [serverId, identity.host, identity.repoOwner, identity.repoName, identity.number],
     ),
     queryFn: async () => {
       if (!daemonClient) throw new Error(t("common.errors.daemonClientUnavailable"));
@@ -96,7 +110,7 @@ export function usePrPaneDataByIdentity({
   return {
     ...selectPrPaneState({
       status: statusResult.status,
-      statusPayloadError: null,
+      statusPayloadError: statusResult.payloadError,
       statusError: statusResult.error,
       statusIsLoading: statusResult.isLoading,
       statusIsFetching: statusResult.isFetching,
@@ -110,5 +124,6 @@ export function usePrPaneDataByIdentity({
       timelineIsFetching: timelineQuery.isFetching,
     }),
     unsupportedForge: statusResult.unsupportedForge,
+    refetch: statusResult.refetch,
   };
 }

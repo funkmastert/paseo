@@ -12,6 +12,26 @@ export function prPaneTimelineQueryKey({
   return [prPaneTimelineQueryKind, serverId, cwd, prNumber] as const;
 }
 
+export const prPaneTimelineByIdentityQueryKind = "prPaneTimelineByIdentity";
+
+/** Keyed by forge identity, not cwd: distinct from prPaneTimelineQueryKey so two different repos
+ * never collide just because their creating agents happen to share a cwd value. */
+export function prPaneTimelineByIdentityQueryKey({
+  serverId,
+  host,
+  repoOwner,
+  repoName,
+  number,
+}: {
+  serverId: string;
+  host: string;
+  repoOwner: string;
+  repoName: string;
+  number: number;
+}) {
+  return [prPaneTimelineByIdentityQueryKind, serverId, host, repoOwner, repoName, number] as const;
+}
+
 export const prPaneStatusByIdentityQueryKind = "prPaneStatusByIdentity";
 
 export function prPaneStatusByIdentityQueryKey({

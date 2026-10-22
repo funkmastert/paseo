@@ -1901,8 +1901,12 @@ export const en = {
       subtitle: "Pull request details",
       emptyTitle: "No pull request yet",
       emptyDescription: "Create a pull request for this checkout to see its details here.",
+      unsupportedForgeDescription:
+        "This forge doesn't support fetching a pull request's status this way.",
+      openInBrowser: "Open in browser",
     },
     pullRequests: {
+      subtitle: "Pull requests this agent or its subagents opened",
       back: "Back",
       untitled: "PR #{{number}}",
       emptyTitle: "No PRs yet",

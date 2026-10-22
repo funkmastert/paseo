@@ -19,11 +19,18 @@ export function resolveExplorerSidebarTab(input: {
   isGit: boolean;
   availableTabs: ExplorerTab[];
 }): ExplorerTab {
-  const requestedTab: ExplorerTab =
+  let requestedTab: ExplorerTab =
     !input.isGit &&
     (input.activeTab === "changes" || input.activeTab === "pr" || input.activeTab === "prs")
       ? "files"
       : input.activeTab;
+  // The "pr"/"prs" alias is resolved here, against this host's actual availableTabs, rather than
+  // migrated blind in explorer-tab-memory.ts — a host without the ledger feature only has "pr".
+  if (requestedTab === "pr" && input.availableTabs.includes("prs")) {
+    requestedTab = "prs";
+  } else if (requestedTab === "prs" && !input.availableTabs.includes("prs")) {
+    requestedTab = "pr";
+  }
   return input.availableTabs.includes(requestedTab)
     ? requestedTab
     : (input.availableTabs[0] ?? "files");

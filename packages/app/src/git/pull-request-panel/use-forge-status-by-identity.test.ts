@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { isUnsupportedForgeStatusError } from "./use-forge-status-by-identity.js";
+import {
+  isUnsupportedForgeStatusError,
+  nextStatusRefetchInterval,
+} from "./use-forge-status-by-identity.js";
+
+const STATUS_REFETCH_INTERVAL_MS = 60_000;
 
 function unknownSchemaError(requestType: string): Error {
   const error = new Error("unknown schema") as Error & { code: string; requestType: string };
@@ -35,5 +40,63 @@ describe("isUnsupportedForgeStatusError", () => {
 
   it("is false when there is no error at all", () => {
     expect(isUnsupportedForgeStatusError({ payloadErrorKind: null, queryError: null })).toBe(false);
+  });
+});
+
+describe("nextStatusRefetchInterval", () => {
+  it("polls at the fixed cadence for an open PR while enabled", () => {
+    expect(
+      nextStatusRefetchInterval({
+        queryEnabled: true,
+        status: { isMerged: false, state: "open" },
+        unsupportedForge: false,
+      }),
+    ).toBe(STATUS_REFETCH_INTERVAL_MS);
+  });
+
+  it("stops polling once a PR is merged", () => {
+    expect(
+      nextStatusRefetchInterval({
+        queryEnabled: true,
+        status: { isMerged: true, state: "open" },
+        unsupportedForge: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("stops polling once a PR's state is no longer open", () => {
+    expect(
+      nextStatusRefetchInterval({
+        queryEnabled: true,
+        status: { isMerged: false, state: "closed" },
+        unsupportedForge: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("stops polling for an unsupported forge", () => {
+    expect(
+      nextStatusRefetchInterval({
+        queryEnabled: true,
+        status: null,
+        unsupportedForge: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("stops polling when the query is disabled (hidden row/tab)", () => {
+    expect(
+      nextStatusRefetchInterval({
+        queryEnabled: false,
+        status: { isMerged: false, state: "open" },
+        unsupportedForge: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps polling at the fixed cadence before the first status arrives", () => {
+    expect(
+      nextStatusRefetchInterval({ queryEnabled: true, status: null, unsupportedForge: false }),
+    ).toBe(STATUS_REFETCH_INTERVAL_MS);
   });
 });

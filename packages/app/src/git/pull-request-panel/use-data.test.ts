@@ -514,7 +514,7 @@ describe("selectPrPaneState", () => {
     const state = selectPrPaneState({
       ...baseSelectInput,
       status: prStatus(),
-      statusPayloadError: { code: "UNKNOWN", message: "bad daemon payload" },
+      statusPayloadError: { message: "bad daemon payload" },
     });
 
     expect(state.error?.message).toContain("bad daemon payload");
@@ -523,7 +523,7 @@ describe("selectPrPaneState", () => {
   it("falls back to a generic message when the status payload error is empty", () => {
     const state = selectPrPaneState({
       ...baseSelectInput,
-      statusPayloadError: { code: "UNKNOWN", message: "" },
+      statusPayloadError: { message: "" },
     });
 
     expect(state.error?.message).toBe("Unable to load pull request status");

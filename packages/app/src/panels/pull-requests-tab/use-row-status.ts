@@ -2,17 +2,25 @@ import { useForgeStatusByIdentity } from "@/git/pull-request-panel/use-forge-sta
 import type { PullRequestLedgerEntry } from "@getpaseo/protocol/pull-requests/rpc-schemas";
 
 export interface RowPullRequestStatus {
-  state: "open" | "merged" | "closed";
+  // "unknown" covers loading, an error, an unsupported forge, and a not-found response alike —
+  // none of them mean the PR is closed, so none of them get the closed glyph.
+  state: "unknown" | "open" | "merged" | "closed";
   checksStatus: string | undefined;
   reviewDecision: string | null | undefined;
 }
 
-function resolveRowState(
+/** The creating agent's cwd selects which authenticated CLI context a status fetch runs from;
+ * fall back to the viewing workspace's own cwd once that agent is gone (archived, restarted). */
+export function resolveStatusCwd(creatingAgentCwd: string, fallbackCwd: string | null): string {
+  return creatingAgentCwd || fallbackCwd || "";
+}
+
+export function resolveRowState(
   status: { isMerged: boolean; state: string } | null,
 ): RowPullRequestStatus["state"] {
-  if (status?.isMerged) return "merged";
-  if (status?.state === "open") return "open";
-  return "closed";
+  if (!status) return "unknown";
+  if (status.isMerged) return "merged";
+  return status.state === "open" ? "open" : "closed";
 }
 
 /** A row's live status, fetched independently of its detail view (no timeline fetch) so a long
@@ -20,10 +28,13 @@ function resolveRowState(
 export function useRowPullRequestStatus({
   serverId,
   entry,
+  fallbackCwd,
   enabled,
 }: {
   serverId: string;
   entry: PullRequestLedgerEntry;
+  /** The viewing workspace's cwd: used when the creating agent's cwd is gone. */
+  fallbackCwd: string | null;
   enabled: boolean;
 }): RowPullRequestStatus {
   const { status } = useForgeStatusByIdentity({
@@ -33,7 +44,7 @@ export function useRowPullRequestStatus({
       repoOwner: entry.repoOwner,
       repoName: entry.repoName,
       number: entry.number,
-      cwd: entry.creatingAgentCwd,
+      cwd: resolveStatusCwd(entry.creatingAgentCwd, fallbackCwd),
     },
     enabled,
   });

@@ -9,6 +9,9 @@ import { useRowPullRequestStatus } from "./use-row-status";
 export interface PullRequestRowProps {
   serverId: string;
   entry: PullRequestLedgerEntry;
+  /** The viewing workspace's cwd: used for the status fetch when the creating agent's cwd is
+   * gone (archived, restarted). */
+  fallbackCwd: string | null;
   isOpen: boolean;
   onPress: (entry: PullRequestLedgerEntry) => void;
 }
@@ -45,9 +48,15 @@ function reviewDecisionLabel(
   }
 }
 
-export function PullRequestRow({ serverId, entry, isOpen, onPress }: PullRequestRowProps) {
+export function PullRequestRow({
+  serverId,
+  entry,
+  fallbackCwd,
+  isOpen,
+  onPress,
+}: PullRequestRowProps) {
   const { t } = useTranslation();
-  const rowStatus = useRowPullRequestStatus({ serverId, entry, enabled: isOpen });
+  const rowStatus = useRowPullRequestStatus({ serverId, entry, fallbackCwd, enabled: isOpen });
   const handlePress = useCallback(() => onPress(entry), [onPress, entry]);
   const checksLabel = checksStatusLabel(t, rowStatus.checksStatus);
   const reviewLabel = reviewDecisionLabel(t, rowStatus.reviewDecision);
@@ -60,7 +69,9 @@ export function PullRequestRow({ serverId, entry, isOpen, onPress }: PullRequest
       accessibilityRole="button"
     >
       <View style={styles.leading}>
-        <PullRequestStateIcon state={rowStatus.state} size={14} />
+        {rowStatus.state === "unknown" ? null : (
+          <PullRequestStateIcon state={rowStatus.state} size={14} />
+        )}
       </View>
       <View style={styles.titleColumn}>
         <Text style={styles.title} numberOfLines={1}>

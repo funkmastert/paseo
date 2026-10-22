@@ -64,4 +64,31 @@ describe("resolveExplorerSidebarTab", () => {
       resolveExplorerSidebarTab({ activeTab: "prs", isGit: false, availableTabs: ["files"] }),
     ).toBe("files");
   });
+
+  it("resolves a stored 'pr' to 'prs' when the ledger-backed tab is available", () => {
+    const resolved = resolveExplorerSidebarTab({
+      activeTab: "pr",
+      isGit: true,
+      availableTabs: ["changes", "files", "prs"],
+    });
+    expect(resolved).toBe("prs");
+  });
+
+  it("keeps a stored 'pr' as 'pr' when the host has no ledger-backed 'prs' tab", () => {
+    const resolved = resolveExplorerSidebarTab({
+      activeTab: "pr",
+      isGit: true,
+      availableTabs: ["changes", "files", "pr"],
+    });
+    expect(resolved).toBe("pr");
+  });
+
+  it("falls back a stored 'prs' to 'pr' when only the legacy tab is available", () => {
+    const resolved = resolveExplorerSidebarTab({
+      activeTab: "prs",
+      isGit: true,
+      availableTabs: ["changes", "files", "pr"],
+    });
+    expect(resolved).toBe("pr");
+  });
 });

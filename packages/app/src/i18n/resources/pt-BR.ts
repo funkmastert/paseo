@@ -1922,8 +1922,12 @@ export const ptBR: TranslationResources = {
       subtitle: "Detalhes do pull request",
       emptyTitle: "Ainda não há pull request",
       emptyDescription: "Crie um pull request para este checkout para ver os detalhes aqui.",
+      unsupportedForgeDescription:
+        "Este forge não oferece suporte a obter o status de um pull request desta forma.",
+      openInBrowser: "Abrir no navegador",
     },
     pullRequests: {
+      subtitle: "Pull requests abertos por este agente ou seus subagentes",
       back: "Voltar",
       untitled: "Pull request #{{number}}",
       emptyTitle: "Ainda não há pull requests",

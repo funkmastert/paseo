@@ -232,7 +232,12 @@ export function buildDeterministicWorkspaceTabId(target: WorkspaceTabTarget): st
     // The scoped and host-wide panels are separate tabs so a split can hold both at once.
     return target.scopeAgentId ? `orchestration_${target.scopeAgentId}` : "orchestration";
   }
-  if (target.kind === "changes_tree" || target.kind === "files" || target.kind === "pull_request") {
+  if (
+    target.kind === "changes_tree" ||
+    target.kind === "files" ||
+    target.kind === "pull_request" ||
+    target.kind === "pull_requests"
+  ) {
     return target.kind;
   }
   if (target.kind === "plugin") {

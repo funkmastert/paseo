@@ -1941,8 +1941,12 @@ export const fr: TranslationResources = {
       emptyTitle: "Aucune demande de fusion pour le moment",
       emptyDescription:
         "Créez une demande de fusion pour cette copie de travail afin d’afficher ses détails ici.",
+      unsupportedForgeDescription:
+        "Cette forge ne permet pas de récupérer le statut d’une demande de fusion de cette façon.",
+      openInBrowser: "Ouvrir dans le navigateur",
     },
     pullRequests: {
+      subtitle: "Demandes de fusion ouvertes par cet agent ou ses sous-agents",
       back: "Retour",
       untitled: "Demande de fusion #{{number}}",
       emptyTitle: "Aucune demande de fusion pour le moment",
