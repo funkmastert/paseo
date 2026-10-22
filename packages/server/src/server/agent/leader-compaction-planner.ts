@@ -17,6 +17,14 @@ const DEFAULT_PREPARE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_DEFER_MINUTES = 20;
 /** A deferral shorter than this is not worth a turn to ask again. */
 const MIN_DEFERRAL_MS = 60_000;
+/**
+ * `ceilingTokens` is the only thing keeping a deferral from running into the CLI's own auto-compact
+ * (docs/leader-compaction.md), which fires around 967K by default. A misconfigured ceiling above
+ * this is clamped, so deferral eligibility and wait-ending never drift that close to it.
+ */
+const CEILING_TOKENS_SAFETY_CAP = 900_000;
+/** A configured ceiling above this is close enough to the cap to warn about at resolve time. */
+const CEILING_TOKENS_WARN_THRESHOLD = 800_000;
 
 /**
  * How every message the monitor sends begins, inside its `<paseo-system>` envelope. The timing
@@ -66,11 +74,21 @@ export interface LeaderCompactionConfig {
   maxDeferMs: number;
 }
 
+export interface ResolveLeaderCompactionConfigOptions {
+  /** Called with the configured (unclamped) value when `ceilingTokens` is above the warn threshold. */
+  onCeilingTokensTooHigh?: (rawCeilingTokens: number) => void;
+}
+
 export function resolveLeaderCompactionConfig(
   settings: LeaderCompactionSettings,
+  options: ResolveLeaderCompactionConfigOptions = {},
 ): LeaderCompactionConfig {
   const finishUpMinutes = settings.finishUpMinutes ?? DEFAULT_FINISH_UP_MINUTES;
   const prepareTimeoutMinutes = settings.prepareTimeoutMinutes ?? DEFAULT_PREPARE_TIMEOUT_MINUTES;
+  const rawCeilingTokens = settings.ceilingTokens ?? DEFAULT_CEILING_TOKENS;
+  if (rawCeilingTokens > CEILING_TOKENS_WARN_THRESHOLD) {
+    options.onCeilingTokensTooHigh?.(rawCeilingTokens);
+  }
   return {
     dryRun: settings.dryRun ?? false,
     scope: settings.scope ?? "leaders",
@@ -78,7 +96,7 @@ export function resolveLeaderCompactionConfig(
     retryAfterMs: (settings.retryAfterMinutes ?? DEFAULT_RETRY_AFTER_MINUTES) * 60_000,
     maxAttempts: settings.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
     quietMs: (settings.quietMinutes ?? DEFAULT_QUIET_MINUTES) * 60_000,
-    ceilingTokens: settings.ceilingTokens ?? DEFAULT_CEILING_TOKENS,
+    ceilingTokens: Math.min(rawCeilingTokens, CEILING_TOKENS_SAFETY_CAP),
     finishUpMs: finishUpMinutes * 60_000,
     // The bound is on the wait, so it cannot be shorter than the window the agent was promised.
     prepareTimeoutMs:
@@ -136,8 +154,13 @@ export interface LeaderCompactionDeferral {
   count: number;
   /** The wait granted across all of them. */
   grantedMs: number;
-  /** The agent asked for one it could not have and was told so: its next reply is the note. */
+  /** The agent asked for one it could not have and was told so: this closes the budget. */
   refused: boolean;
+  /**
+   * The agent deferred again after the refusal and was asked once more, explicitly, instead of
+   * being compacted with that reply as the note. A further DEFER after this fails the step.
+   */
+  refusalEscalated: boolean;
   /** The reason on its latest request, for the log. */
   lastReason: string | null;
 }
@@ -146,6 +169,7 @@ export const NO_LEADER_COMPACTION_DEFERRAL: LeaderCompactionDeferral = {
   count: 0,
   grantedMs: 0,
   refused: false,
+  refusalEscalated: false,
   lastReason: null,
 };
 
@@ -427,7 +451,9 @@ export type LeaderCompactionStepFailure =
   | { kind: "timedOut" }
   | { kind: "failed"; error: string }
   | { kind: "busy" }
-  | { kind: "notCompacted"; usedTokens: number | undefined };
+  | { kind: "notCompacted"; usedTokens: number | undefined }
+  /** The agent deferred again after the refusal and the one explicit re-ask that followed it. */
+  | { kind: "deferredAfterRefusal" };
 
 export type LeaderCompactionTurnResult =
   | { status: "completed"; finalText: string; usedTokensAfter: number | undefined }
@@ -442,6 +468,12 @@ export interface LeaderCompactionTurnApplied {
   failure: LeaderCompactionStepFailure | null;
   /** True when this failure used the last attempt and the episode was abandoned. */
   gaveUp: boolean;
+  /**
+   * Set when a `prepare` reply became the note, but its first or last line still looked like an
+   * attempted `DEFER` that did not parse as one — worth a log line so a near-miss format gets
+   * noticed. Absent otherwise.
+   */
+  noteLooksLikeAttemptedDeferral?: boolean;
 }
 
 function failStep(
@@ -472,16 +504,20 @@ function failStep(
   };
 }
 
-const DEFER_REPLY = /^DEFER\s+(\d+)\s*:\s*(\S.*)$/;
+const DEFER_REPLY = /^DEFER\s+(\d+)\s*:\s*(\S.*)$/i;
 
 /**
- * The reply `prepare` offers instead of a note: exactly `DEFER <minutes>: <reason>`, one line.
- * Anything else, a note that merely mentions it included, is the note.
+ * The reply `prepare` offers instead of a note: `DEFER <minutes>: <reason>`, one line, case-
+ * insensitive, markdown emphasis stripped. Anything else, a note that merely mentions it included,
+ * is the note.
  */
 export function parseLeaderCompactionDeferral(
   text: string,
 ): { minutes: number; reason: string } | null {
-  const trimmed = text.trim().replace(/^`+|`+$/g, "");
+  const trimmed = text
+    .trim()
+    .replace(/^[`*_]+/, "")
+    .replace(/[`*_]+$/, "");
   if (trimmed.includes("\n")) return null;
   const match = DEFER_REPLY.exec(trimmed);
   if (!match) return null;
@@ -489,6 +525,20 @@ export function parseLeaderCompactionDeferral(
   const reason = match[2]?.trim();
   if (!reason || !Number.isInteger(minutes) || minutes < 1) return null;
   return { minutes, reason };
+}
+
+/** A line that reads like an attempted `DEFER` even though it did not parse as one. */
+const DEFER_LOOKALIKE = /^\W*defer\b/i;
+
+/**
+ * Whether a reply that became the note still looked like it was trying to ask for a deferral —
+ * a near-miss format, worth surfacing even though the note stands as written.
+ */
+export function looksLikeAttemptedDeferral(text: string): boolean {
+  const lines = text.split("\n");
+  const first = lines[0]?.trim() ?? "";
+  const last = lines[lines.length - 1]?.trim() ?? "";
+  return DEFER_LOOKALIKE.test(first) || DEFER_LOOKALIKE.test(last);
 }
 
 /**
@@ -516,7 +566,8 @@ function applyDeferralRequest(input: {
   const { episode, request, usedTokensAfter, config, nowMs } = input;
   const minutesLeft = leaderCompactionDeferMinutesLeft(episode.deferral, config, usedTokensAfter);
   if (minutesLeft === 0) {
-    // Not a note: ask once more, and take whatever comes back as the note.
+    // Closes the budget and asks once more. A note is used as one; another DEFER is handled by
+    // the `prepare` case above, which escalates once before treating it as a failed try.
     return {
       state: {
         phase: "waiting",
@@ -540,6 +591,7 @@ function applyDeferralRequest(input: {
           count: episode.deferral.count + 1,
           grantedMs: episode.deferral.grantedMs + grantedMs,
           refused: false,
+          refusalEscalated: false,
           lastReason: request.reason,
         },
       },
@@ -566,26 +618,52 @@ export function applyLeaderCompactionTurnOutcome(input: {
   }
   switch (step) {
     case "prepare": {
-      const request = episode.deferral.refused
-        ? null
-        : parseLeaderCompactionDeferral(result.finalText);
-      if (request) {
-        return applyDeferralRequest({
-          episode,
-          request,
-          usedTokensAfter: result.usedTokensAfter,
-          config,
-          nowMs,
-        });
+      if (episode.deferral.refused) {
+        const stillDeferring = parseLeaderCompactionDeferral(result.finalText);
+        if (stillDeferring) {
+          if (!episode.deferral.refusalEscalated) {
+            // Not the note: ask once more, now explicit that the deferral is closed and a note
+            // is needed. A further DEFER after this fails the step like any other failed try.
+            return {
+              state: {
+                phase: "waiting",
+                step: "prepare",
+                episode: {
+                  ...episode,
+                  attempts: 0,
+                  deferral: { ...episode.deferral, refusalEscalated: true },
+                },
+              },
+              failure: null,
+              gaveUp: false,
+            };
+          }
+          return failStep(step, episode, { kind: "deferredAfterRefusal" }, config, nowMs);
+        }
+      } else {
+        const request = parseLeaderCompactionDeferral(result.finalText);
+        if (request) {
+          return applyDeferralRequest({
+            episode,
+            request,
+            usedTokensAfter: result.usedTokensAfter,
+            config,
+            nowMs,
+          });
+        }
       }
+      const note = result.finalText.trim() || null;
       return {
         state: {
           phase: "waiting",
           step: "compact",
-          episode: { ...episode, attempts: 0, note: result.finalText.trim() || null },
+          episode: { ...episode, attempts: 0, note },
         },
         failure: null,
         gaveUp: false,
+        ...(looksLikeAttemptedDeferral(result.finalText)
+          ? { noteLooksLikeAttemptedDeferral: true as const }
+          : {}),
       };
     }
     case "compact": {

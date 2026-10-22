@@ -156,6 +156,8 @@ export interface LeaderCompactionPrepareOffer {
   deferredMinutes: number;
   /** The agent asked to defer and was refused, so this is the last ask. */
   deferralRefused: boolean;
+  /** The agent deferred again after the refusal; this ask is the explicit one before failing. */
+  deferralRefusedAgain: boolean;
 }
 
 function prepareOfferFor(
@@ -167,6 +169,7 @@ function prepareOfferFor(
     deferMinutesLeft: leaderCompactionDeferMinutesLeft(deferral, config, usedTokens),
     deferredMinutes: Math.round(deferral.grantedMs / 60_000),
     deferralRefused: deferral.refused,
+    deferralRefusedAgain: deferral.refusalEscalated,
   };
 }
 
@@ -200,6 +203,9 @@ function formatUnfinishedStep(
 ): string {
   const stop =
     "stop where it is safe to stop, and say in the note exactly where it stands and how to resume it.";
+  if (offer.deferralRefusedAgain) {
+    return `Deferral refused — write the restore note now. If that step is still unfinished, ${stop}`;
+  }
   if (offer.deferralRefused) {
     return (
       "You asked to defer this compaction and it cannot be deferred any further. If that step " +
@@ -399,6 +405,8 @@ function describeFailure(failure: LeaderCompactionStepFailure): string {
       return failure.usedTokens === undefined
         ? "the context size could not be read afterwards"
         : `the context was still ${formatTokens(failure.usedTokens)} tokens afterwards`;
+    case "deferredAfterRefusal":
+      return "the agent deferred again after being told the deferral was refused";
   }
 }
 
@@ -423,6 +431,8 @@ export class AgentLeaderCompactionMonitor {
   private readonly states = new Map<string, LeaderCompactionState>();
   /** The `defer` verdict last reported per agent, so a verdict standing over many sweeps logs once. */
   private readonly reportedDeferrals = new Map<string, LeaderCompactionTiming>();
+  /** The last `ceilingTokens` value warned about, so a standing misconfiguration logs once. */
+  private loggedCeilingTokensTooHigh: number | null = null;
   /** The quiet-gate hold last reported per agent, keyed on when it lifts, for the same reason. */
   private readonly reportedQuietHolds = new Map<string, number>();
   /** The leader's most recent human prompt the daemon has seen (the quiet gate; carried prompts
@@ -580,7 +590,17 @@ export class AgentLeaderCompactionMonitor {
       this.episodeQuietHolds.clear();
       return;
     }
-    const config = resolveLeaderCompactionConfig(settings);
+    const config = resolveLeaderCompactionConfig(settings, {
+      onCeilingTokensTooHigh: (rawCeilingTokens) => {
+        if (this.loggedCeilingTokensTooHigh === rawCeilingTokens) return;
+        this.loggedCeilingTokensTooHigh = rawCeilingTokens;
+        this.options.logger.warn(
+          { ceilingTokens: rawCeilingTokens },
+          "Leader compaction: ceilingTokens is close to the CLI's own auto-compact point; " +
+            "clamped to 900K for deferral eligibility and wait-ending",
+        );
+      },
+    });
     const nowMs = this.now();
     for (const [agentId, state] of this.states) {
       if (!liveIds.has(agentId) && state.phase !== "inFlight") {
@@ -936,9 +956,11 @@ export class AgentLeaderCompactionMonitor {
         agentId,
         step,
         // The ledger's outcomes are the wire's (docs/insights.md); a turn the monitor stopped
-        // waiting for is a failed try there.
+        // waiting for, or a second deferral after the refusal, is a failed try there.
         outcome:
-          applied.failure?.kind === "timedOut" ? "failed" : (applied.failure?.kind ?? "completed"),
+          applied.failure?.kind === "timedOut" || applied.failure?.kind === "deferredAfterRefusal"
+            ? "failed"
+            : (applied.failure?.kind ?? "completed"),
         gaveUp: applied.gaveUp,
         episodeEnded:
           applied.state.phase === "settled" && applied.state.reason !== "dryRun"
@@ -986,6 +1008,13 @@ export class AgentLeaderCompactionMonitor {
     });
     this.setState(agent.id, applied.state);
     this.notifyStepFinished(agent.id, step, currentEpisode, applied, after);
+    if (applied.noteLooksLikeAttemptedDeferral) {
+      this.options.logger.warn(
+        { agentId: agent.id },
+        "Leader compaction: a prepare reply looked like an attempted DEFER but did not parse " +
+          "as one; used as the note",
+      );
+    }
     if (!applied.failure) {
       this.onStepSucceeded(agent, step, currentEpisode, applied.state);
       return;
@@ -1071,6 +1100,16 @@ export class AgentLeaderCompactionMonitor {
       !before.deferral.refused
     ) {
       this.options.logger.info({ agentId: agent.id }, "Leader compaction deferral refused");
+    } else if (
+      state.phase === "waiting" &&
+      state.step === "prepare" &&
+      state.episode.deferral.refusalEscalated &&
+      !before.deferral.refusalEscalated
+    ) {
+      this.options.logger.info(
+        { agentId: agent.id },
+        "Leader compaction deferral refused again; asked once more before failing the step",
+      );
     }
   }
 

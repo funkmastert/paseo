@@ -38,7 +38,7 @@ The turn is the agent's, and the monitor never shortens it. `prepareTimeoutMinut
 
 A step that needs longer than the window, a 20-minute build for example, would otherwise be handed to the post-compaction agent as a note. The agent can instead reply to `prepare` with exactly `DEFER <minutes>: <reason>` and nothing else. The monitor waits that long and sends `prepare` again from the start. One episode is deferred at most `maxDeferMinutes` in total, and a request past that is cut to what is left.
 
-The ceiling outranks a deferral. At or over `ceilingTokens` a request is refused, and a wait in progress ends when the context reaches the ceiling. Keep `ceilingTokens` well under the CLI's compaction point, or a deferral could run into it. A refused request is not a note. The monitor asks once more, saying deferral is closed, and takes whatever comes back as the note, even another `DEFER`.
+The ceiling outranks a deferral. At or over `ceilingTokens` a request is refused, and a wait in progress ends when the context reaches the ceiling. `ceilingTokens` is capped at 900K regardless of what is configured, to keep it well under the CLI's own compaction point. A refused request is not a note. The monitor asks once more, saying deferral is closed. A reply that defers again gets one more ask, now saying to write the note now instead; only a third `DEFER` is a failed try, the same as a cancelled or timed-out step — never taken as the note.
 
 Only an exact one-line reply counts, so a note that mentions `DEFER` is a note. A deferral is a successful turn: it uses no attempt, and the ledger keeps one row for the episode. The cost is one extra `prepare` turn per request. The cap and the ceiling stop it from becoming a way to dodge compaction.
 

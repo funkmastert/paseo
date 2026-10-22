@@ -336,6 +336,45 @@ describe("AgentLeaderCompactionMonitor with scope all", () => {
     expect(pushes).toEqual([]);
     expect(logs.some((log) => log.msg === "Leader compaction gave up")).toBe(true);
   });
+
+  test("the same give-up still pushes for a leader, only the delegated agent is suppressed", async () => {
+    const settings: LeaderCompactionSettings = {
+      enabled: true,
+      scope: "all",
+      maxAttempts: 1,
+      retryAfterMinutes: 0,
+    };
+
+    const workerFake = new FakeAgents();
+    workerFake.agents = [leader({ id: "worker-1", isDelegated: true })];
+    const {
+      monitor: workerMonitor,
+      pushes: workerPushes,
+      logs: workerLogs,
+    } = createMonitor(workerFake, settings);
+
+    const leaderFake = new FakeAgents();
+    leaderFake.agents = [leader({ id: "leader-1", isDelegated: false })];
+    const {
+      monitor: leaderMonitor,
+      pushes: leaderPushes,
+      logs: leaderLogs,
+    } = createMonitor(leaderFake, settings);
+
+    for (let i = 0; i < 4; i += 1) {
+      await sweep(workerMonitor);
+      await sweep(leaderMonitor);
+    }
+
+    expect(workerMonitor.getState("worker-1")).toEqual({ phase: "settled", reason: "gaveUp" });
+    expect(leaderMonitor.getState("leader-1")).toEqual({ phase: "settled", reason: "gaveUp" });
+    expect(workerLogs.some((log) => log.msg === "Leader compaction gave up")).toBe(true);
+    expect(leaderLogs.some((log) => log.msg === "Leader compaction gave up")).toBe(true);
+
+    expect(workerPushes).toEqual([]);
+    expect(leaderPushes).toHaveLength(1);
+    expect(leaderPushes[0]?.title).toBe("Could not compact a leader's context");
+  });
 });
 
 describe("AgentLeaderCompactionMonitor with the quiet gate and carried prompts", () => {

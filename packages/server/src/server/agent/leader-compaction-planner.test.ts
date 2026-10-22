@@ -3,6 +3,7 @@ import {
   applyLeaderCompactionTurnOutcome,
   hasLeaderCompactionPrepareTimedOut,
   leaderCompactionDeferMinutesLeft,
+  looksLikeAttemptedDeferral,
   NO_LEADER_COMPACTION_DEFERRAL,
   parseLeaderCompactionDeferral,
   planLeaderCompactionStep,
@@ -499,6 +500,21 @@ describe("resolveLeaderCompactionConfig: finish-up, prepare bound and deferral",
     });
     expect(resolved).toMatchObject({ finishUpMs: 0, prepareTimeoutMs: 0, maxDeferMs: 0 });
   });
+
+  test("ceilingTokens is capped at 900K, however high it is configured", () => {
+    expect(resolveLeaderCompactionConfig({ ceilingTokens: 550_000 }).ceilingTokens).toBe(550_000);
+    expect(resolveLeaderCompactionConfig({ ceilingTokens: 900_000 }).ceilingTokens).toBe(900_000);
+    expect(resolveLeaderCompactionConfig({ ceilingTokens: 950_000 }).ceilingTokens).toBe(900_000);
+  });
+
+  test("warns once at resolve when ceilingTokens is above 800K, not when it is under", () => {
+    const warnings: number[] = [];
+    const onCeilingTokensTooHigh = (raw: number) => warnings.push(raw);
+    resolveLeaderCompactionConfig({ ceilingTokens: 800_000 }, { onCeilingTokensTooHigh });
+    expect(warnings).toEqual([]);
+    resolveLeaderCompactionConfig({ ceilingTokens: 850_000 }, { onCeilingTokensTooHigh });
+    expect(warnings).toEqual([850_000]);
+  });
 });
 
 describe("parseLeaderCompactionDeferral", () => {
@@ -516,11 +532,39 @@ describe("parseLeaderCompactionDeferral", () => {
     });
   });
 
+  test("reads any case, as long as it is one line", () => {
+    expect(parseLeaderCompactionDeferral("Defer 10: building the APK")).toEqual({
+      minutes: 10,
+      reason: "building the APK",
+    });
+    expect(parseLeaderCompactionDeferral("defer 10: building the APK")).toEqual({
+      minutes: 10,
+      reason: "building the APK",
+    });
+  });
+
+  test("strips surrounding markdown emphasis before the strict parse", () => {
+    expect(parseLeaderCompactionDeferral("**DEFER 10: building the APK**")).toEqual({
+      minutes: 10,
+      reason: "building the APK",
+    });
+    expect(parseLeaderCompactionDeferral("_DEFER 10: building the APK_")).toEqual({
+      minutes: 10,
+      reason: "building the APK",
+    });
+  });
+
   test("a restore note is never read as a deferral, even one that mentions DEFER", () => {
     expect(parseLeaderCompactionDeferral("GOAL: ship it.\nDEFER 5: later")).toBeNull();
     expect(parseLeaderCompactionDeferral("I will defer 5: no")).toBeNull();
     expect(parseLeaderCompactionDeferral("DEFER 5 minutes please")).toBeNull();
     expect(parseLeaderCompactionDeferral("")).toBeNull();
+  });
+
+  test("stays strict about everything but case and markdown: minutes-with-unit and multi-line still miss", () => {
+    expect(parseLeaderCompactionDeferral("DEFER 10 minutes: building the APK")).toBeNull();
+    expect(parseLeaderCompactionDeferral("DEFER 10: building the APK\nmore text")).toBeNull();
+    expect(parseLeaderCompactionDeferral("more text\nDEFER 10: building the APK")).toBeNull();
   });
 
   test("needs a positive whole number of minutes and a reason", () => {
@@ -529,6 +573,21 @@ describe("parseLeaderCompactionDeferral", () => {
     expect(parseLeaderCompactionDeferral("DEFER 2.5: x")).toBeNull();
     expect(parseLeaderCompactionDeferral("DEFER 5:")).toBeNull();
     expect(parseLeaderCompactionDeferral("DEFER 5:   ")).toBeNull();
+  });
+});
+
+describe("looksLikeAttemptedDeferral", () => {
+  test("matches a defer-looking first or last line, case-insensitively", () => {
+    expect(looksLikeAttemptedDeferral("DEFER 10 minutes: building the APK")).toBe(true);
+    expect(looksLikeAttemptedDeferral("defer: no reason given")).toBe(true);
+    expect(looksLikeAttemptedDeferral("GOAL: ship it.\nDEFER 5: later")).toBe(true);
+    expect(looksLikeAttemptedDeferral("DEFER 5: later\nGOAL: ship it.")).toBe(true);
+  });
+
+  test("does not match an ordinary note, even one that discusses deferring in prose", () => {
+    expect(looksLikeAttemptedDeferral("GOAL: ship it. NEXT: review PR 12.")).toBe(false);
+    expect(looksLikeAttemptedDeferral("I decided not to defer this compaction.")).toBe(false);
+    expect(looksLikeAttemptedDeferral("")).toBe(false);
   });
 });
 
@@ -577,6 +636,7 @@ describe("a prepare reply that asks to defer", () => {
           count: 1,
           grantedMs: 12 * 60_000,
           refused: false,
+          refusalEscalated: false,
           lastReason: "waiting on the Android build",
         },
       },
@@ -597,10 +657,16 @@ describe("a prepare reply that asks to defer", () => {
     });
   });
 
-  test("is refused once the budget is spent: the same step is asked again, and the next reply is the note", () => {
+  test("is refused once the budget is spent: the same step is asked again, and a plain note is used as one", () => {
     const spent: LeaderCompactionEpisode = {
       ...episode,
-      deferral: { count: 2, grantedMs: 20 * 60_000, refused: false, lastReason: "x" },
+      deferral: {
+        count: 2,
+        grantedMs: 20 * 60_000,
+        refused: false,
+        refusalEscalated: false,
+        lastReason: "x",
+      },
     };
     const refused = applyPrepare("DEFER 5: one more minute", { from: spent });
     expect(refused.failure).toBeNull();
@@ -610,11 +676,59 @@ describe("a prepare reply that asks to defer", () => {
       episode: { note: null, deferral: { grantedMs: 20 * 60_000, refused: true } },
     });
     if (refused.state.phase !== "waiting") throw new Error("expected waiting");
-    const again = applyPrepare("DEFER 5: please", { from: refused.state.episode });
+    const again = applyPrepare("GOAL: ship it. NEXT: review PR 12.", {
+      from: refused.state.episode,
+    });
     expect(again.state).toMatchObject({
       phase: "waiting",
       step: "compact",
-      episode: { note: "DEFER 5: please" },
+      episode: { note: "GOAL: ship it. NEXT: review PR 12." },
+    });
+  });
+
+  test("refused, then DEFER again: not taken as the note, asked once more with explicit wording", () => {
+    const refused: LeaderCompactionEpisode = {
+      ...episode,
+      deferral: {
+        count: 2,
+        grantedMs: 20 * 60_000,
+        refused: true,
+        refusalEscalated: false,
+        lastReason: "x",
+      },
+    };
+    const applied = applyPrepare("DEFER 5: please", { from: refused });
+    expect(applied.failure).toBeNull();
+    expect(applied.gaveUp).toBe(false);
+    expect(applied.state).toMatchObject({
+      phase: "waiting",
+      step: "prepare",
+      episode: {
+        note: null,
+        attempts: 0,
+        deferral: { refused: true, refusalEscalated: true },
+      },
+    });
+  });
+
+  test("refused, then DEFER twice: a failed try, never compacted with that reply as the note", () => {
+    const escalated: LeaderCompactionEpisode = {
+      ...episode,
+      deferral: {
+        count: 2,
+        grantedMs: 20 * 60_000,
+        refused: true,
+        refusalEscalated: true,
+        lastReason: "x",
+      },
+    };
+    const applied = applyPrepare("DEFER 5: still not done", { from: escalated });
+    expect(applied.failure).toEqual({ kind: "deferredAfterRefusal" });
+    expect(applied.gaveUp).toBe(false);
+    expect(applied.state).toMatchObject({
+      phase: "backoff",
+      step: "prepare",
+      episode: { note: null, attempts: 1 },
     });
   });
 
@@ -652,6 +766,26 @@ describe("a prepare reply that asks to defer", () => {
       episode: { note: "GOAL: ship it. NEXT: review PR 12." },
     });
   });
+
+  test("a case-variant or markdown-wrapped DEFER is granted, not taken as the note", () => {
+    const caseVariant = applyPrepare("Defer 10: building the APK");
+    expect(caseVariant.state).toMatchObject({ phase: "deferred", step: "prepare" });
+    const markdownWrapped = applyPrepare("**DEFER 10: building the APK**");
+    expect(markdownWrapped.state).toMatchObject({ phase: "deferred", step: "prepare" });
+  });
+
+  test("a near-miss DEFER that becomes the note is flagged for the log", () => {
+    const minutesWithUnit = applyPrepare("DEFER 10 minutes: building the APK");
+    expect(minutesWithUnit.state).toMatchObject({
+      phase: "waiting",
+      step: "compact",
+      episode: { note: "DEFER 10 minutes: building the APK" },
+    });
+    expect(minutesWithUnit.noteLooksLikeAttemptedDeferral).toBe(true);
+
+    const ordinary = applyPrepare("GOAL: ship it. NEXT: review PR 12.");
+    expect(ordinary.noteLooksLikeAttemptedDeferral).toBeUndefined();
+  });
 });
 
 describe("planLeaderCompactionStep while the agent has deferred", () => {
@@ -666,7 +800,13 @@ describe("planLeaderCompactionStep while the agent has deferred", () => {
     untilMs: 600_000,
     episode: {
       ...episode,
-      deferral: { count: 1, grantedMs: 600_000, refused: false, lastReason: "build" },
+      deferral: {
+        count: 1,
+        grantedMs: 600_000,
+        refused: false,
+        refusalEscalated: false,
+        lastReason: "build",
+      },
     },
   };
 
@@ -716,7 +856,13 @@ describe("leaderCompactionDeferMinutesLeft", () => {
     expect(leaderCompactionDeferMinutesLeft(episode.deferral, offerConfig, 450_000)).toBe(20);
     const used: LeaderCompactionEpisode = {
       ...episode,
-      deferral: { count: 1, grantedMs: 12.5 * 60_000, refused: false, lastReason: null },
+      deferral: {
+        count: 1,
+        grantedMs: 12.5 * 60_000,
+        refused: false,
+        refusalEscalated: false,
+        lastReason: null,
+      },
     };
     expect(leaderCompactionDeferMinutesLeft(used.deferral, offerConfig, 450_000)).toBe(7);
   });
