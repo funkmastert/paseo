@@ -106,6 +106,28 @@ describe("TokenUsageService", () => {
     expect(breakdown.unpricedTokens).toBe(500);
   });
 
+  it("reports totalCostUsd as null, not 0, when no row in range is priced", async () => {
+    await writeTranscript(FAKE_CLAUDE_SESSION, [
+      claudeAssistantLine({
+        messageId: "unpriced",
+        model: "claude-opus-99",
+        input: 500,
+        cacheWrite: 0,
+        cacheRead: 0,
+        output: 0,
+      }),
+    ]);
+    const service = createService();
+
+    await service.runSweep();
+    const breakdown = await service.getBreakdown("24h");
+    await service.stop();
+
+    expect(breakdown.rows.length).toBeGreaterThan(0);
+    expect(breakdown.totalCostUsd).toBeNull();
+    expect(breakdown.unpricedTokens).toBe(500);
+  });
+
   it("reports the backfill pending, then running with progress, then done", async () => {
     await writeTranscript(FAKE_CLAUDE_SESSION, [
       claudeAssistantLine({ messageId: "m1" }),

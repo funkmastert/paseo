@@ -30,7 +30,7 @@ export interface TokenUsageBreakdown {
   rangeStartMs: number;
   rows: TokenUsageRow[];
   coverage: TokenUsageCoverage;
-  /** Sum of `costUsd` across priced rows. `null` when disabled. */
+  /** Sum of `costUsd` across priced rows. `null` when disabled or no row in range is priced. */
   totalCostUsd: number | null;
   /** Raw tokens (input+cacheWrite+cacheRead+output) summed across rows with no listed price. */
   unpricedTokens: number;
@@ -280,15 +280,17 @@ function totalTokenUsageCost(
   rows: readonly TokenUsageRow[],
 ): Pick<TokenUsageBreakdown, "totalCostUsd" | "unpricedTokens"> {
   let totalCostUsd = 0;
+  let pricedRows = 0;
   let unpricedTokens = 0;
   for (const row of rows) {
     if (row.costUsd === null || row.costUsd === undefined) {
       unpricedTokens += row.input + row.cacheWrite + row.cacheRead + row.output;
     } else {
       totalCostUsd += row.costUsd;
+      pricedRows += 1;
     }
   }
-  return { totalCostUsd, unpricedTokens };
+  return { totalCostUsd: pricedRows > 0 ? totalCostUsd : null, unpricedTokens };
 }
 
 /** `agents.tokenUsage.enabled` out of a parsed `config.json`. On unless explicitly false. */

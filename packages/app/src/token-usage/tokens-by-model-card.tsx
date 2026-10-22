@@ -54,29 +54,32 @@ function ModelRow({
 }) {
   return (
     <View
-      style={[styles.row, bordered ? settingsStyles.rowBorder : null]}
+      style={[styles.rowContainer, bordered ? settingsStyles.rowBorder : null]}
       testID={`tokens-by-model-row-${bar.id}`}
     >
-      <Text
-        style={bar.isUnattributed ? styles.labelMuted : styles.label}
-        numberOfLines={1}
-        testID={`tokens-by-model-label-${bar.id}`}
-      >
-        {bar.label}
-      </Text>
-      <View style={styles.trackWrap}>
-        <ModelBarTrack bar={bar} />
-      </View>
-      <View style={styles.valueColumn}>
+      <View style={styles.row}>
+        <Text
+          style={bar.isUnattributed ? styles.labelMuted : styles.label}
+          numberOfLines={1}
+          testID={`tokens-by-model-label-${bar.id}`}
+        >
+          {bar.label}
+        </Text>
+        <View style={styles.trackWrap}>
+          <ModelBarTrack bar={bar} />
+        </View>
         <Text style={styles.value} testID={`tokens-by-model-value-${bar.id}`}>
           {bar.formattedTotal}
         </Text>
-        {costSupported ? (
-          <Text style={styles.costValue} testID={`tokens-by-model-cost-${bar.id}`}>
-            {bar.formattedCost ?? "—"}
-          </Text>
-        ) : null}
       </View>
+      {/* Own line, not squeezed into a fixed-width column next to the token total: a lower-bound
+          "≥$X" cost can run longer than the plain total, and at phone widths the label plus both
+          values left no room for the bar track (docs/token-usage.md). */}
+      {costSupported ? (
+        <Text style={styles.costLine} testID={`tokens-by-model-cost-${bar.id}`}>
+          {bar.formattedCost ?? "—"}
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -128,12 +131,14 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
   },
+  rowContainer: {
+    paddingVertical: theme.spacing[3],
+    paddingHorizontal: theme.spacing[4],
+  },
   row: {
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[3],
-    paddingVertical: theme.spacing[3],
-    paddingHorizontal: theme.spacing[4],
   },
   label: {
     width: 180,
@@ -162,17 +167,15 @@ const styles = StyleSheet.create((theme) => ({
   segment: {
     height: "100%",
   },
-  valueColumn: {
-    minWidth: 56,
-    alignItems: "flex-end",
-  },
   value: {
+    minWidth: 56,
     color: theme.colors.foreground,
     fontSize: theme.fontSize.sm,
     fontVariant: ["tabular-nums"],
     textAlign: "right",
   },
-  costValue: {
+  costLine: {
+    marginTop: theme.spacing[1],
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
     fontVariant: ["tabular-nums"],

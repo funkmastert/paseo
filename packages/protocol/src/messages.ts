@@ -4494,7 +4494,7 @@ export const ServerInfoStatusPayloadSchema = z
         // COMPAT(tokenUsage): added in v0.8.x, remove gate after 2027-10-07. Token usage by model
         // and role from transcripts (docs/token-usage.md).
         tokenUsage: z.boolean().optional(),
-        // COMPAT(tokenUsageCost): added in v0.9.x, remove gate after 2027-10-22. Whether
+        // COMPAT(tokenUsageCost): added in v0.8.x, remove gate after 2027-10-22. Whether
         // `usage.tokens.get_breakdown.response` rows carry `costUsd` (docs/token-usage.md,
         // "Cost").
         tokenUsageCost: z.boolean().optional(),

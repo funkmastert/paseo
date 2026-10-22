@@ -210,7 +210,7 @@ describe("buildTokenUsageModelBars cost", () => {
     expect(bars[0]?.formattedCost).toBe(formatUsd(1.5));
   });
 
-  it("is null when any contributing row has no listed price", () => {
+  it("sums the priced rows and flags a lower bound when some rows are unpriced", () => {
     const rows: TokenUsageRow[] = [
       row({ role: "leader", weighted: 100, costUsd: 1.2 }),
       row({ role: "worker", weighted: 100, costUsd: null }),
@@ -218,7 +218,18 @@ describe("buildTokenUsageModelBars cost", () => {
 
     const bars = buildTokenUsageModelBars(rows, "weighted");
 
+    expect(bars[0]?.costUsd).toBeCloseTo(1.2, 6);
+    expect(bars[0]?.isCostLowerBound).toBe(true);
+    expect(bars[0]?.formattedCost).toBe(`≥${formatUsd(1.2)}`);
+  });
+
+  it("is null, not a lower bound, when every contributing row is unpriced", () => {
+    const rows: TokenUsageRow[] = [row({ role: "leader", weighted: 100, costUsd: null })];
+
+    const bars = buildTokenUsageModelBars(rows, "weighted");
+
     expect(bars[0]?.costUsd).toBeNull();
+    expect(bars[0]?.isCostLowerBound).toBe(false);
     expect(bars[0]?.formattedCost).toBeNull();
   });
 });
@@ -236,12 +247,28 @@ describe("buildTokenUsageRoleTotals cost", () => {
     expect(totals.find((entry) => entry.role === "worker")?.costUsd).toBe(0);
   });
 
-  it("is null for a role where any row is unpriced", () => {
+  it("is null for a role where every row is unpriced", () => {
     const rows: TokenUsageRow[] = [row({ role: "outside", weighted: 100, costUsd: null })];
 
     const totals = buildTokenUsageRoleTotals(rows, "weighted");
 
-    expect(totals.find((entry) => entry.role === "outside")?.costUsd).toBeNull();
+    const outside = totals.find((entry) => entry.role === "outside");
+    expect(outside?.costUsd).toBeNull();
+    expect(outside?.isCostLowerBound).toBe(false);
+  });
+
+  it("sums priced rows as a lower bound when a role has both priced and unpriced rows", () => {
+    const rows: TokenUsageRow[] = [
+      row({ role: "outside", weighted: 100, costUsd: 2.0 }),
+      row({ role: "outside", weighted: 100, costUsd: null }),
+    ];
+
+    const totals = buildTokenUsageRoleTotals(rows, "weighted");
+
+    const outside = totals.find((entry) => entry.role === "outside");
+    expect(outside?.costUsd).toBeCloseTo(2.0, 6);
+    expect(outside?.isCostLowerBound).toBe(true);
+    expect(outside?.formattedCost).toBe(`≥${formatUsd(2.0)}`);
   });
 });
 
@@ -252,10 +279,11 @@ describe("buildTokenUsageCostSummary", () => {
     expect(summary.hasUnpriced).toBe(false);
   });
 
-  it("reports unpriced tokens when present", () => {
+  it("reports unpriced tokens when present, and renders the partial total as a lower bound", () => {
     const summary = buildTokenUsageCostSummary({ totalCostUsd: 1, unpricedTokens: 500 });
     expect(summary.hasUnpriced).toBe(true);
     expect(summary.unpricedTokens).toBe(500);
+    expect(summary.formattedTotal).toBe(`≥${formatUsd(1)}`);
   });
 
   it("treats a missing totalCostUsd as null (feature-unsupported shape)", () => {

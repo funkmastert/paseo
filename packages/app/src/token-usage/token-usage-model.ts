@@ -51,19 +51,44 @@ export function formatUsd(value: number): string {
   return USD_FORMATTER.format(value);
 }
 
-/** Sums `costUsd` across rows; `null` if any contributing row has no listed price. */
-function sumCostUsd(rows: readonly TokenUsageRow[]): number | null {
-  let sum = 0;
-  for (const row of rows) {
-    if (row.costUsd === null || row.costUsd === undefined) return null;
-    sum += row.costUsd;
-  }
-  return sum;
+interface CostAggregate {
+  /** Sum across priced rows only; `null` when none of the rows are priced. */
+  costUsd: number | null;
+  /** `true` when at least one contributing row has no listed price — `costUsd` undercounts it. */
+  isCostLowerBound: boolean;
 }
 
-/** `formatUsd`, passing `null` through — the shared shape for every priced-or-unpriced field. */
-function formatCostOrNull(costUsd: number | null): string | null {
-  return costUsd === null ? null : formatUsd(costUsd);
+/**
+ * Sums `costUsd` across priced rows and reports whether any contributing row was unpriced,
+ * mirroring the daemon's own partial-sum behavior for the range total (`token-usage-service.ts`,
+ * `totalTokenUsageCost`) instead of discarding the whole bar's or role's cost over one unpriced
+ * row.
+ */
+function sumCostUsd(rows: readonly TokenUsageRow[]): CostAggregate {
+  // No rows (an unused role) costs $0, not "unknown" — only an unpriced row makes it unknown.
+  if (rows.length === 0) return { costUsd: 0, isCostLowerBound: false };
+  let sum = 0;
+  let pricedRows = 0;
+  let hasUnpriced = false;
+  for (const row of rows) {
+    if (row.costUsd === null || row.costUsd === undefined) {
+      hasUnpriced = true;
+      continue;
+    }
+    sum += row.costUsd;
+    pricedRows += 1;
+  }
+  return { costUsd: pricedRows > 0 ? sum : null, isCostLowerBound: pricedRows > 0 && hasUnpriced };
+}
+
+/**
+ * `formatUsd`, passing `null` through, prefixed with "≥" when `isLowerBound` — the shared shape
+ * for every priced-or-unpriced field that can also be a partial sum.
+ */
+function formatCostOrNull(costUsd: number | null, isLowerBound: boolean): string | null {
+  if (costUsd === null) return null;
+  const formatted = formatUsd(costUsd);
+  return isLowerBound ? `≥${formatted}` : formatted;
 }
 
 export function totalForUnit(row: TokenUsageRow, unit: TokenUsageUnit): number {
@@ -127,8 +152,10 @@ export interface TokenUsageModelBar {
   /** This bar's own length as a share of the largest bar (0-1). */
   share: number;
   segments: TokenUsageRoleSegment[];
-  /** API-equivalent cost summed across this bar's rows; `null` when any row is unpriced. */
+  /** API-equivalent cost summed across this bar's priced rows; `null` when none are priced. */
   costUsd: number | null;
+  /** `true` when `costUsd` excludes at least one unpriced row — a lower bound, not the total. */
+  isCostLowerBound: boolean;
   formattedCost: string | null;
 }
 
@@ -201,7 +228,7 @@ function buildModelBar(
     const roleTotal = entry.roleTotals.get(role) ?? 0;
     return { role, total: roleTotal, fraction: roleTotal / maxTotal };
   });
-  const costUsd = sumCostUsd(entry.rows);
+  const { costUsd, isCostLowerBound } = sumCostUsd(entry.rows);
   return {
     id: `${entry.provider}/${entry.model}`,
     provider: entry.provider,
@@ -213,7 +240,8 @@ function buildModelBar(
     share: entry.total / maxTotal,
     segments,
     costUsd,
-    formattedCost: formatCostOrNull(costUsd),
+    isCostLowerBound,
+    formattedCost: formatCostOrNull(costUsd, isCostLowerBound),
   };
 }
 
@@ -221,8 +249,10 @@ export interface TokenUsageRoleTotal {
   role: TokenUsageDisplayRole;
   total: number;
   formattedTotal: string;
-  /** API-equivalent cost summed across this role's rows; `null` when any row is unpriced. */
+  /** API-equivalent cost summed across this role's priced rows; `null` when none are priced. */
   costUsd: number | null;
+  /** `true` when `costUsd` excludes at least one unpriced row — a lower bound, not the total. */
+  isCostLowerBound: boolean;
   formattedCost: string | null;
 }
 
@@ -242,13 +272,14 @@ export function buildTokenUsageRoleTotals(
   }
   return TOKEN_USAGE_ROLE_ORDER.map((role) => {
     const total = totals.get(role) ?? 0;
-    const costUsd = sumCostUsd(rowsByRole.get(role) ?? []);
+    const { costUsd, isCostLowerBound } = sumCostUsd(rowsByRole.get(role) ?? []);
     return {
       role,
       total,
       formattedTotal: formatCompactTokens(total),
       costUsd,
-      formattedCost: formatCostOrNull(costUsd),
+      isCostLowerBound,
+      formattedCost: formatCostOrNull(costUsd, isCostLowerBound),
     };
   });
 }
@@ -263,6 +294,7 @@ export function hasIncompleteAttribution(
 
 export interface TokenUsageCostSummary {
   totalCostUsd: number | null;
+  /** "≥$X" when `hasUnpriced` — the daemon's total is a partial sum, same as a bar's or role's. */
   formattedTotal: string | null;
   unpricedTokens: number;
   hasUnpriced: boolean;
@@ -277,11 +309,12 @@ export function buildTokenUsageCostSummary(
 ): TokenUsageCostSummary {
   const totalCostUsd = breakdown.totalCostUsd ?? null;
   const unpricedTokens = breakdown.unpricedTokens ?? 0;
+  const hasUnpriced = unpricedTokens > 0;
   return {
     totalCostUsd,
-    formattedTotal: formatCostOrNull(totalCostUsd),
+    formattedTotal: formatCostOrNull(totalCostUsd, hasUnpriced),
     unpricedTokens,
-    hasUnpriced: unpricedTokens > 0,
+    hasUnpriced,
   };
 }
 
