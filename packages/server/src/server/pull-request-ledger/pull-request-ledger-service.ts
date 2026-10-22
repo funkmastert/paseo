@@ -13,7 +13,10 @@ import {
  */
 export interface PullRequestLedgerAgentManager {
   subscribeTimelineRecorded(listener: (agentId: string, row: AgentTimelineRow) => void): () => void;
-  listResidentAgents(): Array<{ id: string; title: string | null }>;
+  listResidentAgents(): Array<{ id: string; title: string | null; cwd: string }>;
+  /** The authenticated CLI context a status fetch for this agent's PRs should run from. Null
+   * when the agent is no longer resident (status fetch then uses the row's last-known cwd). */
+  getAgentCwd(agentId: string): string | null;
   getTimelineRows(agentId: string): Promise<AgentTimelineRow[]>;
   listAgentRecordsForPullRequestLedger(): Promise<
     Array<{
@@ -111,16 +114,22 @@ export class PullRequestLedgerService {
     for (const agent of this.agentManager.listResidentAgents()) {
       const rows = await this.agentManager.getTimelineRows(agent.id);
       for (const row of rows) {
-        this.detectAndUpsert(agent.id, agent.title, row);
+        this.detectAndUpsert(agent.id, agent.title, agent.cwd, row);
       }
     }
   }
 
   private onTimelineRecorded(agentId: string, row: AgentTimelineRow): void {
-    this.detectAndUpsert(agentId, null, row);
+    const cwd = this.agentManager.getAgentCwd(agentId);
+    this.detectAndUpsert(agentId, null, cwd, row);
   }
 
-  private detectAndUpsert(agentId: string, agentTitle: string | null, row: AgentTimelineRow): void {
+  private detectAndUpsert(
+    agentId: string,
+    agentTitle: string | null,
+    agentCwd: string | null,
+    row: AgentTimelineRow,
+  ): void {
     const item = row.item;
     if (item.type !== "tool_call" || item.status !== "completed") return;
     const detected = detectPullRequestCreation(item.name, item.detail);
@@ -130,6 +139,7 @@ export class PullRequestLedgerService {
       id,
       agentId,
       agentTitle: agentTitle ?? this.store.getRow(id)?.agentTitle ?? null,
+      agentCwd: agentCwd ?? this.store.getRow(id)?.agentCwd ?? "",
       host: detected.host,
       repoOwner: detected.repoOwner,
       repoName: detected.repoName,

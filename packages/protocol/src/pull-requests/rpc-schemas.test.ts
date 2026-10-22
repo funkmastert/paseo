@@ -33,6 +33,7 @@ describe("workspace.pullRequests.list", () => {
             forge: "github",
             creatingAgentId: "agent_1",
             creatingAgentTitle: "Add retry logic",
+            creatingAgentCwd: "/repo",
             detectedAtMs: 1_700_000_000_000,
             status: null,
           },
@@ -61,6 +62,7 @@ describe("workspace.pullRequests.list", () => {
             forge: "github",
             creatingAgentId: "agent_1",
             creatingAgentTitle: null,
+            creatingAgentCwd: "/repo",
             detectedAtMs: 1_700_000_000_000,
             status: {
               url: "https://github.com/acme/widgets/pull/42",

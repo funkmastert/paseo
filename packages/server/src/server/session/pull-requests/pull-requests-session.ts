@@ -26,6 +26,7 @@ function rowOnWire(row: PullRequestLedgerRow): PullRequestLedgerEntry {
     forge: row.forge,
     creatingAgentId: row.agentId,
     creatingAgentTitle: row.agentTitle,
+    creatingAgentCwd: row.agentCwd,
     detectedAtMs: row.detectedAtMs,
     // The list is identity + detection metadata; a row's live status is fetched per-row via
     // checkout.forge.get_pull_request_status, the same way the single-PR tab always has

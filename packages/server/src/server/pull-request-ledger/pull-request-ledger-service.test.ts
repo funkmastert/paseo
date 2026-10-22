@@ -35,8 +35,9 @@ function toolCallRow(name: string, command: string, output: string, seq: number)
 
 function fakeAgentManager(options: {
   records?: AgentRecordFixture[];
-  residentAgents?: Array<{ id: string; title: string | null }>;
+  residentAgents?: Array<{ id: string; title: string | null; cwd: string }>;
   residentTimelines?: Record<string, AgentTimelineRow[]>;
+  agentCwds?: Record<string, string>;
 }): PullRequestLedgerAgentManager & { emit: (agentId: string, row: AgentTimelineRow) => void } {
   const listeners = new Set<(agentId: string, row: AgentTimelineRow) => void>();
   return {
@@ -46,6 +47,9 @@ function fakeAgentManager(options: {
     },
     listResidentAgents() {
       return options.residentAgents ?? [];
+    },
+    getAgentCwd(agentId: string) {
+      return options.agentCwds?.[agentId] ?? null;
     },
     async getTimelineRows(agentId: string) {
       return options.residentTimelines?.[agentId] ?? [];
@@ -65,7 +69,7 @@ describe("PullRequestLedgerService", () => {
     try {
       const store = new PullRequestLedgerStore({ rootDir, logger });
       await store.load();
-      const agentManager = fakeAgentManager({});
+      const agentManager = fakeAgentManager({ agentCwds: { "agent-1": "/repo" } });
       const service = new PullRequestLedgerService({ store, agentManager });
       service.start();
 
@@ -77,6 +81,7 @@ describe("PullRequestLedgerService", () => {
       const row = store.getRow("github.com/acme/widgets#42");
       expect(row?.agentId).toBe("agent-1");
       expect(row?.status).toBe("open");
+      expect(row?.agentCwd).toBe("/repo");
     } finally {
       rmSync(rootDir, { recursive: true, force: true });
     }
@@ -105,7 +110,7 @@ describe("PullRequestLedgerService", () => {
       const store = new PullRequestLedgerStore({ rootDir, logger });
       await store.load();
       const agentManager = fakeAgentManager({
-        residentAgents: [{ id: "agent-1", title: "Ship the thing" }],
+        residentAgents: [{ id: "agent-1", title: "Ship the thing", cwd: "/repo" }],
         residentTimelines: {
           "agent-1": [
             toolCallRow(
@@ -137,6 +142,7 @@ describe("PullRequestLedgerService", () => {
         id: "github.com/acme/widgets#42",
         agentId: "child-1",
         agentTitle: null,
+        agentCwd: "/repo-b",
         host: "github.com",
         repoOwner: "acme",
         repoName: "widgets",
@@ -171,6 +177,7 @@ describe("PullRequestLedgerService", () => {
         id: "github.com/acme/widgets#7",
         agentId: "archived-child",
         agentTitle: null,
+        agentCwd: "/repo",
         host: "github.com",
         repoOwner: "acme",
         repoName: "widgets",

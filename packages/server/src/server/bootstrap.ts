@@ -1038,7 +1038,8 @@ function createPullRequestLedgerService(input: {
       listResidentAgents: () =>
         agentManager
           .listAgents()
-          .map((agent) => ({ id: agent.id, title: agent.config.title ?? null })),
+          .map((agent) => ({ id: agent.id, title: agent.config.title ?? null, cwd: agent.cwd })),
+      getAgentCwd: (agentId) => agentManager.getAgent(agentId)?.cwd ?? null,
       getTimelineRows: (agentId) => agentManager.getTimelineRows(agentId),
       listAgentRecordsForPullRequestLedger: () =>
         agentManager.listAgentRecordsForPullRequestLedger(),

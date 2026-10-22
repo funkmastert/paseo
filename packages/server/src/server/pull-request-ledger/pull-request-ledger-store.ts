@@ -25,6 +25,9 @@ export interface PullRequestLedgerRow {
   id: string;
   agentId: string;
   agentTitle: string | null;
+  /** The creating agent's cwd: selects which authenticated CLI context a status fetch runs
+   * from (docs/pull-request-ledger.md), not the PR's own identity. */
+  agentCwd: string;
   host: string;
   repoOwner: string;
   repoName: string;
@@ -61,6 +64,7 @@ const ROW_SCHEMA = z.object({
   id: z.string(),
   agentId: z.string(),
   agentTitle: z.string().nullable(),
+  agentCwd: z.string().optional().default(""),
   host: z.string(),
   repoOwner: z.string(),
   repoName: z.string(),

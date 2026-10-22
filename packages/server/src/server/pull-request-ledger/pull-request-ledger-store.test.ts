@@ -11,6 +11,7 @@ function row(overrides: Partial<PullRequestLedgerRow> = {}): PullRequestLedgerRo
     id: "github.com/acme/widgets#42",
     agentId: "agent-1",
     agentTitle: "Add retry logic",
+    agentCwd: "/repo",
     host: "github.com",
     repoOwner: "acme",
     repoName: "widgets",

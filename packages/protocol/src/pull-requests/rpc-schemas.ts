@@ -15,6 +15,9 @@ export const PullRequestLedgerEntrySchema = z.object({
   forge: z.string(),
   creatingAgentId: z.string(),
   creatingAgentTitle: z.string().nullable(),
+  // The creating agent's cwd: selects which authenticated CLI context a status fetch for this
+  // row should run from. Not the PR's own identity.
+  creatingAgentCwd: z.string(),
   detectedAtMs: z.number(),
   // Null until the first status poll completes.
   status: CheckoutPrStatusSchema.nullable(),
