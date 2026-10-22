@@ -78,9 +78,20 @@ Desktop **Settings → Layout → Open location** has independent Main panel or 
 Explorer Files, diffs, chat files, files opened from diffs, and subagents. They default to Main
 panel. Mobile ignores them.
 
-Pull requests have a three-way open location: Main panel, On the side, or Explorer sidebar. Explorer
-sidebar is the default. Compact layouts always open pull requests in Explorer regardless of this
-desktop preference.
+A single checkout's own branch PR, opened standalone (not through the Explorer tab below), keeps a
+three-way open location: Main panel, On the side, or Explorer sidebar. Explorer sidebar is the
+default. Compact layouts always open it in Explorer regardless of this desktop preference.
+
+## Pull requests
+
+On a daemon serving `server_info.features.pullRequestLedger`, Explorer's PR tab is "PRs"
+([docs/pull-request-ledger.md](pull-request-ledger.md)): every PR the workspace's agent or any
+descendant subagent created, not only the checkout's own branch PR, and present unconditionally on
+git workspaces rather than only when a branch PR exists. Tapping a row drills into the same
+checks/timeline view the single-PR tab used, in place inside the Explorer dock — it does not use
+the three-way routing above, since `ExplorerSidebarContent` renders identically for compact and
+native-wide docks and there is no separate "wide" placement to route through. On a host without
+the feature, the tab falls back to exactly the old single-PR "PR #N" behavior.
 
 Panels request an implicit open through the narrow `openPreferredTarget(target, source)` pane
 contract. Entry points outside panels use `openPreferredWorkspaceTarget`. Do not branch on a

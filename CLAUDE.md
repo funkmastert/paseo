@@ -57,6 +57,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/budget-pacing.md](docs/budget-pacing.md)                       | Budget pacing — advising leaders to widen or narrow fan-out against a usage window's clock, plus the noise thresholds            |
 | [docs/leader-compaction.md](docs/leader-compaction.md)               | Leader compaction — the CLI auto-compact window, prepare → /compact → restore, never interrupting a turn, Opus 5.5 thinking      |
 | [docs/insights.md](docs/insights.md)                                 | Insights — the compaction episode ledger, measured vs. estimated vs. unmeasured cost, the RPC, the screen and timeline marker    |
+| [docs/pull-request-ledger.md](docs/pull-request-ledger.md)           | Pull request ledger — tool-call detection, boot-scan backfill and its gap, status-by-identity scope, the RPCs, the PRs tab       |
 | [docs/context-usage.md](docs/context-usage.md)                       | Context usage — the per-agent `/context` breakdown, the out-of-band read, what a capture costs, the meter's thresholds           |
 | [docs/usage-history.md](docs/usage-history.md)                       | Usage history — what is sampled and from where, bounded storage, projection rules, the RPC and where it surfaces                 |
 | [docs/token-usage.md](docs/token-usage.md)                           | Token usage by model and role — transcripts read, dedupe and fork facts, roles, bounds, the RPC                                  |
