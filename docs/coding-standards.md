@@ -13,6 +13,7 @@ For testing rules, see [testing.md](testing.md).
 - **`function` declarations** over arrow function assignments.
 - **`interface`** over `type` when both work.
 - **No `index.ts` barrel files** that only re-export — they create indirection and circular-dep risk. Import from the source.
+- **App imports carry no `.js` suffix.** `packages/server` and `packages/protocol` need it (NodeNext); Metro, which bundles `packages/app`, cannot resolve it to the `.ts` file, while `tsc` and vitest accept it. Lint rejects it in `packages/app/src` ([why](solutions/build-errors/metro-cannot-resolve-js-suffix-imports.md)).
 
 ## Shell scripts
 

@@ -107,7 +107,12 @@ typed `{kind: "rate_limited"}` response instead of spawning `gh` into a host tha
 off. The Gitea adapter implements the same optional method with `tea api
 repos/{owner}/{repo}/pulls/{number}`, reusing the existing list-item-to-status conversion and
 best-effort checks enrichment `getCurrentPullRequestStatus` already uses for the current branch; a
-404 resolves to `null` rather than throwing. A row on a forge with no `getPullRequestStatusByIdentity`
+404 that surfaces as a thrown command error resolves to `null` rather than throwing. **Known gap:**
+`tea api` exits 0 on an HTTP error, so a real 404 arrives as an error body on stdout and never
+reaches that branch. It fails the response schema instead, and the row shows `failed` with a Retry
+where it should show `not_found`. See
+[tea-api-exits-zero-on-http-errors](solutions/integration-issues/tea-api-exits-zero-on-http-errors.md).
+A row on a forge with no `getPullRequestStatusByIdentity`
 at all falls back to an explicit "Open in browser" action in the detail view instead of showing a
 broken, never-resolving skeleton.
 
@@ -199,6 +204,8 @@ On a host without the feature, the sidebar falls back to exactly the old single-
 
 - Coordinating ledger PR status refresh through the shared GitHub poll grid instead of each
   identity query independently consulting the pause gate.
+- Telling a Gitea 404 from a schema failure in `getPullRequestStatusByIdentity` (see "Status by
+  identity").
 - Reading a closed, not-yet-reopened agent's provider-native transcript directly, instead of
   relying on it being opened to backfill.
 - A slower background poll cadence for an open PR's row once its tab goes hidden — polling stops
