@@ -10,16 +10,16 @@ import {
   shouldFetchTimelineFrom,
   unsupportedTimelineKey,
   type UsePrPaneDataResult,
-} from "./use-data.js";
-import { prPaneTimelineByIdentityQueryKey } from "./query-keys.js";
+} from "./use-data";
+import { prPaneTimelineByIdentityQueryKey } from "./query-keys";
 import {
   STATUS_STALE_TIME_MS,
   useForgeStatusByIdentity,
   type PullRequestIdentity,
-} from "./use-forge-status-by-identity.js";
+} from "./use-forge-status-by-identity";
 
-export type { PullRequestIdentity } from "./use-forge-status-by-identity.js";
-export { isUnsupportedForgeStatusError } from "./use-forge-status-by-identity.js";
+export type { PullRequestIdentity } from "./use-forge-status-by-identity";
+export { isUnsupportedForgeStatusError } from "./use-forge-status-by-identity";
 
 type PullRequestTimeline = PullRequestTimelineResponse["payload"];
 
