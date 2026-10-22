@@ -681,6 +681,7 @@ export const ar: TranslationResources = {
         toggle: "تبديل اللوحة الجانبية",
         changes: "التغييرات",
         files: "ملفات",
+        prs: "طلبات السحب",
       },
       toasts: {
         copyFailed: "فشل النسخ",
@@ -1889,6 +1890,19 @@ export const ar: TranslationResources = {
       subtitle: "تفاصيل طلب السحب",
       emptyTitle: "لا يوجد طلب سحب بعد",
       emptyDescription: "أنشئ طلب سحب لنسخة العمل هذه لعرض تفاصيله هنا.",
+    },
+    pullRequests: {
+      back: "رجوع",
+      untitled: "طلب السحب #{{number}}",
+      emptyTitle: "لا توجد طلبات سحب بعد",
+      emptyDescription: "ستظهر هنا طلبات السحب التي يفتحها هذا الوكيل أو وكلاؤه الفرعيون.",
+      errorTitle: "تعذّر تحميل طلبات السحب",
+      errorDescription: "حدث خطأ أثناء جلب طلبات السحب لمساحة العمل هذه.",
+      checks: {
+        success: "نجحت الفحوصات",
+        failure: "فشلت الفحوصات",
+        pending: "الفحوصات قيد التنفيذ",
+      },
     },
     orchestration: {
       label: "التنسيق",

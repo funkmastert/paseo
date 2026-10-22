@@ -686,6 +686,7 @@ export const es: TranslationResources = {
         toggle: "Alternar panel lateral",
         changes: "Cambios",
         files: "Archivos",
+        prs: "Solicitudes de extracción",
       },
       toasts: {
         copyFailed: "Copia fallida",
@@ -1935,6 +1936,21 @@ export const es: TranslationResources = {
       subtitle: "Detalles de la solicitud de extracción",
       emptyTitle: "Aún no hay ninguna solicitud de extracción",
       emptyDescription: "Crea una solicitud para este checkout y consulta aquí sus detalles.",
+    },
+    pullRequests: {
+      back: "Atrás",
+      untitled: "Solicitud de extracción n.°{{number}}",
+      emptyTitle: "Aún no hay solicitudes de extracción",
+      emptyDescription:
+        "Las solicitudes de extracción que abra este agente o sus subagentes aparecerán aquí.",
+      errorTitle: "No se pudieron cargar las solicitudes de extracción",
+      errorDescription:
+        "Se produjo un error al obtener las solicitudes de extracción de este espacio de trabajo.",
+      checks: {
+        success: "Verificaciones aprobadas",
+        failure: "Verificaciones fallidas",
+        pending: "Verificaciones en curso",
+      },
     },
     orchestration: {
       label: "Orquestación",

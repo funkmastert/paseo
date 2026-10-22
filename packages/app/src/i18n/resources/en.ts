@@ -679,6 +679,7 @@ export const en = {
         toggle: "Toggle Explorer sidebar",
         changes: "Changes",
         files: "Files",
+        prs: "PRs",
       },
       toasts: {
         copyFailed: "Copy failed",
@@ -1900,6 +1901,19 @@ export const en = {
       subtitle: "Pull request details",
       emptyTitle: "No pull request yet",
       emptyDescription: "Create a pull request for this checkout to see its details here.",
+    },
+    pullRequests: {
+      back: "Back",
+      untitled: "PR #{{number}}",
+      emptyTitle: "No PRs yet",
+      emptyDescription: "PRs this agent or its subagents open will show up here.",
+      errorTitle: "Couldn't load PRs",
+      errorDescription: "Something went wrong fetching this workspace's pull requests.",
+      checks: {
+        success: "Checks passed",
+        failure: "Checks failed",
+        pending: "Checks running",
+      },
     },
     orchestration: {
       label: "Orchestration",

@@ -683,6 +683,7 @@ export const ko: TranslationResources = {
         toggle: "사이드 패널 토글",
         changes: "변경 사항",
         files: "파일",
+        prs: "풀 리퀘스트",
       },
       toasts: {
         copyFailed: "복사 실패",
@@ -1899,6 +1900,19 @@ export const ko: TranslationResources = {
       subtitle: "풀 리퀘스트 세부 정보",
       emptyTitle: "아직 풀 리퀘스트가 없습니다",
       emptyDescription: "이 체크아웃에 풀 리퀘스트를 만들면 세부 정보가 여기에 표시됩니다.",
+    },
+    pullRequests: {
+      back: "뒤로",
+      untitled: "풀 리퀘스트 #{{number}}",
+      emptyTitle: "아직 풀 리퀘스트가 없습니다",
+      emptyDescription: "이 에이전트 또는 하위 에이전트가 연 풀 리퀘스트가 여기에 표시됩니다.",
+      errorTitle: "풀 리퀘스트를 불러오지 못했습니다",
+      errorDescription: "이 워크스페이스의 풀 리퀘스트를 가져오는 중 문제가 발생했습니다.",
+      checks: {
+        success: "검사 통과",
+        failure: "검사 실패",
+        pending: "검사 실행 중",
+      },
     },
     orchestration: {
       label: "오케스트레이션",

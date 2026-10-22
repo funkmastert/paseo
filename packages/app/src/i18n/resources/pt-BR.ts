@@ -685,6 +685,7 @@ export const ptBR: TranslationResources = {
         toggle: "Alternar painel lateral",
         changes: "Alterações",
         files: "Arquivos",
+        prs: "Pull requests",
       },
       toasts: {
         copyFailed: "Falha ao copiar",
@@ -1921,6 +1922,20 @@ export const ptBR: TranslationResources = {
       subtitle: "Detalhes do pull request",
       emptyTitle: "Ainda não há pull request",
       emptyDescription: "Crie um pull request para este checkout para ver os detalhes aqui.",
+    },
+    pullRequests: {
+      back: "Voltar",
+      untitled: "Pull request #{{number}}",
+      emptyTitle: "Ainda não há pull requests",
+      emptyDescription:
+        "Os pull requests abertos por este agente ou seus subagentes aparecerão aqui.",
+      errorTitle: "Não foi possível carregar os pull requests",
+      errorDescription: "Ocorreu um erro ao buscar os pull requests deste workspace.",
+      checks: {
+        success: "Verificações aprovadas",
+        failure: "Verificações com falha",
+        pending: "Verificações em execução",
+      },
     },
     orchestration: {
       label: "Orquestração",
