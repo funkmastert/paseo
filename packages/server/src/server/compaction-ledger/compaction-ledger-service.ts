@@ -153,7 +153,9 @@ export class CompactionLedgerService implements LeaderCompactionEpisodeObserver 
     let episode = this.openEpisodes.get(input.agentId);
     // A first prepare attempt always begins a new episode. One still open here was dropped
     // without the monitor saying so; close it rather than append to it.
-    if (episode && input.step === "prepare" && input.attempt === 1) {
+    // A prepare the agent deferred or was refused is asked again as attempt 1 but is the same
+    // episode: `reask` says so.
+    if (episode && input.step === "prepare" && input.attempt === 1 && !input.reask) {
       this.abandon(episode, lastActivityMs(episode));
       episode = undefined;
     }
@@ -204,6 +206,7 @@ export class CompactionLedgerService implements LeaderCompactionEpisodeObserver 
     if (input.compactedToTokens !== null) episode.contextAfterTokens = input.compactedToTokens;
     if (input.noteLength !== null) episode.noteLength = input.noteLength;
     if (input.carriedPrompts) episode.promptsCarried = storedPrompts(input.carriedPrompts);
+    if (input.deferral !== undefined) episode.deferrals = input.deferral;
 
     if (input.episodeEnded) {
       this.closeEpisode(episode, input.episodeEnded, input.atMs);

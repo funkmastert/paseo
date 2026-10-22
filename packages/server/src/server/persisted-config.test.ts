@@ -204,6 +204,54 @@ describe("PersistedConfigSchema agents.doneJanitor config", () => {
   });
 });
 
+describe("PersistedConfigSchema agents.leaderCompaction config", () => {
+  test("accepts every key the monitor reads, including the quiet gate, ceiling and finish-up window", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        leaderCompaction: {
+          enabled: true,
+          dryRun: false,
+          scope: "all",
+          prepareAtTokens: 400_000,
+          retryAfterMinutes: 30,
+          maxAttempts: 3,
+          quietMinutes: 10,
+          ceilingTokens: 550_000,
+          finishUpMinutes: 10,
+          prepareTimeoutMinutes: 30,
+          maxDeferMinutes: 20,
+        },
+      },
+    });
+    expect(parsed.agents?.leaderCompaction).toMatchObject({
+      quietMinutes: 10,
+      ceilingTokens: 550_000,
+      finishUpMinutes: 10,
+      prepareTimeoutMinutes: 30,
+      maxDeferMinutes: 20,
+    });
+  });
+
+  test("0 is a valid finish-up window, prepare bound and deferral budget: each turns its part off", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({
+        agents: {
+          leaderCompaction: { finishUpMinutes: 0, prepareTimeoutMinutes: 0, maxDeferMinutes: 0 },
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  test("rejects a negative window and an unknown key, like its siblings", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({ agents: { leaderCompaction: { finishUpMinutes: -1 } } }),
+    ).toThrow();
+    expect(() =>
+      PersistedConfigSchema.parse({ agents: { leaderCompaction: { finishUpMinute: 5 } } }),
+    ).toThrow();
+  });
+});
+
 describe("PersistedConfigSchema agents.accountFailover config", () => {
   test("accepts settleBack, the switch for roots going back to the leader account", () => {
     expect(

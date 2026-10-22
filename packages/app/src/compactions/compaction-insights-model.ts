@@ -36,6 +36,14 @@ export function formatEpisodeQuietGate(episode: CompactionEpisode): string | nul
   return `Waited ${formatDuration(episode.quietGate.heldMs)} for quiet`;
 }
 
+/** "Deferred 20m (2 times)" when the agent asked to finish a step first; null when it did not. */
+export function formatEpisodeDeferrals(episode: CompactionEpisode): string | null {
+  const deferrals = episode.deferrals;
+  if (!deferrals || deferrals.count === 0) return null;
+  const duration = `Deferred ${formatDuration(deferrals.totalMs)}`;
+  return deferrals.count === 1 ? duration : `${duration} (${deferrals.count} times)`;
+}
+
 /** "2 prompts carried" into the restore message; null when there were none. */
 export function formatEpisodePromptsCarried(episode: CompactionEpisode): string | null {
   const count = episode.promptsCarried?.length ?? 0;

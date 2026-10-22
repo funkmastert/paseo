@@ -79,6 +79,13 @@ held it, the sweep it let it through, and the duration. A hold that ends without
 is the list of human prompts the restore message quoted, each cut at 2,000 characters as the
 monitor cuts it; null when there were none.
 
+Deferrals ([leader-compaction.md](leader-compaction.md#deferral)) reach the row the same way.
+`deferrals` is `{ count, totalMs }`: how many times the agent asked and the wait granted in total;
+null when it never asked. A deferred `prepare` is one `completed` step and its re-ask is another
+step on the same row. A re-asked `prepare` is attempt 1 again, so the observer's `reask` flag is
+what stops the ledger from opening a second episode for it. The finish-up time is the `prepare`
+steps' own duration, and a `prepare` the monitor stopped waiting for is a `failed` step.
+
 ## The RPC
 
 `compaction.episodes.list` / `compaction.episodes.summary`
@@ -99,7 +106,7 @@ unmeasured counts.
 - **Insights screen** (`packages/app/src/screens/insights-screen.tsx` /
   `insights-view.tsx`): totals tiles (count, total cost, average cost, estimated saved) and a
   newest-first episode list, each row showing agent, time, trigger, before → after context, cost,
-  payback, and, when present, `Waited 7m for quiet · 2 prompts carried`. With nothing in range
+  payback, and, when present, `Waited 7m for quiet · Deferred 20m (2 times) · 2 prompts carried`. With nothing in range
   measured, the cost tiles show a dash rather than 0. Three link rows at the top open
   the JEV dashboard, Settings (where Agent roles' Decisions dashboard lives — no direct route exists
   for it in this app), and Token usage. `useCompactionEpisodesSummary`/`useCompactionEpisodesList`

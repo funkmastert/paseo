@@ -44,6 +44,7 @@ const episode = {
   noteLength: 120,
   promptsCarried: null,
   quietGate: null,
+  deferrals: null,
   costWeightedTokens: 175,
   costBasis: "measured",
   estimatedSavedWeightedTokens: 38_000,
@@ -115,6 +116,17 @@ describe("compaction.episodes.list", () => {
 
     const parsed = SessionOutboundMessageSchema.parse(message);
     expect(parsed).toEqual(message);
+    expect(validateWSOutboundMessage({ type: "session", message }).success).toBe(true);
+  });
+
+  test("an episode with deferrals, and one from an older daemon without them, both parse", () => {
+    const deferred = { ...episode, deferrals: { count: 2, totalMs: 1_200_000 } };
+    const message = {
+      type: "compaction.episodes.list.response",
+      payload: { requestId: "req-1", episodes: [deferred, episode], nextCursor: null },
+    };
+
+    expect(SessionOutboundMessageSchema.parse(message)).toEqual(message);
     expect(validateWSOutboundMessage({ type: "session", message }).success).toBe(true);
   });
 

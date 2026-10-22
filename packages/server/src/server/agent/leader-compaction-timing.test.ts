@@ -7,6 +7,7 @@ import type { AgentTimelineItem } from "./agent-sdk-types.js";
 import type { AgentTimelineRow } from "./agent-timeline-store-types.js";
 import { formatSystemNotificationPrompt } from "./agent-prompt.js";
 import {
+  NO_LEADER_COMPACTION_DEFERRAL,
   resolveLeaderCompactionConfig,
   type LeaderCompactionAgentInput,
   type LeaderCompactionSettings,
@@ -64,6 +65,7 @@ const RESTORE = formatRestoreMessage({
   compactedFromTokens: 612_000,
   compactedToTokens: 31_000,
   carriedPrompts: [],
+  deferral: NO_LEADER_COMPACTION_DEFERRAL,
 });
 
 /** A leader compacted once, then three requests: CSV work, a child's finish, a new bug. */

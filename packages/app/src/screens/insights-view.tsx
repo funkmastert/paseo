@@ -13,6 +13,7 @@ import {
   compactionOutcomeVariant,
   formatEpisodeContext,
   formatEpisodeCost,
+  formatEpisodeDeferrals,
   formatEpisodePayback,
   formatEpisodePromptsCarried,
   formatEpisodeQuietGate,
@@ -289,7 +290,9 @@ function CompactionEpisodeRow({
   bordered: boolean;
 }) {
   const quietGateLine = formatEpisodeQuietGate(episode);
+  const deferralsLine = formatEpisodeDeferrals(episode);
   const promptsCarriedLine = formatEpisodePromptsCarried(episode);
+  const detailLine = [quietGateLine, deferralsLine, promptsCarriedLine].filter(Boolean).join(" · ");
   return (
     <View
       style={[styles.eventRow, bordered ? styles.featureRowBorder : null]}
@@ -309,11 +312,7 @@ function CompactionEpisodeRow({
       <Text style={styles.featureMeta}>
         Cost {formatEpisodeCost(episode)} · Payback {formatEpisodePayback(episode)}
       </Text>
-      {quietGateLine || promptsCarriedLine ? (
-        <Text style={styles.featureMeta}>
-          {[quietGateLine, promptsCarriedLine].filter(Boolean).join(" · ")}
-        </Text>
-      ) : null}
+      {detailLine ? <Text style={styles.featureMeta}>{detailLine}</Text> : null}
     </View>
   );
 }

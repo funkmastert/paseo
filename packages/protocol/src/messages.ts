@@ -459,6 +459,12 @@ const MutableLeaderCompactionConfigSchema = z
     prepareAtTokens: z.number().int().positive().optional(),
     retryAfterMinutes: z.number().nonnegative().optional(),
     maxAttempts: z.number().int().positive().optional(),
+    quietMinutes: z.number().nonnegative().optional(),
+    ceilingTokens: z.number().int().positive().optional(),
+    // 0 turns each of these off: no finish-up window, no bound on prepare, no deferral.
+    finishUpMinutes: z.number().nonnegative().optional(),
+    prepareTimeoutMinutes: z.number().nonnegative().optional(),
+    maxDeferMinutes: z.number().nonnegative().optional(),
   })
   .passthrough();
 

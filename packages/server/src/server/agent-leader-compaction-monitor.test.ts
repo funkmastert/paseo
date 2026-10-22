@@ -29,6 +29,9 @@ class FakeAgents {
   sent: SentTurn[] = [];
   outcomes: IdleTurnOutcome[] = [];
   onTurn: (turn: SentTurn) => void = () => undefined;
+  /** Set to make the next started turn stay open until `release` is called with its outcome. */
+  holdNextTurn = false;
+  release: (outcome: IdleTurnOutcome) => void = () => undefined;
   private readonly operatorSignalListeners = new Set<(signal: AgentOperatorSignal) => void>();
 
   listAgentsForLeaderCompaction(): LeaderCompactionAgentSummary[] {
@@ -41,6 +44,12 @@ class FakeAgents {
     const turn = { agentId, prompt: String(prompt) };
     this.sent.push(turn);
     this.onTurn(turn);
+    if (this.holdNextTurn) {
+      this.holdNextTurn = false;
+      return new Promise<IdleTurnOutcome>((resolve) => {
+        this.release = resolve;
+      });
+    }
     return Promise.resolve(this.outcomes.shift() ?? { status: "completed", finalText: "" });
   }
 
@@ -303,6 +312,68 @@ describe("AgentLeaderCompactionMonitor", () => {
     // Automation has run out of tries and only a person can compact it now.
     expect(pushes[0]?.level).toBe("alert");
     expect(monitor.getState("leader-1")).toEqual({ phase: "settled", reason: "gaveUp" });
+  });
+});
+
+describe("AgentLeaderCompactionMonitor with scope all", () => {
+  test("compacts a delegated agent over the line, and a give-up stays in the log instead of the phone", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ id: "worker-1", isDelegated: true })];
+    const { monitor, pushes, logs } = createMonitor(fake, {
+      enabled: true,
+      scope: "all",
+      maxAttempts: 1,
+      retryAfterMinutes: 0,
+    });
+
+    for (let i = 0; i < 4; i += 1) {
+      await sweep(monitor);
+    }
+
+    // prepare, then one /compact that never shrinks the context.
+    expect(fake.sent.map((turn) => turn.prompt.slice(0, 8))).toEqual(["<paseo-s", "/compact"]);
+    expect(monitor.getState("worker-1")).toEqual({ phase: "settled", reason: "gaveUp" });
+    expect(pushes).toEqual([]);
+    expect(logs.some((log) => log.msg === "Leader compaction gave up")).toBe(true);
+  });
+
+  test("the same give-up still pushes for a leader, only the delegated agent is suppressed", async () => {
+    const settings: LeaderCompactionSettings = {
+      enabled: true,
+      scope: "all",
+      maxAttempts: 1,
+      retryAfterMinutes: 0,
+    };
+
+    const workerFake = new FakeAgents();
+    workerFake.agents = [leader({ id: "worker-1", isDelegated: true })];
+    const {
+      monitor: workerMonitor,
+      pushes: workerPushes,
+      logs: workerLogs,
+    } = createMonitor(workerFake, settings);
+
+    const leaderFake = new FakeAgents();
+    leaderFake.agents = [leader({ id: "leader-1", isDelegated: false })];
+    const {
+      monitor: leaderMonitor,
+      pushes: leaderPushes,
+      logs: leaderLogs,
+    } = createMonitor(leaderFake, settings);
+
+    for (let i = 0; i < 4; i += 1) {
+      await sweep(workerMonitor);
+      await sweep(leaderMonitor);
+    }
+
+    expect(workerMonitor.getState("worker-1")).toEqual({ phase: "settled", reason: "gaveUp" });
+    expect(leaderMonitor.getState("leader-1")).toEqual({ phase: "settled", reason: "gaveUp" });
+    expect(workerLogs.some((log) => log.msg === "Leader compaction gave up")).toBe(true);
+    expect(leaderLogs.some((log) => log.msg === "Leader compaction gave up")).toBe(true);
+
+    expect(workerPushes).toEqual([]);
+    expect(leaderPushes).toHaveLength(1);
+    expect(leaderPushes[0]?.title).toBe("Could not compact a leader's context");
   });
 });
 
@@ -910,5 +981,375 @@ describe("AgentLeaderCompactionMonitor with compaction timing", () => {
     expect(pushes).toEqual([]);
     const gaveUp = logs.find((log) => log.msg === "Leader compaction gave up");
     expect(gaveUp?.obj).toMatchObject({ agentId: "leader-1", trigger: "early" });
+  });
+});
+
+describe("AgentLeaderCompactionMonitor finish-up window", () => {
+  const FINISH_UP_SETTINGS: LeaderCompactionSettings = { enabled: true, prepareAtTokens: 400_000 };
+
+  async function firstPrepare(settings: LeaderCompactionSettings, contextTokens = 450_000) {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: contextTokens })];
+    const { monitor } = createMonitor(fake, settings);
+    await sweep(monitor);
+    return fake.sent[0]?.prompt ?? "";
+  }
+
+  test("prepare lets an agent partway through a critical step finish just that step first", async () => {
+    const prepare = await firstPrepare(FINISH_UP_SETTINGS);
+    expect(prepare).toContain("partway through a step");
+    expect(prepare).toContain("a merge, push, deploy, migration, multi-file edit");
+    expect(prepare).toContain("a build or test you are waiting on");
+    expect(prepare).toContain("at most about 10 minutes");
+    expect(prepare).toContain("start nothing new");
+    expect(prepare).toContain("call no tools");
+    expect(prepare).toContain("final message");
+  });
+
+  test("the window is whatever finishUpMinutes says", async () => {
+    expect(await firstPrepare({ ...FINISH_UP_SETTINGS, finishUpMinutes: 4 })).toContain(
+      "at most about 4 minutes",
+    );
+  });
+
+  test("finishUpMinutes 0 goes back to telling the agent to call no tools", async () => {
+    const prepare = await firstPrepare({ ...FINISH_UP_SETTINGS, finishUpMinutes: 0 });
+    expect(prepare).toContain("Do not call tools or start anything new");
+    expect(prepare).not.toContain("partway through a step");
+    expect(prepare).not.toContain("DEFER");
+  });
+
+  test("offers a deferral for what is left of the budget, and says what the reply looks like", async () => {
+    const prepare = await firstPrepare(FINISH_UP_SETTINGS);
+    expect(prepare).toContain("`DEFER <minutes>: <reason>`");
+    expect(prepare).toContain("at most 20 minutes");
+  });
+
+  test("offers no deferral when it is off, or when the context is already at the ceiling", async () => {
+    const off = await firstPrepare({ ...FINISH_UP_SETTINGS, maxDeferMinutes: 0 });
+    expect(off).not.toContain("DEFER");
+    expect(off).toContain("say in the note exactly where it stands");
+    const atCeiling = await firstPrepare(FINISH_UP_SETTINGS, 560_000);
+    expect(atCeiling).not.toContain("DEFER");
+    expect(atCeiling).toContain("partway through a step");
+  });
+});
+
+describe("AgentLeaderCompactionMonitor deferral", () => {
+  const settings: LeaderCompactionSettings = {
+    enabled: true,
+    prepareAtTokens: 400_000,
+    ceilingTokens: 550_000,
+    maxDeferMinutes: 20,
+  };
+
+  test("a deferral holds the episode, asks again afterwards, and the second reply is the note", async () => {
+    let nowMs = 0;
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    fake.outcomes = [
+      { status: "completed", finalText: "DEFER 12: the iOS build is finishing" },
+      { status: "completed", finalText: "GOAL: ship it. NEXT: install the build." },
+      { status: "completed", finalText: "" },
+      { status: "completed", finalText: "Picking up from the note." },
+    ];
+    fake.onTurn = (turn) => {
+      if (turn.prompt.startsWith("/compact")) {
+        fake.agents = [leader({ contextWindowUsedTokens: 30_000 })];
+      }
+    };
+    const { monitor, logs } = createMonitor(fake, settings, undefined, () => nowMs);
+
+    await sweep(monitor);
+    expect(fake.sent).toHaveLength(1);
+    expect(monitor.getState("leader-1")).toMatchObject({
+      phase: "deferred",
+      step: "prepare",
+      untilMs: 12 * 60_000,
+    });
+    expect(
+      logs.find((log) => log.msg === "Leader compaction deferred at the agent's request")?.obj,
+    ).toMatchObject({ agentId: "leader-1", minutes: 12, reason: "the iOS build is finishing" });
+
+    nowMs = 12 * 60_000 - 1;
+    await sweep(monitor);
+    expect(fake.sent).toHaveLength(1);
+
+    nowMs = 12 * 60_000;
+    await sweep(monitor);
+    expect(fake.sent).toHaveLength(2);
+    const reask = fake.sent[1]?.prompt ?? "";
+    expect(reask).toContain("step 1 of 3");
+    expect(reask).toContain("You deferred this by 12 minutes");
+    expect(reask).toContain("at most 8 minutes");
+
+    await sweep(monitor);
+    expect(fake.sent[2]?.prompt.startsWith("/compact")).toBe(true);
+    await sweep(monitor);
+    expect(fake.sent[3]?.prompt).toContain("GOAL: ship it. NEXT: install the build.");
+    expect(monitor.getState("leader-1")).toEqual({ phase: "settled", reason: "done" });
+  });
+
+  test("a deferral does not use an attempt: three in a row do not give up", async () => {
+    let nowMs = 0;
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    fake.outcomes = [
+      { status: "completed", finalText: "DEFER 5: step one" },
+      { status: "completed", finalText: "DEFER 5: step two" },
+      { status: "completed", finalText: "DEFER 5: step three" },
+    ];
+    const { monitor, pushes } = createMonitor(
+      fake,
+      { ...settings, maxAttempts: 1 },
+      undefined,
+      () => nowMs,
+    );
+    for (let i = 0; i < 3; i += 1) {
+      await sweep(monitor);
+      nowMs += 5 * 60_000;
+    }
+    expect(fake.sent).toHaveLength(3);
+    expect(pushes).toEqual([]);
+    expect(monitor.getState("leader-1")).toMatchObject({ phase: "deferred" });
+  });
+
+  test("a deferral past the ceiling is refused, and the reply to the second ask is taken as the note", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 560_000 })];
+    fake.outcomes = [
+      { status: "completed", finalText: "DEFER 10: still pushing" },
+      { status: "completed", finalText: "GOAL: push. NEXT: open the PR." },
+    ];
+    const { monitor, logs } = createMonitor(fake, settings);
+
+    await sweep(monitor);
+    expect(monitor.getState("leader-1")).toMatchObject({ phase: "waiting", step: "prepare" });
+    expect(logs.some((log) => log.msg === "Leader compaction deferral refused")).toBe(true);
+
+    await sweep(monitor);
+    expect(fake.sent).toHaveLength(2);
+    expect(fake.sent[1]?.prompt).toContain("cannot be deferred any further");
+    expect(monitor.getState("leader-1")).toMatchObject({
+      phase: "waiting",
+      step: "compact",
+      episode: { note: "GOAL: push. NEXT: open the PR." },
+    });
+  });
+
+  test("the ceiling ends a deferral early", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    fake.outcomes = [
+      { status: "completed", finalText: "DEFER 20: long migration" },
+      { status: "completed", finalText: "GOAL: migrate." },
+    ];
+    const { monitor } = createMonitor(fake, settings);
+
+    await sweep(monitor);
+    expect(monitor.getState("leader-1")).toMatchObject({ phase: "deferred" });
+    await sweep(monitor);
+    expect(fake.sent).toHaveLength(1);
+
+    fake.agents = [leader({ contextWindowUsedTokens: 551_000 })];
+    await sweep(monitor);
+    expect(fake.sent).toHaveLength(2);
+    expect(fake.sent[1]?.prompt).not.toContain("`DEFER");
+  });
+
+  test("a human prompt sent during a deferral is carried into the restore message", async () => {
+    let nowMs = 0;
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    fake.outcomes = [
+      { status: "completed", finalText: "DEFER 5: pushing" },
+      { status: "completed", finalText: "GOAL: push." },
+      { status: "completed", finalText: "" },
+      { status: "completed", finalText: "" },
+    ];
+    fake.onTurn = (turn) => {
+      if (turn.prompt.startsWith("/compact")) {
+        fake.agents = [leader({ contextWindowUsedTokens: 30_000 })];
+      }
+    };
+    const { monitor } = createMonitor(fake, settings, undefined, () => nowMs);
+
+    await sweep(monitor);
+    fake.humanPrompt("leader-1", "also rename the flag", 60_000);
+    nowMs = 5 * 60_000;
+    await sweep(monitor);
+    await sweep(monitor);
+    await sweep(monitor);
+    expect(fake.sent[3]?.prompt).toContain("also rename the flag");
+  });
+
+  test("turning the leg off during a deferral reports the episode abandoned", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    fake.outcomes = [{ status: "completed", finalText: "DEFER 5: pushing" }];
+    let current: LeaderCompactionSettings = settings;
+    const observer = new RecordingEpisodeObserver();
+    const monitor = new AgentLeaderCompactionMonitor({
+      agentManager: fake,
+      pushNotificationSender: { send: async () => undefined },
+      serverId: "server-1",
+      readDaemonConfig: () => ({ leaderCompaction: current }),
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      now: () => 0,
+      episodeObserver: observer,
+    });
+    await sweep(monitor);
+    expect(monitor.isEpisodeOpen("leader-1")).toBe(true);
+    current = { ...settings, enabled: false };
+    await sweep(monitor);
+    expect(monitor.isEpisodeOpen("leader-1")).toBe(false);
+    expect(observer.abandoned).toHaveLength(1);
+  });
+
+  test("the ledger hears how many deferrals an episode took and how long they added up to", async () => {
+    let nowMs = 0;
+    const fake = new FakeAgents();
+    fake.agents = [leader({ contextWindowUsedTokens: 450_000 })];
+    fake.outcomes = [
+      { status: "completed", finalText: "DEFER 7: build" },
+      { status: "completed", finalText: "GOAL: ship." },
+    ];
+    const observer = new RecordingEpisodeObserver();
+    const { monitor } = createMonitor(fake, settings, undefined, () => nowMs, observer);
+
+    await sweep(monitor);
+    nowMs = 7 * 60_000;
+    await sweep(monitor);
+
+    expect(observer.finished.map((call) => call.deferral)).toEqual([
+      { count: 1, totalMs: 7 * 60_000 },
+      { count: 1, totalMs: 7 * 60_000 },
+    ]);
+    // The second prepare re-asks the first: the ledger must not open a second episode for it.
+    expect(observer.started.map((call) => call.reask)).toEqual([false, true]);
+  });
+
+  test("an episode with no deferral reports none", async () => {
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    fake.outcomes = [{ status: "completed", finalText: "GOAL: ship." }];
+    const observer = new RecordingEpisodeObserver();
+    const { monitor } = createMonitor(fake, settings, undefined, undefined, observer);
+    await sweep(monitor);
+    expect(observer.finished[0]?.deferral).toBeNull();
+  });
+});
+
+describe("AgentLeaderCompactionMonitor bound on the wait for prepare", () => {
+  const settings: LeaderCompactionSettings = {
+    enabled: true,
+    prepareAtTokens: 400_000,
+    prepareTimeoutMinutes: 30,
+    retryAfterMinutes: 30,
+    maxAttempts: 3,
+  };
+
+  test("a prepare turn that outlives the bound is left running, and the monitor stops waiting for it", async () => {
+    let nowMs = 0;
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    fake.holdNextTurn = true;
+    const observer = new RecordingEpisodeObserver();
+    const { monitor, logs } = createMonitor(fake, settings, undefined, () => nowMs, observer);
+
+    await monitor.tick();
+    fake.agents = [leader({ lifecycle: "running", busy: true })];
+    expect(monitor.getState("leader-1")).toMatchObject({ phase: "inFlight", step: "prepare" });
+
+    nowMs = 30 * 60_000 - 1;
+    await monitor.tick();
+    expect(monitor.getState("leader-1")).toMatchObject({ phase: "inFlight", step: "prepare" });
+
+    nowMs = 30 * 60_000;
+    await monitor.tick();
+    expect(monitor.getState("leader-1")).toMatchObject({
+      phase: "backoff",
+      step: "prepare",
+      untilMs: 60 * 60_000,
+    });
+    expect(fake.sent).toHaveLength(1);
+    expect(observer.finished[0]).toMatchObject({ step: "prepare", outcome: "failed" });
+    expect(
+      logs.find((log) => log.msg === "Leader compaction step did not take; will retry")?.obj,
+    ).toMatchObject({ step: "prepare", reason: expect.stringContaining("still running") });
+  });
+
+  test("the turn's own outcome, when it finally comes, changes nothing", async () => {
+    let nowMs = 0;
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    fake.holdNextTurn = true;
+    const { monitor } = createMonitor(fake, settings, undefined, () => nowMs);
+
+    await monitor.tick();
+    fake.agents = [leader({ lifecycle: "running", busy: true })];
+    nowMs = 31 * 60_000;
+    await monitor.tick();
+    const before = monitor.getState("leader-1");
+
+    fake.release({ status: "completed", finalText: "GOAL: a note nobody asked for any more" });
+    await monitor.settle();
+
+    expect(monitor.getState("leader-1")).toEqual(before);
+    expect(fake.sent).toHaveLength(1);
+  });
+
+  test("after the backoff, a late-idle agent is asked for its note again", async () => {
+    let nowMs = 0;
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    fake.holdNextTurn = true;
+    const { monitor } = createMonitor(fake, settings, undefined, () => nowMs);
+
+    await monitor.tick();
+    fake.agents = [leader({ lifecycle: "running", busy: true })];
+    nowMs = 31 * 60_000;
+    await monitor.tick();
+    fake.release({ status: "completed", finalText: "stale" });
+    await monitor.settle();
+
+    fake.agents = [leader()];
+    nowMs = 61 * 60_000 + 1;
+    await sweep(monitor);
+    expect(fake.sent).toHaveLength(2);
+    expect(fake.sent[1]?.prompt).toContain("step 1 of 3");
+  });
+
+  test("prepareTimeoutMinutes 0 waits as long as the turn takes", async () => {
+    let nowMs = 0;
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    fake.holdNextTurn = true;
+    const { monitor } = createMonitor(
+      fake,
+      { ...settings, prepareTimeoutMinutes: 0 },
+      undefined,
+      () => nowMs,
+    );
+
+    await monitor.tick();
+    nowMs = 5 * 24 * 60 * 60_000;
+    await monitor.tick();
+    expect(monitor.getState("leader-1")).toMatchObject({ phase: "inFlight", step: "prepare" });
+  });
+
+  test("only prepare is bounded: a compact turn is left to finish", async () => {
+    let nowMs = 0;
+    const fake = new FakeAgents();
+    fake.agents = [leader()];
+    fake.outcomes = [{ status: "completed", finalText: "GOAL: x" }];
+    const { monitor } = createMonitor(fake, settings, undefined, () => nowMs);
+    await sweep(monitor);
+    fake.holdNextTurn = true;
+    await monitor.tick();
+    expect(monitor.getState("leader-1")).toMatchObject({ phase: "inFlight", step: "compact" });
+    nowMs = 10 * 60 * 60_000;
+    await monitor.tick();
+    expect(monitor.getState("leader-1")).toMatchObject({ phase: "inFlight", step: "compact" });
   });
 });
