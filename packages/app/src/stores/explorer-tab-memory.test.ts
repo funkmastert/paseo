@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isExplorerTab, resolveExplorerTabForCheckout } from "./explorer-tab-memory.js";
+import { isExplorerTab, resolveExplorerTabForCheckout } from "./explorer-tab-memory";
 
 describe("isExplorerTab", () => {
   it("accepts prs as a valid tab", () => {
