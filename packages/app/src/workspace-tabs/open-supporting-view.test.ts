@@ -143,7 +143,7 @@ describe("openWorkspacePullRequest", () => {
     const explorerPane =
       layout && explorerPaneId ? findPaneById(layout.root, explorerPaneId) : null;
     const pullRequestTab = layout
-      ? collectAllTabs(layout.root).find((tab) => tab.target.kind === "pull_request")
+      ? collectAllTabs(layout.root).find((tab) => tab.target.kind === "pull_requests")
       : null;
 
     expect(explorerPane?.tabIds).toContain(pullRequestTab?.tabId);

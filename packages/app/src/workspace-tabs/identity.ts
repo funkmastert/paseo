@@ -58,6 +58,7 @@ function normalizeSimpleWorkspaceTabTarget(value: WorkspaceTabTarget): Workspace
     case "changes_tree":
     case "files":
     case "pull_request":
+    case "pull_requests":
       return { kind: value.kind };
     case "orchestration": {
       // A blank scope is the host-wide tab, so an unusable id degrades to it rather than to null:
@@ -133,6 +134,13 @@ export function workspaceTabTargetsEqual(
   return secondaryWorkspaceTabTargetsEqual(left, right);
 }
 
+const NO_FIELD_SECONDARY_KINDS = new Set<WorkspaceTabTarget["kind"]>([
+  "files",
+  "changes_tree",
+  "pull_request",
+  "pull_requests",
+]);
+
 function secondaryWorkspaceTabTargetsEqual(
   left: WorkspaceTabTarget,
   right: WorkspaceTabTarget,
@@ -146,14 +154,8 @@ function secondaryWorkspaceTabTargetsEqual(
   if (left.kind === "working_diff" && right.kind === "working_diff") {
     return left.focusPath === right.focusPath && left.focusRequestId === right.focusRequestId;
   }
-  if (left.kind === "files" && right.kind === "files") {
-    return true;
-  }
-  if (left.kind === "changes_tree" && right.kind === "changes_tree") {
-    return true;
-  }
-  if (left.kind === "pull_request" && right.kind === "pull_request") {
-    return true;
+  if (NO_FIELD_SECONDARY_KINDS.has(left.kind)) {
+    return left.kind === right.kind;
   }
   if (left.kind === "orchestration" && right.kind === "orchestration") {
     return left.scopeAgentId === right.scopeAgentId;

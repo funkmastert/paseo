@@ -613,7 +613,7 @@ function getFallbackTabLabel(
   if (tab.target.kind === "files") {
     return labels.files;
   }
-  if (tab.target.kind === "pull_request") {
+  if (tab.target.kind === "pull_request" || tab.target.kind === "pull_requests") {
     return labels.pullRequest;
   }
   if (tab.target.kind === "orchestration") {
