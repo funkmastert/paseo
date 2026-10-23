@@ -1155,7 +1155,12 @@ async function sweepRows(harness: ReturnType<typeof createManager>): Promise<voi
 
 /**
  * A simulator the daemon saw the agent boot: a checkout with nothing running, then the device
- * appears a minute later (up 30 s, so after the lease) and the sweep binds the lease to it.
+ * appears a minute later (up 30 s, so after the lease) and the sweep binds the lease to it. Also
+ * puts the agent's own boot command (`xcrun simctl boot <udid>`) in its tree for that one sweep —
+ * the process evidence `reconcileDeviceLeases`'s `deviceNamedByAgent` needs to mark the bind
+ * `booted`, in place of the real `simctl boot`/`xcodebuild` invocation that named this UDID while
+ * it ran. Stripped right after: a real boot command does not stay running once the simulator is
+ * up, and the `booted` mark it earns is sticky regardless (device-lease-registry.ts).
  */
 async function checkOutAndBoot(
   harness: ReturnType<typeof createManager>,
@@ -1165,8 +1170,16 @@ async function checkOutAndBoot(
   const result = await manager.checkout({ agentId: input.agentId, platform: "ios" });
   expect(result.status).toBe("granted");
   state.nowMs += 60_000;
-  state.rows = [...state.rows, simulatorRow(input.pid, input.udid, "00:30")];
+  const bootRootPid = input.pid + 100_000;
+  const bootCommandPid = input.pid + 100_001;
+  state.rows = [
+    ...state.rows,
+    simulatorRow(input.pid, input.udid, "00:30"),
+    agentRootRow(bootRootPid, input.agentId),
+    childRow(bootCommandPid, bootRootPid, `xcrun simctl boot ${input.udid}`),
+  ];
   await sweepRows(harness);
+  state.rows = state.rows.filter((row) => row.pid !== bootRootPid && row.pid !== bootCommandPid);
 }
 
 const IDLE_HOLDER: DeviceLeaseAgentSummary = {
@@ -1387,6 +1400,29 @@ describe("DeviceLeaseManager agent-held simulator shutdown", () => {
 
     expect(harness.shutdownExec).not.toHaveBeenCalled();
   });
+
+  test("an Xcode-booted simulator bound by a pending lease survives too", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    const result = await harness.manager.checkout({ agentId: "agent-1", platform: "ios" });
+    expect(result.status).toBe("granted");
+
+    // Tyler boots a simulator from Xcode a few seconds later — the only "first unclaimed device"
+    // the registry's blind bind has to go on, and nothing in agent-1's own tree ever names it.
+    harness.state.nowMs += 10_000;
+    harness.state.rows = [simulatorRow(2, UDID_B, "00:05")];
+    await sweepRows(harness);
+    expect((await harness.manager.getSnapshot()).devices[0]).toMatchObject({
+      deviceId: UDID_B,
+      attribution: "lease",
+    });
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+
+    await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
 });
 
 describe("DeviceLeaseManager agent-held emulator shutdown", () => {
@@ -1425,19 +1461,42 @@ describe("DeviceLeaseManager agent-held emulator shutdown", () => {
     );
   });
 
-  test("daemon shutdown shuts down an emulator an agent booted, via its resolved serial", async () => {
+  test("a Studio-launched emulator bound to a pending lease survives the idle sweep and daemon shutdown", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    // The emulator genuinely sits inside agent-1's process tree — same as the cycling test above
+    // — but Android Studio is its ancestor, so it is Tyler's, not something to tear down just
+    // because attribution legitimately bound the lease with `booted: true`.
+    harness.state.rows = [
+      agentRootRow(500, "agent-1"),
+      childRow(550, 500, "/Applications/Android Studio.app/Contents/MacOS/studio"),
+      emulatorRow(501, 550, "pixel_studio_race"),
+    ];
+    await sweepRows(harness);
+    expect((await harness.manager.getSnapshot()).devices[0]).toMatchObject({
+      deviceId: "pixel_studio_race",
+      agentId: "agent-1",
+      attribution: "lease",
+    });
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+
+    await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("daemon shutdown never touches an emulator an agent booted — only the idle sweep does", async () => {
+    // Killing an Android emulator on every daemon stop or deploy restart, with no in-use check,
+    // would cut off a mid-flight Maestro run or instrumented test. Only iOS simulators are in
+    // scope for the daemon-shutdown trigger (the CoreSimulator crash it exists for).
     const harness = createManager({ androidSerials: { pixel_shutdown: "emulator-5598" } });
     harness.state.rows = [agentRootRow(500, "agent-1"), emulatorRow(501, 500, "pixel_shutdown")];
     await sweepRows(harness);
 
     await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
 
-    expect(harness.shutdownExec).toHaveBeenCalledWith("adb", [
-      "-s",
-      "emulator-5598",
-      "emu",
-      "kill",
-    ]);
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
   });
 });
 
@@ -1531,6 +1590,30 @@ describe("DeviceLeaseManager unleased device shutdown", () => {
       expect.objectContaining({ deviceId: UDID_A, platform: "ios" }),
       "Shut down an unleased simulator",
     );
+  });
+
+  test("a relaunch under a new pid resets agent provenance even when the reported uptime does not dip", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+    });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    harness.state.agents = [];
+    await sweepRows(harness);
+
+    // Tyler quits and relaunches the same simulator under a new OS process — a coincidence in
+    // `ps`'s elapsed-time rounding could report the same apparent uptime either side of that, but
+    // the pid can never lie about it.
+    harness.state.nowMs += 60_000;
+    harness.state.rows = harness.state.rows.filter((row) => row.pid !== 900);
+    harness.state.rows.push(simulatorRow(901, UDID_A, "00:30"));
+    await sweepRows(harness);
+
+    // Well past unleasedIdleMinutes (20) — still never swept: the relaunch reset agent
+    // provenance, so this reads as Tyler's own device from here on, same as item 2's reboot rule.
+    harness.state.nowMs += 60 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
   });
 
   test("an agent-booted emulator, orphaned when its agent is archived, is shut down once unleased for 20 minutes", async () => {
@@ -1653,6 +1736,28 @@ describe("DeviceLeaseManager unleased device shutdown", () => {
       "emu",
       "kill",
     ]);
+  });
+
+  test("an adb install naming a file with 'server' in it still counts as use, not the host server", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+      androidSerials: { pixel_filename: "emulator-5597" },
+    });
+    await bootEmulatorThenOrphanAgent(harness, {
+      agentId: "agent-1",
+      avd: "pixel_filename",
+      pid: 501,
+    });
+    // The subcommand is `install`, not a host-server one — the filename merely contains the
+    // substring "server", which a whole-command regex scan would wrongly match as the adb host
+    // server and exclude from use evidence, letting the sweep kill a device mid-install
+    // (device-lease-manager.ts's `adbSubcommand`).
+    harness.state.rows.push(childRow(800, 1, "adb install app-server-debug.apk"));
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
   });
 
   test("an Android Studio ancestor means the device is Tyler's, even inside what looks like an agent's process tree", async () => {

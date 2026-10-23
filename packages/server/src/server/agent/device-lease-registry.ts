@@ -45,11 +45,13 @@ export interface DeviceLease {
    */
   counted?: boolean;
   /**
-   * True when the daemon saw this lease's agent boot the device: the lease was pending and bound
-   * to a device that started after it, or the device sits in the agent's own process tree.
-   * Absent when the lease bound straight onto a device that was already running (a reuse at
-   * checkout, a launch naming a running simulator), which may be one Tyler booted by hand. The
-   * simulator teardown shuts down booted ones only (docs/device-leases.md#shutdown).
+   * True when the daemon saw this lease's agent boot the device: the device sits in the agent's
+   * own process tree, or the lease was pending and bound to a device its own process named
+   * (`deviceNamedByAgent`). Absent when the lease bound straight onto a device that was already
+   * running (a reuse at checkout, a launch naming a running simulator) or onto the first
+   * unclaimed device of its platform with nothing tying it to this agent specifically — either
+   * may be one Tyler, Android Studio, or Xcode booted. The simulator teardown shuts down booted
+   * ones only (docs/device-leases.md#shutdown).
    */
   booted?: true;
   /**
@@ -234,6 +236,15 @@ export interface ReconcileDeviceLeasesInput {
   pendingTtlMs: number;
   /** Backstop for a device that runs forever; 0 disables it. */
   maxLeaseMs: number;
+  /**
+   * deviceId → every agentId whose own process tree named that UDID this sweep — the one signal
+   * that survives `launchd_sim`'s reparenting to pid 1, which is otherwise why the second bind
+   * loop below (no process-tree attribution available) cannot tell "the device this lease's
+   * agent actually booted" from "whatever simulator or emulator Tyler, Android Studio, or Xcode
+   * happened to start in the same window." Absent or missing an entry binds the device without
+   * the `booted` mark, same as a reuse — never `true` from the blind match alone.
+   */
+  deviceNamedByAgent?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 export interface ReconcileDeviceLeasesResult {
@@ -248,7 +259,8 @@ export interface ReconcileDeviceLeasesResult {
  * platform that no other lease has claimed, preferring one whose process tree already belongs
  * to the leasing agent (true for an Android emulator, which stays a child of the agent's shell;
  * never true for a simulator, whose `launchd_sim` is reparented to pid 1 at boot). Among equals
- * the oldest lease binds first, which is also the order agents were let through the gate.
+ * the oldest lease binds first, which is also the order agents were let through the gate. Only a
+ * tree-attributed bind, or one `deviceNamedByAgent` backs, earns the `booted` mark.
  */
 export function reconcileDeviceLeases(
   input: ReconcileDeviceLeasesInput,
@@ -292,12 +304,17 @@ export function reconcileDeviceLeases(
     });
 
   const boundLeaseIds = new Set<string>();
-  const bind = (lease: DeviceLease, deviceId: string) => {
+  // `attributed` is the only thing that earns the `booted` mark: a device in the binding
+  // agent's own process tree (the first loop below), or one its own process named this sweep
+  // (`deviceNamedByAgent`). The second loop's blind "first unclaimed device of this platform"
+  // match still binds a lease to a device either way — a pending lease needs a device id the
+  // moment one appears, booted mark or not — but an unattributed bind must never read as "the
+  // daemon saw this agent boot it": that is exactly the claim a device Tyler just booted from
+  // Android Studio or Xcode would otherwise make true by being first in sort order.
+  const bind = (lease: DeviceLease, deviceId: string, attributed: boolean) => {
     claimedDeviceIds.add(deviceId);
     boundLeaseIds.add(lease.id);
-    // A pending lease only binds to a device that started after it (`startedAfterLease`): the
-    // device it was waiting for, booted for it.
-    leases.push({ ...lease, deviceId, booted: true });
+    leases.push(attributed ? { ...lease, deviceId, booted: true } : { ...lease, deviceId });
   };
 
   // Attribution first, across every device: an Android emulator stays inside the process tree
@@ -313,7 +330,7 @@ export function reconcileDeviceLeases(
         lease.platform === device.platform &&
         startedAfterLease(device, lease, input.nowMs),
     );
-    if (owner) bind(owner, device.deviceId);
+    if (owner) bind(owner, device.deviceId, true);
   }
 
   for (const lease of pending) {
@@ -330,7 +347,9 @@ export function reconcileDeviceLeases(
         startedAfterLease(device, lease, input.nowMs),
     );
     if (match) {
-      bind(lease, match.deviceId);
+      const namedByAgent =
+        input.deviceNamedByAgent?.get(match.deviceId)?.has(lease.agentId) ?? false;
+      bind(lease, match.deviceId, namedByAgent);
       continue;
     }
     // Nothing booted yet. A lease that never turns into a device must not hold a slot forever:

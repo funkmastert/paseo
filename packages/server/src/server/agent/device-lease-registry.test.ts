@@ -158,7 +158,10 @@ describe("reconcileDeviceLeases", () => {
     expect(result.unleasedDevices.map((entry) => entry.deviceId)).toEqual(["UDID-1"]);
   });
 
-  test("binds to the device that booted after the lease", () => {
+  test("binds to the device that booted after the lease, but leaves it unmarked with no evidence the agent itself booted it", () => {
+    // Nothing ties this device to agent `a1` specifically — it is simply the first unclaimed
+    // device of its platform. That is also true of a simulator Tyler just booted from Xcode in
+    // the same window, so this blind match alone must never earn the `booted` mark.
     const result = reconcileDeviceLeases({
       ...base,
       leases: [lease({ id: "fresh", agentId: "a1", acquiredAtMs: 10 * MINUTE - 60_000 })],
@@ -166,8 +169,30 @@ describe("reconcileDeviceLeases", () => {
     });
 
     expect(result.leases[0].deviceId).toBe("UDID-1");
-    // The simulator teardown reads this: the daemon saw the device boot for this lease.
-    expect(result.leases[0].booted).toBe(true);
+    expect(result.leases[0].booted).toBeUndefined();
+  });
+
+  test("marks a blind bind booted once the agent's own process is seen naming the device", () => {
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [lease({ id: "fresh", agentId: "a1", acquiredAtMs: 10 * MINUTE - 60_000 })],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 30 })],
+      deviceNamedByAgent: new Map([["UDID-1", new Set(["a1"])]]),
+    });
+
+    expect(result.leases[0]).toMatchObject({ deviceId: "UDID-1", booted: true });
+  });
+
+  test("a blind bind named by a different agent's process still earns no mark", () => {
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [lease({ id: "fresh", agentId: "a1", acquiredAtMs: 10 * MINUTE - 60_000 })],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 30 })],
+      deviceNamedByAgent: new Map([["UDID-1", new Set(["a2"])]]),
+    });
+
+    expect(result.leases[0]).toMatchObject({ deviceId: "UDID-1" });
+    expect(result.leases[0].booted).toBeUndefined();
   });
 
   test("a lease already bound to a running device is carried through without a booted mark", () => {
