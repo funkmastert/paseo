@@ -520,8 +520,8 @@ export class McpGateway {
       url,
       isStatic: url === undefined || config.auth === "static",
       unhealthy,
-      hasStoredTokens: this.tokenStore.getOAuthTokens(name) !== undefined,
-      hasClientCredentials: this.tokenStore.getClientCredentials(name) !== undefined,
+      hasStoredTokens: () => this.tokenStore.getOAuthTokens(name) !== undefined,
+      hasClientCredentials: () => this.tokenStore.getClientCredentials(name) !== undefined,
       registrationUnsupported: runtime.registrationUnsupported === true,
     });
   }

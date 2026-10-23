@@ -6867,9 +6867,7 @@ export const RefreshProvidersSnapshotResponseMessageSchema = z.object({
 });
 
 // Per-server connection status for the MCP auth gateway (KTD9's state machine in
-// packages/server/src/server/mcp-gateway/state.ts). `status` mirrors
-// `McpGatewayServerStatus` there — duplicated rather than imported because the
-// protocol package can't depend on the server package.
+// packages/server/src/server/mcp-gateway/state.ts, which imports the status type from here).
 export const McpGatewayServerStatusSchema = z.enum([
   "disabled",
   "connecting",
@@ -7112,7 +7110,8 @@ export const McpGatewayAuthStartResponseMessageSchema = z.object({
 });
 
 // Responses to the setup requests. `error` is null on success; `reason` names the cause from the
-// gateway's vocabulary (plus invalid_input, no_local_preset, install_failed, config_write_failed)
+// gateway's vocabulary (plus invalid_input, no_local_preset, install_failed, config_write_failed,
+// setup_in_progress)
 // as a plain string, so the daemon can name a new cause without breaking an older client. No
 // response carries a secret: `describe` reports whether a credential is stored, never its value.
 // COMPAT(mcpGatewaySetup): added in v0.9.x, remove optional parsing after 2027-10-22.

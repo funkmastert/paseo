@@ -12,7 +12,12 @@ import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { McpGatewayActionError } from "./action-failure.js";
-import { installLocalServer, runWithDeadline, type NpmRunner } from "./local-server-installer.js";
+import {
+  installLocalServer,
+  NpmCommandError,
+  runWithDeadline,
+  type NpmRunner,
+} from "./local-server-installer.js";
 import type { ProcessTerminator } from "../../utils/tree-kill.js";
 import { getLocalServerPreset, LOCAL_SERVER_PRESETS } from "./local-server-presets.js";
 
@@ -106,7 +111,7 @@ describe("installLocalServer", () => {
   test("an npm failure becomes install_failed carrying the stderr tail", async () => {
     const paseoHome = createTempHome();
     const runNpm: NpmRunner = async () => {
-      throw Object.assign(new Error("Command failed"), { stderr: "npm ERR! 404 Not Found\n" });
+      throw new NpmCommandError("Command failed", "npm ERR! 404 Not Found\n");
     };
 
     const failure = await installLocalServer({ paseoHome, preset: figma, runNpm }).catch(
@@ -146,7 +151,7 @@ describe("installLocalServer", () => {
     const directory = installDir(paseoHome);
     const runNpm: NpmRunner = async (command) => {
       mkdirSync(path.join(command.cwd, "node_modules", "half"), { recursive: true });
-      throw Object.assign(new Error("Command failed"), { stderr: "npm ERR! network" });
+      throw new NpmCommandError("Command failed", "npm ERR! network");
     };
 
     await installLocalServer({ paseoHome, preset: figma, runNpm }).catch(() => undefined);
@@ -154,19 +159,20 @@ describe("installLocalServer", () => {
     expect(existsSync(directory)).toBe(false);
   });
 
-  test("a timeout removes the directory and says how long npm was given", async () => {
+  test("npm is given 150 s, and a timeout from it removes the directory and reaches the message", async () => {
     const paseoHome = createTempHome();
+    let timeoutGiven: number | undefined;
     const runNpm: NpmRunner = async (command) => {
+      timeoutGiven = command.timeout;
       mkdirSync(path.join(command.cwd, "node_modules", "half"), { recursive: true });
-      throw Object.assign(new Error("did not finish within 150 s"), {
-        stderr: "did not finish within 150 s",
-      });
+      throw new NpmCommandError("timed out", "did not finish within 150 s");
     };
 
     const failure = await installLocalServer({ paseoHome, preset: figma, runNpm }).catch(
       (error: unknown) => error,
     );
 
+    expect(timeoutGiven).toBe(150_000);
     expect((failure as McpGatewayActionError).reason).toBe("install_failed");
     expect((failure as McpGatewayActionError).message).toContain("did not finish within 150 s");
     expect(existsSync(installDir(paseoHome))).toBe(false);
@@ -300,7 +306,8 @@ describe("runWithDeadline", () => {
       timeout: 30_000,
     }).catch((error: unknown) => error);
 
-    expect((failure as { stderr: string }).stderr).toContain("npm ERR! 404");
+    expect(failure).toBeInstanceOf(NpmCommandError);
+    expect((failure as NpmCommandError).stderr).toContain("npm ERR! 404");
   });
 
   test("on timeout it kills the whole process tree and rejects only once the command has stopped", async () => {
@@ -323,7 +330,8 @@ describe("runWithDeadline", () => {
     }).catch((error: unknown) => error);
 
     expect(stopped).toHaveLength(1);
-    expect((failure as { stderr: string }).stderr).toBe("did not finish within 0.05 s");
+    expect(failure).toBeInstanceOf(NpmCommandError);
+    expect((failure as NpmCommandError).stderr).toBe("did not finish within 0.05 s");
     expect(() => process.kill(stopped[0] ?? -1, 0)).toThrow();
   });
 });

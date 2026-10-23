@@ -30,6 +30,17 @@ export interface InstallCommand {
   timeout: number;
 }
 
+/** A command that exited non-zero or ran out of time, carrying the stderr a person can act on. */
+export class NpmCommandError extends Error {
+  constructor(
+    message: string,
+    readonly stderr: string,
+  ) {
+    super(message);
+    this.name = "NpmCommandError";
+  }
+}
+
 /** Runs `npm <args>` in `cwd`; rejects with the failure's stderr when npm exits non-zero. */
 export type NpmRunner = (command: InstallCommand) => Promise<void>;
 
@@ -69,8 +80,15 @@ export function runWithDeadline(input: RunWithDeadlineInput): Promise<void> {
     const timer = setTimeout(() => {
       timedOut = true;
       const detail = `did not finish within ${input.timeout / 1000} s`;
-      const rejectTimedOut = () =>
-        reject(Object.assign(new Error(detail), { stderr: stderr.trim() || detail }));
+      const lastOutput = stderr.trim();
+      function rejectTimedOut(): void {
+        reject(
+          new NpmCommandError(
+            detail,
+            lastOutput ? `${detail} (last output: ${lastOutput})` : detail,
+          ),
+        );
+      }
       terminate(child, {
         gracefulTimeoutMs: TERMINATE_GRACE_MS,
         forceTimeoutMs: TERMINATE_FORCE_MS,
@@ -88,7 +106,7 @@ export function runWithDeadline(input: RunWithDeadlineInput): Promise<void> {
         resolve();
         return;
       }
-      reject(Object.assign(new Error(`exited with ${code ?? signal}`), { stderr }));
+      reject(new NpmCommandError(`exited with ${code ?? signal}`, stderr));
     });
   });
 }
@@ -139,10 +157,10 @@ async function installFresh(input: {
   runNpm: NpmRunner;
 }): Promise<void> {
   const { directory, entry, preset, runNpm } = input;
-  // Whatever is here is a half-finished earlier attempt or an unmarked tree: start clean.
-  rmSync(directory, { recursive: true, force: true });
-  mkdirSync(directory, { recursive: true });
   try {
+    // Whatever is here is a half-finished earlier attempt or an unmarked tree: start clean.
+    rmSync(directory, { recursive: true, force: true, maxRetries: 3 });
+    mkdirSync(directory, { recursive: true });
     // A package.json of its own keeps npm from adopting one further up the tree as the prefix.
     writeFileSync(
       path.join(directory, "package.json"),
@@ -214,9 +232,9 @@ export async function installLocalServer(
       pending = installFresh({ directory, entry, preset, runNpm: input.runNpm ?? runNpmFromPath });
       installsInFlight.set(directory, pending);
       const started = pending;
-      const clear = () => {
+      function clear(): void {
         if (installsInFlight.get(directory) === started) installsInFlight.delete(directory);
-      };
+      }
       started.then(clear, clear);
     }
     await pending;

@@ -10,8 +10,8 @@ function hint(overrides: Partial<SetupHintInput>) {
     url: "https://example.test/mcp",
     isStatic: false,
     unhealthy: true,
-    hasStoredTokens: false,
-    hasClientCredentials: false,
+    hasStoredTokens: () => false,
+    hasClientCredentials: () => false,
     registrationUnsupported: false,
     ...overrides,
   });
@@ -36,6 +36,20 @@ describe("a server a local-server preset replaces", () => {
   });
 });
 
+describe("reading the token file", () => {
+  test("a healthy server, or one a preset replaces, never reads it", () => {
+    const reads: string[] = [];
+    const tracking = {
+      hasStoredTokens: () => reads.push("tokens") > 0,
+      hasClientCredentials: () => reads.push("credentials") > 0,
+    };
+    hint({ ...tracking, name: "slack", url: slackHost, unhealthy: false });
+    hint({ ...tracking, name: "figma", url: undefined, isStatic: true });
+    hint({ ...tracking, name: "figma", url: "https://mcp.figma.com/mcp" });
+    expect(reads).toEqual([]);
+  });
+});
+
 describe("an OAuth server that cannot register an app", () => {
   test("offers the credentials form on a host known to refuse registration", () => {
     expect(hint({ name: "slack", url: slackHost })).toBe("client_credentials");
@@ -46,15 +60,20 @@ describe("an OAuth server that cannot register an app", () => {
   });
 
   test("keeps offering it after credentials are saved, because they may be wrong", () => {
-    expect(hint({ name: "slack", url: slackHost, hasClientCredentials: true })).toBe(
+    expect(hint({ name: "slack", url: slackHost, hasClientCredentials: () => true })).toBe(
       "client_credentials",
     );
-    expect(hint({ hasClientCredentials: true })).toBe("client_credentials");
+    expect(hint({ hasClientCredentials: () => true })).toBe("client_credentials");
   });
 
   test("stops once a sign-in has stored tokens", () => {
     expect(
-      hint({ name: "slack", url: slackHost, hasClientCredentials: true, hasStoredTokens: true }),
+      hint({
+        name: "slack",
+        url: slackHost,
+        hasClientCredentials: () => true,
+        hasStoredTokens: () => true,
+      }),
     ).toBe(undefined);
   });
 

@@ -16,8 +16,9 @@ export interface SetupHintInput {
   /** Whether the entry authenticates with a stored header or env rather than OAuth. */
   isStatic: boolean;
   unhealthy: boolean;
-  hasStoredTokens: boolean;
-  hasClientCredentials: boolean;
+  /** Read lazily: they hit the token file, and most servers never reach the question. */
+  hasStoredTokens(): boolean;
+  hasClientCredentials(): boolean;
   /** A sign-in already failed because the upstream has no dynamic registration. */
   registrationUnsupported: boolean;
 }
@@ -43,17 +44,14 @@ function hostOf(url: string | undefined): string | undefined {
  */
 export function deriveSetupHint(input: SetupHintInput): McpGatewaySetupKind | undefined {
   if (getLocalServerPreset(input.name)) {
-    return input.unhealthy || input.url === undefined ? "local_token" : undefined;
+    const runsLocally = input.url === undefined;
+    return input.unhealthy || runsLocally ? "local_token" : undefined;
   }
   if (!input.unhealthy) return undefined;
-  if (input.isStatic || input.hasStoredTokens) return undefined;
+  if (input.isStatic || input.hasStoredTokens()) return undefined;
   const host = hostOf(input.url);
-  if (
-    input.hasClientCredentials ||
-    input.registrationUnsupported ||
-    (host !== undefined && NON_DCR_HOSTS.has(host))
-  ) {
-    return "client_credentials";
-  }
-  return undefined;
+  const hostRefusesRegistration = host !== undefined && NON_DCR_HOSTS.has(host);
+  const needsOwnApp =
+    input.registrationUnsupported || hostRefusesRegistration || input.hasClientCredentials();
+  return needsOwnApp ? "client_credentials" : undefined;
 }
