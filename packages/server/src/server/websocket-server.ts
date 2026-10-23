@@ -1809,6 +1809,8 @@ export class VoiceAssistantWebSocketServer {
         mcpStatus: true,
         // COMPAT(mcpGatewayAdopt): added in v0.8.1, remove gate after 2027-03-14.
         mcpGatewayAdopt: true,
+        // COMPAT(mcpGatewaySetup): added in v0.9.x, remove gate after 2027-10-22.
+        mcpGatewaySetup: true,
         // COMPAT(deviceLeases): added in v0.8.1, remove gate after 2027-03-18.
         deviceLeases: true,
         // COMPAT(claudeAccountSignIn): added in v0.8.x, remove gate after 2027-10-12.

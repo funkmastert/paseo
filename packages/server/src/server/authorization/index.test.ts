@@ -132,6 +132,40 @@ describe("SessionAuthorization", () => {
     ).toBe(true);
   });
 
+  // The setup forms write credentials and switch a server's command: configuration, so the same
+  // daemon.manage tier as editing the gateway's config. Reading the form's state is gated the
+  // same way, since it names which credentials are stored.
+  test("mcp_gateway.setup requests require daemon.manage; viewers and a Hub alone are refused", () => {
+    const requests = [
+      "mcp_gateway.setup.describe.request",
+      "mcp_gateway.setup.save_client.request",
+      "mcp_gateway.setup.set_local_token.request",
+    ] as const;
+    const responses = [
+      "mcp_gateway.setup.describe.response",
+      "mcp_gateway.setup.save_client.response",
+      "mcp_gateway.setup.set_local_token.response",
+    ] as const;
+    for (const type of requests) {
+      for (const permission of ["hub.execute", "daemon.read", "workspace.write"] as const) {
+        expect(new SessionAuthorization([permission]).allowsInbound(inboundMessage(type))).toBe(
+          false,
+        );
+      }
+      expect(new SessionAuthorization(["daemon.manage"]).allowsInbound(inboundMessage(type))).toBe(
+        true,
+      );
+    }
+    for (const type of responses) {
+      expect(new SessionAuthorization(["daemon.read"]).allowsOutbound(outboundMessage(type))).toBe(
+        false,
+      );
+      expect(
+        new SessionAuthorization(["daemon.manage"]).allowsOutbound(outboundMessage(type)),
+      ).toBe(true);
+    }
+  });
+
   // Starting a login on the daemon's host is administration: a Hub or a read-only client can see
   // a signed-out account but cannot sign it in.
   test("account.claude.sign_in requires daemon.manage; daemon.read and hub.execute alone don't grant it", () => {

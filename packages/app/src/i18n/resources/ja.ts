@@ -2189,6 +2189,75 @@ export const ja: TranslationResources = {
       path: "ホスト上のファイル",
       snippet: "追加する内容",
       command: "ホストで実行",
+      why: "理由",
+    },
+    setup: {
+      title: "{{name}} をセットアップ",
+      action: {
+        localToken: "トークンでセットアップ",
+        clientCredentials: "アプリを作成",
+        slack: "Slack アプリを作成",
+        replaceToken: "トークンを置き換える",
+      },
+      hint: {
+        localToken:
+          "{{name}} のホスト型サーバーは承認済みリストにあるアプリしか受け付けないため、Paseo はサインインできません。代わりに、ご自身のトークンでローカルサーバーを実行してください。",
+        clientCredentials:
+          "{{name}} には自動サインインがありません。一度だけアプリを作成してから、サインインしてください。",
+      },
+      describeFailed: "セットアップの詳細を読み取れませんでした: {{error}}",
+      error: {
+        required: "必須",
+        whitespace: "スペースと改行を削除してください",
+        invalidUrl: "完全な URL を入力してください（例: https://example.com/callback）",
+      },
+      failure: {
+        installFailed: "ローカルサーバーをインストールできませんでした: {{error}}",
+        configWriteFailed: "{{name}} をローカルサーバーに切り替えられませんでした: {{error}}",
+        unknown: "{{name}} をセットアップできませんでした。",
+        notConnected:
+          "トークンは保存されましたが、{{name}} に接続できませんでした（状態: {{status}}）。トークンを確認して、もう一度保存してください。",
+      },
+      localToken: {
+        intro:
+          "Paseo はホスト上で、パーソナルアクセストークンを使ってローカルの {{name}} サーバーを実行します。トークンはホストに保存され、このアプリが取得することはありません。",
+        getToken: "トークンを取得",
+        tokenHint: "読み取り専用のパーソナルアクセストークンを作成し、下に貼り付けてください。",
+        tokenLabel: "パーソナルアクセストークン",
+        installNote: "最初の保存時にサーバーをインストールします。1 分ほどかかることがあります。",
+        save: "保存して接続",
+      },
+      clientCredentials: {
+        intro:
+          "{{name}} は Paseo を自動で登録できません。一度だけ OAuth アプリを作成し、その認証情報をここに貼り付けてから、サインインしてください。",
+        step1: "アプリを作成",
+        step2: "認証情報を貼り付け",
+        step3: "サインイン",
+        step3Hint: "ブラウザーで {{name}} を開き、アクセスを承認します。",
+        adminNote:
+          "新しいアプリをインストールする前に、ワークスペースの管理者による承認が必要な場合があります。",
+        redirectLabel: "リダイレクト URL",
+        redirectHint: "この URL をそのままアプリに登録してください。",
+        clientIdLabel: "クライアント ID",
+        clientSecretLabel: "クライアントシークレット",
+        scopeLabel: "スコープ（任意）",
+        save: "認証情報を保存",
+        saved: "認証情報を保存しました",
+        secretKept: "シークレットは保存済みです。空欄のままにすると、そのまま使われます。",
+      },
+      providers: {
+        figma: {
+          tokenHint:
+            "Figma で、設定 → セキュリティ → パーソナルアクセストークン を開きます。読み取り専用のスコープを選んでください。",
+        },
+        slack: {
+          clientCredentialsIntro:
+            "Slack は Paseo を自動で登録できません。一度だけ Slack アプリを作成し、その認証情報をここに貼り付けてから、サインインしてください。",
+          createApp: "Slack アプリを作成",
+          createAppHint:
+            "アプリの内容が入力済みの状態で Slack を開きます。読み取り専用のアクセスとリダイレクト URL が設定済みです。Paseo は投稿も書き込みもできません。",
+        },
+      },
     },
     showFullError: "メッセージ全体を表示",
     showLessError: "メッセージを短く表示",

@@ -22,6 +22,7 @@ interface SupportedMutableConfigPatch {
   browserTools?: { enabled?: boolean };
   providers?: MutableDaemonConfig["providers"];
   removeProviders?: string[];
+  removeMcpGatewayServers?: string[];
   metadataGeneration?: Partial<MutableDaemonConfig["metadataGeneration"]>;
   tokenBurnMonitor?: MutableDaemonConfig["tokenBurnMonitor"];
   resourceMonitor?: MutableDaemonConfig["resourceMonitor"];
@@ -475,6 +476,9 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
       : {}),
     ...(patch.providers !== undefined ? { providers: patch.providers } : {}),
     ...(patch.removeProviders !== undefined ? { removeProviders: patch.removeProviders } : {}),
+    ...(patch.removeMcpGatewayServers !== undefined
+      ? { removeMcpGatewayServers: patch.removeMcpGatewayServers }
+      : {}),
     ...pickMetadataGenerationPatch(patch.metadataGeneration),
     ...pickTokenBurnMonitorPatch(patch.tokenBurnMonitor),
     ...pickResourceMonitorPatch(patch.resourceMonitor),
@@ -605,9 +609,13 @@ export class DaemonConfigStore {
         "Relay is controlled by a daemon launch override. Remove PASEO_RELAY_ENABLED or the relay CLI flag before changing it here.",
       );
     }
-    const { removeProviders = [], ...configPatch } = parsedPatch;
+    const { removeProviders = [], removeMcpGatewayServers = [], ...configPatch } = parsedPatch;
     const removedProviders = Array.from(new Set(removeProviders));
-    const merged = deepMerge(this.current, configPatch);
+    const removedGatewayServers = Array.from(new Set(removeMcpGatewayServers));
+    const merged = omitMcpGatewayServersFromConfig(
+      deepMerge(this.current, configPatch),
+      removedGatewayServers,
+    );
     if (parsedPatch.skills?.selection !== undefined) {
       merged.skills = { selection: parsedPatch.skills.selection };
     }
@@ -628,6 +636,7 @@ export class DaemonConfigStore {
     const { previous: persistedBeforePatch, knownNext } = this.persistConfig(
       configPatch,
       removedProviders,
+      removedGatewayServers,
     );
     if (!configChanged) {
       this.lastKnownPersisted = knownNext;
@@ -824,6 +833,7 @@ export class DaemonConfigStore {
   private persistConfig(
     patch: Omit<SupportedMutableConfigPatch, "removeProviders">,
     removeProviders: readonly string[],
+    removeMcpGatewayServers: readonly string[],
   ): { previous: PersistedConfig; knownNext: PersistedConfig } {
     const persisted = loadPersistedConfig(this.paseoHome, this.logger);
     const merge = (source: PersistedConfig) =>
@@ -831,6 +841,7 @@ export class DaemonConfigStore {
         persisted: source,
         patch,
         removeProviders,
+        removeMcpGatewayServers,
         persistRelayEnabled: this.relayEnabledMutable,
       });
     const nextPersisted = merge(persisted);
@@ -844,13 +855,18 @@ function mergeMutablePatchIntoPersistedConfig(params: {
   persisted: PersistedConfig;
   patch: Omit<SupportedMutableConfigPatch, "removeProviders">;
   removeProviders: readonly string[];
+  removeMcpGatewayServers: readonly string[];
   persistRelayEnabled: boolean;
 }): PersistedConfig {
-  const { persisted, patch, removeProviders, persistRelayEnabled } = params;
+  const { persisted, patch, removeProviders, removeMcpGatewayServers, persistRelayEnabled } =
+    params;
   const daemon = mergeMutableDaemonPatch(persisted.daemon, patch, persistRelayEnabled);
   const agents = mergeMutableAgentPatch(persisted.agents, patch, removeProviders);
   const worktrees = mergeMutableWorktreesPatch(persisted.worktrees, patch);
-  const mcpGateway = mergeMcpGatewayForPersist(persisted.mcpGateway, patch.mcpGateway);
+  const mcpGateway = omitMcpGatewayServersFromPersisted(
+    mergeMcpGatewayForPersist(persisted.mcpGateway, patch.mcpGateway),
+    removeMcpGatewayServers,
+  );
   return {
     ...persisted,
     ...(patch.pluginsEnabled !== undefined ? { pluginsEnabled: patch.pluginsEnabled } : {}),
@@ -1160,6 +1176,46 @@ function mergeMcpGatewayForPersist(
     (persisted ?? {}) as Record<string, unknown>,
     patch as Record<string, unknown>,
   ) as PersistedMcpGateway;
+}
+
+// Deep-merge patching cannot delete a key, and a name in both `servers` and `localServers`
+// keeps the remote entry on the next boot, so switching a hosted server to a local one has to
+// drop the hosted entry in the same write (docs/mcp-gateway.md).
+function omitMcpGatewayServersFromPersisted(
+  persisted: PersistedMcpGateway,
+  names: readonly string[],
+): PersistedMcpGateway {
+  if (names.length === 0 || !persisted?.servers) {
+    return persisted;
+  }
+  const servers = { ...persisted.servers };
+  let changed = false;
+  for (const name of names) {
+    if (name in servers) {
+      delete servers[name];
+      changed = true;
+    }
+  }
+  return changed ? { ...persisted, servers } : persisted;
+}
+
+function omitMcpGatewayServersFromConfig<T extends { mcpGateway?: { servers?: object } }>(
+  config: T,
+  names: readonly string[],
+): T {
+  const servers = config.mcpGateway?.servers;
+  if (names.length === 0 || !servers) {
+    return config;
+  }
+  const kept = { ...servers } as Record<string, unknown>;
+  let changed = false;
+  for (const name of names) {
+    if (name in kept) {
+      delete kept[name];
+      changed = true;
+    }
+  }
+  return changed ? { ...config, mcpGateway: { ...config.mcpGateway, servers: kept } } : config;
 }
 
 function mergeMutableWorktreesPatch(

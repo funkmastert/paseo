@@ -141,6 +141,7 @@ import { createAgentMcpServer } from "./agent/mcp-server.js";
 import { liveParentOf } from "./agent/live-parent.js";
 import { McpGateway, type McpGatewayConfig } from "./mcp-gateway/gateway.js";
 import { installMcpGatewayRoutes } from "./mcp-gateway/routes.js";
+import { McpGatewaySetupService } from "./mcp-gateway/setup.js";
 import { normalizeMcpProtocolVersionHeader } from "./mcp-protocol-compat.js";
 import {
   createPaseoToolCatalog,
@@ -3343,9 +3344,13 @@ export async function createPaseoDaemon(
   // wsServer is accepting connections) once the daemon's own reachable base URL is known
   // (needed for the OAuth redirect_uri, KTD3). Non-blocking so an unreachable upstream
   // never delays the daemon that manages all agents from coming up.
+  // One token store for the gateway and the setup forms, so a credential the form writes is the
+  // one the next connect reads.
+  const mcpGatewayTokenStore = new McpGatewayTokenStore(config.paseoHome, logger);
   const mcpGateway = new McpGateway({
     paseoHome: config.paseoHome,
     config: resolveMcpGatewayConfig(daemonConfigStore.get().mcpGateway),
+    tokenStore: mcpGatewayTokenStore,
     logger,
   });
   installMcpGatewayRoutes(app, {
@@ -3365,6 +3370,21 @@ export async function createPaseoDaemon(
   mcpGateway.setServerPersister((name, serverConfig) => {
     daemonConfigStore.patch({ mcpGateway: { servers: { [name]: serverConfig } } });
   });
+  // The strip's setup forms (docs/mcp-gateway.md). Switching a hosted server to a local one drops
+  // the hosted entry in the same config write; the live gateway is swapped by the service.
+  agentManager.setMcpGatewaySetup(
+    new McpGatewaySetupService({
+      paseoHome: config.paseoHome,
+      gateway: mcpGateway,
+      tokenStore: mcpGatewayTokenStore,
+      writeLocalServer: (name, localConfig) => {
+        daemonConfigStore.patch({
+          mcpGateway: { localServers: { [name]: localConfig } },
+          removeMcpGatewayServers: [name],
+        });
+      },
+    }),
+  );
 
   let mcpEnabled = config.mcpEnabled ?? true;
   // `jev.status` says the agent tools are served while agents can reach them: the agent MCP

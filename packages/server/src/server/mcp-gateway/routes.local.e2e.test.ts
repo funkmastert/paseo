@@ -31,7 +31,7 @@ import express from "express";
 import { hashDaemonPassword } from "../auth.js";
 import { createPaseoDaemon, type PaseoDaemonConfig } from "../bootstrap.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
-import { MCP_GATEWAY_CALLBACK_ROUTE } from "./routes.js";
+import { MCP_GATEWAY_CALLBACK_ROUTE } from "./oauth.js";
 
 async function getAvailablePort(): Promise<number> {
   return await new Promise((resolve, reject) => {

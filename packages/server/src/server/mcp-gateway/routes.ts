@@ -13,6 +13,7 @@ import {
 import { isAgentMcpRequestAuthorized } from "../auth.js";
 import { normalizeMcpProtocolVersionHeader } from "../mcp-protocol-compat.js";
 import { McpGatewayUpstreamUnavailableError, type McpGateway } from "./gateway.js";
+import { MCP_GATEWAY_CALLBACK_ROUTE } from "./oauth.js";
 
 interface LoggerLike {
   child(bindings: Record<string, unknown>): LoggerLike;
@@ -24,7 +25,6 @@ interface LoggerLike {
 // ErrorCode.ConnectionClosed (-32000) and ErrorCode.RequestTimeout (-32001).
 const MCP_GATEWAY_NEEDS_AUTH_ERROR_CODE = -32010;
 
-export const MCP_GATEWAY_CALLBACK_ROUTE = "/mcp/gateway/oauth/callback";
 const MCP_GATEWAY_PROXY_ROUTE = "/mcp/gateway/:name";
 
 export interface McpGatewayRoutesOptions {

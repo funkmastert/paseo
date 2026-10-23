@@ -113,6 +113,8 @@ import type {
   TerminalInput,
   SessionInboundMessage,
   SessionOutboundMessage,
+  McpGatewaySetupLocalTokenRequest,
+  McpGatewaySetupSaveClientRequest,
   SendAgentMessageRequest,
   PaseoConfigRaw,
   PaseoConfigRevision,
@@ -811,6 +813,26 @@ export type McpGatewayServerAdoptPayload = Extract<
   SessionOutboundMessage,
   { type: "mcp_gateway.server.adopt.response" }
 >["payload"];
+export type McpGatewaySetupDescribePayload = Extract<
+  SessionOutboundMessage,
+  { type: "mcp_gateway.setup.describe.response" }
+>["payload"];
+export type McpGatewaySetupSaveClientPayload = Extract<
+  SessionOutboundMessage,
+  { type: "mcp_gateway.setup.save_client.response" }
+>["payload"];
+export type McpGatewaySetupLocalTokenPayload = Extract<
+  SessionOutboundMessage,
+  { type: "mcp_gateway.setup.set_local_token.response" }
+>["payload"];
+export type McpGatewaySetupSaveClientInput = Omit<
+  McpGatewaySetupSaveClientRequest,
+  "type" | "requestId"
+>;
+export type McpGatewaySetupLocalTokenInput = Omit<
+  McpGatewaySetupLocalTokenRequest,
+  "type" | "requestId"
+>;
 export type ProjectListPayload = Extract<
   SessionOutboundMessage,
   { type: "project.list.response" }
@@ -1045,6 +1067,8 @@ function toTimeoutError(error: unknown, label: string, timeoutMs: number): Error
 const DEFAULT_RECONNECT_BASE_DELAY_MS = 1500;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30000;
 const DEFAULT_SESSION_RPC_TIMEOUT_MS = 60_000;
+/** A local server's install runs `npm install`, which outlasts a plain RPC on a slow link. */
+const MCP_GATEWAY_LOCAL_TOKEN_TIMEOUT_MS = 180_000;
 // JEV calls are made from plugin hooks with a 30-second budget, and every JEV answer is optional:
 // a caller that forgets a timeout must fail open well inside that budget, not after 60 s.
 const JEV_DEFAULT_DEADLINE_MS = 1_500; // spawnHint's default deadline, the only feature served
@@ -5339,6 +5363,54 @@ export class DaemonClient {
         name,
         agentId,
       },
+    });
+  }
+
+  /**
+   * What the setup form for one brokered server needs: the redirect URL an OAuth app must allow,
+   * the client id already stored (it is public), and whether a secret or token is stored
+   * (booleans, never the values).
+   * Gate on `server_info.features.mcpGatewaySetup`.
+   */
+  async describeMcpGatewaySetup(
+    name: string,
+    options?: { requestId?: string },
+  ): Promise<McpGatewaySetupDescribePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "mcp_gateway.setup.describe.request", name },
+    });
+  }
+
+  /**
+   * Stores a hand-made OAuth app's credentials for a server whose upstream has no dynamic client
+   * registration. The secret travels in the request and never comes back; leaving it out keeps
+   * the secret already stored for the same client ID.
+   */
+  async saveMcpGatewayClient(
+    input: McpGatewaySetupSaveClientInput,
+    options?: { requestId?: string },
+  ): Promise<McpGatewaySetupSaveClientPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "mcp_gateway.setup.save_client.request", ...input },
+    });
+  }
+
+  /**
+   * Installs the daemon's pinned local server for `preset`, stores `token` for it, and switches
+   * the named entry to that local server. The install can take a while, so the wait is longer
+   * than a plain RPC's. The payload's `status` is the swapped server's: anything but `connected`
+   * means the token is stored and the local server did not start.
+   */
+  async setMcpGatewayLocalToken(
+    input: McpGatewaySetupLocalTokenInput,
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<McpGatewaySetupLocalTokenPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout ?? MCP_GATEWAY_LOCAL_TOKEN_TIMEOUT_MS,
+      message: { type: "mcp_gateway.setup.set_local_token.request", ...input },
     });
   }
 

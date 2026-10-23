@@ -11,12 +11,7 @@
  *          (any status) --disable--> disabled
  */
 
-export type McpGatewayServerStatus =
-  | "disabled"
-  | "connecting"
-  | "connected"
-  | "needs-auth"
-  | "error";
+import type { McpGatewayServerStatus } from "@getpaseo/protocol/messages";
 
 export interface McpGatewayServerState {
   readonly status: McpGatewayServerStatus;

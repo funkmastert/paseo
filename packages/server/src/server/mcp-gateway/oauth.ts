@@ -15,6 +15,9 @@ import type {
 
 import type { McpGatewayTokenStore } from "./token-store.js";
 
+/** The path every upstream OAuth app sends the browser back to; the one place it is spelled. */
+export const MCP_GATEWAY_CALLBACK_ROUTE = "/mcp/gateway/oauth/callback";
+
 const DEFAULT_STATE_TTL_MS = 5 * 60_000;
 
 interface OAuthStateEntry {

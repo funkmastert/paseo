@@ -2222,6 +2222,75 @@ export const fr: TranslationResources = {
       path: "Fichier sur l'hôte",
       snippet: "Ajoutez",
       command: "Exécutez sur l'hôte",
+      why: "Pourquoi",
+    },
+    setup: {
+      title: "Configurer {{name}}",
+      action: {
+        localToken: "Configurer avec un jeton",
+        clientCredentials: "Créer une application",
+        slack: "Créer une application Slack",
+        replaceToken: "Remplacer le jeton",
+      },
+      hint: {
+        localToken:
+          "Le serveur hébergé de {{name}} n'accepte que les applications de sa propre liste approuvée : Paseo ne peut donc pas s'y connecter. Lancez plutôt un serveur local avec votre propre jeton.",
+        clientCredentials:
+          "{{name}} n'a pas de connexion automatique. Créez une application pour lui une seule fois, puis connectez-vous.",
+      },
+      describeFailed: "Impossible de lire les détails de configuration : {{error}}",
+      error: {
+        required: "Obligatoire",
+        whitespace: "Supprimez les espaces et les sauts de ligne",
+        invalidUrl: "Saisissez une URL complète, par exemple https://example.com/callback",
+      },
+      failure: {
+        installFailed: "Impossible d'installer le serveur local : {{error}}",
+        configWriteFailed: "Impossible de basculer {{name}} vers le serveur local : {{error}}",
+        unknown: "Impossible de configurer {{name}}.",
+        notConnected:
+          "Le jeton est enregistré, mais {{name}} ne s'est pas connecté (état : {{status}}). Vérifiez le jeton, puis enregistrez à nouveau.",
+      },
+      localToken: {
+        intro:
+          "Paseo exécutera un serveur {{name}} local sur l'hôte avec un jeton d'accès personnel. Le jeton reste sur l'hôte ; cette application ne le récupère jamais.",
+        getToken: "Obtenir un jeton",
+        tokenHint: "Créez un jeton d'accès personnel en lecture seule, puis collez-le ci-dessous.",
+        tokenLabel: "Jeton d'accès personnel",
+        installNote: "La première sauvegarde installe le serveur, ce qui peut prendre une minute.",
+        save: "Enregistrer et connecter",
+      },
+      clientCredentials: {
+        intro:
+          "{{name}} ne peut pas enregistrer Paseo de lui-même. Créez une application OAuth pour lui une seule fois, collez ses identifiants ici, puis connectez-vous.",
+        step1: "Créez l'application",
+        step2: "Collez ses identifiants",
+        step3: "Connectez-vous",
+        step3Hint: "Ouvre {{name}} dans votre navigateur pour approuver l'accès.",
+        adminNote:
+          "Votre espace de travail peut exiger qu'un administrateur approuve une nouvelle application avant son installation.",
+        redirectLabel: "URL de redirection",
+        redirectHint: "Enregistrez exactement cette URL sur l'application.",
+        clientIdLabel: "ID client",
+        clientSecretLabel: "Secret client",
+        scopeLabel: "Portées (facultatif)",
+        save: "Enregistrer les identifiants",
+        saved: "Identifiants enregistrés",
+        secretKept: "Un secret est enregistré. Laissez ce champ vide pour le conserver.",
+      },
+      providers: {
+        figma: {
+          tokenHint:
+            "Dans Figma : Paramètres → Sécurité → Jetons d'accès personnels. Choisissez des portées en lecture seule.",
+        },
+        slack: {
+          clientCredentialsIntro:
+            "Slack ne peut pas enregistrer Paseo de lui-même. Créez une application Slack une seule fois, collez ses identifiants ici, puis connectez-vous.",
+          createApp: "Créer l'application Slack",
+          createAppHint:
+            "Ouvre Slack avec l'application préremplie : accès en lecture seule et URL de redirection définie. Paseo ne peut ni publier ni écrire.",
+        },
+      },
     },
     showFullError: "Afficher tout le message",
     showLessError: "Raccourcir le message",

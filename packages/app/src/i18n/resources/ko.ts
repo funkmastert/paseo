@@ -2179,6 +2179,74 @@ export const ko: TranslationResources = {
       path: "호스트의 파일",
       snippet: "추가할 내용",
       command: "호스트에서 실행",
+      why: "이유",
+    },
+    setup: {
+      title: "{{name}} 설정",
+      action: {
+        localToken: "토큰으로 설정",
+        clientCredentials: "앱 만들기",
+        slack: "Slack 앱 만들기",
+        replaceToken: "토큰 교체",
+      },
+      hint: {
+        localToken:
+          "{{name}}의 호스팅 서버는 자체 승인 목록에 있는 앱만 받아들이므로 Paseo가 로그인할 수 없습니다. 대신 본인의 토큰으로 로컬 서버를 실행하세요.",
+        clientCredentials:
+          "{{name}}은(는) 자동 로그인을 지원하지 않습니다. 앱을 한 번 만든 뒤 로그인하세요.",
+      },
+      describeFailed: "설정 정보를 읽지 못했습니다: {{error}}",
+      error: {
+        required: "필수 항목",
+        whitespace: "공백과 줄바꿈을 지우세요",
+        invalidUrl: "전체 URL을 입력하세요. 예: https://example.com/callback",
+      },
+      failure: {
+        installFailed: "로컬 서버를 설치하지 못했습니다: {{error}}",
+        configWriteFailed: "{{name}}을(를) 로컬 서버로 전환하지 못했습니다: {{error}}",
+        unknown: "{{name}}을(를) 설정하지 못했습니다.",
+        notConnected:
+          "토큰은 저장되었지만 {{name}}에 연결되지 않았습니다(상태: {{status}}). 토큰을 확인한 뒤 다시 저장하세요.",
+      },
+      localToken: {
+        intro:
+          "Paseo가 호스트에서 개인 액세스 토큰으로 로컬 {{name}} 서버를 실행합니다. 토큰은 호스트에만 남으며, 이 앱은 토큰을 다시 받아오지 않습니다.",
+        getToken: "토큰 받기",
+        tokenHint: "읽기 전용 권한의 개인 액세스 토큰을 만든 뒤 아래에 붙여넣으세요.",
+        tokenLabel: "개인 액세스 토큰",
+        installNote: "처음 저장할 때 서버를 설치하며, 1분 정도 걸릴 수 있습니다.",
+        save: "저장 후 연결",
+      },
+      clientCredentials: {
+        intro:
+          "{{name}}은(는) Paseo를 스스로 등록할 수 없습니다. OAuth 앱을 한 번 만들고 자격 증명을 여기에 붙여넣은 뒤 로그인하세요.",
+        step1: "앱 만들기",
+        step2: "자격 증명 붙여넣기",
+        step3: "로그인",
+        step3Hint: "브라우저에서 {{name}}을(를) 열어 접근을 승인합니다.",
+        adminNote: "새 앱을 설치하려면 워크스페이스 관리자의 승인이 필요할 수 있습니다.",
+        redirectLabel: "리디렉션 URL",
+        redirectHint: "이 URL을 그대로 앱에 등록하세요.",
+        clientIdLabel: "클라이언트 ID",
+        clientSecretLabel: "클라이언트 시크릿",
+        scopeLabel: "범위(선택 사항)",
+        save: "자격 증명 저장",
+        saved: "자격 증명을 저장했습니다",
+        secretKept: "저장된 시크릿이 있습니다. 비워 두면 그대로 유지됩니다.",
+      },
+      providers: {
+        figma: {
+          tokenHint:
+            "Figma에서 설정 → 보안 → 개인 액세스 토큰으로 이동하세요. 읽기 전용 범위를 선택하세요.",
+        },
+        slack: {
+          clientCredentialsIntro:
+            "Slack은 Paseo를 스스로 등록할 수 없습니다. Slack 앱을 한 번 만들고 자격 증명을 여기에 붙여넣은 뒤 로그인하세요.",
+          createApp: "Slack 앱 만들기",
+          createAppHint:
+            "앱이 미리 채워진 상태로 Slack을 엽니다. 읽기 전용 접근과 리디렉션 URL이 설정되어 있습니다. Paseo는 게시하거나 쓸 수 없습니다.",
+        },
+      },
     },
     showFullError: "메시지 전체 보기",
     showLessError: "메시지 줄이기",

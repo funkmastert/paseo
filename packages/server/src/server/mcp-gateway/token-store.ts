@@ -247,6 +247,22 @@ export class McpGatewayTokenStore {
     return this.getOAuthRecord(serverName)?.clientCredentials;
   }
 
+  /**
+   * Stores the credentials of a hand-made OAuth app (the in-app setup form's Save). Stored
+   * credentials outrank a past dynamic registration and the SDK never registers when they are
+   * present, so the registration is dropped rather than left to shadow nothing. Tokens survive:
+   * a re-save of the same app must not sign anyone out.
+   */
+  saveClientCredentials(serverName: string, credentials: PreregisteredOAuthClient): void {
+    const record = this.getOAuthRecord(serverName);
+    if (!record) {
+      this.setRecord(serverName, { auth: "oauth", clientCredentials: credentials });
+      return;
+    }
+    const { clientInformation: _dropped, ...rest } = record;
+    this.setRecord(serverName, { ...rest, clientCredentials: credentials });
+  }
+
   getCodeVerifier(serverName: string): string | undefined {
     return this.getOAuthRecord(serverName)?.codeVerifier;
   }
@@ -275,6 +291,15 @@ export class McpGatewayTokenStore {
 
   saveStaticHeaders(serverName: string, headers: Record<string, string>): void {
     this.setRecord(serverName, { auth: "static", headers });
+  }
+
+  /**
+   * Stores the environment a local server starts with, which is where it takes its credential.
+   * `headers` stays `{}`: a daemon older than local servers requires the field, and one record it
+   * cannot parse makes it read the whole file as empty.
+   */
+  saveStaticEnv(serverName: string, env: Record<string, string>): void {
+    this.setRecord(serverName, { auth: "static", headers: {}, env });
   }
 
   /**

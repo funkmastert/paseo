@@ -10,7 +10,8 @@ import express from "express";
 import { hashDaemonPassword } from "../auth.js";
 import { McpGateway } from "./gateway.js";
 import { McpGatewayTokenStore } from "./token-store.js";
-import { installMcpGatewayRoutes, MCP_GATEWAY_CALLBACK_ROUTE } from "./routes.js";
+import { MCP_GATEWAY_CALLBACK_ROUTE } from "./oauth.js";
+import { installMcpGatewayRoutes } from "./routes.js";
 
 const tempDirs: string[] = [];
 const testServers: Array<() => Promise<void>> = [];
