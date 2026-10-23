@@ -37,7 +37,7 @@ Add an `mcpGateway` section to the daemon config (`~/.paseo/config.json`):
 - `auth`: `oauth` (default) or `static`. Secrets never go in this config — it is broadcast to every connected client. Static header values live in the private token store (below).
 - `sessionMode`: `overlay` (default) or `strict`. How brokered entries meet the CLI's own MCP loading; see Session injection.
 - `localServers`: stdio servers the daemon runs itself; see Local servers.
-- Adding a server is configuration only; no code. Editing `mcpGateway` requires a daemon restart — the config store persists the change and reports it as restart-required.
+- Adding a server is configuration only; no code. Editing `mcpGateway` requires a daemon restart — the config store persists the change and reports it as restart-required. The in-app setup forms are the exception: they write config and swap the live runtime in one step (see Setting up a server that cannot sign in).
 
 When the gateway is disabled or unconfigured, nothing is constructed and session launches are byte-identical to a gateway-less daemon.
 
@@ -128,35 +128,37 @@ Figma is the worked example, and the app sets it up for you (next section). [Fra
 
 Two kinds of upstream cannot be signed in to by pressing a button: one that offers no dynamic client registration (Slack), and one that refuses every client outside its catalog (Figma). Both used to end in an explanation and a hand-edited token file. The strip now offers a setup form on those rows.
 
-The daemon decides which rows get one, because only it knows what is already stored. `mcp_status_update` entries carry an optional `setup` while the server is unhealthy:
+The daemon decides which rows get one, because only it knows what is already stored. `mcp_status_update` entries carry an optional `setup`:
 
-- `local_token`: `local-server-presets.ts` has a preset for that server name.
-- `client_credentials`: an OAuth server with no stored app and no tokens, on a host with no registration (`mcp.slack.com`) or after a sign-in that failed with `client_not_registered`.
+- `local_token`: `local-server-presets.ts` has a preset for that server name. While the entry is still the hosted URL, the hint appears when it is unhealthy. Once it runs as the local server, the hint stays whether it is healthy or not, and the row reads **Replace token**: a wrong token starts fine and fails only on tool calls, so "connected" does not mean the token is right.
+- `client_credentials`: an OAuth server with no stored tokens, on a host with no registration (`mcp.slack.com`), after a sign-in that failed with `client_not_registered`, or with credentials already saved. It ends when a sign-in stores tokens. A mistyped secret saves fine and only fails at sign-in, so saving credentials leaves the form on offer to correct them.
 
-The hint clears once credentials exist, and the row's ordinary Sign in returns. The app shows the action only when `server_info.features.mcpGatewaySetup` is set, so an older daemon keeps today's rows. The provider specifics are two small tables: the preset table on the daemon (which package a name runs) and `mcp-setup-providers.ts` in the app (the Slack manifest, the Figma token link, the form wording). A third server is a new entry in each; the forms themselves are generic.
+The app shows the action only when `server_info.features.mcpGatewaySetup` is set, so an older daemon keeps today's rows. The provider specifics are two small tables: the preset table on the daemon (which package a name runs) and `mcp-setup-providers.ts` in the app (the Slack manifest, the Figma token link, the form wording). A third server is a new entry in each; the forms themselves are generic.
 
-The three RPCs, `mcp_gateway.setup.describe`, `.save_client` and `.set_local_token`, require `daemon.manage`, the permission that edits gateway config ([permissions](permissions.md)). Secrets travel in requests only. No response carries one, `describe` reports booleans, and the session logs the server name and reason, never the message.
+The three RPCs, `mcp_gateway.setup.describe`, `.save_client` and `.set_local_token`, require `daemon.manage`, the permission that edits gateway config ([permissions](permissions.md)). Secrets travel in requests only. No response carries one, `describe` reports booleans for the secret and token (and returns the public client ID), and the session logs the server name and reason, never the message.
 
 ### Figma: a token
 
 **Set up with a token** opens a form with a link to Figma's settings (Security, Personal access tokens; choose read-only scopes) and a secret field. On save the daemon:
 
-1. Installs `figma-developer-mcp` at an exact version (the preset's `version`) into `$PASEO_HOME/mcp-gateway/local-servers/figma-<version>/` with `npm install --ignore-scripts`. A present `node_modules/figma-developer-mcp/dist/bin.js` skips the install, and a failed install changes nothing else. The daemon needs `npm` on its `PATH` and Node 20.20 or newer. Transitive dependencies float inside the package's own ranges; only the top-level version is pinned.
+1. Installs `figma-developer-mcp` at an exact version (the preset's `version`) into `$PASEO_HOME/mcp-gateway/local-servers/figma-<version>/` with `npm install --ignore-scripts`. The install is finished only when a completion marker exists next to a present `node_modules/figma-developer-mcp/dist/bin.js`; the marker is written after npm exits 0 and the entry exists. An unmarked directory is a half-finished attempt and is cleared before the next one, and any failure, a timeout included, removes the directory. On timeout the whole npm process tree is killed first, because on Windows `npm.cmd` is a shell around npm. Two installs of one directory share a single npm run, and a failed install changes nothing else. The daemon needs `npm` on its `PATH` and Node 20.20 or newer. Transitive dependencies float inside the package's own ranges; only the top-level version is pinned.
 2. Writes the token as `env.FIGMA_API_KEY` on a static record in the token file, with `headers: {}`. Under the desktop app the daemon is Electron running as node, so `ELECTRON_RUN_AS_NODE=1` rides in the same record; the child's environment is otherwise minimal.
 3. Writes `mcpGateway.localServers.figma` to config: `command` is the daemon's own runtime, `args` are the installed `bin.js` then `--stdio --no-telemetry --skip-image-downloads`, `auth` is `static`. It drops `mcpGateway.servers.figma` in the same write through the patch field `removeMcpGatewayServers`, because a name in both keeps the remote entry on the next boot and would undo the switch.
 4. Swaps the live runtime (`McpGateway.replaceServer`), so the row reconnects without a daemon restart. Sessions already running reach `/mcp/gateway/figma` as before.
 
-Setting up again replaces the token. To move to another Framelink version, change the preset's `version`; the new directory installs on the next save and the old one stays.
+The response carries the swapped server's status. Anything but `connected` means the token is stored and the local server did not start, so the form stays open with the token in place and a message naming the status. A second save for the same name while one is running is refused with `setup_in_progress`; `McpGateway.replaceServer` and `adoptServer` also run one at a time per name, so two clients cannot interleave a swap and leave a child process unowned.
+
+**Replace token** opens the same form on a server that already runs locally. To move to another Framelink version, change the preset's `version`; the new directory installs on the next save and the old one stays.
 
 ### Slack: an OAuth app
 
 **Create a Slack app** opens a three-step form:
 
 1. A button opening `https://api.slack.com/apps?new_app=1&manifest_json=…` with the app prefilled: name `Paseo MCP`, the redirect URL, and read-only user scopes. A workspace may need an admin to approve a new app; the form says so.
-2. Client ID and Client secret fields. Saving writes `clientCredentials` with `redirectUrl` and `scope` to the token file. The redirect URL is the daemon's own callback with a loopback IP rewritten to `localhost` and the port it actually listens on; a service-proxy public URL is used as is.
-3. **Sign in**, which starts the ordinary OAuth flow.
+2. Client ID and Client secret fields. Saving writes `clientCredentials` with `redirectUrl` and `scope` to the token file. `describe` returns the stored client ID, which is public, so the form prefills it; the secret is never returned. Leaving the secret blank keeps the stored secret of the same client ID, and a different client ID drops it, since it belongs to a different app. The redirect URL is the daemon's own callback with a loopback IP rewritten to `localhost` and the port it actually listens on; a service-proxy public URL is used as is.
+3. **Sign in**, which starts the ordinary OAuth flow. The sheet closes only when the daemon returns an authorization URL. A failure stays on the sheet and on the row, and a second tap while one is running is ignored.
 
-The scopes are the ones Slack's MCP server documents per tool ([docs.slack.dev/ai/slack-mcp-server](https://docs.slack.dev/ai/slack-mcp-server), checked 2026-10-22), reduced to the ones that read: `search:read.public`, `search:read.private`, `search:read.mpim`, `search:read.im`, `search:read.files`, `search:read.users`, `channels:history`, `groups:history`, `im:history`, `mpim:history`, `channels:read`, `groups:read`, `im:read`, `mpim:read`, `users:read`, `users:read.email`, `files:read`, `canvases:read`, `lists:read`, `reactions:read`, `emoji:read`. Nothing that writes is requested (`chat:write`, `files:write`, `canvases:write`, and every other `:write`): an app without a scope cannot use it, which is how "agents never post to Slack unasked" is enforced rather than hoped for. Slack's docs name search as granular `search:read.*` scopes, not the older `search:read`.
+The scopes are `SLACK_USER_SCOPES` in `mcp-setup-providers.ts`, taken from the ones Slack's MCP server documents per tool ([docs.slack.dev/ai/slack-mcp-server](https://docs.slack.dev/ai/slack-mcp-server), checked 2026-10-22) and reduced to the ones that read. Nothing that writes is requested (`chat:write`, `files:write`, `canvases:write`, and every other `:write`), and an app without a scope cannot use it. Slack's docs name search as granular `search:read.*` scopes, not the older `search:read`.
 
 Slack's MCP documentation says only directory-published or internal apps may use the server. An app created in your own workspace is internal, but whether a given workspace accepts it was not checked against a real one.
 
@@ -182,7 +184,7 @@ Both actions the strip offers — **Sign in** on a brokered server and **Broker 
 | `server_unreachable`          | The upstream could not be reached                        | Yes                   |
 | `authorization_failed`        | Sign-in itself failed                                    | Yes                   |
 
-The setup RPCs answer with the same `reason` field and four of their own: `invalid_input` (an empty token, a redirect URL that is not this daemon's callback), `no_local_preset`, `install_failed` and `config_write_failed`.
+The setup RPCs answer with the same `reason` field and five of their own: `invalid_input` (an empty token, a redirect URL that is not this daemon's callback), `no_local_preset`, `install_failed`, `config_write_failed` and `setup_in_progress`.
 
 Only `authorization_failed` is authentication. The strip withdraws the action for the "no" rows, shows the reason in its place, and offers **Hide** in the button's slot; it never withdraws one on a reason it does not recognise, so a daemon naming a new cause degrades to "still offered" rather than to a dead row. `server_rejected` and `server_unreachable` stay actionable on purpose: an upstream that is down or refusing now may not be in a minute, and removing the only way to find out is worse than a button that sometimes fails again.
 
