@@ -12,6 +12,7 @@ import {
   visibleRevealedText,
 } from "@/agent-stream/text-reveal";
 import type { MarkdownPhase } from "@/components/markdown/fence/types";
+import { useRetainedPanelActive } from "@/components/retained-panel";
 
 /**
  * Binds the paced reveal in @/agent-stream/text-reveal to a frame clock.
@@ -20,9 +21,18 @@ import type { MarkdownPhase } from "@/components/markdown/fence/types";
  * in that module and is tested there. This hook only owns the requestAnimationFrame
  * wiring, so the rendered behavior is covered end to end by
  * `packages/app/e2e/browser/agent-stream-smoothness.spec.ts`.
+ *
+ * A `requestAnimationFrame` keeps firing for a `RetainedPanel` hidden behind
+ * `display: none` — only a hidden *tab* stops the frame clock. Without the
+ * active check below, every streaming message row in every background agent
+ * paces its reveal at full frame rate whether anyone can see it or not, so
+ * main-thread cost scales with the number of agents streaming, not the number
+ * visible. Nobody is watching an inactive panel, so it settles immediately
+ * instead and picks the paced reveal back up for whatever arrives once active.
  */
 export function useRevealedText(text: string, phase: MarkdownPhase): string {
   const pacingSupported = isTextRevealPacingSupported();
+  const isPanelActive = useRetainedPanelActive();
   const stateRef = useRef<TextRevealState>(beginTextReveal(text));
   const [, forceRender] = useState(0);
   const frameRef = useRef<number | null>(null);
@@ -40,7 +50,7 @@ export function useRevealedText(text: string, phase: MarkdownPhase): string {
       }
     };
 
-    if (!pacingSupported || phase !== "streaming") {
+    if (!pacingSupported || phase !== "streaming" || !isPanelActive) {
       settle();
       return;
     }
@@ -79,7 +89,7 @@ export function useRevealedText(text: string, phase: MarkdownPhase): string {
         frameRef.current = null;
       }
     };
-  }, [text, pacingSupported, phase]);
+  }, [text, pacingSupported, phase, isPanelActive]);
 
   return pacingSupported
     ? visibleRevealedText(stateRef.current, { streaming: phase === "streaming" })
