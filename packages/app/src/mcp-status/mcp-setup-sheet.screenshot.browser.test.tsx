@@ -224,12 +224,13 @@ function saveCredentials(model: McpSetupFormModel): void {
   });
 }
 
-function describeReady(model: McpSetupFormModel, clientIdSet = false): void {
+function describeReady(model: McpSetupFormModel, clientIdSet = false, scope = ""): void {
   act(() =>
     model.applyDescription({
       redirectUrl: REDIRECT,
       clientIdSet,
       clientId: clientIdSet ? "123.456" : "",
+      scope,
       clientSecretSet: clientIdSet,
       tokenSet: false,
     }),
@@ -322,6 +323,24 @@ describe.each([
       expect(byTestId(container, "mcp-setup-admin-note")?.textContent).toContain("admin");
     });
 
+    it("shows the stored client ID in the field once the daemon has described the server", () => {
+      const { container, model } = mountForm("client_credentials", "slack", width);
+      describeReady(model, true);
+      expect(inputIn(container, "mcp-setup-client-id-input").value).toBe("123.456");
+    });
+
+    it("says a saved secret is kept only while the client ID is still the stored one", () => {
+      const { container, model } = mountForm("client_credentials", "slack", width);
+      describeReady(model, true);
+      expect(byTestId(container, "mcp-setup-form")?.textContent).toContain(
+        "A secret is saved. Leave this blank to keep it.",
+      );
+
+      type(container, "mcp-setup-client-id-input", "789.012");
+
+      expect(byTestId(container, "mcp-setup-form")?.textContent).not.toContain("A secret is saved");
+    });
+
     it("keeps the secret hidden, saves only with a client id, and unlocks Sign in after saving", () => {
       const { container, model, onSubmit, onSignIn } = mountForm(
         "client_credentials",
@@ -366,6 +385,12 @@ describe.each([
       expect(byTestId(container, "mcp-setup-create-app")).toBeNull();
       expect(inputIn(container, "mcp-setup-redirect-input").value).toBe(REDIRECT);
       expect(byTestId(container, "mcp-setup-scope-input")).not.toBeNull();
+    });
+
+    it("a server with no guide shows the scope already stored, so saving again does not clear it", () => {
+      const { container, model } = mountForm("client_credentials", "other", width);
+      describeReady(model, true, "users:read");
+      expect(inputIn(container, "mcp-setup-scope-input").value).toBe("users:read");
     });
   });
 

@@ -1,8 +1,8 @@
-import type { ProviderUsageTone } from "@getpaseo/protocol/messages";
+import type { McpGatewayServerStatus, ProviderUsageTone } from "@getpaseo/protocol/messages";
 import type { McpSetupKind } from "./mcp-setup-form-model";
 
-/** Mirrors `McpGatewayStatusEntrySchema`'s state machine (packages/protocol/src/messages.ts). */
-export type McpServerStatus = "disabled" | "connecting" | "connected" | "needs-auth" | "error";
+/** `McpGatewayStatusEntrySchema`'s state machine (packages/protocol/src/messages.ts). */
+export type McpServerStatus = McpGatewayServerStatus;
 
 /** One entry from the daemon-wide `mcp_status_update` snapshot (KTD7). */
 export interface McpStatusServerEntry {

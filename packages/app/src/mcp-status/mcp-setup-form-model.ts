@@ -22,6 +22,8 @@ export interface McpSetupDescribed {
   clientIdSet: boolean;
   /** The client ID already stored, which the form prefills; empty when none is. */
   clientId: string;
+  /** The scope already stored, which the form prefills; empty when none is. */
+  scope: string;
   clientSecretSet: boolean;
   tokenSet: boolean;
 }
@@ -212,6 +214,8 @@ export function openMcpSetupForm(input: McpSetupFormInput): McpSetupFormModel {
         // What the person already typed wins over what the daemon holds.
         redirectUrl: raw.redirectUrl || described.redirectUrl,
         clientId: raw.clientId || described.clientId,
+        // A stored scope is the one in force, so it replaces the provider's default.
+        scope: described.scope || raw.scope,
         // Credentials already on the host mean Sign in is available straight away.
         credentialsSaved: raw.credentialsSaved || described.clientIdSet,
       });

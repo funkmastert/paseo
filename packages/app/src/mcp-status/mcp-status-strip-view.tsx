@@ -289,11 +289,9 @@ function IssueRow({
 
 /**
  * One line per connected, connecting or disabled server: dot and name, then the status only when
- * it says more than the green dot already does.
- */
-/**
- * A connected row. It carries an action only when the daemon offers a setup form for a server
- * that reports healthy (replacing a token that may be wrong), so the button is quiet.
+ * it says more than the green dot already does. It carries an action only when the daemon offers
+ * a setup form for a server that reports healthy (replacing a token that may be wrong), so the
+ * button is quiet.
  */
 function CompactRow({
   row,

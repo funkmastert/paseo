@@ -161,7 +161,11 @@ function ClientCredentialsFields({ state, model, controlSize, onSubmit }: FormPa
   const clientIdErrorKey = fieldErrorKey(state.clientIdError);
   const saving = state.phase === "saving";
   const editable = state.phase === "editing";
-  const secretKept = state.description.status === "ready" && state.description.clientSecretSet;
+  // The daemon keeps a stored secret only for the client ID it was stored with.
+  const secretKept =
+    state.description.status === "ready" &&
+    state.description.clientSecretSet &&
+    state.clientId.trim() === state.description.clientId;
   return (
     <>
       <Text style={styles.body}>
@@ -194,6 +198,7 @@ function ClientCredentialsFields({ state, model, controlSize, onSubmit }: FormPa
             testID="mcp-setup-client-id-input"
             accessibilityLabel={t("mcpStatus.setup.clientCredentials.clientIdLabel")}
             initialValue={state.clientId}
+            resetKey={state.description.status}
             onChangeText={model.setClientId}
             autoCapitalize="none"
             autoCorrect={false}
@@ -223,6 +228,7 @@ function ClientCredentialsFields({ state, model, controlSize, onSubmit }: FormPa
               testID="mcp-setup-scope-input"
               accessibilityLabel={t("mcpStatus.setup.clientCredentials.scopeLabel")}
               initialValue={state.scope}
+              resetKey={state.description.status}
               onChangeText={model.setScope}
               autoCapitalize="none"
               autoCorrect={false}

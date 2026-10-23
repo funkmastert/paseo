@@ -70,6 +70,11 @@ beforeEach(() => {
 
 const TOKEN = "figd_fake-token-do-not-use";
 
+interface SignInAnswer {
+  authorizationUrl: string;
+  error: null;
+}
+
 function formInput(overrides: Partial<UseMcpSetupFormInput> = {}): UseMcpSetupFormInput {
   return {
     serverId: HOST.serverId,
@@ -223,6 +228,27 @@ describe("useMcpSetupForm: saving a token", () => {
     expect(onDone).not.toHaveBeenCalled();
   });
 
+  it("does not tell the strip to close a sheet when the save finishes after its own sheet was dismissed", async () => {
+    let finish: (value: unknown) => void = () => undefined;
+    client.setMcpGatewayLocalToken.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const onDone = vi.fn();
+    const { result, unmount } = renderHook(() => useMcpSetupForm(formInput({ onDone })));
+    typeToken(result);
+    act(() => result.current.submit());
+
+    unmount();
+    await act(async () =>
+      finish({ requestId: "r1", error: null, reason: null, status: "connected" }),
+    );
+
+    expect(client.setMcpGatewayLocalToken).toHaveBeenCalledTimes(1);
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
   it("does not call the daemon while the token is invalid", () => {
     const { result } = renderHook(() => useMcpSetupForm(formInput()));
 
@@ -311,8 +337,27 @@ describe("useMcpSetupForm: saving credentials and signing in", () => {
     expect(onDone).not.toHaveBeenCalled();
   });
 
+  it("does not tell the strip to close a sheet when the sign-in answers after its own sheet was dismissed", async () => {
+    let finish: (value: SignInAnswer) => void = () => undefined;
+    const onSignIn = vi.fn(
+      () =>
+        new Promise<SignInAnswer>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { result, onDone, unmount } = await readyCredentialsForm(onSignIn);
+    act(() => result.current.signIn());
+
+    unmount();
+    await act(async () =>
+      finish({ authorizationUrl: "https://slack.example/authorize", error: null }),
+    );
+
+    expect(onSignIn).toHaveBeenCalledTimes(1);
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
   it("ignores a second tap while a sign-in is running", async () => {
-    type SignInAnswer = { authorizationUrl: string; error: null };
     let finish: (value: SignInAnswer) => void = () => undefined;
     const onSignIn = vi.fn(
       () =>

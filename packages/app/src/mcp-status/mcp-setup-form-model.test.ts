@@ -7,6 +7,7 @@ const described = (overrides: Partial<McpSetupDescribed> = {}): McpSetupDescribe
   redirectUrl: REDIRECT,
   clientIdSet: false,
   clientId: "",
+  scope: "",
   clientSecretSet: false,
   tokenSet: false,
   ...overrides,
@@ -163,6 +164,18 @@ describe("client credentials form", () => {
     typed.setClientId("789.012");
     typed.applyDescription(described({ clientIdSet: true, clientId: "123.456" }));
     expect(typed.getState().clientId).toBe("789.012");
+  });
+
+  it("a stored scope replaces the provider's default, and no stored scope leaves the default", () => {
+    const stored = openMcpSetupForm({ kind: "client_credentials", serverName: "slack" });
+    stored.applyDescription(
+      described({ clientIdSet: true, clientId: "123.456", scope: "users:read" }),
+    );
+    expect(stored.getState().scope).toBe("users:read");
+
+    const none = openMcpSetupForm({ kind: "client_credentials", serverName: "slack" });
+    none.applyDescription(described());
+    expect(none.getState().scope).toBe(slackScopeString());
   });
 
   it("correcting a saved app: the prefilled ID with a blank secret sends no secret, which keeps the stored one", () => {

@@ -44,10 +44,13 @@ function annotation(overrides: Partial<McpStatusRowAnnotation> = {}): McpStatusR
   };
 }
 
-type RowOverrides = Partial<Omit<McpStatusRow, "action" | "setupKind">> &
-  Partial<McpStatusRowActionFields>;
+type RowOverrides = Partial<Omit<McpStatusRow, "action" | "setupKind">>;
 
-function row(lastFailure?: McpStatusActionFailure, overrides: RowOverrides = {}): McpStatusRow {
+function row(
+  lastFailure?: McpStatusActionFailure,
+  overrides: RowOverrides = {},
+  action: McpStatusRowActionFields = {},
+): McpStatusRow {
   return {
     key: "session:amplitude",
     name: "amplitude",
@@ -58,17 +61,25 @@ function row(lastFailure?: McpStatusActionFailure, overrides: RowOverrides = {})
     ...(lastFailure ? { failure: lastFailure } : {}),
     sessionOnly: true,
     ...overrides,
-  } as McpStatusRow;
+    ...action,
+  };
 }
 
-function brokeredRow(overrides: RowOverrides = {}): McpStatusRow {
-  return row(undefined, {
-    key: "server:github",
-    name: "github",
-    statusKey: "needsAuth",
-    sessionOnly: false,
-    ...overrides,
-  });
+function brokeredRow(
+  overrides: RowOverrides = {},
+  action: McpStatusRowActionFields = {},
+): McpStatusRow {
+  return row(
+    undefined,
+    {
+      key: "server:github",
+      name: "github",
+      statusKey: "needsAuth",
+      sessionOnly: false,
+      ...overrides,
+    },
+    action,
+  );
 }
 
 function failure(overrides: Partial<McpStatusActionFailure> = {}): McpStatusActionFailure {
@@ -355,15 +366,15 @@ describe("secondLineText", () => {
 
 describe("actionLabelText", () => {
   it("asks to sign in, or to sign in again after an error", () => {
-    expect(actionLabelText(t, brokeredRow({ action: "authenticate" }))).toBe("Sign in");
-    expect(actionLabelText(t, brokeredRow({ action: "authenticate", statusKey: "error" }))).toBe(
-      "Sign in again",
-    );
+    expect(actionLabelText(t, brokeredRow({}, { action: "authenticate" }))).toBe("Sign in");
+    expect(
+      actionLabelText(t, brokeredRow({ statusKey: "error" }, { action: "authenticate" })),
+    ).toBe("Sign in again");
   });
 
   it("calls the claude.ai hand-off a sign-in too, and keeps Broker & sign in", () => {
-    expect(actionLabelText(t, row(undefined, { action: "openClaudeAi" }))).toBe("Sign in");
-    expect(actionLabelText(t, row(undefined, { action: "adopt" }))).toBe("Broker & sign in");
+    expect(actionLabelText(t, row(undefined, {}, { action: "openClaudeAi" }))).toBe("Sign in");
+    expect(actionLabelText(t, row(undefined, {}, { action: "adopt" }))).toBe("Broker & sign in");
   });
 });
 
@@ -401,7 +412,7 @@ describe("compactStatusText", () => {
 
 describe("rows that offer a setup form", () => {
   function setupRow(name: string, setupKind: "local_token" | "client_credentials"): McpStatusRow {
-    return brokeredRow({ key: `server:${name}`, name, action: "setup", setupKind });
+    return brokeredRow({ key: `server:${name}`, name }, { action: "setup", setupKind });
   }
   const refused = failure({
     reason: "client_registration_refused",
@@ -422,12 +433,14 @@ describe("rows that offer a setup form", () => {
   });
 
   it("calls the token form 'Replace token' once the server is connected", () => {
-    const connected = { ...setupRow("figma", "local_token"), tone: "ok", statusKey: "connected" };
-    expect(actionLabelText(t, connected as McpStatusRow)).toBe("Replace token");
+    const connected: McpStatusRow = {
+      ...setupRow("figma", "local_token"),
+      tone: "ok",
+      statusKey: "connected",
+    };
+    expect(actionLabelText(t, connected)).toBe("Replace token");
     // An unhealthy local server still says Set up: nothing has worked yet.
-    expect(actionLabelText(t, { ...connected, statusKey: "error" } as McpStatusRow)).toBe(
-      "Set up with a token",
-    );
+    expect(actionLabelText(t, { ...connected, statusKey: "error" })).toBe("Set up with a token");
   });
 
   it("points a never-tried row at the button instead of calling it just 'Needs sign-in'", () => {

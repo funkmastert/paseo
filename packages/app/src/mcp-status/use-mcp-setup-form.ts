@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import type { McpGatewayAuthStartResponseMessage } from "@getpaseo/protocol/messages";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
@@ -50,8 +50,15 @@ export function useMcpSetupForm(input: UseMcpSetupFormInput): UseMcpSetupFormRes
   const [model] = useState(() => openMcpSetupForm({ kind, serverName }));
   const state = useSyncExternalStore(model.subscribe, model.getState, model.getState);
 
+  // A save or sign-in can outlive its sheet. Whatever it finds on return belongs to a form nobody
+  // is looking at, so it must not tell the strip to close whichever sheet is open by then.
+  const mountedRef = useRef(true);
   useEffect(() => {
-    return () => model.close();
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      model.close();
+    };
   }, [model]);
 
   useEffect(() => {
@@ -76,6 +83,7 @@ export function useMcpSetupForm(input: UseMcpSetupFormInput): UseMcpSetupFormRes
           redirectUrl: payload.redirectUrl,
           clientIdSet: payload.clientIdSet === true,
           clientId: payload.clientId ?? "",
+          scope: payload.scope ?? "",
           clientSecretSet: payload.clientSecretSet === true,
           tokenSet: payload.tokenSet === true,
         });
@@ -114,7 +122,7 @@ export function useMcpSetupForm(input: UseMcpSetupFormInput): UseMcpSetupFormRes
             );
           }
           model.saveSucceeded();
-          onDone();
+          if (mountedRef.current) onDone();
           return;
         }
         const request = model.saveClientRequest();
@@ -145,7 +153,7 @@ export function useMcpSetupForm(input: UseMcpSetupFormInput): UseMcpSetupFormRes
           );
         }
         model.signInStarted();
-        onDone();
+        if (mountedRef.current) onDone();
       } catch (error) {
         model.signInFailed(error instanceof Error ? error.message : String(error));
       }
