@@ -122,6 +122,64 @@ describe("detectInstallCommandIntents", () => {
     expect(detectInstallCommandIntents("react-native run-android")).toEqual([]);
   });
 
+  test("the mobile repo's ios-fast-iterate.sh wrapper is gated on --device", () => {
+    expect(
+      detectInstallCommandIntents(
+        "./apps/mobile/scripts/ios-fast-iterate.sh --device 00006-FAKE-UDID --configuration Debug-Development",
+      ),
+    ).toEqual([
+      {
+        platform: "ios",
+        command: "ios-fast-iterate.sh --device",
+        target: "00006-FAKE-UDID",
+        installsOnAllIfUntargeted: false,
+        stateOnly: false,
+      },
+    ]);
+    // A $VAR target resolves against an earlier assignment, same as every other matcher.
+    expect(
+      detectInstallCommandIntents("UDID=00006-FAKE-UDID; ios-fast-iterate.sh --device $UDID"),
+    ).toEqual([expect.objectContaining({ target: "00006-FAKE-UDID" })]);
+    // An unassigned $VAR fails closed, same as every other matcher.
+    expect(detectInstallCommandIntents("ios-fast-iterate.sh --device $NEVER_ASSIGNED")).toEqual([
+      expect.objectContaining({ target: "$NEVER_ASSIGNED", targetUnresolved: true }),
+    ]);
+    // Run through a shell interpreter (not executable, or out of habit) -- installs the same way.
+    expect(
+      detectInstallCommandIntents(
+        "bash apps/mobile/scripts/ios-fast-iterate.sh --device 00006-FAKE-UDID",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        command: "ios-fast-iterate.sh --device",
+        target: "00006-FAKE-UDID",
+      }),
+    ]);
+    expect(
+      detectInstallCommandIntents("sh -x scripts/ios-fast-iterate.sh --device 00006-FAKE-UDID"),
+    ).toEqual([expect.objectContaining({ target: "00006-FAKE-UDID" })]);
+    // `bash -c '...'` runs an inline command, not this script file -- left unresolved, not matched.
+    expect(
+      detectInstallCommandIntents("bash -c 'echo ios-fast-iterate.sh --device 00006-FAKE-UDID'"),
+    ).toEqual([]);
+    // --device is required by the script itself; without it, nothing installs.
+    expect(
+      detectInstallCommandIntents("scripts/ios-fast-iterate.sh --skip-build --skip-launch"),
+    ).toEqual([]);
+    // --skip-install and --skip-launch together touch nothing on the device, even with --device.
+    expect(
+      detectInstallCommandIntents(
+        "scripts/ios-fast-iterate.sh --device 00006-FAKE-UDID --skip-install --skip-launch",
+      ),
+    ).toEqual([]);
+    // --skip-install alone still launches the previously-installed app -- gated.
+    expect(
+      detectInstallCommandIntents(
+        "scripts/ios-fast-iterate.sh --device 00006-FAKE-UDID --skip-install",
+      ),
+    ).toEqual([expect.objectContaining({ target: "00006-FAKE-UDID" })]);
+  });
+
   test("devicectl device install, uninstall and process launch are gated on --device", () => {
     expect(
       detectInstallCommandIntents("xcrun devicectl device install app --device 00003-FAKE-UDID"),
@@ -166,6 +224,54 @@ describe("detectInstallCommandIntents", () => {
       expect.objectContaining({ installsOnAllIfUntargeted: true, stateOnly: false }),
     ]);
     expect(detectInstallCommandIntents("./gradlew :app:assembleDebug")).toEqual([]);
+  });
+
+  test("the mobile repo's android-gradle-parallel.sh wrapper is gated the same as gradlew", () => {
+    expect(
+      detectInstallCommandIntents("scripts/android-gradle-parallel.sh :app:installDebug"),
+    ).toEqual([
+      {
+        platform: "android",
+        command: "android-gradle-parallel.sh :app:installDebug",
+        installsOnAllIfUntargeted: true,
+        stateOnly: false,
+      },
+    ]);
+    expect(
+      detectInstallCommandIntents(
+        "ANDROID_SERIAL=FAKESERIAL007 ../scripts/android-gradle-parallel.sh :app:installDebug",
+      ),
+    ).toEqual([
+      expect.objectContaining({ target: "FAKESERIAL007", installsOnAllIfUntargeted: true }),
+    ]);
+    // A $VAR target in ANDROID_SERIAL resolves against an earlier assignment, same as gradlew.
+    expect(
+      detectInstallCommandIntents(
+        "S=FAKESERIAL008; ANDROID_SERIAL=$S scripts/android-gradle-parallel.sh :app:installDebug",
+      ),
+    ).toEqual([expect.objectContaining({ target: "FAKESERIAL008" })]);
+    // An unassigned $VAR fails closed, same as every other matcher.
+    expect(
+      detectInstallCommandIntents(
+        "ANDROID_SERIAL=$NEVER_ASSIGNED scripts/android-gradle-parallel.sh :app:installDebug",
+      ),
+    ).toEqual([expect.objectContaining({ target: "$NEVER_ASSIGNED", targetUnresolved: true })]);
+    // Run through a shell interpreter (not executable, or out of habit) -- installs the same way.
+    expect(
+      detectInstallCommandIntents("bash scripts/android-gradle-parallel.sh :app:installDebug"),
+    ).toEqual([
+      expect.objectContaining({
+        command: "android-gradle-parallel.sh :app:installDebug",
+        installsOnAllIfUntargeted: true,
+      }),
+    ]);
+    // `sh -c '...'` runs an inline command, not this script file -- left unresolved, not matched.
+    expect(
+      detectInstallCommandIntents("sh -c 'echo android-gradle-parallel.sh :app:installDebug'"),
+    ).toEqual([]);
+    expect(
+      detectInstallCommandIntents("scripts/android-gradle-parallel.sh :app:ktlintCheck"),
+    ).toEqual([]);
   });
 
   test("read-only and build-only commands are never gated", () => {
