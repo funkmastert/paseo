@@ -153,7 +153,7 @@ someone using the app. The pieces to fix them exist in the daemon (`localServers
 **Approach:**
 
 - `mcp_gateway.setup.describe.{request,response}`, `mcp_gateway.setup.save_client.{request,response}`,
-  `mcp_gateway.setup.local_token.{request,response}`. Requests carry top-level params and a
+  `mcp_gateway.setup.set_local_token.{request,response}`. Requests carry top-level params and a
   `requestId`; responses carry `payload` with `requestId`, `error`, `reason` (plain string, like
   the existing responses) and the remedy-free fields each needs. `describe` payload: `redirectUrl`,
   `clientIdSet`, `clientSecretSet`, `scope`, `tokenSet`, `presetAvailable`. No secret value ever

@@ -821,7 +821,7 @@ export type McpGatewaySetupSaveClientPayload = Extract<
 >["payload"];
 export type McpGatewaySetupLocalTokenPayload = Extract<
   SessionOutboundMessage,
-  { type: "mcp_gateway.setup.local_token.response" }
+  { type: "mcp_gateway.setup.set_local_token.response" }
 >["payload"];
 export type ProjectListPayload = Extract<
   SessionOutboundMessage,
@@ -5403,7 +5403,7 @@ export class DaemonClient {
     return this.sendNamespacedCorrelatedSessionRequest({
       requestId: options?.requestId,
       timeout: options?.timeout ?? MCP_GATEWAY_LOCAL_TOKEN_TIMEOUT_MS,
-      message: { type: "mcp_gateway.setup.local_token.request", ...input },
+      message: { type: "mcp_gateway.setup.set_local_token.request", ...input },
     });
   }
 

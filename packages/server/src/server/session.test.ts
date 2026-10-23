@@ -5647,13 +5647,13 @@ test("mcp_gateway.auth.start.request happy path returns the authorization URL (U
   ]);
 });
 
-test("mcp_gateway.setup.local_token.request hands the token to the daemon and never echoes it", async () => {
+test("mcp_gateway.setup.set_local_token.request hands the token to the daemon and never echoes it", async () => {
   const messages: SessionOutboundMessage[] = [];
   const setMcpGatewayLocalToken = vi.fn().mockResolvedValue({ status: "connected" });
   const session = createSessionForTest({ messages, agentManager: { setMcpGatewayLocalToken } });
 
   await session.handleMessage({
-    type: "mcp_gateway.setup.local_token.request",
+    type: "mcp_gateway.setup.set_local_token.request",
     requestId: "setup-1",
     name: "figma",
     preset: "figma",
@@ -5667,14 +5667,14 @@ test("mcp_gateway.setup.local_token.request hands the token to the daemon and ne
   });
   expect(messages).toEqual([
     {
-      type: "mcp_gateway.setup.local_token.response",
+      type: "mcp_gateway.setup.set_local_token.response",
       payload: { requestId: "setup-1", error: null, reason: null, status: "connected" },
     },
   ]);
   expect(JSON.stringify(messages)).not.toContain("figd_fake-token-value");
 });
 
-test("mcp_gateway.setup.local_token.request failure carries the reason and no secret", async () => {
+test("mcp_gateway.setup.set_local_token.request failure carries the reason and no secret", async () => {
   const messages: SessionOutboundMessage[] = [];
   const session = createSessionForTest({
     messages,
@@ -5686,7 +5686,7 @@ test("mcp_gateway.setup.local_token.request failure carries the reason and no se
   });
 
   await session.handleMessage({
-    type: "mcp_gateway.setup.local_token.request",
+    type: "mcp_gateway.setup.set_local_token.request",
     requestId: "setup-2",
     name: "figma",
     preset: "figma",
@@ -5695,7 +5695,7 @@ test("mcp_gateway.setup.local_token.request failure carries the reason and no se
 
   expect(messages).toEqual([
     {
-      type: "mcp_gateway.setup.local_token.response",
+      type: "mcp_gateway.setup.set_local_token.response",
       payload: {
         requestId: "setup-2",
         error: "npm was not found",

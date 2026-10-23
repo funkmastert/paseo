@@ -3921,7 +3921,7 @@ export type McpGatewaySetupSaveClientRequest = z.infer<
 >;
 
 export const McpGatewaySetupLocalTokenRequestSchema = z.object({
-  type: z.literal("mcp_gateway.setup.local_token.request"),
+  type: z.literal("mcp_gateway.setup.set_local_token.request"),
   requestId: z.string(),
   name: z.string().min(1),
   preset: z.string().min(1),
@@ -7125,7 +7125,7 @@ export const McpGatewaySetupSaveClientResponseMessageSchema = z.object({
 });
 
 export const McpGatewaySetupLocalTokenResponseMessageSchema = z.object({
-  type: z.literal("mcp_gateway.setup.local_token.response"),
+  type: z.literal("mcp_gateway.setup.set_local_token.response"),
   payload: z.object({
     requestId: z.string(),
     error: z.string().nullable(),

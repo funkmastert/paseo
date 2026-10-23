@@ -6539,7 +6539,7 @@ test("sends the three mcp_gateway.setup requests and resolves each by requestId"
   expect(JSON.parse(assertStr(mock.sent[2]))).toEqual({
     type: "session",
     message: {
-      type: "mcp_gateway.setup.local_token.request",
+      type: "mcp_gateway.setup.set_local_token.request",
       requestId: "setup-3",
       name: "figma",
       preset: "figma",
@@ -6548,7 +6548,7 @@ test("sends the three mcp_gateway.setup requests and resolves each by requestId"
   });
   mock.triggerMessage(
     wrapSessionMessage({
-      type: "mcp_gateway.setup.local_token.response",
+      type: "mcp_gateway.setup.set_local_token.response",
       payload: { requestId: "setup-3", error: null, status: "connected" },
     }),
   );
@@ -6567,7 +6567,7 @@ test("a setup response carries the failure reason and no secret fields", async (
   );
   mock.triggerMessage(
     wrapSessionMessage({
-      type: "mcp_gateway.setup.local_token.response",
+      type: "mcp_gateway.setup.set_local_token.response",
       payload: {
         requestId: "setup-4",
         error: "No local server is known for preset nope",

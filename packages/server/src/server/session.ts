@@ -3217,7 +3217,7 @@ export class Session {
       case "mcp_gateway.setup.save_client.request":
         this.handleMcpGatewaySetupSaveClientRequest(msg);
         return;
-      case "mcp_gateway.setup.local_token.request":
+      case "mcp_gateway.setup.set_local_token.request":
         await this.handleMcpGatewaySetupLocalTokenRequest(msg);
         return;
       case "register_push_token":
@@ -5172,7 +5172,7 @@ export class Session {
         token: request.token,
       });
       this.emit({
-        type: "mcp_gateway.setup.local_token.response",
+        type: "mcp_gateway.setup.set_local_token.response",
         payload: { requestId: request.requestId, error: null, reason: null, status },
       });
     } catch (error) {
@@ -5182,7 +5182,7 @@ export class Session {
         "Failed to set up the MCP gateway local server",
       );
       this.emit({
-        type: "mcp_gateway.setup.local_token.response",
+        type: "mcp_gateway.setup.set_local_token.response",
         payload: {
           requestId: request.requestId,
           error: failure?.message ?? "Failed to set up the local server",

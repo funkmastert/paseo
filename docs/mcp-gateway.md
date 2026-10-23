@@ -135,7 +135,7 @@ The daemon decides which rows get one, because only it knows what is already sto
 
 The hint clears once credentials exist, and the row's ordinary Sign in returns. The app shows the action only when `server_info.features.mcpGatewaySetup` is set, so an older daemon keeps today's rows. The provider specifics are two small tables: the preset table on the daemon (which package a name runs) and `mcp-setup-providers.ts` in the app (the Slack manifest, the Figma token link, the form wording). A third server is a new entry in each; the forms themselves are generic.
 
-The three RPCs, `mcp_gateway.setup.describe`, `.save_client` and `.local_token`, require `daemon.manage`, the permission that edits gateway config ([permissions](permissions.md)). Secrets travel in requests only. No response carries one, `describe` reports booleans, and the session logs the server name and reason, never the message.
+The three RPCs, `mcp_gateway.setup.describe`, `.save_client` and `.set_local_token`, require `daemon.manage`, the permission that edits gateway config ([permissions](permissions.md)). Secrets travel in requests only. No response carries one, `describe` reports booleans, and the session logs the server name and reason, never the message.
 
 ### Figma: a token
 

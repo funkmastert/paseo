@@ -34,7 +34,7 @@ describe("mcp_gateway.setup requests", () => {
 
   test("local_token names a preset and carries the token", () => {
     const message = {
-      type: "mcp_gateway.setup.local_token.request",
+      type: "mcp_gateway.setup.set_local_token.request",
       requestId: "r3",
       name: "figma",
       preset: "figma",
@@ -56,7 +56,7 @@ describe("mcp_gateway.setup requests", () => {
         clientId: "id",
       },
       {
-        type: "mcp_gateway.setup.local_token.request",
+        type: "mcp_gateway.setup.set_local_token.request",
         requestId: "r",
         name: "figma",
         preset: "figma",
@@ -89,7 +89,7 @@ describe("mcp_gateway.setup responses", () => {
         payload: { requestId: "r2", error: null },
       },
       {
-        type: "mcp_gateway.setup.local_token.response",
+        type: "mcp_gateway.setup.set_local_token.response",
         payload: { requestId: "r3", error: "boom", reason: "install_failed", status: null },
       },
     ];

@@ -139,12 +139,12 @@ describe("SessionAuthorization", () => {
     const requests = [
       "mcp_gateway.setup.describe.request",
       "mcp_gateway.setup.save_client.request",
-      "mcp_gateway.setup.local_token.request",
+      "mcp_gateway.setup.set_local_token.request",
     ] as const;
     const responses = [
       "mcp_gateway.setup.describe.response",
       "mcp_gateway.setup.save_client.response",
-      "mcp_gateway.setup.local_token.response",
+      "mcp_gateway.setup.set_local_token.response",
     ] as const;
     for (const type of requests) {
       for (const permission of ["hub.execute", "daemon.read", "workspace.write"] as const) {
