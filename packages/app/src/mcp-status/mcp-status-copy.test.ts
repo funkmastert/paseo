@@ -11,6 +11,7 @@ import {
   remedyLines,
   reportedByText,
   secondLineText,
+  setupFailureText,
   statusText,
 } from "./mcp-status-copy";
 import type {
@@ -393,6 +394,101 @@ describe("compactStatusText", () => {
   it("keeps the reporters on a connected server, where they are the only sign of trouble", () => {
     expect(compactStatusText(t, healthyRow({ annotation: annotation() }))).toBe(
       "Connected · Amp analyst on claude-personal",
+    );
+  });
+});
+
+describe("rows that offer a setup form", () => {
+  function setupRow(name: string, setupKind: "local_token" | "client_credentials"): McpStatusRow {
+    return brokeredRow({ key: `server:${name}`, name, action: "setup", setupKind });
+  }
+  const refused = failure({
+    reason: "client_registration_refused",
+    error: 'MCP server "figma" refused to register Paseo as a client (HTTP 403).',
+  });
+  const notRegistered = failure({
+    reason: "client_not_registered",
+    remedyRedirectUrl: "https://host.example/mcp/gateway/oauth/callback",
+    remedyPath: "/home/t/.paseo/mcp-gateway/tokens.json",
+    error: "slack needs an OAuth app you register yourself",
+  });
+
+  it("labels the button for the provider, then for the kind", () => {
+    expect(actionLabelText(t, setupRow("figma", "local_token"))).toBe("Set up with a token");
+    expect(actionLabelText(t, setupRow("slack", "client_credentials"))).toBe("Create a Slack app");
+    expect(actionLabelText(t, setupRow("other", "client_credentials"))).toBe("Create an app");
+    expect(actionLabelText(t, setupRow("other", "local_token"))).toBe("Set up with a token");
+  });
+
+  it("points a never-tried row at the button instead of calling it just 'Needs sign-in'", () => {
+    const line = secondLineText(t, setupRow("figma", "local_token"));
+    expect(line).toContain("local server");
+    expect(line).toContain("your own token");
+    expect(secondLineText(t, setupRow("slack", "client_credentials"))).toContain(
+      "Create an app for it once",
+    );
+  });
+
+  it("replaces both dead-end sentences with the pointer, whatever the daemon's error says", () => {
+    const figma = setupRow("figma", "local_token");
+    const slack = setupRow("slack", "client_credentials");
+    expect(failureText(t, figma, refused)).toBe(secondLineText(t, figma));
+    expect(failureText(t, slack, notRegistered)).toBe(secondLineText(t, slack));
+    expect(failureText(t, figma, refused)).not.toContain("allowlist");
+    expect(failureText(t, slack, notRegistered)).not.toContain("token file");
+  });
+
+  it("keeps the old explanation one tap away, and drops the hand-edit recipe", () => {
+    const figma = setupRow("figma", "local_token");
+    const slack = setupRow("slack", "client_credentials");
+    const [figmaWhy] = remedyLines(t, figma, refused);
+    expect(figmaWhy?.key).toBe("why");
+    expect(figmaWhy?.label).toBe("Why");
+    expect(figmaWhy?.value).toContain("allowlist");
+    const slackLines = remedyLines(t, slack, notRegistered);
+    expect(slackLines.map((line) => line.key)).toEqual(["why"]);
+    expect(slackLines[0]?.value).toContain("token file");
+  });
+
+  it("other failures on such a row keep their own sentence", () => {
+    expect(
+      failureText(
+        t,
+        setupRow("figma", "local_token"),
+        failure({ reason: "server_unreachable", error: "connect ECONNREFUSED" }),
+      ),
+    ).toBe("connect ECONNREFUSED");
+  });
+
+  it("a row without the setup action keeps today's dead-end copy", () => {
+    expect(failureText(t, brokeredRow(), notRegistered)).toContain("Register an OAuth app");
+    expect(remedyLines(t, brokeredRow(), notRegistered).map((line) => line.key)).toEqual([
+      "redirectUrl",
+      "path",
+      "snippet",
+    ]);
+  });
+});
+
+describe("setupFailureText", () => {
+  it("leads an install failure with what failed and keeps npm's words", () => {
+    expect(
+      setupFailureText(t, { reason: "install_failed", error: "npm ERR! 404", name: "figma" }),
+    ).toBe("Couldn't install the local server: npm ERR! 404");
+  });
+
+  it("names the server when the config could not be written", () => {
+    expect(
+      setupFailureText(t, { reason: "config_write_failed", error: "disk full", name: "figma" }),
+    ).toBe("Couldn't switch figma to the local server: disk full");
+  });
+
+  it("passes any other daemon sentence through, and falls back when there is none", () => {
+    expect(
+      setupFailureText(t, { reason: "invalid_input", error: "The token is required", name: "f" }),
+    ).toBe("The token is required");
+    expect(setupFailureText(t, { reason: null, error: "", name: "figma" })).toBe(
+      "Couldn't set up figma.",
     );
   });
 });

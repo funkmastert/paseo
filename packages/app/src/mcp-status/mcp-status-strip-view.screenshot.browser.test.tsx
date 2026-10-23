@@ -228,6 +228,27 @@ function model(hiddenNames: readonly string[] = []) {
   });
 }
 
+const SETUP_HINTS: Record<string, McpStatusServerEntry["setup"]> = {
+  figma: "local_token",
+  slack: "client_credentials",
+};
+
+function withSetupHint(server: McpStatusServerEntry): McpStatusServerEntry {
+  const setup = SETUP_HINTS[server.name];
+  return setup ? { ...server, setup } : server;
+}
+
+/** The same strip on a daemon that offers setup forms: figma and slack carry the hint. */
+function setupModel(withFailures = true) {
+  return buildMcpStatusStripModel({
+    servers: SERVERS.map(withSetupHint),
+    sessionReports: [],
+    canAdopt: true,
+    canSetup: true,
+    failures: withFailures ? FAILURES : {},
+  });
+}
+
 function click(element: Element | null | undefined): void {
   if (!element) throw new Error("nothing to click");
   act(() => {
@@ -486,6 +507,66 @@ describe.each([
     expect(overflowing.map((node) => node.getAttribute("data-testid") ?? node.tagName)).toEqual([]);
   });
 
+  describe("setup actions", () => {
+    it("gives figma and slack a button that says what it does, in place of Hide", () => {
+      const { container } = mountStrip({ model: setupModel() });
+      expect(byTestId(container, "mcp-status-auth-figma")?.textContent).toBe("Set up with a token");
+      expect(byTestId(container, "mcp-status-auth-slack")?.textContent).toBe("Create a Slack app");
+      expect(byTestId(container, "mcp-status-hide-figma")).toBeNull();
+      expect(byTestId(container, "mcp-status-hide-slack")).toBeNull();
+    });
+
+    it("hands the pressed row to the caller so it can open the form", () => {
+      const onAction = vi.fn();
+      const { container } = mountStrip({ model: setupModel(), onAction });
+      click(byTestId(container, "mcp-status-auth-figma"));
+      expect(onAction).toHaveBeenCalledTimes(1);
+      expect(onAction.mock.calls[0]?.[0]).toMatchObject({
+        name: "figma",
+        action: "setup",
+        setupKind: "local_token",
+      });
+    });
+
+    it("points the two dead ends at the button instead of at a token file", () => {
+      const { container } = mountStrip({ model: setupModel() });
+      expect(byTestId(container, "mcp-status-second-line-figma")?.textContent).toContain(
+        "Run a local server with your own token",
+      );
+      expect(byTestId(container, "mcp-status-second-line-slack")?.textContent).toContain(
+        "Create an app for it once",
+      );
+      expect(byTestId(container, "mcp-status-row-slack")?.textContent).not.toContain("token file");
+    });
+
+    it("says so before anyone has pressed anything", () => {
+      const { container } = mountStrip({ model: setupModel(false) });
+      expect(byTestId(container, "mcp-status-second-line-figma")?.textContent).toContain(
+        "only accepts apps on its own approved list",
+      );
+    });
+
+    it("keeps the old explanation behind More, under Why", async () => {
+      const { container } = mountStrip({ model: setupModel() });
+      await settle();
+      click(byTestId(container, "mcp-status-more-figma"));
+      expect(byTestId(container, "mcp-status-remedy-why-figma")?.textContent).toContain(
+        "allowlist",
+      );
+      click(byTestId(container, "mcp-status-more-slack"));
+      expect(byTestId(container, "mcp-status-remedy-why-slack")?.textContent).toContain(
+        "token file",
+      );
+      expect(byTestId(container, "mcp-status-remedy-path-slack")).toBeNull();
+    });
+
+    it("a daemon without the setup flag keeps Hide on the dead ends", () => {
+      const { container } = mountStrip();
+      expect(byTestId(container, "mcp-status-hide-figma")).not.toBeNull();
+      expect(byTestId(container, "mcp-status-auth-figma")).toBeNull();
+    });
+  });
+
   describe("captures", () => {
     // The runner scales its frame down to fit a viewport taller than its own window, and the
     // capture shrinks with it; at this height it stays at 1:1.
@@ -525,6 +606,24 @@ describe.each([
       await settle();
       click(byTestId(container, "mcp-status-more-slack"));
       await capture(byTestId(container, "mcp-status-row-slack"), "remedy-open");
+    });
+
+    it("with setup actions on figma and slack", async () => {
+      const { container } = mountStrip({ model: setupModel() });
+      await settle();
+      await page.screenshot({
+        element: container,
+        path: `/tmp/mcp-setup-strip-${name}.png`,
+      });
+    });
+
+    it("with figma's old explanation open behind More", async () => {
+      const { container } = mountStrip({ model: setupModel() });
+      await settle();
+      click(byTestId(container, "mcp-status-more-figma"));
+      const figmaRow = byTestId(container, "mcp-status-row-figma");
+      if (!figmaRow) throw new Error("no figma row to capture");
+      await page.screenshot({ element: figmaRow, path: `/tmp/mcp-setup-strip-why-${name}.png` });
     });
 
     it("expanded with the connected group open", async () => {

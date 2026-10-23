@@ -2141,6 +2141,67 @@ export const zhCN: TranslationResources = {
       path: "主机上的文件",
       snippet: "添加",
       command: "在主机上执行",
+      why: "原因",
+    },
+    setup: {
+      title: "设置 {{name}}",
+      action: {
+        localToken: "使用令牌设置",
+        clientCredentials: "创建应用",
+        slack: "创建 Slack 应用",
+      },
+      hint: {
+        localToken:
+          "{{name}} 的托管服务器只接受其批准名单中的应用，因此 Paseo 无法登录。请改用你自己的令牌运行本地服务器。",
+        clientCredentials: "{{name}} 没有自动登录。请先为它创建一次应用，然后登录。",
+      },
+      describeFailed: "无法读取设置详情：{{error}}",
+      error: {
+        required: "必填",
+        whitespace: "请删除空格和换行",
+        invalidUrl: "请输入完整的 URL，例如 https://example.com/callback",
+      },
+      failure: {
+        installFailed: "无法安装本地服务器：{{error}}",
+        configWriteFailed: "无法将 {{name}} 切换到本地服务器：{{error}}",
+        unknown: "无法设置 {{name}}。",
+      },
+      localToken: {
+        intro:
+          "Paseo 将在主机上用个人访问令牌运行本地 {{name}} 服务器。令牌保留在主机上，此应用不会取回。",
+        getToken: "获取令牌",
+        tokenHint: "创建一个只读的个人访问令牌，然后粘贴到下方。",
+        tokenLabel: "个人访问令牌",
+        installNote: "首次保存时会安装服务器，可能需要一分钟。",
+        save: "保存并连接",
+      },
+      clientCredentials: {
+        intro: "{{name}} 无法自行注册 Paseo。请为它创建一次 OAuth 应用，在此粘贴其凭据，然后登录。",
+        step1: "创建应用",
+        step2: "粘贴凭据",
+        step3: "登录",
+        step3Hint: "在浏览器中打开 {{name}} 以批准访问。",
+        adminNote: "安装新应用前，你的工作区可能需要管理员批准。",
+        redirectLabel: "重定向 URL",
+        redirectHint: "请在应用上注册这个完全一致的 URL。",
+        clientIdLabel: "客户端 ID",
+        clientSecretLabel: "客户端密钥",
+        scopeLabel: "权限范围（可选）",
+        save: "保存凭据",
+        saved: "凭据已保存",
+      },
+      providers: {
+        figma: {
+          tokenHint: "在 Figma 中：设置 → 安全 → 个人访问令牌。请选择只读权限范围。",
+        },
+        slack: {
+          clientCredentialsIntro:
+            "Slack 无法自行注册 Paseo。请创建一次 Slack 应用，在此粘贴其凭据，然后登录。",
+          createApp: "创建 Slack 应用",
+          createAppHint:
+            "打开 Slack 并预填应用：只读访问，并已设置重定向 URL。Paseo 无法发布或写入。",
+        },
+      },
     },
     showFullError: "查看完整消息",
     showLessError: "收起消息",

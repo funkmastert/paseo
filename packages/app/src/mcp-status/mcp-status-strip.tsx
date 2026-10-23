@@ -6,6 +6,7 @@ import { useMcpStatus } from "./use-mcp-status";
 import { failureClipboardText } from "./mcp-status-copy";
 import type { McpStatusActionFailure, McpStatusRow } from "./mcp-status-strip-model";
 import { McpStatusStripView } from "./mcp-status-strip-view";
+import { McpSetupSheet } from "./mcp-setup-sheet";
 
 /**
  * Persistent, host-scoped MCP status strip (KTD10): wires McpStatusStripView to the daemon, the
@@ -18,17 +19,26 @@ export function McpStatusStrip() {
   const { t } = useTranslation();
   const toast = useToast();
   const {
+    serverId,
     supportsMcpStatus,
     model,
     startAuth,
     adoptServer,
     openClaudeAiConnectors,
+    clearFailure,
     pendingNames,
     hideServer,
     unhideServer,
   } = useMcpStatus();
   // Always starts collapsed — this is UI chrome state, not persisted, per KTD10.
   const [expanded, setExpanded] = useState(false);
+  // The row whose setup form is open; the sheet mounts fresh for each one.
+  const [setupRow, setSetupRow] = useState<McpStatusRow | null>(null);
+  const handleCloseSetup = useCallback(() => {
+    // Whatever failure the row last showed was about the state the form just changed.
+    if (setupRow) clearFailure(setupRow.name);
+    setSetupRow(null);
+  }, [clearFailure, setupRow]);
 
   const handleToggle = useCallback(() => setExpanded((prev) => !prev), []);
   const handleAction = useCallback(
@@ -37,6 +47,10 @@ export function McpStatusStrip() {
         try {
           if (row.action === "openClaudeAi") {
             await openClaudeAiConnectors();
+            return;
+          }
+          if (row.action === "setup") {
+            setSetupRow(row);
             return;
           }
           // Both resolve with the daemon's answer and record it onto the row themselves.
@@ -72,15 +86,23 @@ export function McpStatusStrip() {
   }
 
   return (
-    <McpStatusStripView
-      model={model}
-      expanded={expanded}
-      onToggleExpanded={handleToggle}
-      pendingNames={pendingNames}
-      onAction={handleAction}
-      onHide={hideServer}
-      onUnhide={unhideServer}
-      onCopyFailure={handleCopyFailure}
-    />
+    <>
+      <McpStatusStripView
+        model={model}
+        expanded={expanded}
+        onToggleExpanded={handleToggle}
+        pendingNames={pendingNames}
+        onAction={handleAction}
+        onHide={hideServer}
+        onUnhide={unhideServer}
+        onCopyFailure={handleCopyFailure}
+      />
+      <McpSetupSheet
+        serverId={serverId}
+        row={setupRow}
+        onClose={handleCloseSetup}
+        onSignIn={startAuth}
+      />
+    </>
   );
 }

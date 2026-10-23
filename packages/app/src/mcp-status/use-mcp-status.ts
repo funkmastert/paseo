@@ -97,6 +97,8 @@ export interface UseMcpStatusResult {
   adoptServer: (name: string, agentId: string) => Promise<McpGatewayServerAdoptPayload>;
   /** Opens claude.ai's connector settings — the only place claude.ai connectors get authorized. */
   openClaudeAiConnectors: () => Promise<void>;
+  /** Forgets a row's recorded failure, once a setup form has changed what caused it. */
+  clearFailure: (name: string) => void;
   /** Servers with a sign-in or broker request in flight. Per row, so one slow sign-in leaves
    * every other row's button usable. */
   pendingNames: ReadonlySet<string>;
@@ -118,6 +120,11 @@ export function useMcpStatus(): UseMcpStatusResult {
   // COMPAT(mcpGatewayAdopt): added in v0.8.1, remove gate after 2027-03-14.
   const supportsAdopt = useSessionStore(
     (state) => state.sessions[serverId ?? ""]?.serverInfo?.features?.mcpGatewayAdopt === true,
+  );
+
+  // COMPAT(mcpGatewaySetup): added in v0.9.x, remove gate after 2027-10-22.
+  const supportsSetup = useSessionStore(
+    (state) => state.sessions[serverId ?? ""]?.serverInfo?.features?.mcpGatewaySetup === true,
   );
 
   const statusQuery = useReplicaQuery<McpStatusPayload>({
@@ -151,10 +158,11 @@ export function useMcpStatus(): UseMcpStatusResult {
         servers: statusQuery.data?.servers ?? [],
         sessionReports,
         canAdopt: supportsAdopt,
+        canSetup: supportsSetup,
         failures,
         hiddenNames,
       }),
-    [statusQuery.data, sessionReports, supportsAdopt, failures, hiddenNames],
+    [statusQuery.data, sessionReports, supportsAdopt, supportsSetup, failures, hiddenNames],
   );
 
   // A hidden server that connects again is released, so the next time it breaks the strip says
@@ -301,6 +309,7 @@ export function useMcpStatus(): UseMcpStatusResult {
     startAuth,
     adoptServer,
     openClaudeAiConnectors,
+    clearFailure,
     pendingNames,
     hideServer,
     unhideServer,

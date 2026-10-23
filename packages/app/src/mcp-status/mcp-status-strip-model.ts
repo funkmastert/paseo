@@ -1,4 +1,5 @@
 import type { ProviderUsageTone } from "@getpaseo/protocol/messages";
+import type { McpSetupKind } from "./mcp-setup-form-model";
 
 /** Mirrors `McpGatewayStatusEntrySchema`'s state machine (packages/protocol/src/messages.ts). */
 export type McpServerStatus = "disabled" | "connecting" | "connected" | "needs-auth" | "error";
@@ -10,6 +11,8 @@ export interface McpStatusServerEntry {
   critical: boolean;
   lastChangedAt: number;
   error?: string;
+  /** Set by a daemon with `mcpGatewaySetup` while a setup form could fix this server. */
+  setup?: McpSetupKind;
 }
 
 /**
@@ -40,9 +43,10 @@ export type McpStatusRowStatusKey =
  * What pressing a row does. `authenticate` runs the daemon's OAuth flow for a brokered server;
  * `adopt` asks the daemon to broker a session-reported server first (reading the reporting
  * agent's own MCP config) and then sign in; `openClaudeAi` opens claude.ai's connector settings,
- * the only place a claude.ai connector can be authorized. Absent when nothing can be done.
+ * the only place a claude.ai connector can be authorized; `setup` opens the form that gives a
+ * server that cannot sign in on its own what it needs. Absent when nothing can be done.
  */
-export type McpStatusRowAction = "authenticate" | "adopt" | "openClaudeAi";
+export type McpStatusRowAction = "authenticate" | "adopt" | "openClaudeAi" | "setup";
 
 export interface McpStatusRowAnnotation {
   /** Label of the first agent that reported this server unhealthy. */
@@ -111,6 +115,8 @@ export interface McpStatusRow {
   statusKey: McpStatusRowStatusKey;
   critical: boolean;
   action?: McpStatusRowAction;
+  /** Which form `action: "setup"` opens. */
+  setupKind?: McpSetupKind;
   error?: string;
   /** Set when a session reported trouble with this server too — "reported by <agent>". */
   annotation?: McpStatusRowAnnotation;
@@ -363,6 +369,20 @@ function isUnhealthyRow(row: McpStatusRow): boolean {
   return row.tone === "warning" || row.tone === "danger";
 }
 
+function serverRowAction(input: {
+  unhealthy: boolean;
+  setupKind: McpSetupKind | undefined;
+  failure: McpStatusActionFailure | undefined;
+}): Pick<McpStatusRow, "action" | "setupKind"> {
+  if (input.setupKind) {
+    return { action: "setup", setupKind: input.setupKind };
+  }
+  if (input.unhealthy && !isTerminalActionFailure(input.failure)) {
+    return { action: "authenticate" };
+  }
+  return {};
+}
+
 /**
  * Pure derivation of the strip's rows and collapsed summary from the daemon's server snapshot
  * plus any per-agent init-reported statuses (KTD10). Never drops a session-reported failure
@@ -377,6 +397,8 @@ export function buildMcpStatusStripModel(input: {
   servers: McpStatusServerEntry[];
   sessionReports: McpStatusSessionReport[];
   canAdopt?: boolean;
+  /** The daemon's `mcpGatewaySetup` feature flag: without it a `setup` hint is ignored. */
+  canSetup?: boolean;
   /** The last failed action per server name, keyed as the strip records them. */
   failures?: Record<string, McpStatusActionFailure>;
   /** Server names the person hid on this host. Only an unhealthy row can be hidden. */
@@ -387,6 +409,10 @@ export function buildMcpStatusStripModel(input: {
 
   const serverRows: McpStatusRow[] = input.servers.map((server) => {
     const annotation = annotationFor(unhealthyReportsByServer.get(server.name) ?? []);
+    const unhealthy = isUnhealthy(server.status);
+    // A setup form beats a sign-in the daemon has already said cannot work, and it stays on
+    // offer through a terminal failure: the failure is why the form exists.
+    const setupKind = unhealthy && input.canSetup ? server.setup : undefined;
     return {
       key: `server:${server.name}`,
       name: server.name,
@@ -395,9 +421,11 @@ export function buildMcpStatusStripModel(input: {
       critical: server.critical,
       // Same withdrawal rule as adopt: an authenticate button the daemon already said cannot
       // work teaches the reader the strip is guessing.
-      ...(isUnhealthy(server.status) && !isTerminalActionFailure(input.failures?.[server.name])
-        ? { action: "authenticate" as const }
-        : {}),
+      ...serverRowAction({
+        unhealthy,
+        setupKind,
+        failure: input.failures?.[server.name],
+      }),
       ...(server.error !== undefined ? { error: server.error } : {}),
       ...(annotation ? { annotation } : {}),
       ...(input.failures?.[server.name] ? { failure: input.failures[server.name] } : {}),

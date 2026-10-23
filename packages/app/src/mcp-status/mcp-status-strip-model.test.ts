@@ -710,3 +710,67 @@ describe("buildMcpStatusStripModel hidden rows over time", () => {
     expect(model.recoveredHiddenNames).toEqual([]);
   });
 });
+
+describe("setup actions", () => {
+  const entry = (overrides: Partial<McpStatusServerEntry>): McpStatusServerEntry => ({
+    name: "figma",
+    status: "needs-auth",
+    critical: false,
+    lastChangedAt: 1,
+    ...overrides,
+  });
+
+  it("an unhealthy server the daemon hints at gets the setup action and its kind", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [entry({ setup: "local_token" })],
+      sessionReports: [],
+      canSetup: true,
+    });
+    expect(model.rows[0]).toMatchObject({ action: "setup", setupKind: "local_token" });
+    expect(model.groups.actionable.map((row) => row.name)).toEqual(["figma"]);
+  });
+
+  it("is ignored on a daemon without the feature flag, leaving today's Sign in", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [entry({ setup: "local_token" })],
+      sessionReports: [],
+      canSetup: false,
+    });
+    expect(model.rows[0]?.action).toBe("authenticate");
+    expect(model.rows[0]?.setupKind).toBeUndefined();
+  });
+
+  it("outlasts the terminal failure that withdraws Sign in: the failure is why the form exists", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [entry({ name: "slack", setup: "client_credentials" })],
+      sessionReports: [],
+      canSetup: true,
+      failures: {
+        slack: {
+          reason: "client_not_registered",
+          remedyCommand: null,
+          remedyPath: null,
+          remedyRedirectUrl: null,
+          error: "needs an app",
+        },
+      },
+    });
+    expect(model.rows[0]).toMatchObject({ action: "setup", setupKind: "client_credentials" });
+    expect(model.groups.stuck).toEqual([]);
+  });
+
+  it("goes away with the hint: a connected server, or one the daemon stopped hinting at", () => {
+    const connected = buildMcpStatusStripModel({
+      servers: [entry({ status: "connected", setup: "local_token" })],
+      sessionReports: [],
+      canSetup: true,
+    });
+    expect(connected.rows[0]?.action).toBeUndefined();
+    const signInAgain = buildMcpStatusStripModel({
+      servers: [entry({ name: "slack" })],
+      sessionReports: [],
+      canSetup: true,
+    });
+    expect(signInAgain.rows[0]?.action).toBe("authenticate");
+  });
+});

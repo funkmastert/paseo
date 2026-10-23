@@ -121,6 +121,34 @@ describe("useMcpStatus", () => {
     expect(openExternalUrlMock).toHaveBeenCalledWith("https://linear.example/authorize");
   });
 
+  it("offers the setup form only when the daemon advertises it", () => {
+    const hinted: McpStatusServerEntry = { ...needsAuth("figma"), setup: "local_token" };
+    sessionState.current = {
+      sessions: {
+        "server-1": {
+          serverInfo: { features: { mcpStatus: true } },
+          agents: new Map(),
+        },
+      },
+    };
+    const without = renderHook(() => useMcpStatus(), { wrapper: wrapperWithServers([hinted]) });
+    expect(without.result.current.model.rows[0]?.action).toBe("authenticate");
+
+    sessionState.current = {
+      sessions: {
+        "server-1": {
+          serverInfo: { features: { mcpStatus: true, mcpGatewaySetup: true } },
+          agents: new Map(),
+        },
+      },
+    };
+    const withFlag = renderHook(() => useMcpStatus(), { wrapper: wrapperWithServers([hinted]) });
+    expect(withFlag.result.current.model.rows[0]).toMatchObject({
+      action: "setup",
+      setupKind: "local_token",
+    });
+  });
+
   it("opens claude.ai's connector settings for claude.ai connectors", async () => {
     const { result } = renderHook(() => useMcpStatus(), { wrapper });
 

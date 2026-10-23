@@ -2218,6 +2218,71 @@ export const es: TranslationResources = {
       path: "Archivo en el host",
       snippet: "Añade",
       command: "Ejecuta en el host",
+      why: "Por qué",
+    },
+    setup: {
+      title: "Configurar {{name}}",
+      action: {
+        localToken: "Configurar con un token",
+        clientCredentials: "Crear una app",
+        slack: "Crear una app de Slack",
+      },
+      hint: {
+        localToken:
+          "El servidor alojado de {{name}} solo acepta apps de su propia lista aprobada, así que Paseo no puede iniciar sesión en él. Ejecuta un servidor local con tu propio token.",
+        clientCredentials:
+          "{{name}} no tiene inicio de sesión automático. Crea una app para él una sola vez y luego inicia sesión.",
+      },
+      describeFailed: "No se pudieron leer los datos de configuración: {{error}}",
+      error: {
+        required: "Obligatorio",
+        whitespace: "Quita los espacios y los saltos de línea",
+        invalidUrl: "Escribe una URL completa, como https://example.com/callback",
+      },
+      failure: {
+        installFailed: "No se pudo instalar el servidor local: {{error}}",
+        configWriteFailed: "No se pudo cambiar {{name}} al servidor local: {{error}}",
+        unknown: "No se pudo configurar {{name}}.",
+      },
+      localToken: {
+        intro:
+          "Paseo ejecutará un servidor local de {{name}} en el host con un token de acceso personal. El token se queda en el host; esta app nunca lo recupera.",
+        getToken: "Obtener un token",
+        tokenHint: "Crea un token de acceso personal de solo lectura y pégalo abajo.",
+        tokenLabel: "Token de acceso personal",
+        installNote: "El primer guardado instala el servidor, lo que puede tardar un minuto.",
+        save: "Guardar y conectar",
+      },
+      clientCredentials: {
+        intro:
+          "{{name}} no puede registrar a Paseo por sí mismo. Crea una app OAuth para él una sola vez, pega aquí sus credenciales y luego inicia sesión.",
+        step1: "Crea la app",
+        step2: "Pega sus credenciales",
+        step3: "Inicia sesión",
+        step3Hint: "Abre {{name}} en tu navegador para aprobar el acceso.",
+        adminNote:
+          "Puede que un administrador de tu espacio de trabajo tenga que aprobar una app nueva antes de poder instalarla.",
+        redirectLabel: "URL de redirección",
+        redirectHint: "Registra exactamente esta URL en la app.",
+        clientIdLabel: "ID de cliente",
+        clientSecretLabel: "Secreto de cliente",
+        scopeLabel: "Ámbitos (opcional)",
+        save: "Guardar credenciales",
+        saved: "Credenciales guardadas",
+      },
+      providers: {
+        figma: {
+          tokenHint:
+            "En Figma: Configuración → Seguridad → Tokens de acceso personal. Elige ámbitos de solo lectura.",
+        },
+        slack: {
+          clientCredentialsIntro:
+            "Slack no puede registrar a Paseo por sí mismo. Crea una app de Slack una sola vez, pega aquí sus credenciales y luego inicia sesión.",
+          createApp: "Crear app de Slack",
+          createAppHint:
+            "Abre Slack con la app ya rellenada: acceso de solo lectura y la URL de redirección configurada. Paseo no puede publicar ni escribir.",
+        },
+      },
     },
     showFullError: "Ver el mensaje completo",
     showLessError: "Acortar el mensaje",

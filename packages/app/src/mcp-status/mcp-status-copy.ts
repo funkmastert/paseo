@@ -1,4 +1,5 @@
 import type { TFunction } from "i18next";
+import { getSetupProvider } from "./mcp-setup-providers";
 import { showsReporterProvenance } from "./mcp-status-strip-model";
 import type {
   McpStatusActionFailure,
@@ -45,12 +46,32 @@ export function compactStatusText(t: TFunction, row: McpStatusRow): string | nul
  * both — "Needs sign-in" over "Sign-in failed: …" says the same thing twice.
  */
 export function secondLineText(t: TFunction, row: McpStatusRow): string {
-  return row.failure ? failureText(t, row, row.failure) : statusText(t, row);
+  if (row.failure) {
+    return failureText(t, row, row.failure);
+  }
+  // A row with a setup form already knows it cannot sign in; say so before anyone presses
+  // Sign in to find out.
+  return setupHintText(t, row) ?? statusText(t, row);
+}
+
+/** What a row that offers a setup form says it needs, or null when it offers none. */
+function setupHintText(t: TFunction, row: McpStatusRow): string | null {
+  if (row.action !== "setup" || !row.setupKind) {
+    return null;
+  }
+  return t(
+    `mcpStatus.setup.hint.${row.setupKind === "local_token" ? "localToken" : "clientCredentials"}`,
+    {
+      name: row.name,
+    },
+  );
 }
 
 /** The row's button label. Every path that ends in a browser sign-in is called one. */
 export function actionLabelText(t: TFunction, row: McpStatusRow): string {
   switch (row.action) {
+    case "setup":
+      return setupActionLabelText(t, row);
     case "adopt":
       return t("mcpStatus.adoptAction");
     case "openClaudeAi":
@@ -58,6 +79,19 @@ export function actionLabelText(t: TFunction, row: McpStatusRow): string {
     default:
       return t(row.statusKey === "error" ? "mcpStatus.reauthAction" : "mcpStatus.authAction");
   }
+}
+
+/** The setup button's label: the provider's own wording when it has some, else the kind's. */
+function setupActionLabelText(t: TFunction, row: McpStatusRow): string {
+  const providerKey = getSetupProvider(row.name)?.copyKey;
+  if (providerKey === "slack") {
+    return t("mcpStatus.setup.action.slack");
+  }
+  return t(
+    row.setupKind === "client_credentials"
+      ? "mcpStatus.setup.action.clientCredentials"
+      : "mcpStatus.setup.action.localToken",
+  );
 }
 
 /**
@@ -111,6 +145,11 @@ export function failureText(
   row: McpStatusRow,
   failure: McpStatusActionFailure,
 ): string {
+  // The two dead ends have a way out now: point at the button. The old explanation stays one
+  // tap away, in `remedyLines`.
+  if (isSetupDeadEnd(row, failure)) {
+    return setupHintText(t, row) ?? failure.error;
+  }
   const key = failure.reason ? FAILURE_COPY_KEY_BY_REASON[failure.reason] : undefined;
   if (!key) {
     return failure.error;
@@ -120,6 +159,14 @@ export function failureText(
     provider: row.annotation?.agentProvider ?? "",
     error: failure.error,
   });
+}
+
+/** The two failures a setup form exists for, on a row that offers it. */
+function isSetupDeadEnd(row: McpStatusRow, failure: McpStatusActionFailure): boolean {
+  return (
+    row.action === "setup" &&
+    (failure.reason === "client_not_registered" || failure.reason === "client_registration_refused")
+  );
 }
 
 /** One labelled host fact under a failure: a URI to register, a file to edit, a line to paste. */
@@ -158,6 +205,19 @@ export function remedyLines(
   failure: McpStatusActionFailure,
 ): McpStatusRemedyLine[] {
   const lines: McpStatusRemedyLine[] = [];
+  if (isSetupDeadEnd(row, failure)) {
+    // Hand-editing the token file is what the form replaces, so its recipe is not offered here;
+    // the explanation of why sign-in cannot start is.
+    const key = failure.reason ? FAILURE_COPY_KEY_BY_REASON[failure.reason] : undefined;
+    if (key) {
+      lines.push({
+        key: "why",
+        label: t("mcpStatus.remedy.why"),
+        value: t(key, { name: row.name, error: failure.error }),
+      });
+    }
+    return lines;
+  }
   if (failure.remedyRedirectUrl) {
     lines.push({
       key: "redirectUrl",
@@ -196,4 +256,26 @@ export function failureClipboardText(
     parts.push(`${line.label}:\n${line.value}`);
   }
   return parts.join("\n\n");
+}
+
+export interface SetupFailure {
+  reason: string | null;
+  error: string;
+  name: string;
+}
+
+/**
+ * What a setup form says when the daemon refused or failed. The daemon's own sentence stays in
+ * the text: for an install it carries npm's last words, which is what someone fixing it needs.
+ */
+export function setupFailureText(t: TFunction, failure: SetupFailure): string {
+  const params = { name: failure.name, error: failure.error };
+  switch (failure.reason) {
+    case "install_failed":
+      return t("mcpStatus.setup.failure.installFailed", params);
+    case "config_write_failed":
+      return t("mcpStatus.setup.failure.configWriteFailed", params);
+    default:
+      return failure.error || t("mcpStatus.setup.failure.unknown", params);
+  }
 }
