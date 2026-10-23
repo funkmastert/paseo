@@ -10,12 +10,13 @@ export interface CopyableWorkspace {
   workspaceId: string;
   workspaceDirectory: string | null | undefined;
   currentBranch: string | null | undefined;
+  agentId?: string | null;
 }
 
 export interface WorkspaceClipboardActions {
   copyPath: (workspace: CopyableWorkspace) => void;
   copyBranchName: (workspace: CopyableWorkspace) => void;
-  copyAgentId: (agentId: string) => void;
+  copyAgentId: (workspace: CopyableWorkspace) => void;
 }
 
 export function useWorkspaceClipboardActions(): WorkspaceClipboardActions {
@@ -56,8 +57,11 @@ export function useWorkspaceClipboardActions(): WorkspaceClipboardActions {
   );
 
   const copyAgentId = useCallback(
-    (agentId: string) => {
-      void Clipboard.setStringAsync(agentId);
+    (workspace: CopyableWorkspace) => {
+      if (!workspace.agentId) {
+        return;
+      }
+      void Clipboard.setStringAsync(workspace.agentId);
       toast.copied(t("sidebar.workspace.toasts.agentIdCopied"));
     },
     [t, toast],

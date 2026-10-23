@@ -259,4 +259,23 @@ describe("agent id resolution (short id / prefix)", () => {
     expect(result.deliveredToAgentId).toBeUndefined();
     expect(result.guidance).toBeUndefined();
   });
+
+  test("send_agent_prompt with a unique prefix that moves accounts reports the resolved id as moved", async () => {
+    const harness = createHarness([{ id: "abcdefg-target", status: "idle" }]);
+    // Delivery landed on a different agent (account failover) than the one resolution picked —
+    // the handler must compare its own resolved id against this returned id, not the raw prefix
+    // the caller typed, or every prefix call would look "moved" even when nothing moved.
+    sendPromptToAgentMock.mockImplementation(
+      async () => ({ disposition: "turn_started", agentId: "moved-to-agent" }) as Loose,
+    );
+
+    const result = await call(harness, "send_agent_prompt", {
+      agentId: "abcdefg",
+      prompt: "hello",
+      background: true,
+    });
+
+    expect(result.deliveredToAgentId).toBe("moved-to-agent");
+    expect(result.guidance).toContain("abcdefg-target moved to moved-to-agent");
+  });
 });

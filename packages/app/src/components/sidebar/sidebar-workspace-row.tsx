@@ -115,8 +115,7 @@ export function SidebarWorkspaceRow({
   }, [clipboard, workspace]);
 
   const handleCopyAgentId = useCallback(() => {
-    if (!workspace.agentId) return;
-    clipboard.copyAgentId(workspace.agentId);
+    clipboard.copyAgentId(workspace);
   }, [clipboard, workspace]);
 
   const handleOpenRename = useCallback(() => {

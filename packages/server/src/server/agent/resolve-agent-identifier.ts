@@ -5,12 +5,14 @@ export type ResolveAgentIdentifierResult =
   | { ok: true; agentId: string }
   | { ok: false; error: string };
 
+export interface ResolveAgentIdentifierDeps {
+  agentStorage: Pick<AgentStorage, "list">;
+  agentManager: Pick<AgentManager, "listAgents">;
+}
+
 export async function resolveAgentIdentifier(
   identifier: string,
-  deps: {
-    agentStorage: Pick<AgentStorage, "list">;
-    agentManager: Pick<AgentManager, "listAgents">;
-  },
+  deps: ResolveAgentIdentifierDeps,
 ): Promise<ResolveAgentIdentifierResult> {
   const trimmed = identifier.trim();
   if (!trimmed) {
