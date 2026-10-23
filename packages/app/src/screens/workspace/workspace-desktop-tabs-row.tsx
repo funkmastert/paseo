@@ -84,6 +84,8 @@ import {
 } from "@/components/ui/horizontal-scroll-boundary";
 import { useSessionStore } from "@/stores/session-store";
 import { getAgentShortId } from "@/utils/agent-short-id";
+import { selectActivePaneAgentId } from "@/screens/workspace/workspace-pane-active-agent";
+import { PaneActiveAgentIdChip } from "@/screens/workspace/workspace-pane-active-agent-chip";
 
 const DROPDOWN_WIDTH = 220;
 const DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH = 36;
@@ -95,6 +97,9 @@ const PANE_SPLIT_ACTIONS_RESERVED_WIDTH =
   PANE_SPLIT_ACTIONS_HORIZONTAL_PADDING * 2 +
   PANE_SPLIT_ACTIONS_OUTER_MARGIN;
 const PANE_MAXIMIZE_ACTION_RESERVED_WIDTH = smallIconButtonChromeFrameSize(false) + 1;
+// AgentIdChip: 7 monospace chars at fontSize.sm (12px, ~0.6em advance) plus its own
+// spacing[1]*2 horizontal padding, plus a small gap separating it from the tab row.
+const AGENT_ID_CHIP_RESERVED_WIDTH = 52 + 8 + 8;
 // Chip geometry. `layoutMetrics` measures tabs from these same numbers, so a chip that changes
 // shape without changing them mis-measures and drops the row into the overflow-scroll fallback at
 // the wrong width. Keep them together.
@@ -1045,6 +1050,8 @@ function ResolvedWorkspaceDesktopTabsRow({
     updateMeasuredWidth(setExitFocusModeWidth, event);
   }, []);
 
+  const activePaneAgentId = useMemo(() => selectActivePaneAgentId(tabs), [tabs]);
+
   const layoutMetrics = useMemo(
     () => ({
       rowHorizontalInset: 0,
@@ -1052,6 +1059,7 @@ function ResolvedWorkspaceDesktopTabsRow({
         0,
         DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH +
           (focusModeEnabled ? exitFocusModeWidth : 0) +
+          (activePaneAgentId ? AGENT_ID_CHIP_RESERVED_WIDTH : 0) +
           (showPaneSplitActions ? PANE_SPLIT_ACTIONS_RESERVED_WIDTH : 0) +
           (showPaneMaximizeAction ? PANE_MAXIMIZE_ACTION_RESERVED_WIDTH : 0),
       ),
@@ -1064,7 +1072,13 @@ function ResolvedWorkspaceDesktopTabsRow({
       tabHorizontalPadding: TAB_CHIP_HORIZONTAL_PADDING,
       closeButtonWidth: TAB_CLOSE_BUTTON_RESERVED_WIDTH,
     }),
-    [exitFocusModeWidth, focusModeEnabled, showPaneMaximizeAction, showPaneSplitActions],
+    [
+      activePaneAgentId,
+      exitFocusModeWidth,
+      focusModeEnabled,
+      showPaneMaximizeAction,
+      showPaneSplitActions,
+    ],
   );
 
   const fallbackTabLabels = useMemo(
@@ -1384,6 +1398,7 @@ function ResolvedWorkspaceDesktopTabsRow({
           rightStyle={tabScrollBoundary.rightShadeStyle}
         />
       </View>
+      <PaneActiveAgentIdChip tabs={tabs} testID={`workspace-pane-agent-id-${paneId ?? "main"}`} />
       <WorkspacePaneToolbarActions
         showNewTabButton={layout.requiresHorizontalScrollFallback}
         showSplitActions={showPaneSplitActions}

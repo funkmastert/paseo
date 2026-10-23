@@ -1,6 +1,7 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { LayoutAnimationConfig } from "react-native-reanimated";
 import { page } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DropdownMenu } from "@/components/ui/dropdown-menu";
@@ -12,12 +13,17 @@ import "@/i18n/i18next";
 
 // The menu builds its leading icons at module scope, so React has to be global before it loads.
 vi.stubGlobal("React", React);
-const { SidebarWorkspaceMenuItems } = await import("./sidebar-workspace-menu");
+const { SidebarWorkspaceMenu, SidebarWorkspaceMenuItems } =
+  await import("./sidebar-workspace-menu");
 
 let mounted: { root: Root; container: HTMLDivElement } | null = null;
 
 // SidebarWorkspaceMenuItems unconditionally renders OpenInFileManagerMenuItem, which reads
 // react-query via useDesktopOpenTargets even when its query is disabled (not Electron, no path).
+// skipEntering/skipExiting: a screenshot forces a paint mid-animation, and Reanimated's web
+// layout-animation handler then throws on the torn-down node (`_updatePropsJS` in
+// componentUtils.ts) — same issue jev-header-badge.browser.test.tsx works around. The popover's
+// fade isn't what these tests assert on.
 function mount(node: React.ReactNode): HTMLDivElement {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -26,7 +32,11 @@ function mount(node: React.ReactNode): HTMLDivElement {
   act(() =>
     root.render(
       <QueryClientProvider client={queryClient}>
-        <ToastProvider>{node}</ToastProvider>
+        <ToastProvider>
+          <LayoutAnimationConfig skipEntering skipExiting>
+            {node}
+          </LayoutAnimationConfig>
+        </ToastProvider>
       </QueryClientProvider>,
     ),
   );
@@ -92,14 +102,19 @@ describe("SidebarWorkspaceMenuItems — Copy ID", () => {
     expect(onCopyAgentId).toHaveBeenCalledTimes(1);
   });
 
-  it("captures the menu with the Copy ID item visible", async () => {
-    const container = mount(
-      <DropdownMenu open>
-        <SidebarWorkspaceMenuItems surface="dropdown" workspaceKey="w1" onCopyAgentId={noop} />
-      </DropdownMenu>,
-    );
+  it("captures the open menu with the Copy ID item visible", async () => {
+    document.body.style.margin = "0";
+    document.body.style.width = "420px";
+    // Mounted already open (not opened via a trigger click): a dynamic closed->open transition
+    // desyncs Reanimated's web entering animation from this headless browser's rAF callbacks and
+    // crashes on an unrelated internal teardown; mounting pre-open avoids that transition.
+    mount(<SidebarWorkspaceMenu workspaceKey="w1" onArchive={noop} onCopyAgentId={noop} open />);
+    // The popover portals outside the mount container (docs/menus.md), so the screenshot must
+    // cover the full page.
+    await vi.waitFor(() => {
+      expect(document.body.textContent ?? "").toContain("Copy ID");
+    });
     await page.screenshot({
-      element: container,
       path: "../../../../.artifacts/sidebar-workspace-menu-copy-id.png",
     });
   });
