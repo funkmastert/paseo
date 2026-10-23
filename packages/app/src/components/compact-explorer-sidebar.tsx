@@ -32,6 +32,12 @@ import { RetainedPanel, RetainedPanelActivity } from "@/components/retained-pane
 import { useMountedTabSet } from "@/screens/workspace/use-mounted-tab-set";
 import { usePullRequestPanelAvailability } from "@/panels/pull-request-availability";
 import { PullRequestContent } from "@/panels/pull-request";
+import { PullRequestsTabContent } from "@/panels/pull-requests-tab";
+import { useHostFeature } from "@/runtime/host-features";
+import {
+  buildExplorerAvailableTabs,
+  resolveExplorerSidebarTab,
+} from "./compact-explorer-sidebar-tabs";
 import { useAddFileToChat } from "@/panels/use-add-file-to-chat";
 import { SidebarResizeHandle } from "@/components/sidebar-resize-handle";
 import {
@@ -315,23 +321,23 @@ function ExplorerSidebarContent({
 }: SidebarContentProps) {
   const { theme } = useUnistyles();
   const { t } = useTranslation();
+  const hasPullRequestLedger = useHostFeature(serverId, "pullRequestLedger");
+  // COMPAT(pullRequestLedger): added in v0.9.x, remove after 2027-04-22. The single-PR tab this
+  // feature replaces — only computed against an old daemon that doesn't serve the ledger yet.
   const { prPane, showPullRequest: showPrTab } = usePullRequestPanelAvailability({
     serverId,
     cwd: workspaceRoot,
     isGit,
-    requested: activeTab === "pr",
-    enabled: isOpen,
-    timelineEnabled: activeTab === "pr",
+    requested: activeTab === "pr" && !hasPullRequestLedger,
+    enabled: isOpen && !hasPullRequestLedger,
+    timelineEnabled: activeTab === "pr" && !hasPullRequestLedger,
   });
-  const requestedTab: ExplorerTab =
-    !isGit && (activeTab === "changes" || activeTab === "pr") ? "files" : activeTab;
-  const resolvedTab: ExplorerTab = requestedTab === "pr" && !showPrTab ? "changes" : requestedTab;
   const prTabLabel = formatPrTabLabel(prPane.prNumber);
-  const availableTabs = useMemo<ExplorerTab[]>(() => {
-    const tabs: ExplorerTab[] = isGit ? ["changes", "files"] : ["files"];
-    if (isGit && showPrTab) tabs.push("pr");
-    return tabs;
-  }, [isGit, showPrTab]);
+  const availableTabs = useMemo<ExplorerTab[]>(
+    () => buildExplorerAvailableTabs({ isGit, hasPullRequestLedger, showPrTab }),
+    [isGit, hasPullRequestLedger, showPrTab],
+  );
+  const resolvedTab = resolveExplorerSidebarTab({ activeTab, isGit, availableTabs });
   const { mountedTabIds } = useMountedTabSet({
     activeTabId: resolvedTab,
     allTabIds: availableTabs,
@@ -365,7 +371,16 @@ function ExplorerSidebarContent({
             onTabPress={onTabPress}
             testID="explorer-tab-files"
           />
-          {isGit && showPrTab && (
+          {isGit && hasPullRequestLedger && (
+            <ExplorerTabButton
+              tab="prs"
+              active={resolvedTab === "prs"}
+              label={t("workspace.tabs.explorerSidebar.prs")}
+              onTabPress={onTabPress}
+              testID="explorer-tab-prs"
+            />
+          )}
+          {isGit && !hasPullRequestLedger && showPrTab && (
             <ExplorerTabButton
               tab="pr"
               active={resolvedTab === "pr"}
@@ -434,6 +449,15 @@ function ExplorerSidebarContent({
               workspaceId={workspaceId}
               cwd={workspaceRoot}
               prPane={prPane}
+            />
+          </RetainedPanel>
+        ) : null}
+        {mountedTabIds.has("prs") ? (
+          <RetainedPanel active={resolvedTab === "prs"}>
+            <PullRequestsTabContent
+              serverId={serverId}
+              workspaceId={workspaceId}
+              isOpen={isOpen && resolvedTab === "prs"}
             />
           </RetainedPanel>
         ) : null}

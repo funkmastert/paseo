@@ -38,6 +38,7 @@ import {
 import type { SheetHeader } from "@/components/adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { getProviderIcon } from "@/components/provider-icons";
 import { useIsCompactFormFactor } from "@/constants/layout";
@@ -979,7 +980,12 @@ function GroupProviderButton({
     onDrillDown(provider.id, provider.label);
   }, [onDrillDown, provider.id, provider.label]);
 
+  const budgetNote = provider.budgetNote;
   const stateNode = useMemo(() => {
+    // An account that can't run anything right now says so instead of how many models it has.
+    if (budgetNote) {
+      return <StatusBadge label={budgetNote} variant="error" />;
+    }
     if (selection.kind === "models") {
       const count = selection.rows.length;
       return (
@@ -1006,7 +1012,7 @@ function GroupProviderButton({
         <Text style={styles.drillDownCount}>{t("modelSelector.error")}</Text>
       </View>
     );
-  }, [selection, t]);
+  }, [budgetNote, selection, t]);
   const leadingSlot = useMemo(
     () => <ModelProviderGlyph provider={provider.id} serverId={serverId} size={ICON_SIZE.sm} />,
     [provider.id, serverId],

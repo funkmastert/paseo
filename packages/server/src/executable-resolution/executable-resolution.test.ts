@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
+  enumerateCandidatesViaSystemWhich,
   executableExists,
   findExecutable,
   quoteWindowsArgument,
@@ -330,5 +331,54 @@ describe("quoteWindowsArgument", () => {
   test("returns the argument unchanged on non-Windows platforms", () => {
     setPlatform("darwin");
     expect(quoteWindowsArgument("/usr/local/bin/claude code")).toBe("/usr/local/bin/claude code");
+  });
+});
+
+describe("system which under load", () => {
+  function killed(): Error {
+    return Object.assign(new Error("Command failed: /usr/bin/which -a claude"), {
+      killed: true,
+      signal: "SIGKILL",
+      code: null,
+    });
+  }
+
+  test("a which killed by its timeout is retried, not reported as a failure", async () => {
+    const exec = vi
+      .fn()
+      .mockRejectedValueOnce(killed())
+      .mockResolvedValueOnce({ stdout: "/usr/local/bin/claude\n", stderr: "" });
+
+    await expect(
+      enumerateCandidatesViaSystemWhich("claude", { exec, fallback: async () => [] }),
+    ).resolves.toEqual(["/usr/local/bin/claude"]);
+    expect(exec).toHaveBeenCalledTimes(2);
+  });
+
+  test("a which killed twice falls back to the in-process PATH search", async () => {
+    const exec = vi.fn().mockRejectedValue(killed());
+    const fallback = vi.fn(async () => ["/opt/bin/claude"]);
+
+    await expect(enumerateCandidatesViaSystemWhich("claude", { exec, fallback })).resolves.toEqual([
+      "/opt/bin/claude",
+    ]);
+    expect(fallback).toHaveBeenCalledWith("claude");
+  });
+
+  test("a missing command is still an empty answer, and other errors still throw", async () => {
+    const missing = Object.assign(new Error("not found"), { code: 1 });
+    await expect(
+      enumerateCandidatesViaSystemWhich("nope", {
+        exec: vi.fn().mockRejectedValue(missing),
+        fallback: async () => ["/wrong"],
+      }),
+    ).resolves.toEqual([]);
+    const broken = Object.assign(new Error("spawn EACCES"), { code: "EACCES" });
+    await expect(
+      enumerateCandidatesViaSystemWhich("x", {
+        exec: vi.fn().mockRejectedValue(broken),
+        fallback: async () => [],
+      }),
+    ).rejects.toThrow("EACCES");
   });
 });

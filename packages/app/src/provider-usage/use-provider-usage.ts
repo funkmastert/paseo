@@ -20,6 +20,25 @@ async function fetchProviderUsage(client: ProviderUsageClient): Promise<Provider
 
 interface UseProviderUsageOptions {
   enabled?: boolean;
+  /** Polling interval in ms. Omit to keep the default no-polling behavior. */
+  refetchInterval?: number;
+  /**
+   * Catch up when the window comes back or the host reconnects. React Query skips a polling tick
+   * while the document is hidden and never backfills the ones it skipped, so a polled surface
+   * that does not opt in shows whatever it last fetched before the window went away — which is
+   * exactly what the user is looking at the moment they come back to it. Off by default to keep
+   * the unpolled callers unchanged. `"always"` additionally ignores staleTime, so the catch-up
+   * refetch fires even when the last fetch isn't stale yet — matches TanStack Query's own
+   * `refetchOnWindowFocus`/`refetchOnReconnect` type, passed straight through.
+   */
+  catchUpOnFocus?: boolean | "always";
+  /**
+   * Keep polling refetchInterval while the document is hidden (occluded, minimized, backgrounded,
+   * on another Space). React Query otherwise skips every tick while unfocused. Off by default.
+   */
+  refetchIntervalInBackground?: boolean;
+  /** Query network mode. Omit to keep TanStack Query's "online" default. */
+  networkMode?: "online" | "always" | "offlineFirst";
 }
 
 export function useProviderUsage(
@@ -31,6 +50,7 @@ export function useProviderUsage(
   canFetch: boolean;
 } {
   const queryClient = useQueryClient();
+  const focusRefetchMode = options.catchUpOnFocus ?? false;
   const client = useHostRuntimeClient(serverId ?? "");
   const isConnected = useHostRuntimeIsConnected(serverId ?? "");
   const supportsProviderUsage = useSessionStore(
@@ -53,8 +73,11 @@ export function useProviderUsage(
     enabled,
     staleTime: PROVIDER_USAGE_STALE_TIME_MS,
     refetchOnMount: true,
-    refetchOnReconnect: false,
-    refetchOnWindowFocus: false,
+    refetchOnReconnect: focusRefetchMode,
+    refetchOnWindowFocus: focusRefetchMode,
+    refetchIntervalInBackground: options.refetchIntervalInBackground ?? false,
+    ...(options.refetchInterval !== undefined ? { refetchInterval: options.refetchInterval } : {}),
+    ...(options.networkMode !== undefined ? { networkMode: options.networkMode } : {}),
   });
 
   const refresh = useCallback(async () => {
@@ -79,6 +102,7 @@ export function useProviderUsage(
         kind: "ready",
         payload: query.data,
         isRefreshing: query.isFetching,
+        fetchedAt: query.dataUpdatedAt,
       };
     }
     if (query.isError) {
@@ -92,6 +116,7 @@ export function useProviderUsage(
     client,
     isConnected,
     query.data,
+    query.dataUpdatedAt,
     query.error,
     query.isError,
     query.isFetching,

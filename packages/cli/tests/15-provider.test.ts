@@ -53,9 +53,14 @@ interface ProviderDiagnostic {
 
 const EXPECTED_CLAUDE_MODELS = [
   {
+    id: "claude-opus-5-5",
+    model: "Opus 5.5",
+    descriptionFragment: "Latest release",
+  },
+  {
     id: "claude-opus-5",
     model: "Opus 5",
-    descriptionFragment: "Latest release",
+    descriptionFragment: "Previous release",
   },
   {
     id: "claude-fable-5-1",
@@ -78,9 +83,14 @@ const EXPECTED_CLAUDE_MODELS = [
     descriptionFragment: "Previous release",
   },
   {
+    id: "claude-sonnet-5-5",
+    model: "Sonnet 5.5",
+    descriptionFragment: "Latest release",
+  },
+  {
     id: "claude-sonnet-5",
     model: "Sonnet 5",
-    descriptionFragment: "Best for everyday tasks",
+    descriptionFragment: "Previous release",
   },
   {
     id: "claude-opus-4-7[1m]",

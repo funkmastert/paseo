@@ -27,6 +27,9 @@ export interface PluginHookAgent {
   provider: string;
   cwd: string;
   title: string | null;
+  // Categorization labels (MCP `create_agent` labels, CLI `paseo run --label`).
+  // Mutable after creation; defaults to {} when none are set.
+  labels: Record<string, string>;
 }
 
 export interface PluginSessionOpenRequest {
@@ -65,7 +68,20 @@ export interface PluginLifecycleEvents {
 }
 
 export interface PluginBeforeRequests {
-  "agent.create": { config: AgentSessionConfig; env?: Record<string, string> };
+  "agent.create": {
+    config: AgentSessionConfig;
+    env?: Record<string, string>;
+    // Read-only: the id of the agent that initiated this create, absent for
+    // human-initiated creates (app/CLI top-level with no calling agent).
+    callerAgentId?: string;
+    // Categorization labels set by the caller (MCP `create_agent` labels, CLI
+    // `paseo run --label`). Mutable by hooks. Optional on the way in — the
+    // wire schema defaults it to {} — but always present by the time a hook
+    // handler sees `request.labels`.
+    labels?: Record<string, string>;
+    // The first user message queued for delivery after creation, if any.
+    initialPrompt?: string;
+  };
   "agent.session_open": PluginSessionOpenRequest;
   "workspace.create": Omit<WorkspaceCreateRequest, "type" | "requestId">;
 }

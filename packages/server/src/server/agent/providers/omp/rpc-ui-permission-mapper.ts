@@ -98,6 +98,24 @@ export function buildOmpRpcUiPermissionResponse(
   return { value: response.behavior === "allow" ? approveValue : denyValue };
 }
 
+/**
+ * The shell command behind an OMP bash approval, for the device cap (docs/device-leases.md).
+ * Reads the approval's own recorded args rather than its title, which is display prose.
+ */
+export function readOmpToolApprovalCommand(request: AgentPermissionRequest): string | undefined {
+  if (
+    request.kind !== "tool" ||
+    request.metadata?.toolApproval !== OMP_RPC_UI_TOOL_APPROVAL_METADATA ||
+    request.metadata.toolName !== "bash"
+  ) {
+    return undefined;
+  }
+  const args = request.metadata.toolArgs;
+  if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+  const command = (args as Record<string, unknown>).command;
+  return typeof command === "string" && command.trim() !== "" ? command : undefined;
+}
+
 function parseToolApprovalDescriptor(
   event: ExtensionUiRequestEvent,
 ): ToolApprovalDescriptor | null {

@@ -14,6 +14,7 @@ export interface SeedWorkspaceDescriptor {
   workspaceDirectory: string;
   diffStat: { additions: number; deletions: number } | null;
   labels?: string[];
+  pinnedAt?: string | null;
 }
 
 interface SeedProjectDescriptor {
@@ -268,6 +269,14 @@ export async function seedWorkspace(options: {
     await project.cleanup().catch(() => undefined);
     throw error;
   }
+}
+
+/**
+ * A session start auto-pins its workspace until it goes quiet (workspace-auto-pin.ts); specs
+ * about grouping start from the state that pin expires to.
+ */
+export async function settleAutoPin(client: SeedDaemonClient, workspaceId: string): Promise<void> {
+  await client.setWorkspacePinned(workspaceId, false);
 }
 
 function loadAppVersion(): string {

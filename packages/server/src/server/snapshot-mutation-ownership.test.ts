@@ -38,7 +38,7 @@ describe("snapshot mutation ownership boundary", () => {
           model: "gpt-5.2-codex",
         },
         undefined,
-        { workspaceId: undefined },
+        { workspaceId: undefined, origin: "human" },
       );
       await daemonHandle.daemon.agentManager.flush();
 
@@ -110,6 +110,7 @@ describe("snapshot mutation ownership boundary", () => {
         paseoHome: "/tmp/paseo-test",
         agentManager: createStub<SessionOptions["agentManager"]>({
           subscribe: () => () => {},
+          onMcpGatewayStatusChange: () => () => {},
           listAgents: () => [],
           getAgent: () => null,
           archiveSnapshot,

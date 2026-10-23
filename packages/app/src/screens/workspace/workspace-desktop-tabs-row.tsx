@@ -83,6 +83,9 @@ import {
   useHorizontalScrollBoundary,
 } from "@/components/ui/horizontal-scroll-boundary";
 import { useSessionStore } from "@/stores/session-store";
+import { getAgentShortId } from "@/utils/agent-short-id";
+import { selectActivePaneAgentId } from "@/screens/workspace/workspace-pane-active-agent";
+import { PaneActiveAgentIdChip } from "@/screens/workspace/workspace-pane-active-agent-chip";
 
 const DROPDOWN_WIDTH = 220;
 const DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH = 36;
@@ -177,7 +180,7 @@ function AgentTabTooltipBody({
         {title}
       </Text>
       <View style={styles.tooltipAgentMetadata}>
-        <Text style={styles.tooltipAgentId}>{agentId.slice(0, 7)}</Text>
+        <Text style={styles.tooltipAgentId}>{getAgentShortId(agentId)}</Text>
         {activity ? (
           <>
             <Text style={styles.tooltipAgentSeparator}>·</Text>
@@ -588,6 +591,7 @@ function getFallbackTabLabel(
     changes: string;
     files: string;
     pullRequest: string;
+    orchestration: string;
   },
 ): string {
   if (tab.target.kind === "new_tab") {
@@ -611,8 +615,11 @@ function getFallbackTabLabel(
   if (tab.target.kind === "files") {
     return labels.files;
   }
-  if (tab.target.kind === "pull_request") {
+  if (tab.target.kind === "pull_request" || tab.target.kind === "pull_requests") {
     return labels.pullRequest;
+  }
+  if (tab.target.kind === "orchestration") {
+    return labels.orchestration;
   }
   return labels.agent;
 }
@@ -1026,6 +1033,7 @@ function ResolvedWorkspaceDesktopTabsRow({
   const newTabKeys = useShortcutKeys("workspace-tab-new");
   const [tabsContainerWidth, setTabsContainerWidth] = useState<number>(0);
   const [exitFocusModeWidth, setExitFocusModeWidth] = useState<number>(0);
+  const [agentIdChipWidth, setAgentIdChipWidth] = useState<number>(0);
   const tabScrollBoundary = useHorizontalScrollBoundary();
   const [labelMeasurements, setLabelMeasurements] = useState(
     () => new Map<string, WorkspaceTabLabelMeasurement>(),
@@ -1040,6 +1048,12 @@ function ResolvedWorkspaceDesktopTabsRow({
     updateMeasuredWidth(setExitFocusModeWidth, event);
   }, []);
 
+  const handleAgentIdChipLayout = useCallback((event: LayoutChangeEvent) => {
+    updateMeasuredWidth(setAgentIdChipWidth, event);
+  }, []);
+
+  const activePaneAgentId = useMemo(() => selectActivePaneAgentId(tabs), [tabs]);
+
   const layoutMetrics = useMemo(
     () => ({
       rowHorizontalInset: 0,
@@ -1047,6 +1061,7 @@ function ResolvedWorkspaceDesktopTabsRow({
         0,
         DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH +
           (focusModeEnabled ? exitFocusModeWidth : 0) +
+          (activePaneAgentId ? agentIdChipWidth : 0) +
           (showPaneSplitActions ? PANE_SPLIT_ACTIONS_RESERVED_WIDTH : 0) +
           (showPaneMaximizeAction ? PANE_MAXIMIZE_ACTION_RESERVED_WIDTH : 0),
       ),
@@ -1059,7 +1074,14 @@ function ResolvedWorkspaceDesktopTabsRow({
       tabHorizontalPadding: TAB_CHIP_HORIZONTAL_PADDING,
       closeButtonWidth: TAB_CLOSE_BUTTON_RESERVED_WIDTH,
     }),
-    [exitFocusModeWidth, focusModeEnabled, showPaneMaximizeAction, showPaneSplitActions],
+    [
+      activePaneAgentId,
+      agentIdChipWidth,
+      exitFocusModeWidth,
+      focusModeEnabled,
+      showPaneMaximizeAction,
+      showPaneSplitActions,
+    ],
   );
 
   const fallbackTabLabels = useMemo(
@@ -1072,6 +1094,7 @@ function ResolvedWorkspaceDesktopTabsRow({
       changes: t("panels.diff.changesLabel"),
       files: t("panels.files.label"),
       pullRequest: t("panels.pullRequest.label"),
+      orchestration: t("panels.orchestration.label"),
     }),
     [t],
   );
@@ -1377,6 +1400,9 @@ function ResolvedWorkspaceDesktopTabsRow({
           leftStyle={tabScrollBoundary.leftShadeStyle}
           rightStyle={tabScrollBoundary.rightShadeStyle}
         />
+      </View>
+      <View onLayout={handleAgentIdChipLayout}>
+        <PaneActiveAgentIdChip tabs={tabs} testID={`workspace-pane-agent-id-${paneId ?? "main"}`} />
       </View>
       <WorkspacePaneToolbarActions
         showNewTabButton={layout.requiresHorizontalScrollFallback}

@@ -1,15 +1,18 @@
 import { QueryClient, QueryObserver, skipToken } from "@tanstack/react-query";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { MutableDaemonConfig, SessionOutboundMessage } from "@getpaseo/protocol/messages";
 import { checkoutDiffQueryKey } from "@/git/query-keys";
 import { buildTerminalsQueryKey } from "@/screens/workspace/terminals/state";
 import { daemonConfigQueryKey } from "@/data/daemon-config";
 import { daemonPairingOfferQueryKey } from "@/data/daemon-pairing";
 import { providersSnapshotQueryKey } from "@/data/providers-snapshot";
+import { mcpStatusQueryKey, type McpStatusPayload } from "@/mcp-status/use-mcp-status";
 import {
+  applyMcpStatusUpdate,
   checkoutDiffPushRoute,
   invalidateServerDataQueriesAfterReconnect,
   mountServerDataPushRouter,
+  trackActiveProviderSubagentParent,
   workspaceTerminalsPushRoute,
 } from "@/data/push-router";
 
@@ -17,6 +20,8 @@ type ProvidersSnapshotUpdateMessage = Extract<
   SessionOutboundMessage,
   { type: "providers_snapshot_update" }
 >;
+type McpStatusUpdateMessage = Extract<SessionOutboundMessage, { type: "mcp_status_update" }>;
+type DeviceStatusUpdateMessage = Extract<SessionOutboundMessage, { type: "device_status_update" }>;
 type CheckoutDiffUpdateMessage = Extract<SessionOutboundMessage, { type: "checkout_diff_update" }>;
 type SubscribeCheckoutDiffResponseMessage = Extract<
   SessionOutboundMessage,
@@ -26,6 +31,8 @@ type StatusMessage = Extract<SessionOutboundMessage, { type: "status" }>;
 type TerminalsChangedMessage = Extract<SessionOutboundMessage, { type: "terminals_changed" }>;
 type RouterMessage =
   | ProvidersSnapshotUpdateMessage
+  | McpStatusUpdateMessage
+  | DeviceStatusUpdateMessage
   | CheckoutDiffUpdateMessage
   | SubscribeCheckoutDiffResponseMessage
   | StatusMessage
@@ -59,6 +66,8 @@ function createFakeClient(config: { rejectCheckoutDiffSubscribe?: boolean } = {}
 } {
   const handlers: Record<RouterMessageType, RouterHandler[]> = {
     providers_snapshot_update: [],
+    mcp_status_update: [],
+    device_status_update: [],
     checkout_diff_update: [],
     subscribe_checkout_diff_response: [],
     status: [],
@@ -609,5 +618,110 @@ describe("server data push router", () => {
     expect(queryClient.getQueryState(diffKey)?.isInvalidated).toBe(true);
     expect(queryClient.getQueryState(terminalKey)?.isInvalidated).toBe(true);
     expect(queryClient.getQueryState(otherProviderKey)?.isInvalidated).toBe(false);
+  });
+
+  it("re-fetches provider subagent lists for tracked parents on reconnect", async () => {
+    const queryClient = new QueryClient();
+    const serverId = "server-1";
+    const listProviderSubagents = vi.fn(async (parentAgentId: string) => ({
+      parentAgentId,
+      subagents: [],
+      requestId: "list-provider-subagents",
+      error: null,
+    }));
+    const client = { listProviderSubagents };
+
+    const untrackA = trackActiveProviderSubagentParent(serverId, "parent-a");
+    const untrackB = trackActiveProviderSubagentParent(serverId, "parent-b");
+
+    invalidateServerDataQueriesAfterReconnect({ queryClient, serverId, client });
+    // `refreshProviderSubagents` dedupes by an in-flight-request map keyed on the client
+    // instance; let each round's requests settle (and clear that map) before the next round,
+    // same as a real reconnect would after the previous refresh already resolved.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(listProviderSubagents).toHaveBeenCalledTimes(2);
+    expect(listProviderSubagents.mock.calls.map((call) => call[0]).sort()).toEqual([
+      "parent-a",
+      "parent-b",
+    ]);
+
+    // A reconnect with no tracked parents left issues nothing further for this parent.
+    untrackA();
+    listProviderSubagents.mockClear();
+    invalidateServerDataQueriesAfterReconnect({ queryClient, serverId, client });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(listProviderSubagents).toHaveBeenCalledExactlyOnceWith("parent-b");
+
+    untrackB();
+    listProviderSubagents.mockClear();
+    invalidateServerDataQueriesAfterReconnect({ queryClient, serverId, client });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(listProviderSubagents).not.toHaveBeenCalled();
+  });
+
+  it("keeps a tracked parent registered while a second mount is still active", async () => {
+    const queryClient = new QueryClient();
+    const serverId = "server-2";
+    const listProviderSubagents = vi.fn(async (parentAgentId: string) => ({
+      parentAgentId,
+      subagents: [],
+      requestId: "list-provider-subagents",
+      error: null,
+    }));
+    const client = { listProviderSubagents };
+
+    // Two independent mounts (e.g. `useSubagentsForParent` and `provider-subagent-panel.tsx`)
+    // tracking the same parent must not clobber each other's registration on unmount.
+    const untrackFirst = trackActiveProviderSubagentParent(serverId, "parent-a");
+    const untrackSecond = trackActiveProviderSubagentParent(serverId, "parent-a");
+
+    untrackFirst();
+    listProviderSubagents.mockClear();
+    invalidateServerDataQueriesAfterReconnect({ queryClient, serverId, client });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(listProviderSubagents).toHaveBeenCalledExactlyOnceWith("parent-a");
+
+    untrackSecond();
+    listProviderSubagents.mockClear();
+    invalidateServerDataQueriesAfterReconnect({ queryClient, serverId, client });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(listProviderSubagents).not.toHaveBeenCalled();
+
+    // Calling the same unregister function twice is a no-op, not a double-decrement.
+    const untrackThird = trackActiveProviderSubagentParent(serverId, "parent-a");
+    untrackThird();
+    untrackThird();
+    listProviderSubagents.mockClear();
+    invalidateServerDataQueriesAfterReconnect({ queryClient, serverId, client });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(listProviderSubagents).not.toHaveBeenCalled();
+  });
+});
+
+describe("applyMcpStatusUpdate", () => {
+  it("writes the push payload straight into the mcp status query cache (no RPC round trip)", () => {
+    const queryClient = new QueryClient();
+    const serverId = "server-1";
+    const payload: McpStatusPayload = {
+      servers: [{ name: "zeeq", status: "needs-auth", critical: true, lastChangedAt: 1 }],
+      generatedAt: "2026-09-12T00:00:00.000Z",
+    };
+
+    applyMcpStatusUpdate({
+      queryClient,
+      serverId,
+      message: { type: "mcp_status_update", payload },
+    });
+
+    expect(queryClient.getQueryData(mcpStatusQueryKey(serverId))).toEqual(payload);
+    // A different server's cache entry is untouched.
+    expect(queryClient.getQueryData(mcpStatusQueryKey("server-2"))).toBeUndefined();
   });
 });

@@ -94,6 +94,7 @@ class FakeDaemonClient {
     if (response) await response;
     const failure = this.sendAgentMessageFailures.shift();
     if (failure) throw failure;
+    return { agentId: args[0], deliveredToAgentId: null };
   }
 
   async waitForSentMessages(count: number): Promise<void> {
@@ -1676,6 +1677,63 @@ describe("HostRuntimeStore", () => {
 
     store.syncHosts([]);
     session.clearSession(host.serverId);
+  });
+
+  it("keeps a host added while the initial disk read is still pending (pairing-offer boot race)", async () => {
+    // Regression for the first-load pairing-offer bug: OfferLinkListener can
+    // ingest an #offer= fragment and add a host to the in-memory registry
+    // before boot()'s own disk read resolves. loadFromStorage() must merge
+    // with whatever landed concurrently instead of clobbering it with the
+    // stale snapshot the read started with.
+    const values = new Map<string, string>([["@paseo:e2e", "1"]]);
+    const registryReadGate = createDeferred<void>();
+    const storage: HostRuntimeStorage = {
+      getItem: async (key) => {
+        // Real storage engines (IndexedDB, etc.) resolve a read against the
+        // value at the time it was dispatched, not whatever is current when
+        // it happens to finish. Snapshot here so a write that lands while
+        // this read is gated still reproduces the stale-read race.
+        const snapshot = values.get(key) ?? null;
+        if (key === "@paseo:daemon-registry") {
+          await registryReadGate.promise;
+        }
+        return snapshot;
+      },
+      setItem: async (key, value) => {
+        values.set(key, value);
+      },
+      removeItem: async (key) => {
+        values.delete(key);
+      },
+    };
+
+    const store = new HostRuntimeStore({
+      storage,
+      deps: {
+        createClient: () => new FakeDaemonClient() as unknown as DaemonClient,
+        connectToDaemon: async ({ host }) => ({
+          client: makeConnectedProbeClient(5) as unknown as DaemonClient,
+          serverId: host.serverId,
+          hostname: host.label ?? null,
+        }),
+        getClientId: async () => "cid_test_runtime",
+      },
+    });
+
+    const bootPromise = store.boot();
+
+    // The offer arrives and is fully ingested (host added, persisted) while
+    // boot's disk read of the registry is still pending behind the gate.
+    await store.upsertConnectionFromOfferUrl(encodeOfferUrl(makeOffer()));
+    expect(store.getHosts().map((host) => host.serverId)).toEqual(["srv_offer"]);
+
+    registryReadGate.resolve();
+    await bootPromise;
+
+    expect(store.getHosts().map((host) => host.serverId)).toEqual(["srv_offer"]);
+    expect(JSON.parse(values.get("@paseo:daemon-registry") ?? "[]")).toHaveLength(1);
+
+    store.syncHosts([]);
   });
 
   it("marks the host registry loaded after boot reads storage", async () => {

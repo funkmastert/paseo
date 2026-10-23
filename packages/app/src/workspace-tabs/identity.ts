@@ -58,7 +58,14 @@ function normalizeSimpleWorkspaceTabTarget(value: WorkspaceTabTarget): Workspace
     case "changes_tree":
     case "files":
     case "pull_request":
+    case "pull_requests":
       return { kind: value.kind };
+    case "orchestration": {
+      // A blank scope is the host-wide tab, so an unusable id degrades to it rather than to null:
+      // a persisted layout whose scoped agent is gone still restores an orchestration tab.
+      const scopeAgentId = trimNonEmpty(value.scopeAgentId);
+      return scopeAgentId ? { kind: "orchestration", scopeAgentId } : { kind: "orchestration" };
+    }
     case "setup": {
       const workspaceId = trimNonEmpty(value.workspaceId);
       return workspaceId ? { kind: "setup", workspaceId } : null;
@@ -127,6 +134,13 @@ export function workspaceTabTargetsEqual(
   return secondaryWorkspaceTabTargetsEqual(left, right);
 }
 
+const NO_FIELD_SECONDARY_KINDS = new Set<WorkspaceTabTarget["kind"]>([
+  "files",
+  "changes_tree",
+  "pull_request",
+  "pull_requests",
+]);
+
 function secondaryWorkspaceTabTargetsEqual(
   left: WorkspaceTabTarget,
   right: WorkspaceTabTarget,
@@ -140,14 +154,11 @@ function secondaryWorkspaceTabTargetsEqual(
   if (left.kind === "working_diff" && right.kind === "working_diff") {
     return left.focusPath === right.focusPath && left.focusRequestId === right.focusRequestId;
   }
-  if (left.kind === "files" && right.kind === "files") {
-    return true;
+  if (NO_FIELD_SECONDARY_KINDS.has(left.kind)) {
+    return left.kind === right.kind;
   }
-  if (left.kind === "changes_tree" && right.kind === "changes_tree") {
-    return true;
-  }
-  if (left.kind === "pull_request" && right.kind === "pull_request") {
-    return true;
+  if (left.kind === "orchestration" && right.kind === "orchestration") {
+    return left.scopeAgentId === right.scopeAgentId;
   }
   if (left.kind === "setup" && right.kind === "setup") {
     return left.workspaceId === right.workspaceId;
@@ -219,7 +230,16 @@ export function buildDeterministicWorkspaceTabId(target: WorkspaceTabTarget): st
   if (target.kind === "working_diff") {
     return "working_diff";
   }
-  if (target.kind === "changes_tree" || target.kind === "files" || target.kind === "pull_request") {
+  if (target.kind === "orchestration") {
+    // The scoped and host-wide panels are separate tabs so a split can hold both at once.
+    return target.scopeAgentId ? `orchestration_${target.scopeAgentId}` : "orchestration";
+  }
+  if (
+    target.kind === "changes_tree" ||
+    target.kind === "files" ||
+    target.kind === "pull_request" ||
+    target.kind === "pull_requests"
+  ) {
     return target.kind;
   }
   if (target.kind === "plugin") {

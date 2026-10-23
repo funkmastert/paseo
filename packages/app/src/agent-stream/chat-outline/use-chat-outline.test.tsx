@@ -4,6 +4,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { createRef } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StreamViewportHandle } from "../strategy";
+import { generateDraftId } from "@/stores/draft-keys";
 import { useChatOutline } from "./use-chat-outline";
 
 interface RefreshMessage {
@@ -184,6 +185,7 @@ describe("useChatOutline", () => {
     const revealLoadedItem = vi.fn(() => true);
     const viewport: StreamViewportHandle = {
       scrollToBottom: vi.fn(),
+      scrollToStart: vi.fn(),
       prepareForViewportChange: vi.fn(),
       scrollToMessage,
     };
@@ -235,6 +237,7 @@ describe("useChatOutline", () => {
     const viewportRef = {
       current: {
         scrollToBottom: vi.fn(),
+        scrollToStart: vi.fn(),
         prepareForViewportChange: vi.fn(),
         scrollToMessage,
       },
@@ -290,6 +293,7 @@ describe("useChatOutline", () => {
     const scrollToMessage = vi.fn();
     const viewport: StreamViewportHandle = {
       scrollToBottom: vi.fn(),
+      scrollToStart: vi.fn(),
       prepareForViewportChange: vi.fn(),
       scrollToMessage,
     };
@@ -320,5 +324,31 @@ describe("useChatOutline", () => {
     await waitFor(() => expect(result.current.prompts).toHaveLength(1));
     await act(async () => result.current.jumpToPrompt(2));
     expect(scrollToMessage).toHaveBeenCalledWith("live-prompt");
+  });
+
+  it("asks for no prompt index while the stream belongs to a draft, only once the agent is real", async () => {
+    runtime.listAgentTimelinePrompts.mockResolvedValue({ epoch: "epoch-1", prompts: [] });
+    const viewportRef = createRef<StreamViewportHandle>();
+    const { rerender } = renderHook(
+      ({ agentId }) =>
+        useChatOutline({
+          agentId,
+          serverId: "server-1",
+          timelineEpoch: null,
+          tail: [],
+          head: [],
+          enabled: true,
+          viewportRef,
+          onJumpError: vi.fn(),
+        }),
+      { initialProps: { agentId: generateDraftId() } },
+    );
+    await act(async () => undefined);
+    expect(runtime.listAgentTimelinePrompts).not.toHaveBeenCalled();
+    expect(runtime.on).not.toHaveBeenCalled();
+
+    rerender({ agentId: "agent-1" });
+    await waitFor(() => expect(runtime.listAgentTimelinePrompts).toHaveBeenCalledWith("agent-1"));
+    expect(runtime.listAgentTimelinePrompts).toHaveBeenCalledTimes(1);
   });
 });

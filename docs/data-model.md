@@ -2,7 +2,7 @@
 
 ## Project identity
 
-Projects are allocated for the exact root selected by the caller, normalized lexically with `path.resolve` (never `realpath`). New project IDs are opaque `prj_<16 hex>` values. Existing remote-shaped or path-shaped IDs are retained as readable compatibility records and are never rekeyed. An active exact root is idempotent; archived-only matches do not resurrect an old project. Workspace `projectId` is stable membership: reconciliation may update git-derived kind and branch metadata, but never rehomes a workspace or changes a project's root, ID, or default name.
+Projects are allocated for the exact root selected by the caller, normalized lexically with `path.resolve` (never `realpath`). New project IDs are opaque `prj_<16 hex>` values. Existing remote-shaped or path-shaped IDs are retained as readable compatibility records and are never rekeyed. An active exact root is idempotent; archived-only matches do not resurrect an old project. One exception: a confirmed linked git worktree (its `mainRepoRoot` resolves to another root) with no exact-root project of its own joins the active project at that `mainRepoRoot`, falling back to one sharing its `projectKey`, instead of minting a new exact-root project — so opening a workspace at a worktree's own root attaches to its main repo. An independent full clone never does this; its own `mainRepoRoot` is null. Workspace `projectId` is stable membership: reconciliation may update git-derived kind and branch metadata, but never rehomes a workspace or changes a project's root, ID, or default name.
 
 `projectKey` is a persisted, opaque equivalence key used only to group the same logical project
 across hosts. It is separate from the host-local `projectId`; today's producer prefers a normalized
@@ -60,6 +60,10 @@ $PASEO_HOME/
 │   ├── workspace-labels.json            # Shared host-local label catalog
 │   ├── workspace-labels.transaction.json # Recoverable catalog/assignment compound commit
 │   └── icons/                           # Host-local custom project icon images
+├── jev/                                 # JEV ledger, audit, savings and decisions (docs/jev.md)
+├── usage-history/
+│   ├── accounts.json                    # Account usage-window readings, bounded (docs/usage-history.md)
+│   └── agents/{agentId}.json            # One agent's cost-weighted spend over time
 ├── runtime/
 │   └── managed-processes/
 │       └── {recordId}.json              # Helper processes owned by Paseo; reconciled on daemon bootstrap
@@ -103,6 +107,9 @@ Each agent is stored as a separate JSON file, grouped by project directory.
 | `attentionTimestamp` | `string?` (ISO 8601)                     | When attention was flagged                                                                                                                                                                                                                                                                                                                                                          |
 | `internal`           | `boolean?`                               | Whether this is a system-internal agent                                                                                                                                                                                                                                                                                                                                             |
 | `archivedAt`         | `string?` (ISO 8601)                     | Soft-delete timestamp                                                                                                                                                                                                                                                                                                                                                               |
+| `finishObligations`  | `FinishObligation[]?`                    | Finish reports this agent owes, one per owner, with their delivery ladder position. Written only by `AgentStorage.updateFinishObligations`; every other write carries it forward. See [finish-reports.md](./finish-reports.md)                                                                                                                                                      |
+| `runMarker`          | `{ startedAt, endedAt?, endedBy? }?`     | Whether the agent was mid-turn: opened at the edge into `running`, settled at the edge out. A daemon stop leaves it open. Written only through `AgentStorage.updateRunMarker`; see [restart-recovery.md](./restart-recovery.md).                                                                                                                                                    |
+| `queuedPrompts`      | `QueuedPrompt[]?`                        | Messages waiting for this agent's run to take them, in the order they were sent. Written only by `AgentStorage.appendQueuedPrompt` / `removeQueuedPrompt`; every other write carries it forward. The next daemon delivers what is left. See [providers.md](./providers.md)                                                                                                          |
 
 ### Nested: SerializableConfig
 

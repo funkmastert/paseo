@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "../support/fixtures";
 import { gotoAppShell } from "../support/helpers/app";
 import { gotoWorkspace, clickNewTerminal } from "../support/helpers/launcher";
-import { seedWorkspace, type SeededWorkspace } from "../support/helpers/seed-client";
+import { seedWorkspace, settleAutoPin, type SeededWorkspace } from "../support/helpers/seed-client";
 import { seedMockAgentWorkspace } from "../support/helpers/mock-agent";
 import { getServerId } from "../support/helpers/server-id";
 import { projectEquivalenceViewKey } from "../support/helpers/project-view-key";
@@ -94,6 +94,9 @@ test.describe("Model B sidebar shape", () => {
     });
 
     try {
+      // Settle the session-start auto pin so the row isn't racing a move into Pinned while this
+      // test materializes tabs on it.
+      await settleAutoPin(mock.client, mock.workspaceId);
       // Open the workspace and materialize both an agent tab and a terminal tab.
       await gotoWorkspace(page, mock.workspaceId);
       const agentTabs = await getVisibleWorkspaceAgentTabIds(page);
@@ -128,6 +131,11 @@ test.describe("Model B sidebar shape", () => {
     });
 
     try {
+      // Status grouping only ever contains settled (unpinned) rows — a session-start auto pin
+      // would hoist these into Pinned instead of a status bucket.
+      await settleAutoPin(idleProject.client, idleProject.workspaceId);
+      await settleAutoPin(activeMock.client, activeMock.workspaceId);
+
       await gotoAppShell(page);
       await waitForSidebarHydration(page);
       await expect(workspaceRow(page, idleProject.workspaceId)).toBeVisible({ timeout: 30_000 });

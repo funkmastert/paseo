@@ -18,6 +18,8 @@ interface FakeLegacyCommand {
   callId: string;
   command: string;
   output: string;
+  /** Defaults to 0 -- set non-zero to simulate a command the sandbox actually contained. */
+  exitCode?: number;
 }
 interface FakeSilentCommand {
   threadId: string;
@@ -98,6 +100,7 @@ export interface FakeCodexAppServer {
     turnId: string;
     reason: string;
   }): void;
+  startsFileChange(params: { threadId: string; itemId: string; changes: unknown }): void;
   requestUserInput(params: {
     itemId: string;
     threadId: string;
@@ -429,8 +432,8 @@ export function createFakeCodexAppServer(
         type: "exec_command_end",
         call_id: params.callId,
         command: params.command,
-        exit_code: 0,
-        success: true,
+        exit_code: params.exitCode ?? 0,
+        success: (params.exitCode ?? 0) === 0,
       });
     },
     appliesLegacyPatch(params) {
@@ -460,7 +463,7 @@ export function createFakeCodexAppServer(
         status: "completed",
         command: params.command,
         aggregatedOutput: params.output,
-        exitCode: 0,
+        exitCode: params.exitCode ?? 0,
       });
     },
     completesSilentCommand(params) {
@@ -530,6 +533,17 @@ export function createFakeCodexAppServer(
     },
     async waitForCommandApprovalDecision(itemId) {
       return await this.waitForApprovalDecision(itemId);
+    },
+    startsFileChange(params) {
+      writeNotification("item/started", {
+        threadId: params.threadId,
+        item: {
+          type: "fileChange",
+          id: params.itemId,
+          changes: params.changes,
+          status: "inProgress",
+        },
+      });
     },
     requestFileChangeApproval(params) {
       const requestId = nextServerRequestId;

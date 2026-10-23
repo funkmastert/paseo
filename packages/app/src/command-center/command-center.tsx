@@ -19,6 +19,7 @@ import {
   BottomSheetFlatList,
   type BottomSheetFlatListMethods,
 } from "@gorhom/bottom-sheet";
+import { AgentIdChip } from "@/components/agent-id-chip";
 import { AgentStatusDot } from "@/components/agent-status-dot";
 import { MaterialFileIcon } from "@/components/material-file-icon";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
@@ -55,6 +56,7 @@ import { focusWithRetries } from "@/utils/web-focus";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { formatTimeAgo } from "@/utils/time";
 import { shortenPath } from "@/utils/shorten-path";
+import { isHiddenAgentWorkspace } from "@/utils/workspace-visibility";
 import { useCommandCenterContributions } from "./provider";
 import { filterAndRankWorkspaces } from "./workspace-search";
 import {
@@ -146,6 +148,9 @@ function useBuiltInRows(open: boolean): {
       for (const host of project.hosts) {
         for (const workspace of host.workspaces) {
           if (workspace.archivingAt) continue;
+          // Agent-made workspaces never show here either, same rule as the sidebar
+          // (docs/done-janitor.md#manual-pin-vs-auto-pin) — unless Tyler pinned one himself.
+          if (isHiddenAgentWorkspace(workspace)) continue;
           allWorkspaces.push({
             kind: "workspace",
             id: `workspace:${host.serverId}:${workspace.id}`,
@@ -469,9 +474,15 @@ function ResultContent({ result }: { result: CommandCenterResult }) {
             />
           </View>
           <View style={styles.textContent}>
-            <Text style={styles.title} numberOfLines={1}>
-              {result.title}
-            </Text>
+            <View style={styles.agentTitleRow}>
+              <Text style={styles.title} numberOfLines={1}>
+                {result.title}
+              </Text>
+              <AgentIdChip
+                agentId={agent.id}
+                testID={`command-center-agent-id-${agent.serverId}:${agent.id}`}
+              />
+            </View>
             <Text style={styles.subtitle} numberOfLines={1} testID="command-center-agent-subtitle">
               {result.subtitle}
             </Text>
@@ -940,11 +951,13 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[3],
   },
   textContent: { flex: 1, minWidth: 0 },
+  agentTitleRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing[1], minWidth: 0 },
   title: {
     color: theme.colors.foreground,
     fontSize: theme.fontSize.base,
     lineHeight: 18,
     flexShrink: 1,
+    minWidth: 0,
   },
   fileLine: { flex: 1, minWidth: 0, fontSize: theme.fontSize.base, lineHeight: 20 },
   fileName: { color: theme.colors.foreground },

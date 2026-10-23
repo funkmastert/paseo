@@ -1109,6 +1109,15 @@ function isAuthFailureText(text: string): boolean {
   );
 }
 
+// HTTP status only, not the text "not found" -- that phrase shows up in unrelated
+// errors (a missing mirror config, a bad remote) that must still propagate rather
+// than be swallowed into a false not-found.
+function isGiteaNotFoundError(error: unknown): boolean {
+  const stderr = error instanceof ForgeCommandError ? error.stderr : "";
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b404\b/.test(`${message} ${stderr}`);
+}
+
 function classifyGiteaTimelineErrorKind(stderr: string): PullRequestTimelineErrorKind {
   const normalized = stderr.toLowerCase();
   if (normalized.includes("404") || normalized.includes("not found")) {
@@ -1475,6 +1484,33 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     };
   }
 
+  // Every observed worktree of a repository polls the same repo-wide `tea pr list` on its own
+  // timer, so a machine with dozens of worktrees spawned dozens of identical processes per cycle
+  // (and timed them out together under load). Concurrent identical queries share one process.
+  // Nothing is cached once it settles, so a later poll always sees fresh data.
+  const inFlightRepoQueries = new Map<string, Promise<unknown>>();
+
+  async function shareInFlightRepoQuery<T>(
+    cwd: string,
+    args: string[],
+    load: () => Promise<T>,
+  ): Promise<T> {
+    const remoteUrl = await resolveRemoteUrl(cwd);
+    if (!remoteUrl) {
+      return load();
+    }
+    const key = JSON.stringify([remoteUrl, args]);
+    const existing = inFlightRepoQueries.get(key);
+    if (existing) {
+      return existing as Promise<T>;
+    }
+    const pending = load().finally(() => {
+      inFlightRepoQueries.delete(key);
+    });
+    inFlightRepoQueries.set(key, pending);
+    return pending;
+  }
+
   async function listPullRequestItems(input: {
     cwd: string;
     state: "open" | "closed" | "all";
@@ -1489,7 +1525,9 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     if (typeof input.page === "number") {
       args.push("--page", String(input.page));
     }
-    const items = await runJsonArray(args, { cwd: input.cwd }, GiteaPrListItemSchema);
+    const items = await shareInFlightRepoQuery(input.cwd, args, () =>
+      runJsonArray(args, { cwd: input.cwd }, GiteaPrListItemSchema),
+    );
     const query = input.query?.trim().toLowerCase();
     if (!query) {
       return items;
@@ -1677,12 +1715,35 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       if (!pr.headSha) {
         return status;
       }
-      const checksInput = {
+      return loadPullRequestChecksForSha(
         cwd,
-        repoOwner: status.repoOwner,
-        repoName: status.repoName,
-        sha: pr.headSha,
-      };
+        status.repoOwner,
+        status.repoName,
+        pr.headSha,
+        status,
+      );
+    } catch {
+      return status;
+    }
+  }
+
+  /**
+   * Loads checks for an already-known head sha, skipping the `tea pr` lookup
+   * `loadCurrentPullRequestChecks` otherwise needs to discover it. The identity-based
+   * lookup already has the sha from its own REST fetch, and `tea pr <n>` runs relative
+   * to `cwd` -- which, for an identity lookup, is the viewing workspace's cwd and may
+   * not even be a checkout of this PR's repo, so re-deriving the sha from it there
+   * risks reading a different repo's PR #<n>.
+   */
+  async function loadPullRequestChecksForSha(
+    cwd: string,
+    repoOwner: string,
+    repoName: string,
+    sha: string,
+    status: CurrentPullRequestStatus,
+  ): Promise<CurrentPullRequestStatus> {
+    try {
+      const checksInput = { cwd, repoOwner, repoName, sha };
       const [combined, actionTasks] = await Promise.all([
         loadCombinedCommitStatusBestEffort(checksInput),
         loadActionTasksBestEffort(checksInput),
@@ -1978,6 +2039,33 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
         headRef: input.headRef,
         headSha: input.headSha,
       });
+    },
+
+    async getPullRequestStatusByIdentity(input): Promise<CurrentPullRequestStatus | null> {
+      const repoPath = `repos/${encodeURIComponent(input.repoOwner)}/${encodeURIComponent(input.repoName)}`;
+      let apiItem: GiteaCurrentPullRequestApi;
+      try {
+        apiItem = await runJson(
+          ["api", `${repoPath}/pulls/${input.number}`],
+          { cwd: input.cwd },
+          GiteaCurrentPullRequestApiSchema,
+        );
+      } catch (error) {
+        if (isGiteaNotFoundError(error)) return null;
+        throw error;
+      }
+      const listItem = currentPullRequestApiToListItem(apiItem);
+      const status = toCurrentPullRequestStatus(listItem);
+      if (!status.repoOwner || !status.repoName) {
+        return status;
+      }
+      return loadPullRequestChecksForSha(
+        input.cwd,
+        status.repoOwner,
+        status.repoName,
+        apiItem.head.sha,
+        status,
+      );
     },
 
     async getPullRequest(input: GetPullRequestOptions): Promise<PullRequestSummary> {

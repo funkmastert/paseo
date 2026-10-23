@@ -13,6 +13,8 @@ export interface WorkspaceSummary {
   archivingAt?: string;
   /** Pull/merge request number backing this workspace, so a query can find it. */
   changeRequestNumber: number | null;
+  createdBy?: WorkspaceDescriptor["createdBy"];
+  pinnedAt?: WorkspaceDescriptor["pinnedAt"];
 }
 
 export interface ProjectHostEntry {
@@ -161,6 +163,8 @@ function toWorkspaceSummary(workspace: WorkspaceDescriptor): WorkspaceSummary {
     currentBranch: currentBranch && currentBranch !== "HEAD" ? currentBranch : null,
     ...(workspace.archivingAt ? { archivingAt: workspace.archivingAt } : {}),
     changeRequestNumber: toChangeRequestNumber(workspace),
+    createdBy: workspace.createdBy,
+    pinnedAt: workspace.pinnedAt,
   };
 }
 

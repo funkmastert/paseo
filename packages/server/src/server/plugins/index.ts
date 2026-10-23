@@ -39,6 +39,8 @@ interface PluginRuntimePort {
   stopPluginById(pluginId: string): Promise<boolean>;
   stopAll(): Promise<void>;
   subscribe(listener: (pluginId: string, error?: string) => void): () => void;
+  subscribeSessionDrop?(listener: (pluginId: string) => void): () => void;
+  isSessionConnected?(pluginId: string): boolean;
   bindPaseoSessionHost(sessionHost: Parameters<PluginRuntime["bindPaseoSessionHost"]>[0]): void;
 }
 
@@ -91,6 +93,9 @@ export class PluginService {
       this.removeProviderRegistrations(pluginId);
       if (error) this.errors.set(pluginId, error);
       this.notify(pluginId);
+    });
+    this.runtime.subscribeSessionDrop?.((pluginId) => {
+      void this.recoverFromSessionDrop(pluginId);
     });
   }
 
@@ -174,6 +179,19 @@ export class PluginService {
         return item;
       })
       .sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  // Every plugin that should be running, and whether it can currently reach its daemon
+  // session. A failed or stopped plugin is offline too: its hooks are skipped either way.
+  listSessionConnectivity(): Array<{ pluginId: string; connected: boolean }> {
+    const config = this.configStore.get();
+    if (config.pluginsEnabled !== true || this.globalStartsBlocked) return [];
+    return Object.entries(config.plugins ?? {})
+      .filter(([, source]) => source.enabled !== false)
+      .map(([pluginId]) => ({
+        pluginId,
+        connected: this.runtime.isSessionConnected?.(pluginId) ?? true,
+      }));
   }
 
   getLogs(pluginId: string): PluginLogEntry[] {
@@ -309,6 +327,36 @@ export class PluginService {
       await this.startExplicit(pluginId, source.path);
       this.notify(pluginId);
       return this.requireItem(pluginId);
+    });
+  }
+
+  // The runtime reports this when a plugin's own daemon session dies while its
+  // process stays alive (e.g. an expired application lease closed the session's
+  // socket during a relay stall). That session never resumes, so recover the same
+  // way a manual `reloadPlugin` would: stop the zombie process, start fresh, and
+  // republish provider registrations. Runs through the same lifecycle queue as
+  // user-triggered operations so it can't race a concurrent reload/disable/remove.
+  private async recoverFromSessionDrop(pluginId: string): Promise<void> {
+    await this.enqueue(async () => {
+      const source = this.configStore.get().plugins?.[pluginId];
+      if (!source || source.enabled === false || this.configStore.get().pluginsEnabled !== true) {
+        return;
+      }
+      this.logger.warn(
+        { pluginId },
+        "Restarting plugin after its daemon session dropped unexpectedly",
+      );
+      await this.stopPlugin(pluginId);
+      this.errors.delete(pluginId);
+      await this.startExplicit(pluginId, source.path).catch((error) => {
+        this.logger.error(
+          { err: error, pluginId },
+          "Plugin failed to restart after daemon session loss",
+        );
+      });
+      this.notify(pluginId);
+    }).catch((error) => {
+      this.logger.error({ err: error, pluginId }, "Failed to recover plugin from session drop");
     });
   }
 

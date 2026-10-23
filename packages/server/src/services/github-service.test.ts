@@ -1550,6 +1550,85 @@ describe("ForgeService", () => {
     service.dispose?.();
   });
 
+  it("getPullRequestStatusByIdentity fetches a PR by explicit owner/repo/number", async () => {
+    const runner = createRunner([
+      currentPullRequestJson({
+        number: 7,
+        url: "https://github.com/acme/widgets/pull/7",
+        state: "OPEN",
+      }),
+      currentPullRequestGithubFactsJson(),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 0,
+    });
+
+    const status = await service.getPullRequestStatusByIdentity?.({
+      cwd: "/repo",
+      repoOwner: "acme",
+      repoName: "widgets",
+      number: 7,
+    });
+
+    expect(status).toMatchObject({
+      number: 7,
+      url: "https://github.com/acme/widgets/pull/7",
+      state: "open",
+    });
+    expect(runner.calls[0]?.args).toEqual([
+      "pr",
+      "view",
+      "7",
+      "--repo",
+      "acme/widgets",
+      "--json",
+      CURRENT_PR_STATUS_FIELDS,
+    ]);
+  });
+
+  it("getPullRequestStatusByIdentity throws ForgePollPausedError while the host's poll is paused", async () => {
+    let now = 0;
+    const resetAt = new Date(EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS).toISOString();
+    const runner = createScriptedRunner([
+      batchPollStatusWithRateLimitJson({
+        aliases: { t0: batchPollRepositoryJson([batchPollPrNodeJson()]) },
+        limit: 5_000,
+        remaining: 2_000,
+        resetAt,
+      }),
+    ]);
+    const service = createGitHubService({
+      ttlMs: 0,
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      resolveRepoHost: async () => "github.com",
+      resolveRepoSlug: async () => "acme/widgets",
+      now: () => now,
+    });
+
+    const subscription = service.retainCurrentPullRequestStatusPoll?.({
+      cwd: "/ws-a",
+      headRef: "feat-a",
+      onError: () => {},
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await flushMicrotasks();
+    subscription?.unsubscribe();
+
+    expect(() =>
+      service.getPullRequestStatusByIdentity?.({
+        cwd: "/ws-a",
+        repoOwner: "acme",
+        repoName: "widgets",
+        number: 7,
+      }),
+    ).toThrow(expect.objectContaining({ name: "ForgePollPausedError" }));
+
+    service.dispose?.();
+  });
+
   it("pauses a host until reset when a batch reaches the GraphQL reserve", async () => {
     let now = 0;
     const resetAt = new Date(EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS).toISOString();

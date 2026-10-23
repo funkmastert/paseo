@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ACCOUNT_FAILOVER_MIGRATED_TO_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { Agent } from "@/stores/session-store";
 import {
   buildWorkspaceTabSnapshot,
@@ -15,6 +16,7 @@ function makeAgent(input: {
   archivedAt?: Date | null;
   createdAt?: Date;
   lastActivityAt?: Date;
+  labels?: Record<string, string>;
 }): Agent {
   const createdAt = input.createdAt ?? new Date("2026-03-04T00:00:00.000Z");
   const lastActivityAt = input.lastActivityAt ?? createdAt;
@@ -50,7 +52,7 @@ function makeAgent(input: {
     model: null,
     thinkingOptionId: null,
     parentAgentId: input.parentAgentId ?? null,
-    labels: {},
+    labels: input.labels ?? {},
     requiresAttention: false,
     attentionReason: null,
     attentionTimestamp: null,
@@ -61,6 +63,35 @@ function makeAgent(input: {
 const WORKSPACE_ID = "ws-1";
 
 describe("workspace agent visibility", () => {
+  it("auto-opens the live end of a moved conversation, not the handle failover retired", () => {
+    const retired = makeAgent({
+      id: "retired",
+      cwd: "/repo",
+      workspaceId: WORKSPACE_ID,
+      labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "successor" },
+    });
+    const successor = makeAgent({ id: "successor", cwd: "/repo", workspaceId: WORKSPACE_ID });
+    const stranded = makeAgent({
+      id: "stranded",
+      cwd: "/repo",
+      workspaceId: WORKSPACE_ID,
+      labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "not-on-this-host" },
+    });
+
+    const result = deriveWorkspaceAgentVisibility({
+      sessionAgents: new Map<string, Agent>([
+        [retired.id, retired],
+        [successor.id, successor],
+        [stranded.id, stranded],
+      ]),
+      workspaceId: WORKSPACE_ID,
+    });
+
+    // The handle stays active, so a tab on it lives until it is retargeted to the successor.
+    expect(result.activeAgentIds).toEqual(new Set(["retired", "successor", "stranded"]));
+    expect(result.autoOpenAgentIds).toEqual(new Set(["successor", "stranded"]));
+  });
+
   it("keeps subagents active and known while excluding them from auto-open", () => {
     const parent = makeAgent({
       id: "parent-agent",

@@ -1042,3 +1042,84 @@ test("auto-completes an open autonomous turn when a foreground prompt starts", a
   subscribedEvents.close();
   await session.close();
 });
+
+// A thinking change needs a new Claude process, and every background Workflow and Agent task
+// lives inside the old one. Restarting on the next turn killed them; the change waits instead.
+test("a thinking change waits for running workflows instead of restarting Claude under them", async () => {
+  const sessionId = "thinking-restart-session";
+  const queries: ScriptedQuery[] = [];
+  const launches: Array<Record<string, unknown>> = [];
+  queryFactory.mockImplementation(
+    ({ prompt, options }: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) => {
+      launches.push(options);
+      const query = createScriptedQuery({
+        prompt,
+        sessionId,
+        async handlePrompt({ promptRecord, query: scripted }) {
+          if (promptRecord.text === "launch the workflow") {
+            scripted.emit({
+              type: "system",
+              subtype: "task_started",
+              task_id: "wf-1",
+              tool_use_id: "toolu_workflow",
+              task_type: "local_workflow",
+              description: "Review the PR",
+            });
+            scripted.emit({
+              type: "system",
+              subtype: "task_updated",
+              task_id: "wf-1",
+              patch: { status: "running", is_backgrounded: true },
+            });
+          }
+          scripted.emit(buildSuccessResult(sessionId));
+        },
+      });
+      queries.push(query);
+      return query;
+    },
+  );
+  const session = await new ClaudeAgentClient({
+    logger: createTestLogger(),
+    queryFactory,
+    resolveBinary: async () => "/test/claude/bin",
+  }).createSession({ provider: "claude", cwd: process.cwd() });
+  const events: AgentStreamEvent[] = [];
+  const unsubscribe = session.subscribe((event) => events.push(event));
+
+  try {
+    await collectUntilTerminal(streamSession(session, "launch the workflow"));
+    await session.setThinkingOption?.("high");
+    await collectUntilTerminal(streamSession(session, "while it runs"));
+
+    expect(queryFactory).toHaveBeenCalledTimes(1);
+    expect(queries[0]?.close).not.toHaveBeenCalled();
+    expect(queries[0]?.prompts.map((prompt) => prompt.text)).toEqual([
+      "launch the workflow",
+      "while it runs",
+    ]);
+
+    queries[0]?.emit({
+      type: "system",
+      subtype: "task_updated",
+      task_id: "wf-1",
+      patch: { status: "completed" },
+    });
+    await waitFor(() =>
+      events.some(
+        (event) =>
+          event.type === "provider_subagent" &&
+          event.event.type === "upsert" &&
+          event.event.status === "completed",
+      ),
+    );
+
+    await collectUntilTerminal(streamSession(session, "after it finished"));
+
+    expect(queryFactory).toHaveBeenCalledTimes(2);
+    expect(launches[1]).toMatchObject({ effort: "high" });
+  } finally {
+    unsubscribe();
+    await session.close();
+  }
+});

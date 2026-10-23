@@ -7,6 +7,7 @@ import { z } from "zod";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
+import type { DeviceLaunchGate } from "../../device-lease-manager.js";
 import type { PaseoToolCatalog } from "../../tools/types.js";
 import { OpenCodeBridge, loadOpenCodeBridgePluginArtifact } from "./bridge.js";
 
@@ -220,6 +221,146 @@ describe("OpenCodeBridge", () => {
       expect(config.plugin).toHaveLength(2);
       expect(config.plugin[1]?.[0]).toMatch(/paseo-[a-f0-9]{64}\.mjs$/);
     } finally {
+      await bridge.close();
+    }
+  });
+});
+
+/**
+ * OpenCode is the only non-Claude provider the device cap can refuse outright
+ * (docs/device-leases.md), because this plugin runs inside the OpenCode server and a throw from
+ * `tool.execute.before` aborts the tool call before the command runs. These drive the real
+ * materialized plugin against the real bridge; no simulator is involved anywhere.
+ */
+describe("OpenCodeBridge device launch gate", () => {
+  async function createGatedBridge(gateLaunch: DeviceLaunchGate["gateLaunch"]) {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-opencode-device-gate-"));
+    temporaryDirectories.push(paseoHome);
+    const bridge = new OpenCodeBridge({
+      paseoHome,
+      logger: createTestLogger(),
+      deviceLaunchGate: { gateLaunch },
+    });
+    await bridge.start();
+    const release = bridge.bindSession({
+      sessionId: "ses_gated",
+      env: {},
+      agentId: "agent-opencode",
+    });
+    const plugin = readPluginOptions(bridge.decorateServerEnv({}));
+    const pluginModule = await import(plugin.pluginUrl);
+    const hooks = await pluginModule.default(
+      { client: { session: { get: async () => ({ data: {} }) } } },
+      { baseUrl: plugin.baseUrl, token: plugin.token },
+    );
+    return { bridge, hooks, release, plugin };
+  }
+
+  test("a denied bash command is aborted before it runs, with the cap's reason", async () => {
+    const gateLaunch = vi.fn(async () => ({
+      decision: "deny" as const,
+      message: "Bozeo device cap: no ios slot. Call device_checkout and wait.",
+    }));
+    const { bridge, hooks, release } = await createGatedBridge(gateLaunch);
+
+    try {
+      await expect(
+        hooks["tool.execute.before"](
+          { tool: "bash", sessionID: "ses_gated", callID: "call-1" },
+          { args: { command: "xcrun simctl boot 'iPhone 17 Pro'" } },
+        ),
+      ).rejects.toThrow("Call device_checkout and wait");
+      // The cap is asked about the agent, not the OpenCode session: it counts per agent.
+      expect(gateLaunch).toHaveBeenCalledWith({
+        agentId: "agent-opencode",
+        command: "xcrun simctl boot 'iPhone 17 Pro'",
+      });
+    } finally {
+      release();
+      await bridge.close();
+    }
+  });
+
+  test("an allowed command runs, and a non-bash tool is never asked about", async () => {
+    const gateLaunch = vi.fn(async () => ({ decision: "allow" as const }));
+    const { bridge, hooks, release } = await createGatedBridge(gateLaunch);
+
+    try {
+      await expect(
+        hooks["tool.execute.before"](
+          { tool: "bash", sessionID: "ses_gated", callID: "call-1" },
+          { args: { command: "npm run typecheck" } },
+        ),
+      ).resolves.toBeUndefined();
+      expect(gateLaunch).toHaveBeenCalledTimes(1);
+
+      // Reading a file cannot boot a device; the cap never sees it.
+      await hooks["tool.execute.before"](
+        { tool: "read", sessionID: "ses_gated", callID: "call-2" },
+        { args: { filePath: "/workspace/App.tsx" } },
+      );
+      await hooks["tool.execute.before"](
+        { tool: "bash", sessionID: "ses_gated", callID: "call-3" },
+        { args: {} },
+      );
+      expect(gateLaunch).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      await bridge.close();
+    }
+  });
+
+  test("a cap that throws allows the command through", async () => {
+    // A device cap that breaks tool calls is worse than one that misses a device, so every
+    // uncertainty fails open — the process scan catches whatever booted a sweep later.
+    const gateLaunch = vi.fn(async () => {
+      throw new Error("ps timed out");
+    });
+    const { bridge, hooks, release } = await createGatedBridge(gateLaunch);
+
+    try {
+      await expect(
+        hooks["tool.execute.before"](
+          { tool: "bash", sessionID: "ses_gated", callID: "call-1" },
+          { args: { command: "emulator -avd Pixel_7" } },
+        ),
+      ).resolves.toBeUndefined();
+    } finally {
+      release();
+      await bridge.close();
+    }
+  });
+
+  test("an unbound session and a daemon with no cap both allow", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-opencode-device-gate-off-"));
+    temporaryDirectories.push(paseoHome);
+    const bridge = new OpenCodeBridge({ paseoHome, logger: createTestLogger() });
+    await bridge.start();
+    const release = bridge.bindSession({ sessionId: "ses_ungated", env: {} });
+
+    try {
+      const plugin = readPluginOptions(bridge.decorateServerEnv({}));
+      const headers = {
+        Authorization: `Bearer ${plugin.token}`,
+        "Content-Type": "application/json",
+      };
+      const body = JSON.stringify({ command: "xcrun simctl boot 'iPhone 17 Pro'" });
+
+      // No gate wired at all.
+      const noGate = await fetch(
+        `${plugin.baseUrl}/_internal/opencode/sessions/ses_ungated/device-gate`,
+        { method: "POST", headers, body },
+      );
+      expect(await noGate.json()).toEqual({ decision: "allow" });
+
+      // A session the bridge has never heard of: nobody to charge, so nothing to refuse.
+      const unknown = await fetch(
+        `${plugin.baseUrl}/_internal/opencode/sessions/ses_missing/device-gate`,
+        { method: "POST", headers, body },
+      );
+      expect(await unknown.json()).toEqual({ decision: "allow" });
+    } finally {
+      release();
       await bridge.close();
     }
   });

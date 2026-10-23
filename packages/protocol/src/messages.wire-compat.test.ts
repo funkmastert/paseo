@@ -3,9 +3,11 @@ import { z } from "zod";
 import {
   AgentSnapshotPayloadSchema,
   AgentTimelineItemPayloadSchema,
+  MutableDaemonConfigSchema,
   ServerInfoStatusPayloadSchema,
   SessionOutboundMessageSchema,
   WSHelloMessageSchema,
+  WorkspaceDescriptorPayloadSchema,
   WorkspaceSetupSnapshotSchema,
   WorkspaceSetupProgressMessageSchema,
   AgentTimelineEntryPayloadSchema,
@@ -289,6 +291,211 @@ describe("wire schema compatibility", () => {
     expect(parsed.capabilities.supportsRewindConversation).toBe(false);
     expect(parsed.capabilities.supportsRewindFiles).toBe(false);
     expect(parsed.capabilities.supportsRewindBoth).toBe(false);
+  });
+
+  test("old clients strip an unknown tokenBurnAlert field from new daemon snapshots", () => {
+    // Models an old client's schema, generated before tokenBurnAlert existed. The proof this
+    // additive-optional field (rather than extending the closed attentionReason enum) is
+    // wire-safe: the old schema has no notion of tokenBurnAlert, so it silently strips the
+    // extra key instead of failing to parse — see agent-types.ts's TokenBurnAlert doc comment.
+    const LegacySnapshotSchema = AgentSnapshotPayloadSchema.omit({ tokenBurnAlert: true });
+    const payloadFromNewDaemon = {
+      id: "agent-1",
+      provider: "claude",
+      cwd: "/tmp/project",
+      model: null,
+      thinkingOptionId: null,
+      effectiveThinkingOptionId: null,
+      createdAt: "2026-09-12T00:00:00.000Z",
+      updatedAt: "2026-09-12T00:00:00.000Z",
+      lastUserMessageAt: null,
+      status: "running",
+      capabilities: {
+        supportsStreaming: true,
+        supportsSessionPersistence: true,
+        supportsDynamicModes: true,
+        supportsMcpServers: true,
+        supportsReasoningStream: true,
+        supportsToolInvocations: true,
+      },
+      currentModeId: null,
+      availableModes: [],
+      pendingPermissions: [],
+      persistence: null,
+      title: null,
+      labels: {},
+      attentionReason: null,
+      tokenBurnAlert: {
+        trigger: "rate",
+        ratePerMinute: 50_000,
+        firstBreachedAt: "2026-09-12T00:00:00.000Z",
+      },
+    };
+
+    const legacyParsed = LegacySnapshotSchema.parse(payloadFromNewDaemon);
+    expect(legacyParsed).not.toHaveProperty("tokenBurnAlert");
+
+    const newParsed = AgentSnapshotPayloadSchema.parse(payloadFromNewDaemon);
+    expect(newParsed.tokenBurnAlert).toEqual(payloadFromNewDaemon.tokenBurnAlert);
+  });
+
+  test("old clients strip an unknown resourceAlert field from new daemon snapshots", () => {
+    // Same wire-safety proof as tokenBurnAlert above, for the resource monitor's alert.
+    const LegacySnapshotSchema = AgentSnapshotPayloadSchema.omit({ resourceAlert: true });
+    const payloadFromNewDaemon = {
+      id: "agent-1",
+      provider: "claude",
+      cwd: "/tmp/project",
+      model: null,
+      thinkingOptionId: null,
+      effectiveThinkingOptionId: null,
+      createdAt: "2026-09-12T00:00:00.000Z",
+      updatedAt: "2026-09-12T00:00:00.000Z",
+      lastUserMessageAt: null,
+      status: "running",
+      capabilities: {
+        supportsStreaming: true,
+        supportsSessionPersistence: true,
+        supportsDynamicModes: true,
+        supportsMcpServers: true,
+        supportsReasoningStream: true,
+        supportsToolInvocations: true,
+      },
+      currentModeId: null,
+      availableModes: [],
+      pendingPermissions: [],
+      persistence: null,
+      title: null,
+      labels: {},
+      attentionReason: null,
+      resourceAlert: {
+        trigger: "memory",
+        memoryBytes: 7_730_941_133,
+        cpuPercent: 410,
+        firstBreachedAt: "2026-09-12T00:00:00.000Z",
+      },
+    };
+
+    const legacyParsed = LegacySnapshotSchema.parse(payloadFromNewDaemon);
+    expect(legacyParsed).not.toHaveProperty("resourceAlert");
+
+    const newParsed = AgentSnapshotPayloadSchema.parse(payloadFromNewDaemon);
+    expect(newParsed.resourceAlert).toEqual(payloadFromNewDaemon.resourceAlert);
+  });
+
+  test("old clients strip an unknown diskUsage field from new daemon workspace descriptors", () => {
+    // Models an old client's schema, generated before diskUsage existed. WorkspaceDescriptorPayloadSchema
+    // ends in a `.transform()` (`workspaceDirectory` defaulting), so it has no `.omit()` — this
+    // reconstructs a pre-diskUsage replica by hand, same shape as the minimal fixtures elsewhere in
+    // this file, to prove the additive-optional, nullable field is wire-safe: an old schema with no
+    // notion of diskUsage silently strips the extra key instead of failing to parse. See
+    // docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
+    const LegacyWorkspaceDescriptorSchema = z.object({
+      id: z.string(),
+      projectId: z.string(),
+      projectDisplayName: z.string(),
+      projectRootPath: z.string(),
+      workspaceDirectory: z.string().optional(),
+      projectKind: z.enum(["git", "non_git", "directory"]),
+      workspaceKind: z.enum(["directory", "local_checkout", "checkout", "worktree"]),
+      name: z.string(),
+      status: z.string(),
+      activityAt: z.string().nullable(),
+      scripts: z.array(z.unknown()),
+    });
+    const payloadFromNewDaemon = {
+      id: "ws-disk-usage",
+      projectId: "proj",
+      projectDisplayName: "repo",
+      projectRootPath: "/repo",
+      workspaceDirectory: "/repo",
+      projectKind: "git",
+      workspaceKind: "worktree",
+      name: "feature",
+      status: "done",
+      activityAt: null,
+      scripts: [],
+      diskUsage: {
+        bytes: 2_576_980_378,
+        sampledAt: "2026-09-12T00:00:00.000Z",
+      },
+    };
+
+    const legacyParsed = LegacyWorkspaceDescriptorSchema.parse(payloadFromNewDaemon);
+    expect(legacyParsed).not.toHaveProperty("diskUsage");
+
+    const newParsed = WorkspaceDescriptorPayloadSchema.parse(payloadFromNewDaemon);
+    expect(newParsed.diskUsage).toEqual(payloadFromNewDaemon.diskUsage);
+  });
+
+  test("old clients strip an unknown createdBy field from new daemon workspace descriptors", () => {
+    // Same shape as the diskUsage case above: createdBy is additive-optional (R1,
+    // docs/done-janitor.md), so a pre-createdBy client schema silently drops the extra key
+    // instead of failing to parse, and the new schema reads it straight through.
+    const LegacyWorkspaceDescriptorSchema = z.object({
+      id: z.string(),
+      projectId: z.string(),
+      projectDisplayName: z.string(),
+      projectRootPath: z.string(),
+      workspaceDirectory: z.string().optional(),
+      projectKind: z.enum(["git", "non_git", "directory"]),
+      workspaceKind: z.enum(["directory", "local_checkout", "checkout", "worktree"]),
+      name: z.string(),
+      status: z.string(),
+      activityAt: z.string().nullable(),
+      scripts: z.array(z.unknown()),
+    });
+    const payloadFromNewDaemon = {
+      id: "ws-created-by",
+      projectId: "proj",
+      projectDisplayName: "repo",
+      projectRootPath: "/repo",
+      workspaceDirectory: "/repo",
+      projectKind: "git",
+      workspaceKind: "worktree",
+      name: "feature",
+      status: "done",
+      activityAt: null,
+      scripts: [],
+      createdBy: "agent",
+    };
+
+    const legacyParsed = LegacyWorkspaceDescriptorSchema.parse(payloadFromNewDaemon);
+    expect(legacyParsed).not.toHaveProperty("createdBy");
+
+    const newParsed = WorkspaceDescriptorPayloadSchema.parse(payloadFromNewDaemon);
+    expect(newParsed.createdBy).toEqual(payloadFromNewDaemon.createdBy);
+
+    // A descriptor an old daemon sent, with no createdBy at all, still parses — the app treats
+    // absence as "person" (see resolveSidebarWorkspaceCreator), not a parse failure.
+    const { createdBy: _omit, ...payloadFromOldDaemon } = payloadFromNewDaemon;
+    expect(WorkspaceDescriptorPayloadSchema.parse(payloadFromOldDaemon).createdBy).toBeUndefined();
+  });
+
+  test("an old daemon config without keptCooldownHours still parses, and a new one round-trips it", () => {
+    const configWithoutCooldown = {
+      mcp: { injectIntoAgents: false },
+      doneJanitor: {
+        enabled: true,
+        workspaceSweep: { enabled: true, idleHours: 72 },
+      },
+    };
+    expect(
+      MutableDaemonConfigSchema.parse(configWithoutCooldown).doneJanitor?.workspaceSweep
+        ?.keptCooldownHours,
+    ).toBeUndefined();
+
+    const configWithCooldown = {
+      mcp: { injectIntoAgents: false },
+      doneJanitor: {
+        enabled: true,
+        workspaceSweep: { enabled: true, idleHours: 72, keptCooldownHours: 6 },
+      },
+    };
+    expect(
+      MutableDaemonConfigSchema.parse(configWithCooldown).doneJanitor?.workspaceSweep
+        ?.keptCooldownHours,
+    ).toBe(6);
   });
 
   test("notification timeline items parse their level and message", () => {

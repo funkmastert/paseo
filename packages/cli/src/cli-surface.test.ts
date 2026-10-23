@@ -27,6 +27,16 @@ describe("canonical CLI surface", () => {
     expect(nestedReload?.helpInformation()).toContain("--json");
   });
 
+  it("offers restart recovery's plan, apply and dismiss on recover", () => {
+    const recover = createCli().commands.find((command) => command.name() === "recover");
+    const help = recover?.helpInformation();
+    expect(help).toContain("--plan");
+    expect(help).toContain("--apply");
+    expect(help).toContain("--dismiss");
+    expect(help).toContain("--host <host>");
+    expect(help).toContain("--json");
+  });
+
   it("names explicit workspace creation without exposing older syntax", () => {
     const run = createCli().commands.find((command) => command.name() === "run");
     const help = run?.helpInformation();

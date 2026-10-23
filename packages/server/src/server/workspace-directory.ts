@@ -5,6 +5,7 @@ import type {
   SessionInboundMessage,
   SessionOutboundMessage,
   WorkspaceDescriptorPayload,
+  WorkspaceDiskUsage,
 } from "./messages.js";
 import {
   deriveAgentStateBucket,
@@ -87,6 +88,20 @@ export interface WorkspaceDirectoryDeps {
     projectRecord?: PersistedProjectRecord | null;
     includeGitData: boolean;
   }): Promise<WorkspaceDescriptorPayload>;
+  /**
+   * Reads the WorktreeDiskMonitor's in-memory sample for a workspace, or undefined if it hasn't
+   * been sampled yet. Unlike `archivingAt` (an instance-owned map, mutated by `markArchiving`),
+   * disk usage is genuinely shared state — one daemon-wide monitor, read identically by every
+   * session's WorkspaceDirectory — so it's a plain dependency rather than an instance method.
+   */
+  getDiskUsage?(workspaceId: string): WorkspaceDiskUsage | undefined;
+  /**
+   * Fire-and-forget: asks the monitor to sample a workspace outside its normal rotation. Called
+   * below the moment a workspace is rendered with no disk-usage sample yet ("lazy sample on
+   * first view" — see the disk-sweeper plan). Never awaited; the sample, if it succeeds, shows up
+   * on a later `getDiskUsage` read.
+   */
+  requestDiskUsageSample?(workspaceId: string, cwd: string): void;
 }
 
 export function summarizeFetchWorkspacesEntries(entries: Iterable<FetchWorkspacesResponseEntry>): {
@@ -248,11 +263,20 @@ export class WorkspaceDirectory {
       ),
     );
     for (let i = 0; i < includedWorkspaces.length; i += 1) {
-      const workspaceId = includedWorkspaces[i].workspaceId;
+      const workspace = includedWorkspaces[i];
+      const workspaceId = workspace.workspaceId;
+      const diskUsage = this.deps.getDiskUsage?.(workspaceId);
       descriptorsByWorkspaceId.set(workspaceId, {
         ...workspaceDescriptors[i],
         archivingAt: this.archivingByWorkspaceId.get(workspaceId) ?? null,
+        diskUsage: diskUsage ?? null,
       });
+      // Lazy sample-on-first-view: only worth asking for worktrees, the one workspace kind the
+      // sweeper ever deletes. A workspace already carrying a sample doesn't need a fresh one just
+      // because it rendered — the rotation and archive-time hooks keep it current enough.
+      if (diskUsage === undefined && workspace.kind === "worktree") {
+        this.deps.requestDiskUsageSample?.(workspaceId, workspace.cwd);
+      }
     }
 
     const activeAgents = agents.filter(
@@ -376,6 +400,8 @@ export class WorkspaceDirectory {
             pendingPermissionCount: agent.pendingPermissions?.length ?? 0,
             requiresAttention: agent.requiresAttention,
             attentionReason: agent.attentionReason ?? null,
+            tokenBurnAlert: agent.tokenBurnAlert !== undefined,
+            resourceAlert: agent.resourceAlert !== undefined,
           })
         : "running";
 
@@ -525,6 +551,8 @@ export class WorkspaceDirectory {
           pendingPermissionCount: agent.pendingPermissions?.length ?? 0,
           requiresAttention: agent.requiresAttention,
           attentionReason: agent.attentionReason ?? null,
+          tokenBurnAlert: agent.tokenBurnAlert !== undefined,
+          resourceAlert: agent.resourceAlert !== undefined,
         });
         return derived === winningBucket;
       })

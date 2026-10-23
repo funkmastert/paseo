@@ -3,6 +3,14 @@ export { createPaseoDaemon, type PaseoDaemon, type PaseoDaemonConfig } from "./b
 export { loadConfig, type CliConfigOverrides } from "./config.js";
 export { resolvePaseoHome } from "./paseo-home.js";
 export { getOrCreateServerId } from "./server-id.js";
+export {
+  readDaemonVitals,
+  deriveVitalsVerdict,
+  lastWedge,
+  describeVitalsVerdict,
+  type VitalsVerdict,
+} from "./daemon-vitals/vitals-file.js";
+export { readLastShutdownReceipt, type ShutdownReceipt } from "./daemon-vitals/shutdown-receipt.js";
 export { createRootLogger, type LogLevel, type LogFormat } from "./logger.js";
 export {
   loadPersistedConfig,
@@ -96,3 +104,14 @@ export type {
   AgentStreamEventPayload,
   AgentStreamMessage,
 } from "@getpaseo/protocol/messages";
+
+// `paseo doctor` (read-only diagnosis). The daemon runs it for itself over `daemon.doctor.request`;
+// the CLI runs the same checks locally when the daemon predates that RPC or is down.
+export {
+  buildDoctorContext,
+  countSeverities,
+  renderTokenAuditTable,
+  runDoctorChecks,
+  runTokenAudit,
+  type TokenAuditRow,
+} from "./session/doctor/index.js";

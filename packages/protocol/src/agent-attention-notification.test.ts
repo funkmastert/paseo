@@ -43,6 +43,42 @@ describe("buildAgentAttentionNotificationPayload", () => {
     });
   });
 
+  it("titles a question-ending finish differently and carries isQuestion", () => {
+    const payload = buildAgentAttentionNotificationPayload({
+      reason: "finished",
+      serverId: "srv-1",
+      workspaceId: "workspace-1",
+      agentId: "agent-1",
+      assistantMessage: "Should I merge the PR?",
+      isQuestion: true,
+    });
+
+    expect(payload).toEqual({
+      title: "Agent has a question",
+      body: "Should I merge the PR?",
+      data: {
+        serverId: "srv-1",
+        workspaceId: "workspace-1",
+        agentId: "agent-1",
+        reason: "finished",
+        isQuestion: true,
+      },
+    });
+  });
+
+  it("ignores isQuestion outside a finish", () => {
+    const payload = buildAgentAttentionNotificationPayload({
+      reason: "permission",
+      serverId: "srv-1",
+      workspaceId: "workspace-1",
+      agentId: "agent-1",
+      isQuestion: true,
+    });
+
+    expect(payload.title).toBe("Agent needs permission");
+    expect(payload.data).not.toHaveProperty("isQuestion");
+  });
+
   it("builds permission notifications from request details", () => {
     const payload = buildAgentAttentionNotificationPayload({
       reason: "permission",

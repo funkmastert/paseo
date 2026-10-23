@@ -5,8 +5,11 @@ import type { TFunction } from "i18next";
 import {
   ArrowDown,
   ArrowUp,
+  BarChart3,
   CalendarClock,
+  Coins,
   History,
+  MessageCircleQuestion,
   Plus,
   Search,
   type LucideIcon,
@@ -41,6 +44,9 @@ const BUILTIN_ICONS: Record<BuiltinSidebarNavId, LucideIcon> = {
   history: History,
   search: Search,
   schedules: CalendarClock,
+  "ask-jev": MessageCircleQuestion,
+  "token-usage": Coins,
+  insights: BarChart3,
 };
 
 function NavIcon({ Icon, color = "" }: { Icon: LucideIcon; color?: string }) {

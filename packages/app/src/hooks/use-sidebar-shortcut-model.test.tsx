@@ -36,6 +36,10 @@ function workspace(projectKey: string, workspaceId: string): SidebarWorkspaceEnt
     archiveUnpushedCommitCount: null,
     scripts: [],
     hasRunningScripts: false,
+    diskUsage: null,
+    completionState: null,
+    completionNote: null,
+    agentId: null,
   };
 }
 

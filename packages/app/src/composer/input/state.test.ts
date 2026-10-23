@@ -8,6 +8,7 @@ import {
   runDefaultSendAction,
   runMessageInputKeyboardAction,
   stopRealtimeVoice,
+  toActiveTurnBehavior,
 } from "./state";
 
 const connected = { isConnected: true } as never;
@@ -39,6 +40,16 @@ function createDictationKeyboard({ startsRecording }: { startsRecording: boolean
       }),
   };
 }
+
+describe("toActiveTurnBehavior", () => {
+  it("interrupts a running turn only when the user chose interrupt", () => {
+    expect(toActiveTurnBehavior("interrupt")).toBe("interrupt");
+    expect(toActiveTurnBehavior("steer")).toBe("steer");
+    // A queued message goes out once the agent looks idle. If a background task woke it by
+    // then, "interrupt" would kill that work.
+    expect(toActiveTurnBehavior("queue")).toBe("steer");
+  });
+});
 
 describe("composer surface presentation", () => {
   it("shows only the input when no voice overlay is active", () => {

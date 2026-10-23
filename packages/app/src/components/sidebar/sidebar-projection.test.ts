@@ -6,11 +6,26 @@ import type {
 } from "@/hooks/use-sidebar-workspaces-list";
 import { buildSidebarProjection } from "./sidebar-projection";
 
+function workspaceIdsOf(entries: readonly { workspaceId: string }[] | undefined): string[] {
+  return (entries ?? []).map((entry) => entry.workspaceId);
+}
+
+function unpinnedProjectWorkspaceIds(projects: readonly SidebarProjectEntry[]): string[] {
+  return projects.flatMap((project) => workspaceIdsOf(project.workspaces));
+}
+
+function workspaceGroupWorkspaceIds(
+  groups: readonly { rows: readonly { workspaceId: string }[] }[],
+): string[] {
+  return groups.flatMap((group) => workspaceIdsOf(group.rows));
+}
+
 function makeWorkspace(
   id: string,
   statusBucket: SidebarWorkspaceEntry["statusBucket"] = "done",
   labels: string[] = [],
   projectViewKey = "project",
+  createdBy?: SidebarWorkspaceEntry["createdBy"],
 ) {
   const placement: SidebarWorkspacePlacement = {
     workspaceKey: `srv:${id}`,
@@ -37,7 +52,12 @@ function makeWorkspace(
     archiveUnpushedCommitCount: null,
     scripts: [],
     hasRunningScripts: false,
+    diskUsage: null,
+    completionState: null,
+    completionNote: null,
+    agentId: null,
     labels,
+    createdBy,
   };
   return { placement, entry };
 }
@@ -172,5 +192,64 @@ describe("buildSidebarProjection", () => {
     expect(projection.shortcutModel.shortcutTargets).toEqual([
       { serverId: "srv", workspaceId: "unpinned" },
     ]);
+  });
+
+  describe("agent-made workspaces", () => {
+    for (const groupMode of ["project", "status"] as const) {
+      it(`hides an unpinned agent workspace entirely in ${groupMode} mode`, () => {
+        const person = makeWorkspace("person-made", "done", [], "project", "person");
+        const agent = makeWorkspace("agent-made", "done", [], "project", "agent");
+        const projection = buildSidebarProjection({
+          ...projectionInput({ groupMode }),
+          projects: [makeProject([person.placement, agent.placement])],
+          pinnedKeys: { pinnedWorkspaceKeys: [], pinnedAtByKey: {} },
+          workspaceEntriesByKey: new Map([
+            [person.entry.workspaceKey, person.entry],
+            [agent.entry.workspaceKey, agent.entry],
+          ]),
+        });
+
+        // Project mode renders `unpinnedProjects`; status mode renders `workspaceGroups` instead
+        // (sidebar-workspace-list.tsx) — mirror that so this doesn't double-count either list.
+        const allRenderedIds = [
+          ...workspaceIdsOf(projection.pinnedGroups.pinnedChats),
+          ...(groupMode === "project"
+            ? unpinnedProjectWorkspaceIds(projection.pinnedGroups.unpinnedProjects)
+            : workspaceGroupWorkspaceIds(projection.workspaceGroups)),
+        ];
+        expect(allRenderedIds).toEqual(["person-made"]);
+      });
+    }
+
+    it("a missing createdBy counts as person", () => {
+      const legacy = makeWorkspace("legacy", "done", [], "project", undefined);
+      const projection = buildSidebarProjection({
+        ...projectionInput({ groupMode: "project" }),
+        projects: [makeProject([legacy.placement])],
+        pinnedKeys: { pinnedWorkspaceKeys: [], pinnedAtByKey: {} },
+        workspaceEntriesByKey: new Map([[legacy.entry.workspaceKey, legacy.entry]]),
+      });
+
+      expect(workspaceIdsOf(projection.pinnedGroups.unpinnedProjects[0]?.workspaces)).toEqual([
+        "legacy",
+      ]);
+    });
+
+    it("a manually pinned agent workspace shows in Pinned, not anywhere else", () => {
+      const agent = makeWorkspace("agent-pinned", "done", [], "project", "agent");
+      const projection = buildSidebarProjection({
+        ...projectionInput({ groupMode: "project" }),
+        projects: [makeProject([agent.placement])],
+        pinnedKeys: {
+          pinnedWorkspaceKeys: [agent.placement.workspaceKey],
+          pinnedAtByKey: { [agent.placement.workspaceKey]: "2026-07-12T12:00:00.000Z" },
+        },
+        workspaceEntriesByKey: new Map([[agent.entry.workspaceKey, agent.entry]]),
+      });
+
+      expect(workspaceIdsOf(projection.pinnedGroups.pinnedChats)).toEqual(["agent-pinned"]);
+      expect(projection.pinnedGroups.unpinnedProjects[0]?.workspaces ?? []).toEqual([]);
+      expect(projection.workspaceGroups).toEqual([]);
+    });
   });
 });

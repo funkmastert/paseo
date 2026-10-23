@@ -15,7 +15,7 @@ import type { AgentManager } from "./agent/agent-manager.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
 import { BrowserToolsBroker } from "./browser-tools/broker.js";
 import type { CheckoutDiffManager } from "./checkout-diff-manager.js";
-import type { DaemonConfigStore } from "./daemon-config-store.js";
+import { createTestDaemonConfigStore } from "./test-utils/daemon-config-store.js";
 import type { DownloadTokenStore } from "./file-download/token-store.js";
 import type { ScheduleService } from "./schedule/service.js";
 import { createStub } from "./test-utils/class-mocks.js";
@@ -274,16 +274,13 @@ function createVoiceAssistantWebSocketServer(params: {
   const agentManager = {
     setAgentAttentionCallback() {},
     subscribe: () => () => {},
+    onMcpGatewayStatusChange: () => () => {},
     getMetricsSnapshot: () => ({
       total: 0,
       byLifecycle: {},
       withActiveForegroundTurn: 0,
       timelineStats: { totalItems: 0, maxItemsPerAgent: 0 },
     }),
-  };
-  const daemonConfigStore = {
-    onApply: () => () => {},
-    onChange: () => () => {},
   };
 
   return new VoiceAssistantWebSocketServer(
@@ -294,7 +291,7 @@ function createVoiceAssistantWebSocketServer(params: {
     createStub<AgentStorage>({}),
     createStub<DownloadTokenStore>({}),
     "/tmp/paseo-browser-tools-websocket-test",
-    createStub<DaemonConfigStore>(daemonConfigStore),
+    createTestDaemonConfigStore(),
     null,
     { allowedOrigins: new Set(["*"]) },
     createWorkspaceAutoNameStub(),

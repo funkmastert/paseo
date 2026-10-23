@@ -1,6 +1,7 @@
 import type { Agent } from "@/stores/session-store";
 import type { WorkspaceTabSnapshot } from "@/stores/workspace-layout-actions";
 import { isWorkspaceRootAgent } from "@/subagents/policies";
+import { resolveShownAgent } from "@/utils/agent-migration";
 import { normalizeWorkspaceOpaqueId } from "@/utils/workspace-identity";
 
 export interface WorkspaceAgentVisibility {
@@ -35,6 +36,7 @@ export function deriveWorkspaceAgentVisibility(input: {
     ...(agentDetails?.entries() ?? []),
     ...(sessionAgents?.entries() ?? []),
   ]);
+  const lookup = (agentId: string) => agentsById.get(agentId);
   for (const agent of sessionAgents?.values() ?? []) {
     if (!agentBelongsToWorkspace(agent, workspaceId)) {
       continue;
@@ -43,7 +45,12 @@ export function deriveWorkspaceAgentVisibility(input: {
     if (!agent.archivedAt) {
       activeAgentIds.add(agent.id);
       const parentAgent = agent.parentAgentId ? agentsById.get(agent.parentAgentId) : undefined;
-      if (isWorkspaceRootAgent(agent, parentAgent)) {
+      // A handle account failover retired is shown as its live end; opening it too would
+      // put the same conversation in two tabs.
+      if (
+        isWorkspaceRootAgent(agent, parentAgent) &&
+        resolveShownAgent(agent.id, lookup).kind !== "moved"
+      ) {
         autoOpenAgentIds.add(agent.id);
       }
     }

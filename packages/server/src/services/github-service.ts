@@ -6,8 +6,9 @@ import {
 } from "@getpaseo/protocol/git-remote";
 import { findExecutable } from "../executable-resolution/executable-resolution.js";
 import { runGitCommand } from "../utils/run-git-command.js";
-import { execCommand } from "../utils/spawn.js";
+import { execCommand, runWithSpawnPriority } from "../utils/spawn.js";
 import { resolveSshHostname } from "../utils/ssh-hostname.js";
+import { ForgePollPausedError } from "./forge-poll-paused-error.js";
 import {
   CLI_AUTH_PROBE_TIMEOUT_MS,
   createForgeCliRunner,
@@ -1510,10 +1511,13 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       batchGroups.set(key, group);
     }
 
-    await Promise.all([
-      ...legacyTargets.map((target) => runGitHubPoll(target)),
-      ...[...batchGroups.values()].map((group) => runGitHubPollGroup(group, now)),
-    ]);
+    // Periodic polling nobody is waiting on: its `gh` calls run at background priority.
+    await runWithSpawnPriority("background", () =>
+      Promise.all([
+        ...legacyTargets.map((target) => runGitHubPoll(target)),
+        ...[...batchGroups.values()].map((group) => runGitHubPollGroup(group, now)),
+      ]),
+    );
   }
 
   async function runGitHubPollGroup(
@@ -2170,6 +2174,50 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
           notify: input.reason === "self-heal-github",
         });
         return status;
+      });
+    },
+
+    getPullRequestStatusByIdentity(input) {
+      const pauseUntil = getPollPauseUntil(input.cwd);
+      const args = { repoOwner: input.repoOwner, repoName: input.repoName, number: input.number };
+      if (pauseUntil > deps.now()) {
+        const key = buildCacheKey({
+          cwd: input.cwd,
+          method: "getPullRequestStatusByIdentity",
+          args,
+        });
+        const stale = cache.get(key);
+        if (stale) return Promise.resolve(stale.value as CurrentPullRequestStatus | null);
+        throw new ForgePollPausedError(pauseUntil);
+      }
+      return cached({
+        cwd: input.cwd,
+        method: "getPullRequestStatusByIdentity",
+        args,
+        readOptions: input,
+        load: async () => {
+          const repo = `${input.repoOwner}/${input.repoName}`;
+          const stdout = await runCurrentPullRequestStatusCommand({
+            cwd: input.cwd,
+            run,
+            args: ["pr", "view", String(input.number), "--repo", repo],
+          });
+          const item = parseGitHubJsonOutput(stdout, CurrentPullRequestStatusSchema, {
+            args: [
+              "pr",
+              "view",
+              String(input.number),
+              "--repo",
+              repo,
+              "--json",
+              CURRENT_PR_STATUS_FIELDS,
+            ],
+            cwd: input.cwd,
+            emptyFallback: "{}",
+          });
+          const status = toCurrentPullRequestStatus(item, "");
+          return addCurrentPullRequestGithubFacts({ cwd: input.cwd, status, run });
+        },
       });
     },
 

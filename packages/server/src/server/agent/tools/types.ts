@@ -37,6 +37,12 @@ export interface PaseoToolCatalog {
 
 export interface PaseoToolRuntimeContext {
   callerAgentId?: string;
+  /**
+   * The caller's labels and cwd when the catalog is built for a launch: at create the agent is
+   * not in the manager yet, so the JEV tools' eligibility is decided from these.
+   */
+  callerLabels?: Readonly<Record<string, string>>;
+  callerCwd?: string;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
   enableVoiceTools?: boolean;
   voiceOnly?: boolean;

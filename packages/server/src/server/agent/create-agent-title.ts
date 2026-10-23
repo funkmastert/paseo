@@ -1,5 +1,6 @@
 import { MAX_EXPLICIT_AGENT_TITLE_CHARS } from "@getpaseo/protocol/agent-title-limits";
 import type { FirstAgentContext } from "@getpaseo/protocol/messages";
+import type { AgentTimelineItem } from "./agent-sdk-types.js";
 
 const MAX_INITIAL_AGENT_TITLE_CHARS = Math.min(60, MAX_EXPLICIT_AGENT_TITLE_CHARS);
 
@@ -43,4 +44,23 @@ export function resolveFirstAgentPromptTitle(firstAgentContext?: FirstAgentConte
       initialPrompt: firstAgentContext?.prompt,
     }).provisionalTitle ?? null
   );
+}
+
+/**
+ * Sibling of getFirstUserMessageTextFromRows (agent-manager.ts) that reads
+ * the newest user message instead of the oldest, over the live in-memory
+ * timeline (AgentManager.getTimeline()) rather than persisted rows.
+ */
+export function getLatestUserMessageText(items: readonly AgentTimelineItem[]): string | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.type !== "user_message") {
+      continue;
+    }
+    const text = item.text.trim();
+    if (text) {
+      return text;
+    }
+  }
+  return null;
 }

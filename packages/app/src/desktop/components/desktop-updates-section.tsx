@@ -16,6 +16,7 @@ import { getCliDaemonStatus, shouldUseDesktopDaemon } from "@/desktop/daemon/des
 import { useBuiltInDaemonManagement } from "@/desktop/hooks/use-built-in-daemon-management";
 import { useDaemonStatus } from "@/desktop/hooks/use-daemon-status";
 import { useDesktopSettings, type DesktopSettings } from "@/desktop/settings/desktop-settings";
+import { KeepAwakeCard } from "@/desktop/components/keep-awake-settings";
 import { resolveAppVersion } from "@/utils/app-version";
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
 
@@ -444,6 +445,8 @@ export function LocalDaemonSection() {
             handleRunCliStatus={handleRunCliStatus}
             isLoadingCliStatus={isLoadingCliStatus}
           />
+
+          <KeepAwakeCard settings={settings.power} updateSettings={updateSettings} />
 
           {daemonVersionMismatch ? (
             <View style={styles.warningCard}>

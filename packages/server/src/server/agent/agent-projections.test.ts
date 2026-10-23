@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { AGENT_LIFECYCLE_STATUSES } from "./agent-manager.js";
 import {
   buildStoredAgentPayload,
+  toAgentListItemPayload,
   toAgentPayload,
   toRecentProviderSessionDescriptorPayload,
   toStoredAgentRecord,
@@ -16,6 +17,7 @@ import type {
   AgentPersistenceHandle,
   AgentSessionConfig,
 } from "./agent-sdk-types.js";
+import { recordTokenDelta, TOKEN_RATE_TRACKER_WINDOW_MS } from "./token-rate-tracker.js";
 
 type ManagedAgentOverrides = Omit<Partial<ManagedAgent>, "config" | "pendingPermissions"> & {
   config?: Partial<AgentSessionConfig>;
@@ -470,6 +472,320 @@ describe("toAgentPayload", () => {
     const payload = toAgentPayload(agent);
 
     expect(payload.features).toEqual(features);
+  });
+
+  it("includes lastActivitySummary when set", () => {
+    const agent = createManagedAgent({ lastActivitySummary: "[Read] src/index.ts" });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload.lastActivitySummary).toBe("[Read] src/index.ts");
+  });
+
+  it("omits lastActivitySummary when not set", () => {
+    const agent = createManagedAgent({ lastActivitySummary: undefined });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload).not.toHaveProperty("lastActivitySummary");
+  });
+
+  it("includes mcpServerStatuses when set (KTD8)", () => {
+    const agent = createManagedAgent({
+      mcpServerStatuses: [{ name: "zeeq", status: "needs-auth" }],
+    });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload.mcpServerStatuses).toEqual([{ name: "zeeq", status: "needs-auth" }]);
+  });
+
+  it("omits mcpServerStatuses when not set", () => {
+    const agent = createManagedAgent({ mcpServerStatuses: undefined });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload).not.toHaveProperty("mcpServerStatuses");
+  });
+
+  it("includes recentTokenRate and totalTokens when the buckets have current activity", () => {
+    const agent = createManagedAgent({
+      tokenRateBuckets: recordTokenDelta([], 40, Date.now()),
+      totalTokens: 40,
+    });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload.recentTokenRate).toEqual({
+      tokensPerMinute: expect.any(Number),
+      asOfMs: expect.any(Number),
+    });
+    expect(payload.totalTokens).toBe(40);
+  });
+
+  it("omits recentTokenRate and totalTokens when never recorded", () => {
+    const agent = createManagedAgent({ tokenRateBuckets: undefined, totalTokens: undefined });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload).not.toHaveProperty("recentTokenRate");
+    expect(payload).not.toHaveProperty("totalTokens");
+  });
+
+  it("omits recentTokenRate once every bucket has aged out of the trailing window", () => {
+    const agent = createManagedAgent({
+      tokenRateBuckets: recordTokenDelta(
+        [],
+        40,
+        Date.now() - TOKEN_RATE_TRACKER_WINDOW_MS - 60_000,
+      ),
+      totalTokens: 40,
+    });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload).not.toHaveProperty("recentTokenRate");
+    // totalTokens is a lifetime counter, independent of the trailing-window rate.
+    expect(payload.totalTokens).toBe(40);
+  });
+
+  it("includes tokenBurnAlert when the monitor has set one", () => {
+    const tokenBurnAlert = {
+      trigger: "rate" as const,
+      ratePerMinute: 50_000,
+      firstBreachedAt: "2026-09-12T00:00:00.000Z",
+    };
+    const agent = createManagedAgent({ tokenBurnAlert });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload.tokenBurnAlert).toEqual(tokenBurnAlert);
+  });
+
+  it("omits tokenBurnAlert when the monitor hasn't set one", () => {
+    const agent = createManagedAgent({ tokenBurnAlert: undefined });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload).not.toHaveProperty("tokenBurnAlert");
+  });
+
+  it("includes resourceAlert when the monitor has set one", () => {
+    const resourceAlert = {
+      trigger: "memory" as const,
+      memoryBytes: 7_730_941_133,
+      cpuPercent: 410,
+      firstBreachedAt: "2026-09-12T00:00:00.000Z",
+    };
+    const agent = createManagedAgent({ resourceAlert });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload.resourceAlert).toEqual(resourceAlert);
+  });
+
+  it("omits resourceAlert when the monitor hasn't set one", () => {
+    const agent = createManagedAgent({ resourceAlert: undefined });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload).not.toHaveProperty("resourceAlert");
+  });
+});
+
+describe("buildStoredAgentPayload", () => {
+  it("drops a stale finished flag from a delegated record written before the rule", () => {
+    // 27 such records existed on one daemon, nothing would ever have cleared them, and each
+    // one badged an agent a human never opens. The rule applies at read time so they stop
+    // showing without rewriting agent state.
+    const agent = createManagedAgent({ labels: { "paseo.parent-agent-id": "parent-1" } });
+    const record = {
+      ...toStoredAgentRecord(agent, { title: "Worker" }),
+      requiresAttention: true,
+      attentionReason: "finished" as const,
+      attentionTimestamp: "2026-08-22T02:40:47.743Z",
+    };
+
+    const payload = buildStoredAgentPayload(record, ["claude"]);
+
+    expect(payload.requiresAttention).toBe(false);
+    expect(payload.attentionReason).toBeNull();
+    expect(payload.attentionTimestamp).toBeNull();
+  });
+
+  it("keeps a delegated record's error flag: a failed subagent is not the normal case", () => {
+    const agent = createManagedAgent({ labels: { "paseo.parent-agent-id": "parent-1" } });
+    const record = {
+      ...toStoredAgentRecord(agent, { title: "Worker" }),
+      requiresAttention: true,
+      attentionReason: "error" as const,
+      attentionTimestamp: "2026-08-22T02:40:47.743Z",
+    };
+
+    expect(buildStoredAgentPayload(record, ["claude"]).requiresAttention).toBe(true);
+  });
+
+  it("keeps a top-level record's finished flag, which is the whole signal", () => {
+    const record = {
+      ...toStoredAgentRecord(createManagedAgent({}), { title: "Leader" }),
+      requiresAttention: true,
+      attentionReason: "finished" as const,
+      attentionTimestamp: "2026-09-19T03:57:12.400Z",
+    };
+
+    const payload = buildStoredAgentPayload(record, ["claude"]);
+
+    expect(payload.requiresAttention).toBe(true);
+    expect(payload.attentionReason).toBe("finished");
+  });
+
+  it("omits lastActivitySummary for persisted records, which never carry it", () => {
+    const agent = createManagedAgent({ lastActivitySummary: "[Read] src/index.ts" });
+    const record = toStoredAgentRecord(agent, { title: "Stored Agent" });
+
+    const payload = buildStoredAgentPayload(record, ["claude"]);
+
+    expect(payload).not.toHaveProperty("lastActivitySummary");
+  });
+
+  it("omits recentTokenRate and totalTokens for persisted records, which never carry them", () => {
+    const agent = createManagedAgent({
+      tokenRateBuckets: recordTokenDelta([], 40, Date.now()),
+      totalTokens: 40,
+    });
+    const record = toStoredAgentRecord(agent, { title: "Stored Agent" });
+
+    const payload = buildStoredAgentPayload(record, ["claude"]);
+
+    expect(payload).not.toHaveProperty("recentTokenRate");
+    expect(payload).not.toHaveProperty("totalTokens");
+  });
+
+  it("omits tokenBurnAlert for persisted records — it's live-only and never stored", () => {
+    const agent = createManagedAgent({
+      tokenBurnAlert: {
+        trigger: "total",
+        totalTokens: 5_000_000,
+        firstBreachedAt: "2026-09-12T00:00:00.000Z",
+      },
+    });
+    const record = toStoredAgentRecord(agent, { title: "Stored Agent" });
+
+    expect(record).not.toHaveProperty("tokenBurnAlert");
+
+    const payload = buildStoredAgentPayload(record, ["claude"]);
+
+    expect(payload).not.toHaveProperty("tokenBurnAlert");
+  });
+
+  it("omits resourceAlert for persisted records — it's live-only and never stored", () => {
+    const agent = createManagedAgent({
+      resourceAlert: {
+        trigger: "cpu",
+        memoryBytes: 1_073_741_824,
+        cpuPercent: 500,
+        firstBreachedAt: "2026-09-12T00:00:00.000Z",
+      },
+    });
+    const record = toStoredAgentRecord(agent, { title: "Stored Agent" });
+
+    expect(record).not.toHaveProperty("resourceAlert");
+
+    const payload = buildStoredAgentPayload(record, ["claude"]);
+
+    expect(payload).not.toHaveProperty("resourceAlert");
+  });
+});
+
+describe("toAgentListItemPayload", () => {
+  it("carries lastActivitySummary through from the snapshot payload", () => {
+    const agent = createManagedAgent({ lastActivitySummary: "[Shell] npm test" });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem.lastActivitySummary).toBe("[Shell] npm test");
+  });
+
+  it("carries recentTokenRate and totalTokens through from the snapshot payload", () => {
+    const agent = createManagedAgent({
+      tokenRateBuckets: recordTokenDelta([], 40, Date.now()),
+      totalTokens: 40,
+    });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem.recentTokenRate).toEqual(snapshot.recentTokenRate);
+    expect(listItem.totalTokens).toBe(40);
+  });
+
+  it("omits recentTokenRate and totalTokens when the snapshot doesn't have them", () => {
+    const agent = createManagedAgent({ tokenRateBuckets: undefined, totalTokens: undefined });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem).not.toHaveProperty("recentTokenRate");
+    expect(listItem).not.toHaveProperty("totalTokens");
+  });
+
+  it("carries tokenBurnAlert through from the snapshot payload", () => {
+    const agent = createManagedAgent({
+      tokenBurnAlert: {
+        trigger: "rate",
+        ratePerMinute: 50_000,
+        firstBreachedAt: "2026-09-12T00:00:00.000Z",
+      },
+    });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem.tokenBurnAlert).toEqual(snapshot.tokenBurnAlert);
+  });
+
+  it("omits tokenBurnAlert when the snapshot doesn't have one", () => {
+    const agent = createManagedAgent({ tokenBurnAlert: undefined });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem).not.toHaveProperty("tokenBurnAlert");
+  });
+
+  it("carries resourceAlert through from the snapshot payload", () => {
+    const agent = createManagedAgent({
+      resourceAlert: {
+        trigger: "memory",
+        memoryBytes: 7_730_941_133,
+        cpuPercent: 410,
+        firstBreachedAt: "2026-09-12T00:00:00.000Z",
+      },
+    });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem.resourceAlert).toEqual(snapshot.resourceAlert);
+  });
+
+  it("omits resourceAlert when the snapshot doesn't have one", () => {
+    const agent = createManagedAgent({ resourceAlert: undefined });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem).not.toHaveProperty("resourceAlert");
+  });
+
+  it("omits lastActivitySummary when the snapshot doesn't have one", () => {
+    const agent = createManagedAgent({ lastActivitySummary: undefined });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem).not.toHaveProperty("lastActivitySummary");
   });
 });
 

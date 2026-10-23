@@ -16,6 +16,7 @@ import {
   type UserModifiedFields,
 } from "./resolve-agent-form";
 import { buildProviderDefinitions } from "@/utils/provider-definitions";
+import type { AccountBudget } from "./account-budget";
 import type { AgentProviderDefinition } from "@getpaseo/protocol/provider-manifest";
 import type {
   AgentModelDefinition,
@@ -1268,4 +1269,116 @@ it("owns input readiness, reopening and user edits in the reducer", () => {
   expect(state.resolution.status).toBe("pending");
   state = resolveAgentForm(state, { ...inputs, isPreferencesLoading: false, hasSnapshot: true });
   expect(state.form).toMatchObject({ provider: "codex", model: "astra" });
+});
+
+describe("a remembered account that is out of budget", () => {
+  const POOLED_MAP = makeProviderMap(
+    TEST_CLAUDE_DEFINITION,
+    { ...TEST_CLAUDE_DEFINITION, id: "claude-personal", label: "Claude Worker" },
+    { ...TEST_CLAUDE_DEFINITION, id: "claude-backup", label: "Claude Backup" },
+  );
+  const PREFERENCES = {
+    provider: "claude-backup",
+    providerPreferences: {
+      "claude-backup": { model: "claude-opus-5-5" },
+      claude: { model: "claude-opus-5-5", mode: "bypassPermissions" },
+    },
+  };
+  const usage = (providerId: string, usedPct: number) =>
+    ({
+      providerId,
+      displayName: providerId,
+      status: "available",
+      planLabel: null,
+      windows: [{ id: "weekly", label: "Weekly", usedPct }],
+    }) as AccountBudget["usage"][number];
+  const BUDGET: AccountBudget = {
+    pool: [
+      { providerId: "claude", role: "leader" },
+      { providerId: "claude-personal", role: "primary" },
+      { providerId: "claude-backup", role: "backup" },
+    ],
+    usage: [usage("claude-backup", 100), usage("claude", 42), usage("claude-personal", 19)],
+  };
+
+  it("opens a new chat on the leader account instead", () => {
+    const resolved = resolveFormState(
+      undefined,
+      PREFERENCES,
+      null,
+      INITIAL_USER_MODIFIED,
+      makeState().form,
+      POOLED_MAP,
+      BUDGET,
+    );
+
+    expect(resolved.provider).toBe("claude");
+    expect(resolved.model).toBe("claude-opus-5-5");
+    expect(resolved.modeId).toBe("bypassPermissions");
+  });
+
+  it("keeps it while it has budget", () => {
+    const resolved = resolveFormState(
+      undefined,
+      PREFERENCES,
+      null,
+      INITIAL_USER_MODIFIED,
+      makeState().form,
+      POOLED_MAP,
+      { ...BUDGET, usage: [usage("claude-backup", 42)] },
+    );
+
+    expect(resolved.provider).toBe("claude-backup");
+  });
+
+  it("never overrides a provider the caller set explicitly", () => {
+    const resolved = resolveFormState(
+      { provider: "claude-backup" },
+      PREFERENCES,
+      null,
+      INITIAL_USER_MODIFIED,
+      makeState().form,
+      POOLED_MAP,
+      BUDGET,
+    );
+
+    expect(resolved.provider).toBe("claude-backup");
+  });
+
+  const inputs = {
+    type: "INPUTS_CHANGED" as const,
+    serverId: "host",
+    isVisible: true,
+    isCreateFlow: true,
+    isPreferencesLoading: false,
+    hasSnapshot: true,
+    initialValues: undefined,
+    preferences: PREFERENCES,
+    allowedProviderMap: POOLED_MAP,
+    providerModelsByProvider: new Map(),
+  };
+
+  it("moves off it when usage arrives after the form resolved", () => {
+    let state = resolveAgentForm(makeState(), { ...inputs, accountBudget: null });
+    expect(state.form.provider).toBe("claude-backup");
+
+    state = resolveAgentForm(state, { ...inputs, accountBudget: BUDGET });
+
+    expect(state.form).toMatchObject({ provider: "claude", model: "claude-opus-5-5" });
+  });
+
+  it("leaves a provider the user picked alone when usage arrives", () => {
+    let state = resolveAgentForm(makeState(), { ...inputs, accountBudget: null });
+    state = resolveAgentForm(state, {
+      type: "SET_PROVIDER_AND_MODEL_FROM_USER",
+      provider: "claude-backup",
+      modelId: "claude-opus-5-5",
+      providerDef: POOLED_MAP.get("claude-backup"),
+      providerModels: null,
+    });
+
+    state = resolveAgentForm(state, { ...inputs, accountBudget: BUDGET });
+
+    expect(state.form.provider).toBe("claude-backup");
+  });
 });

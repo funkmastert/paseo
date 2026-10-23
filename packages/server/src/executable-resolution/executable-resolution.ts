@@ -23,18 +23,42 @@ async function enumerateCandidates(name: string): Promise<string[]> {
   return enumerateCandidatesViaLibrary(name);
 }
 
-async function enumerateCandidatesViaSystemWhich(name: string): Promise<string[]> {
-  try {
-    const { stdout } = await execCommand("/usr/bin/which", ["-a", name], {
-      timeout: 3000,
-      killSignal: "SIGKILL",
-    });
-    return Array.from(new Set(stdout.trim().split("\n").filter(Boolean)));
-  } catch (error) {
-    // which exits 1 for a missing command. A failed lookup is not evidence of absence.
-    if (error instanceof Error && "code" in error && error.code === 1) return [];
-    throw error;
+const SYSTEM_WHICH_TIMEOUTS_MS = [3000, 6000];
+
+interface SystemWhichDeps {
+  exec: (command: string, args: string[], options: object) => Promise<{ stdout: string }>;
+  fallback: (name: string) => Promise<string[]>;
+}
+
+function wasKilled(error: unknown): boolean {
+  return (
+    typeof error === "object" && error !== null && (error as { killed?: unknown }).killed === true
+  );
+}
+
+/**
+ * `which -a` through the system binary. Under heavy load the subprocess can miss its timeout
+ * and be SIGKILLed; that says nothing about the command, so it is retried once with more time and
+ * then answered by the in-process PATH search instead of failing the lookup.
+ */
+export async function enumerateCandidatesViaSystemWhich(
+  name: string,
+  deps: SystemWhichDeps = { exec: execCommand, fallback: enumerateCandidatesViaLibrary },
+): Promise<string[]> {
+  for (const timeout of SYSTEM_WHICH_TIMEOUTS_MS) {
+    try {
+      const { stdout } = await deps.exec("/usr/bin/which", ["-a", name], {
+        timeout,
+        killSignal: "SIGKILL",
+      });
+      return Array.from(new Set(stdout.trim().split("\n").filter(Boolean)));
+    } catch (error) {
+      // which exits 1 for a missing command. A failed lookup is not evidence of absence.
+      if (error instanceof Error && "code" in error && error.code === 1) return [];
+      if (!wasKilled(error)) throw error;
+    }
   }
+  return deps.fallback(name);
 }
 
 async function enumerateCandidatesViaLibrary(name: string): Promise<string[]> {

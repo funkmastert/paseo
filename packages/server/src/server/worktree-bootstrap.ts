@@ -730,6 +730,8 @@ export interface SpawnWorkspaceScriptOptions {
   projectSlug: string;
   branchName: string | null;
   scriptName: string;
+  /** Nice for a newly created script terminal; a reused terminal keeps the one it has. */
+  nice?: number;
   daemonPort?: number | null;
   daemonListenHost?: string | null;
   serviceProxyPublicBaseUrl?: string | null;
@@ -858,6 +860,7 @@ async function acquireWorkspaceScriptTerminal(params: {
   workspaceId: string;
   scriptName: string;
   env: Record<string, string> | undefined;
+  nice: number | undefined;
 }): Promise<{ terminal: TerminalSession; reusableTerminal: TerminalSession | null }> {
   const {
     serviceScript,
@@ -867,6 +870,7 @@ async function acquireWorkspaceScriptTerminal(params: {
     workspaceId,
     scriptName,
     env,
+    nice,
   } = params;
   let reusableTerminal: TerminalSession | null = null;
   if (!serviceScript && existingRuntimeEntry?.terminalId) {
@@ -880,6 +884,7 @@ async function acquireWorkspaceScriptTerminal(params: {
       name: scriptName,
       title: scriptName,
       env,
+      ...(nice !== undefined ? { nice } : {}),
     }));
   return { terminal, reusableTerminal };
 }
@@ -893,6 +898,7 @@ export async function spawnWorkspaceScript(
     projectSlug,
     branchName,
     scriptName,
+    nice,
     daemonPort,
     daemonListenHost,
     serviceProxyPublicBaseUrl,
@@ -958,6 +964,7 @@ export async function spawnWorkspaceScript(
       workspaceId,
       scriptName,
       env,
+      nice,
     });
 
     runtimeStore.set({

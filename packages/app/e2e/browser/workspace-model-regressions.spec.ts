@@ -17,7 +17,7 @@ import {
 } from "../support/helpers/new-workspace";
 import { getServerId } from "../support/helpers/server-id";
 import { selectSidebarStatusGrouping } from "../support/helpers/sidebar";
-import { seedWorkspace, type SeededWorkspace } from "../support/helpers/seed-client";
+import { seedWorkspace, settleAutoPin, type SeededWorkspace } from "../support/helpers/seed-client";
 import {
   expectSubagentRowVisible,
   openSubagentsTrack,
@@ -324,6 +324,11 @@ test.describe("Workspace model regressions", () => {
         throw new Error(secondWorkspace.error ?? "Failed to create same-directory workspace");
       }
       const secondWorkspaceId = secondWorkspace.workspace.id;
+      // These assertions read `workspace-status-indicator-*` and status-group membership on each
+      // row directly; a session-start auto pin would hoist a row into Pinned instead. Settle
+      // secondWorkspaceId now (nothing else creates against it), but wait to settle seeded.workspaceId
+      // until after the createAgent below, which re-pins it.
+      await settleAutoPin(seeded.client, secondWorkspaceId);
 
       const runningAgent = await seeded.client.createAgent({
         provider: "mock",
@@ -334,6 +339,7 @@ test.describe("Workspace model regressions", () => {
         model: "five-minute-stream",
         initialPrompt: "stay running",
       });
+      await settleAutoPin(seeded.client, seeded.workspaceId);
       await seeded.client.waitForAgentUpsert(
         runningAgent.id,
         (snapshot) => snapshot.status === "running",
@@ -365,6 +371,7 @@ test.describe("Workspace model regressions", () => {
         previousWorkspaceId: seeded.workspaceId,
         projectDisplayName: seeded.projectDisplayName,
       });
+      await settleAutoPin(seeded.client, createdWorkspace.workspaceId);
       const createdRowTestId = `sidebar-workspace-row-${serverId}:${createdWorkspace.workspaceId}`;
 
       await expect
@@ -443,6 +450,11 @@ test.describe("Workspace model regressions", () => {
         throw new Error(secondWorkspace.error ?? "Failed to create same-directory workspace");
       }
       const secondWorkspaceId = secondWorkspace.workspace.id;
+      // These assertions read `workspace-status-indicator-*` and status-group membership on each
+      // row directly; a session-start auto pin would hoist a row into Pinned instead. Settle
+      // secondWorkspaceId now (nothing else creates against it), but wait to settle seeded.workspaceId
+      // until after the createAgent below, which re-pins it.
+      await settleAutoPin(seeded.client, secondWorkspaceId);
 
       const agent = await seeded.client.createAgent({
         provider: "mock",
@@ -452,6 +464,7 @@ test.describe("Workspace model regressions", () => {
         modeId: "load-test",
         model: "ten-second-stream",
       });
+      await settleAutoPin(seeded.client, seeded.workspaceId);
       await seeded.client.sendAgentMessage(agent.id, "Emit synthetic plan approval.");
       const parked = await seeded.client.waitForFinish(agent.id, 15_000);
       expect(parked.status).toBe("permission");
@@ -481,6 +494,7 @@ test.describe("Workspace model regressions", () => {
         previousWorkspaceId: seeded.workspaceId,
         projectDisplayName: seeded.projectDisplayName,
       });
+      await settleAutoPin(seeded.client, createdWorkspace.workspaceId);
       const createdRowTestId = `sidebar-workspace-row-${serverId}:${createdWorkspace.workspaceId}`;
 
       await expect

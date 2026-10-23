@@ -13,7 +13,9 @@ export type ExplorerSidebarPresentation = "overlay" | "dock" | "pane";
 const VIEW_TARGETS: Record<ExplorerSidebarView, WorkspaceTabTarget> = {
   changes: { kind: "changes_tree" },
   files: { kind: "files" },
-  pr: { kind: "pull_request" },
+  // The ledger-backed PRs list replaces the single-PR tab on pane layouts too — see
+  // docs/pull-request-ledger.md, "Wide layouts".
+  pr: { kind: "pull_requests" },
 };
 
 export interface ExplorerSidebarQuery {

@@ -64,9 +64,22 @@ export default defineConfig({
   // (`findHostInstance.web.js`). Vite's dependency optimizer does not apply `resolve.extensions`,
   // so it scans the native files and dies on imports react-native-web has no answer for.
   // Unbundled, the same imports go through the resolver below and land on the web files.
+  // react-native-gesture-handler (pulled in by react-native-draggable-flatlist, used by the
+  // sidebar's draggable lists) hits the same scan-time failure: its non-web specs `require`
+  // `react-native/Libraries/...` paths the alias below only redirects for normal, per-file
+  // transforms, not the optimizer's eager scan.
   optimizeDeps: {
-    include: ["react/jsx-runtime"],
-    exclude: ["react-native-reanimated"],
+    // hoist-non-react-statics is gesture-handler's own CJS dependency; pre-bundling it directly
+    // is what gives it a usable default export under Vite's ESM transform.
+    include: ["react/jsx-runtime", "hoist-non-react-statics", "invariant"],
+    // expo-asset is excluded (not pre-bundled) too: a pre-bundled dep's vi.mock in a test isn't
+    // honored, since the optimizer serves a cached chunk straight to the browser.
+    exclude: [
+      "react-native-reanimated",
+      "react-native-gesture-handler",
+      "react-native-draggable-flatlist",
+      "expo-asset",
+    ],
   },
   // The globals a React Native bundler defines, which esbuild is no longer there to supply for
   // the package excluded above.
@@ -113,7 +126,7 @@ export default defineConfig({
       // Vite alias resolution).
       {
         find: "react-native",
-        replacement: path.resolve(rootNodeModules, "react-native-web/dist/index.js"),
+        replacement: path.resolve(__dirname, "test-stubs/react-native-web-with-toast-android.ts"),
       },
       { find: "react", replacement: resolvePackageEntry("react") },
       {
@@ -153,6 +166,40 @@ export default defineConfig({
       {
         find: /^expo-linking$/,
         replacement: path.resolve(__dirname, "test-stubs/expo-linking.ts"),
+      },
+      // Ships untranspiled JSX in .js files and pulls in react-native-screens, which esbuild's
+      // browser-mode dependency scan can't parse — it kills collection for every browser test
+      // file, not just the ones that reach this import. Only `router` is used off this path today.
+      {
+        find: /^expo-router$/,
+        replacement: path.resolve(__dirname, "test-stubs/expo-router.ts"),
+      },
+      // Pulls in expo-modules-core, which needs `TurboModuleRegistry` off the real react-native —
+      // not provided by the react-native-web stub below, so it also kills browser collection.
+      {
+        find: /^expo-constants$/,
+        replacement: path.resolve(__dirname, "test-stubs/expo-constants.ts"),
+      },
+      // Same `TurboModuleRegistry` problem as expo-constants above, reached directly by
+      // src/performance/native-trace.ts.
+      {
+        find: /^expo-modules-core$/,
+        replacement: path.resolve(__dirname, "test-stubs/expo-modules-core.ts"),
+      },
+      // expo-file-system's legacy shim needs more off expo-modules-core than the stub above
+      // provides, reached by src/attachments/attachment-file-system.ts.
+      {
+        find: /^expo-file-system\/legacy$/,
+        replacement: path.resolve(__dirname, "test-stubs/expo-file-system-legacy.ts"),
+      },
+      {
+        find: /^expo-file-system$/,
+        replacement: path.resolve(__dirname, "test-stubs/expo-file-system.ts"),
+      },
+      // Ships untranspiled JSX in a .js file, which esbuild's dependency scan refuses to parse.
+      {
+        find: /^expo-clipboard$/,
+        replacement: path.resolve(__dirname, "test-stubs/expo-clipboard.ts"),
       },
       {
         find: /^lucide-react-native$/,

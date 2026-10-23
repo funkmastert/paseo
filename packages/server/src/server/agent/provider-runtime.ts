@@ -22,7 +22,15 @@ interface CreateAgentProviderRuntimeOptions {
 export async function createAgentProviderRuntime(
   options: CreateAgentProviderRuntimeOptions,
 ): Promise<AgentProviderRuntime> {
-  const bridge = new OpenCodeBridge({ paseoHome: options.paseoHome, logger: options.logger });
+  // The bridge takes the cap's gate as well as the snapshot manager: OpenCode's refusal lives
+  // in the bridge plugin, not in the provider client (docs/device-leases.md).
+  const bridge = new OpenCodeBridge({
+    paseoHome: options.paseoHome,
+    logger: options.logger,
+    ...(options.snapshotManager.deviceLaunchGate
+      ? { deviceLaunchGate: options.snapshotManager.deviceLaunchGate }
+      : {}),
+  });
   try {
     await bridge.start();
     const snapshotManager = new ProviderSnapshotManager({

@@ -7,6 +7,8 @@ on:
 
 jobs:
   deploy:
+    # Deploys upstream's relay worker. Forks skip it.
+    if: github.repository == 'getpaseo/paseo'
     runs-on: ubuntu-latest
 
     steps:

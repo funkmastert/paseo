@@ -1,9 +1,19 @@
 import { router, usePathname } from "expo-router";
-import { CalendarClock, History, Plus, Search } from "lucide-react-native";
+import {
+  BarChart3,
+  CalendarClock,
+  Coins,
+  History,
+  MessageCircleQuestion,
+  Plus,
+  Search,
+} from "lucide-react-native";
 import { memo, useCallback, useMemo, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import { View, type StyleProp, type ViewStyle } from "react-native";
 import { SidebarHeaderRow } from "@/components/sidebar/sidebar-header-row";
+import { useSidebarInsightsTarget } from "@/components/sidebar/use-sidebar-insights-target";
+import { useSidebarTokenUsageTarget } from "@/components/sidebar/use-sidebar-token-usage-target";
 import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import { PluginSidebarItemRow } from "@/plugins/sidebar-items";
 import { canCreateWorktreeForProjectKind } from "@/projects/host-projects";
@@ -18,9 +28,12 @@ import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useWorkspace } from "@/stores/session-store-hooks";
 import {
+  buildAskJevRoute,
+  buildInsightsRoute,
   buildNewWorkspaceRoute,
   buildSchedulesRoute,
   buildSessionsRoute,
+  buildTokenUsageRoute,
 } from "@/utils/host-routes";
 
 interface SidebarNavRowProps {
@@ -170,9 +183,78 @@ function SidebarSchedulesRow({ onBeforeNavigate }: SidebarNavRowProps) {
   );
 }
 
+function SidebarAskJevRow({ onBeforeNavigate }: SidebarNavRowProps) {
+  const { t } = useTranslation();
+  const pathname = usePathname();
+  const handlePress = useCallback(() => {
+    onBeforeNavigate?.();
+    router.push(buildAskJevRoute());
+  }, [onBeforeNavigate]);
+
+  return (
+    <SidebarHeaderRow
+      icon={MessageCircleQuestion}
+      label={t(builtinSidebarNavLabelKey("ask-jev"))}
+      onPress={handlePress}
+      isActive={pathname.includes("/ask-jev")}
+      testID="sidebar-ask-jev"
+      variant="compact"
+    />
+  );
+}
+
+function SidebarTokenUsageRow({ onBeforeNavigate }: SidebarNavRowProps) {
+  const { t } = useTranslation();
+  const pathname = usePathname();
+  const target = useSidebarTokenUsageTarget();
+  const handlePress = useCallback(() => {
+    onBeforeNavigate?.();
+    router.push(buildTokenUsageRoute());
+  }, [onBeforeNavigate]);
+
+  if (!target) return null;
+
+  return (
+    <SidebarHeaderRow
+      icon={Coins}
+      label={t(builtinSidebarNavLabelKey("token-usage"))}
+      onPress={handlePress}
+      isActive={pathname.includes("/tokens")}
+      testID="sidebar-token-usage"
+      variant="compact"
+    />
+  );
+}
+
+function SidebarInsightsRow({ onBeforeNavigate }: SidebarNavRowProps) {
+  const { t } = useTranslation();
+  const pathname = usePathname();
+  const target = useSidebarInsightsTarget();
+  const handlePress = useCallback(() => {
+    onBeforeNavigate?.();
+    router.push(buildInsightsRoute());
+  }, [onBeforeNavigate]);
+
+  if (!target) return null;
+
+  return (
+    <SidebarHeaderRow
+      icon={BarChart3}
+      label={t(builtinSidebarNavLabelKey("insights"))}
+      onPress={handlePress}
+      isActive={pathname.includes("/insights")}
+      testID="sidebar-insights"
+      variant="compact"
+    />
+  );
+}
+
 const BUILTIN_ROWS: Record<BuiltinSidebarNavId, ComponentType<SidebarNavRowProps>> = {
   "new-workspace": SidebarNewWorkspaceRow,
   history: SidebarHistoryRow,
   search: SidebarSearchRow,
   schedules: SidebarSchedulesRow,
+  "ask-jev": SidebarAskJevRow,
+  "token-usage": SidebarTokenUsageRow,
+  insights: SidebarInsightsRow,
 };

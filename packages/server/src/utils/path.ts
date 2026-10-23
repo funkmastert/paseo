@@ -62,6 +62,28 @@ export function isPathInsideRoot(root: string, candidate: string): boolean {
   return getRelativePathInsideRoot(root, candidate) !== null;
 }
 
+/**
+ * The one spelling of a directory: its realpath, or for a path that does not exist, the realpath of
+ * its deepest existing ancestor with the rest appended. `/var/x` and `/private/var/x` on macOS
+ * canonicalize to the same string, so a path compared by equality has to be canonical on both
+ * sides.
+ */
+export function canonicalizePath(value: string): string {
+  const absolute = nodePath.resolve(value);
+  const missing: string[] = [];
+  let existing = absolute;
+  for (;;) {
+    try {
+      return nodePath.join(realpathSync(existing), ...missing);
+    } catch {
+      const parent = nodePath.dirname(existing);
+      if (parent === existing) return absolute;
+      missing.unshift(nodePath.basename(existing));
+      existing = parent;
+    }
+  }
+}
+
 export function normalizePathForIdentity(value: string): string {
   const canonicalPath = resolveRealpathVariants(value)[0] ?? value;
   return normalizePathForComparison(canonicalPath, looksLikeDefiniteWindowsPath(canonicalPath));

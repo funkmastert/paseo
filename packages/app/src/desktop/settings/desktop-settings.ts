@@ -11,6 +11,8 @@ import { i18n } from "@/i18n/i18next";
 
 const DESKTOP_SETTINGS_QUERY_KEY = ["desktop-settings"] as const;
 
+export type KeepDisplayAwake = "always" | "on-power-adapter" | "never";
+
 export interface DesktopSettings {
   releaseChannel: ReleaseChannel;
   notifications: {
@@ -20,12 +22,17 @@ export interface DesktopSettings {
     manageBuiltInDaemon: boolean;
     keepRunningAfterQuit: boolean;
   };
+  power: {
+    keepAwake: boolean;
+    keepDisplayAwake: KeepDisplayAwake;
+  };
 }
 
 export interface DesktopSettingsPatch {
   releaseChannel?: ReleaseChannel;
   notifications?: Partial<DesktopSettings["notifications"]>;
   daemon?: Partial<DesktopSettings["daemon"]>;
+  power?: Partial<DesktopSettings["power"]>;
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
@@ -36,6 +43,10 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   daemon: {
     manageBuiltInDaemon: true,
     keepRunningAfterQuit: false,
+  },
+  power: {
+    keepAwake: true,
+    keepDisplayAwake: "always",
   },
 };
 
@@ -153,6 +164,7 @@ function parseDesktopSettings(raw: unknown): DesktopSettings {
   const record = isRecord(raw) ? raw : {};
   const notifications = isRecord(record.notifications) ? record.notifications : {};
   const daemon = isRecord(record.daemon) ? record.daemon : {};
+  const power = isRecord(record.power) ? record.power : {};
 
   return {
     releaseChannel: record.releaseChannel === "beta" ? "beta" : "stable",
@@ -172,7 +184,20 @@ function parseDesktopSettings(raw: unknown): DesktopSettings {
           ? daemon.keepRunningAfterQuit
           : DEFAULT_DESKTOP_SETTINGS.daemon.keepRunningAfterQuit,
     },
+    power: {
+      keepAwake:
+        typeof power.keepAwake === "boolean"
+          ? power.keepAwake
+          : DEFAULT_DESKTOP_SETTINGS.power.keepAwake,
+      keepDisplayAwake: isKeepDisplayAwake(power.keepDisplayAwake)
+        ? power.keepDisplayAwake
+        : DEFAULT_DESKTOP_SETTINGS.power.keepDisplayAwake,
+    },
   };
+}
+
+function isKeepDisplayAwake(value: unknown): value is KeepDisplayAwake {
+  return value === "always" || value === "on-power-adapter" || value === "never";
 }
 
 function mergeDesktopSettings(
@@ -189,6 +214,10 @@ function mergeDesktopSettings(
       ...current.daemon,
       ...updates.daemon,
     },
+    power: {
+      ...current.power,
+      ...updates.power,
+    },
   };
 }
 
@@ -197,6 +226,7 @@ function normalizePatch(updates: DesktopSettingsPatch): Record<string, unknown> 
     ...(updates.releaseChannel ? { releaseChannel: updates.releaseChannel } : {}),
     ...(updates.notifications ? { notifications: updates.notifications } : {}),
     ...(updates.daemon ? { daemon: updates.daemon } : {}),
+    ...(updates.power ? { power: updates.power } : {}),
   };
 }
 

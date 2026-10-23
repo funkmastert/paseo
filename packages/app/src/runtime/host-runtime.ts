@@ -1507,12 +1507,25 @@ export class HostRuntimeStore {
           shouldPersistHosts = true;
         }
       }
-      this.hosts = profiles;
-      this.replicaCache.setHosts(profiles.map((profile) => profile.serverId));
-      projectIconCache.setHosts(profiles.map((profile) => profile.serverId));
+      // A host can be added (e.g. a pairing-offer fragment ingested by
+      // OfferLinkListener on the very first page load) while this disk read
+      // is still in flight. Merge rather than overwrite so that in-memory
+      // addition isn't clobbered by the stale snapshot this read started
+      // with -- otherwise the host lands in storage but the live session
+      // never adopts it until a fresh reload re-reads the now-updated disk.
+      const storedIds = new Set(profiles.map((profile) => profile.serverId));
+      const concurrentlyAdded = this.hosts.filter((host) => !storedIds.has(host.serverId));
+      const mergedProfiles =
+        concurrentlyAdded.length > 0 ? [...profiles, ...concurrentlyAdded] : profiles;
+      if (concurrentlyAdded.length > 0) {
+        shouldPersistHosts = true;
+      }
+      this.hosts = mergedProfiles;
+      this.replicaCache.setHosts(mergedProfiles.map((profile) => profile.serverId));
+      projectIconCache.setHosts(mergedProfiles.map((profile) => profile.serverId));
       await projectIconCache.restore();
-      this.syncHosts(profiles);
-      for (const profile of profiles) {
+      this.syncHosts(mergedProfiles);
+      for (const profile of mergedProfiles) {
         void this.directorySyncByServer
           .get(profile.serverId)
           ?.restoreCachedDirectory()
@@ -2166,7 +2179,7 @@ export class HostRuntimeStore {
       // good (the daemon dedupes by snapshot fingerprint). Mark the caches stale so active
       // queries refetch now and evicted ones on their next mount.
       void invalidateCheckoutGitQueriesForServer(queryClient, serverId);
-      invalidateServerDataQueriesAfterReconnect({ queryClient, serverId });
+      invalidateServerDataQueriesAfterReconnect({ queryClient, serverId, client: snapshot.client });
       void queryClient.invalidateQueries({ queryKey: schedulesQueryBaseKey });
     }
   }

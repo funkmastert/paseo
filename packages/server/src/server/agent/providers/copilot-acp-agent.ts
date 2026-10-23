@@ -7,6 +7,7 @@ import {
   resolveProviderLaunch,
   type ProviderRuntimeSettings,
 } from "../provider-launch-config.js";
+import type { DeviceLaunchGate } from "../device-lease-manager.js";
 import {
   ACPAgentClient,
   type ACPConfigFeatureOption,
@@ -76,6 +77,8 @@ export const COPILOT_MODES: AgentMode[] = [
 interface CopilotACPAgentClientOptions {
   logger: Logger;
   runtimeSettings?: ProviderRuntimeSettings;
+  /** The device cap's launch gate; ACP is gated at the terminal and the permission request. */
+  deviceLaunchGate?: DeviceLaunchGate;
 }
 
 export class CopilotACPAgentClient extends ACPAgentClient {
@@ -84,6 +87,7 @@ export class CopilotACPAgentClient extends ACPAgentClient {
       provider: "copilot",
       logger: options.logger,
       runtimeSettings: options.runtimeSettings,
+      deviceLaunchGate: options.deviceLaunchGate,
       defaultCommand: ["copilot", "--acp"],
       defaultModes: COPILOT_MODES,
       sessionResponseTransformer: transformCopilotSessionResponse,

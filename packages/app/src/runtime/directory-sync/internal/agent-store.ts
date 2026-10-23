@@ -12,6 +12,10 @@ import { useDraftStore } from "@/stores/draft-store";
 import { getInitDeferred, getInitKey, rejectInitDeferred } from "@/utils/agent-initialization";
 import { reduceTurnLiveness, type TurnLivenessTransition } from "@/timeline/turn-liveness";
 
+type PendingPermissionMap = NonNullable<
+  ReturnType<typeof useSessionStore.getState>["sessions"][string]
+>["pendingPermissions"];
+
 function mergeSnapshotTurn(previous: Agent | undefined, incoming: Agent): Agent {
   if (!previous) return incoming;
   const activeTurn =
@@ -132,12 +136,23 @@ export class AgentStoreProjection {
   }
 
   replacePendingPermissions(agent: Agent): void {
-    const pending = new Map(useSessionStore.getState().sessions[this.serverId]?.pendingPermissions);
-    for (const [key, entry] of pending) if (entry.agentId === agent.id) pending.delete(key);
-    for (const request of agent.pendingPermissions) {
+    const current: PendingPermissionMap =
+      useSessionStore.getState().sessions[this.serverId]?.pendingPermissions ?? new Map();
+    const existingKeys: string[] = [];
+    for (const [key, entry] of current) if (entry.agentId === agent.id) existingKeys.push(key);
+    const nextEntries = agent.pendingPermissions.map((request) => {
       const key = derivePendingPermissionKey(agent.id, request);
-      pending.set(key, { key, agentId: agent.id, request });
-    }
+      return { key, entry: { key, agentId: agent.id, request } };
+    });
+    // Every live agent update passes through here, and most carry no permission change at all.
+    // Committing a fresh Map regardless forced a store-wide notification per streaming tick.
+    const unchanged =
+      existingKeys.length === nextEntries.length &&
+      nextEntries.every(({ key, entry }) => equal(current.get(key)?.request, entry.request));
+    if (unchanged) return;
+    const pending = new Map(current);
+    for (const key of existingKeys) pending.delete(key);
+    for (const { key, entry } of nextEntries) pending.set(key, entry);
     useSessionStore.getState().setPendingPermissions(this.serverId, pending);
   }
 

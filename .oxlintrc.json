@@ -3,7 +3,7 @@
   "options": {
     "typeAware": false
   },
-  "ignorePatterns": [".dev/**"],
+  "ignorePatterns": [".dev/**", "plugins/claude-account-pool/**", "ops/**"],
   "plugins": ["react", "react-perf", "unicorn", "typescript", "oxc", "import", "promise"],
   "categories": {
     "correctness": "error",
@@ -84,6 +84,9 @@
     "max-nested-callbacks": ["error", { "max": 3 }]
   },
   "overrides": [
+    // Every no-restricted-imports block below carries the same `.js` pattern: a later matching
+    // override replaces an earlier one's rule config wholesale, so a block without it silently
+    // stops enforcing the ban for the files it matches.
     {
       "files": ["packages/app/src/**/*.{ts,tsx}"],
       "rules": {
@@ -93,6 +96,12 @@
         "no-restricted-imports": [
           "error",
           {
+            "patterns": [
+              {
+                "regex": "^(\\.{1,2}/|@/).*\\.js$",
+                "message": "Drop the .js extension: Metro cannot resolve it to the .ts file (docs/solutions/build-errors/metro-cannot-resolve-js-suffix-imports.md)."
+              }
+            ],
             "paths": [
               {
                 "name": "react-native",
@@ -124,6 +133,12 @@
         "no-restricted-imports": [
           "error",
           {
+            "patterns": [
+              {
+                "regex": "^(\\.{1,2}/|@/).*\\.js$",
+                "message": "Drop the .js extension: Metro cannot resolve it to the .ts file (docs/solutions/build-errors/metro-cannot-resolve-js-suffix-imports.md)."
+              }
+            ],
             "paths": [
               {
                 "name": "react-native",
@@ -176,6 +191,12 @@
         "no-restricted-imports": [
           "error",
           {
+            "patterns": [
+              {
+                "regex": "^(\\.{1,2}/|@/).*\\.js$",
+                "message": "Drop the .js extension: Metro cannot resolve it to the .ts file (docs/solutions/build-errors/metro-cannot-resolve-js-suffix-imports.md)."
+              }
+            ],
             "paths": [
               {
                 "name": "react-native",
@@ -268,6 +289,12 @@
         "no-restricted-imports": [
           "error",
           {
+            "patterns": [
+              {
+                "regex": "^(\\.{1,2}/|@/).*\\.js$",
+                "message": "Drop the .js extension: Metro cannot resolve it to the .ts file (docs/solutions/build-errors/metro-cannot-resolve-js-suffix-imports.md)."
+              }
+            ],
             "paths": [
               {
                 "name": "react-native",
@@ -298,6 +325,12 @@
         "no-restricted-imports": [
           "error",
           {
+            "patterns": [
+              {
+                "regex": "^(\\.{1,2}/|@/).*\\.js$",
+                "message": "Drop the .js extension: Metro cannot resolve it to the .ts file (docs/solutions/build-errors/metro-cannot-resolve-js-suffix-imports.md)."
+              }
+            ],
             "paths": [
               {
                 "name": "react-native",
@@ -315,7 +348,17 @@
         "packages/app/src/agent-stream/scroll-keyboard-dismiss/use-scroll-keyboard-dismiss.ts"
       ],
       "rules": {
-        "no-restricted-imports": "off"
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "regex": "^(\\.{1,2}/|@/).*\\.js$",
+                "message": "Drop the .js extension: Metro cannot resolve it to the .ts file (docs/solutions/build-errors/metro-cannot-resolve-js-suffix-imports.md)."
+              }
+            ]
+          }
+        ]
       }
     },
     {

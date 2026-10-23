@@ -429,6 +429,48 @@ function giteaMergeStatus(
   };
 }
 
+describe("createGiteaService concurrent polls of one repository", () => {
+  it("shares one open-PR list between worktrees of the same remote instead of one tea process each", async () => {
+    let releaseList: (() => void) | undefined;
+    const listGate = new Promise<void>((resolve) => {
+      releaseList = resolve;
+    });
+    const { service, calls } = makeService(async (args) => {
+      if (args[0] === "pr" && args[1] === "list") {
+        await listGate;
+        return ok(JSON.stringify([OPEN_PR]));
+      }
+      if (args[0] === "pr" && args[1] === "5") return ok(JSON.stringify(STATUS_PR_VIEW));
+      if (args[0] === "api") return ok(JSON.stringify(SAMPLE_COMBINED_STATUS));
+      throw new Error(`unexpected call: ${args.join(" ")}`);
+    });
+
+    const polls = ["/repo-a", "/repo-b", "/repo-c"].map((cwd) =>
+      service.getCurrentPullRequestStatus({ cwd, headRef: "feat/sample-change" }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    releaseList?.();
+    const statuses = await Promise.all(polls);
+
+    expect(statuses.map((status) => status?.number)).toEqual([5, 5, 5]);
+    expect(calls.filter((args) => args[0] === "pr" && args[1] === "list")).toHaveLength(1);
+  });
+
+  it("does not reuse a finished list, so a later poll sees new PRs", async () => {
+    const { service, calls } = makeService((args) => {
+      if (args[0] === "pr" && args[1] === "list") return ok(JSON.stringify([OPEN_PR]));
+      if (args[0] === "pr" && args[1] === "5") return ok(JSON.stringify(STATUS_PR_VIEW));
+      if (args[0] === "api") return ok(JSON.stringify(SAMPLE_COMBINED_STATUS));
+      throw new Error(`unexpected call: ${args.join(" ")}`);
+    });
+
+    await service.getCurrentPullRequestStatus({ cwd: "/repo-a", headRef: "feat/sample-change" });
+    await service.getCurrentPullRequestStatus({ cwd: "/repo-a", headRef: "feat/sample-change" });
+
+    expect(calls.filter((args) => args[0] === "pr" && args[1] === "list")).toHaveLength(2);
+  });
+});
+
 describe("createGiteaService", () => {
   it("maps a tea pr list item to the neutral current PR status by head branch", async () => {
     const { service, calls } = makeService((args) => {
@@ -3040,5 +3082,116 @@ describe("detectGiteaFamilySoftware", () => {
       runTea: async () => ({ stdout: "[]", stderr: "" }),
     });
     expect(software).toBe("gitea");
+  });
+});
+
+describe("createGiteaService getPullRequestStatusByIdentity", () => {
+  it("fetches a PR by explicit owner/repo/number, independent of the checkout's branch", async () => {
+    const { service, calls } = makeService((args) => {
+      if (args[0] === "api" && args[1] === "repos/acme/widgets/pulls/42") {
+        return ok(
+          JSON.stringify(
+            currentPullRequestApi({
+              number: 42,
+              state: "open",
+              headRef: "feat/widgets",
+              headSha: "4444444444444444444444444444444444444444",
+            }),
+          ),
+        );
+      }
+      if (args[0] === "pr" && args[1] === "42") {
+        return ok(JSON.stringify({ ...STATUS_PR_VIEW, index: 42, headSha: undefined }));
+      }
+      throw new Error(`unexpected call: ${args.join(" ")}`);
+    });
+
+    const status = await service.getPullRequestStatusByIdentity?.({
+      cwd: "/repo",
+      repoOwner: "acme",
+      repoName: "widgets",
+      number: 42,
+    });
+
+    expect(status).toMatchObject({
+      number: 42,
+      url: "https://gitea.com/example-user/sample-repo/pulls/42",
+      state: "open",
+      isMerged: false,
+      repoOwner: "example-user",
+      repoName: "sample-repo",
+    });
+    expect(calls[0]).toEqual(["api", "repos/acme/widgets/pulls/42"]);
+  });
+
+  it("returns null for a 404 on the pulls collection item", async () => {
+    const { service } = makeService((args) => {
+      if (args[0] === "api" && args[1] === "repos/acme/widgets/pulls/999") {
+        throw new Error("tea: HTTP 404 Not Found");
+      }
+      throw new Error(`unexpected call: ${args.join(" ")}`);
+    });
+
+    const status = await service.getPullRequestStatusByIdentity?.({
+      cwd: "/repo",
+      repoOwner: "acme",
+      repoName: "widgets",
+      number: 999,
+    });
+
+    expect(status).toBeNull();
+  });
+
+  it("does not swallow a non-404 error whose text happens to say 'not found'", async () => {
+    const { service } = makeService(() => {
+      throw new Error("mirror sync failed: upstream repository not found in configuration");
+    });
+
+    await expect(
+      service.getPullRequestStatusByIdentity?.({
+        cwd: "/repo",
+        repoOwner: "acme",
+        repoName: "widgets",
+        number: 42,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("loads checks from the already-fetched head sha instead of re-running `tea pr` in cwd", async () => {
+    const { service, calls } = makeService((args) => {
+      if (args[0] === "api" && args[1] === "repos/acme/widgets/pulls/42") {
+        return ok(
+          JSON.stringify(
+            currentPullRequestApi({
+              number: 42,
+              state: "open",
+              headRef: "feat/widgets",
+              headSha: "4444444444444444444444444444444444444444",
+            }),
+          ),
+        );
+      }
+      if (
+        args[0] === "api" &&
+        args[1] ===
+          "repos/example-user/sample-repo/commits/4444444444444444444444444444444444444444/status"
+      ) {
+        return ok(JSON.stringify(SAMPLE_COMBINED_STATUS));
+      }
+      // `cwd` here belongs to whichever workspace is viewing this PR, not necessarily
+      // acme/widgets -- `tea pr 42` run there could resolve to a different repo's PR #42
+      // entirely, so the sha from the identity API fetch above must be used instead.
+      throw new Error(`unexpected call: ${args.join(" ")}`);
+    });
+
+    const status = await service.getPullRequestStatusByIdentity?.({
+      cwd: "/unrelated-repo",
+      repoOwner: "acme",
+      repoName: "widgets",
+      number: 42,
+    });
+
+    expect(calls.some((args) => args[0] === "pr")).toBe(false);
+    expect(status?.checksStatus).toBe("pending");
   });
 });

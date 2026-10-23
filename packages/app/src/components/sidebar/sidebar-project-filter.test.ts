@@ -28,6 +28,10 @@ function workspace(workspaceId: string, projectViewKey: string): SidebarWorkspac
     archiveUnpushedCommitCount: null,
     scripts: [],
     hasRunningScripts: false,
+    diskUsage: null,
+    completionState: null,
+    completionNote: null,
+    agentId: null,
   };
 }
 

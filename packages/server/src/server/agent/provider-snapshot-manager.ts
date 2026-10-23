@@ -31,6 +31,9 @@ import type {
   AgentProviderRuntimeSettingsMap,
   ProviderOverride,
 } from "./provider-launch-config.js";
+import type { FileReadObserver } from "../jev/read-check/observer.js";
+import type { AskUserQuestionCheckOptions } from "./providers/claude/agent.js";
+import type { DeviceLaunchGate } from "./device-lease-manager.js";
 import {
   buildProviderRegistry,
   shutdownAgentClients,
@@ -116,6 +119,11 @@ export interface ProviderSnapshotManagerOptions {
   providerOverrides?: Record<string, ProviderOverride>;
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   managedProcesses?: ManagedProcessRegistry;
+  deviceLaunchGate?: DeviceLaunchGate;
+  /** The catastrophe gate's kill switch (docs/catastrophe-gate.md). Absent means on. */
+  isCatastropheGateEnabled?: () => boolean;
+  fileReadObserver?: FileReadObserver;
+  askUserQuestionCheck?: AskUserQuestionCheckOptions;
   isDev?: boolean;
   extraClients?: Partial<Record<AgentProvider, AgentClient>>;
   refreshTimeoutMs?: number;
@@ -245,6 +253,10 @@ export class ProviderSnapshotManager {
   private readonly logger: Logger;
   private readonly workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   private readonly managedProcesses?: ManagedProcessRegistry;
+  private readonly deviceLaunchGate?: DeviceLaunchGate;
+  private readonly isCatastropheGateEnabled?: () => boolean;
+  private readonly fileReadObserver?: FileReadObserver;
+  private readonly askUserQuestionCheck?: AskUserQuestionCheckOptions;
   private readonly openCodeBridge?: OpenCodeBridge;
   private readonly isDev: boolean;
   private readonly extraClients: Partial<Record<AgentProvider, AgentClient>>;
@@ -263,6 +275,10 @@ export class ProviderSnapshotManager {
     );
     this.workspaceGitService = options.workspaceGitService;
     this.managedProcesses = options.managedProcesses;
+    this.deviceLaunchGate = options.deviceLaunchGate;
+    this.isCatastropheGateEnabled = options.isCatastropheGateEnabled;
+    this.fileReadObserver = options.fileReadObserver;
+    this.askUserQuestionCheck = options.askUserQuestionCheck;
     this.openCodeBridge = options.openCodeBridge;
     this.isDev = options.isDev === true;
     this.extraClients = options.extraClients ?? {};
@@ -691,6 +707,10 @@ export class ProviderSnapshotManager {
       workspaceGitService: this.workspaceGitService,
       managedProcesses: this.managedProcesses,
       openCodeBridge: this.openCodeBridge,
+      deviceLaunchGate: this.deviceLaunchGate,
+      isCatastropheGateEnabled: this.isCatastropheGateEnabled,
+      fileReadObserver: this.fileReadObserver,
+      askUserQuestionCheck: this.askUserQuestionCheck,
       isDev: this.isDev,
     });
 
@@ -840,6 +860,7 @@ export class ProviderSnapshotManager {
           description: definition.description,
           iconSvg: definition.iconSvg,
           defaultModeId: definition.defaultModeId ?? null,
+          derivedFromProviderId: definition.derivedFromProviderId,
         }),
       });
     }

@@ -8,6 +8,8 @@ export interface AgentAttentionNotificationData {
   workspaceId?: string;
   agentId: string;
   reason: AgentAttentionReason;
+  /** A root agent's `finished` asked something in plain text instead of through AskUserQuestion. */
+  isQuestion?: boolean;
 }
 
 export interface AgentAttentionNotificationPayload {
@@ -23,6 +25,8 @@ interface BuildAgentAttentionNotificationPayloadInput {
   agentId: string;
   assistantMessage?: string | null;
   permissionRequest?: NotificationPermissionRequest | null;
+  /** Only meaningful with `reason: "finished"`. Changes the title and keeps the push an alert. */
+  isQuestion?: boolean;
 }
 
 export interface NotificationPermissionRequest {
@@ -169,9 +173,13 @@ export function findLatestPermissionRequest(
   return latest;
 }
 
-function resolveAgentAttentionTitle(reason: AgentAttentionReason): string {
+function resolveAgentAttentionTitle(
+  reason: AgentAttentionReason,
+  isQuestion: boolean | undefined,
+): string {
   if (reason === "permission") return "Agent needs permission";
   if (reason === "error") return "Agent needs attention";
+  if (isQuestion) return "Agent has a question";
   return "Agent finished";
 }
 
@@ -196,7 +204,8 @@ function resolveAgentAttentionFallbackBody(reason: AgentAttentionReason): string
 export function buildAgentAttentionNotificationPayload(
   input: BuildAgentAttentionNotificationPayloadInput,
 ): AgentAttentionNotificationPayload {
-  const title = resolveAgentAttentionTitle(input.reason);
+  const isQuestion = input.reason === "finished" && input.isQuestion === true;
+  const title = resolveAgentAttentionTitle(input.reason, isQuestion);
   const preview = resolveAgentAttentionPreview(input);
   const body = preview ?? resolveAgentAttentionFallbackBody(input.reason);
 
@@ -208,6 +217,7 @@ export function buildAgentAttentionNotificationPayload(
       workspaceId: input.workspaceId,
       agentId: input.agentId,
       reason: input.reason,
+      ...(isQuestion ? { isQuestion: true } : {}),
     },
   };
 }

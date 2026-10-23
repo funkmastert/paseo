@@ -1,21 +1,35 @@
 import type { Command } from "commander";
 import { createRequire } from "node:module";
-import { getOrCreateServerId, findExecutable, execCommand } from "@getpaseo/server";
-import { connectToDaemon } from "../../utils/client.js";
+import {
+  getOrCreateServerId,
+  findExecutable,
+  execCommand,
+  readDaemonVitals,
+  deriveVitalsVerdict,
+  describeVitalsVerdict,
+  lastWedge,
+  readLastShutdownReceipt,
+} from "@getpaseo/server";
+import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
 import type { CommandOptions, ListResult, OutputSchema } from "../../output/index.js";
 import { resolveLocalDaemonState } from "./local-daemon.js";
 import { resolveNodePathFromPid } from "./runtime-toolchain.js";
 
-const DAEMON_STATUS_PROBE_TIMEOUT_MS = 1500;
+// Matches doctor.ts's `getDaemonStatus({ timeout: 5000 })`: the daemon answers this by probing
+// every registered provider's `isAvailable()` live (no caching), and at least one of those checks
+// (Codex, discovered via a real subprocess `--version` probe of the ChatGPT-bundled binary) can
+// take close to 2s on a cold run. A tighter budget here timed out reliably and silently fell back
+// to checkProviderBinaries() below, which answers a different question (PATH-only).
+export const DAEMON_STATUS_PROBE_TIMEOUT_MS = 5000;
 
-interface ProviderBinaryStatus {
+export interface ProviderBinaryStatus {
   label: string;
   path: string | null;
   version: string | null;
   source?: "daemon" | "local";
 }
 
-interface DaemonStatus {
+export interface DaemonStatus {
   serverId: string | null;
   localDaemon: "running" | "stopped" | "stale_pid" | "unresponsive";
   connectedDaemon: "reachable" | "unreachable" | "auth_required" | "auth_failed" | "not_probed";
@@ -32,6 +46,10 @@ interface DaemonStatus {
   cliVersion: string;
   daemonVersion: string | null;
   desktopManaged: boolean;
+  /** From the daemon's heartbeat file, so it answers even when the websocket cannot. */
+  eventLoop: string | null;
+  lastWedge: string | null;
+  lastShutdown: string | null;
   providers: ProviderBinaryStatus[];
   note?: string;
 }
@@ -99,9 +117,14 @@ function createStatusSchema(status: DaemonStatus): OutputSchema<StatusRow> {
             if (item.value === "not_probed" || item.value === "auth_required") return "yellow";
             return "red";
           }
+          if (item.key === "Event Loop") {
+            if (item.value === "healthy") return "green";
+            if (item.value === "not reporting") return undefined;
+            return "yellow";
+          }
           if (item.key.startsWith("  ")) {
-            if (item.value === "not found" || item.value === "not found (daemon)") return "red";
-            if (item.value.endsWith("(--version failed)")) return "yellow";
+            if (item.value.startsWith("not found")) return "red";
+            if (item.value.includes("(--version failed)")) return "yellow";
             return "green";
           }
           return undefined;
@@ -112,7 +135,13 @@ function createStatusSchema(status: DaemonStatus): OutputSchema<StatusRow> {
   };
 }
 
-function toStatusRows(status: DaemonStatus): StatusRow[] {
+function formatProviderValue(path: string | null, version: string | null, suffix: string): string {
+  if (!path) return `not found${suffix}`;
+  if (!version) return `${path} (--version failed)${suffix}`;
+  return `${path} (${version})${suffix}`;
+}
+
+export function toStatusRows(status: DaemonStatus): StatusRow[] {
   const rows: StatusRow[] = [
     { key: "Server ID", value: status.serverId ?? "-" },
     { key: "Local Daemon", value: status.localDaemon },
@@ -131,6 +160,10 @@ function toStatusRows(status: DaemonStatus): StatusRow[] {
     { key: "Daemon Version", value: status.daemonVersion ?? "-" },
   ];
 
+  if (status.eventLoop) rows.push({ key: "Event Loop", value: status.eventLoop });
+  if (status.lastWedge) rows.push({ key: "Last Wedge", value: status.lastWedge });
+  if (status.lastShutdown) rows.push({ key: "Last Shutdown", value: status.lastShutdown });
+
   if (status.note) {
     rows.push({ key: "Note", value: status.note });
   }
@@ -144,12 +177,15 @@ function toStatusRows(status: DaemonStatus): StatusRow[] {
       } else {
         rows.push({ key: `  ${provider.label}`, value: `${provider.path} (daemon)` });
       }
-    } else if (!provider.path) {
-      rows.push({ key: `  ${provider.label}`, value: "not found" });
-    } else if (!provider.version) {
-      rows.push({ key: `  ${provider.label}`, value: `${provider.path} (--version failed)` });
     } else {
-      rows.push({ key: `  ${provider.label}`, value: `${provider.path} (${provider.version})` });
+      // No daemon-sourced answer reached this (the daemon detail request failed or was never
+      // made): this is checkProviderBinaries()'s own PATH-only check, a materially narrower
+      // question than the daemon's live availability probe. Tag every row so it never reads like
+      // the daemon's own answer.
+      rows.push({
+        key: `  ${provider.label}`,
+        value: formatProviderValue(provider.path, provider.version, " (local)"),
+      });
     }
   }
 
@@ -179,11 +215,11 @@ async function checkProviderBinary(
   }
 }
 
-async function checkProviderBinaries(): Promise<ProviderBinaryStatus[]> {
+export async function checkProviderBinaries(): Promise<ProviderBinaryStatus[]> {
   const results = await Promise.all(
     PROVIDER_BINARIES.map(async ({ label, binary }) => {
       const result = await checkProviderBinary(binary);
-      return Object.assign({ label }, result);
+      return Object.assign({ label, source: "local" as const }, result);
     }),
   );
   return results;
@@ -378,7 +414,78 @@ export function selectRelayStatus(input: {
   return `${scheme}://${relay.publicEndpoint}`;
 }
 
+interface VitalsRows {
+  eventLoop: string | null;
+  lastWedge: string | null;
+  lastShutdown: string | null;
+  /** The loop is slow, wedged or silent: the reason a probe may have timed out. */
+  blocked: boolean;
+}
+
+/**
+ * Reads the heartbeat file and the shutdown receipt straight off disk. "Slow" and "wedged" come
+ * from the loop metric the daemon's watchdog thread keeps current, never from how long a probe
+ * waited, so a busy daemon is not reported down.
+ */
+export function resolveVitalsRows(input: {
+  home: string;
+  running: boolean;
+  /** When the running daemon's supervisor started. The worker, and its file, start after it. */
+  daemonStartedAt: string | null;
+}): VitalsRows {
+  const read = readDaemonVitals(input.home);
+  // A file from an earlier run (this one has the vitals off) describes a process that is gone.
+  // The pid file names the supervisor and the file names the worker, so compare start times.
+  const file =
+    read.status === "ok" && !isBefore(read.file.startedAt, input.daemonStartedAt)
+      ? read.file
+      : null;
+  const verdict = input.running ? deriveVitalsVerdict(file, Date.now()) : null;
+  const wedge = lastWedge(file);
+  const shutdown = readLastShutdownReceipt(input.home, input.running);
+  return {
+    eventLoop: verdict && verdict.state !== "stopped" ? describeVitalsVerdict(verdict) : null,
+    lastWedge:
+      input.running && wedge
+        ? `${wedge.endedAt} (${Math.round(wedge.blockedMs / 1000)}s, ${wedge.cause})`
+        : null,
+    lastShutdown:
+      shutdown.status === "ok"
+        ? `${shutdown.receipt.outcome} (${shutdown.receipt.reason}) at ${shutdown.receipt.completedAt}`
+        : null,
+    blocked:
+      verdict !== null &&
+      (verdict.state === "slow" || verdict.state === "wedged" || verdict.state === "silent"),
+  };
+}
+
+function isBefore(candidate: string, reference: string | null): boolean {
+  if (reference === null) return false;
+  const candidateMs = Date.parse(candidate);
+  const referenceMs = Date.parse(reference);
+  return Number.isFinite(candidateMs) && Number.isFinite(referenceMs) && candidateMs < referenceMs;
+}
+
+function describeBlockedLoop(
+  localDaemon: DaemonStatus["localDaemon"],
+  vitals: VitalsRows,
+): string | undefined {
+  if (localDaemon !== "unresponsive" || !vitals.blocked) return undefined;
+  return `Event loop: ${vitals.eventLoop}. The process is alive, not down`;
+}
+
 export type StatusResult = ListResult<StatusRow>;
+
+/**
+ * Which daemon this invocation should probe: --host/PASEO_HOST, the same precedence every other
+ * command uses (utils/client.ts's getDaemonHost), never state.listen. `state.listen` reflects the
+ * local supervised daemon's own persisted listen config (deliberately scrubbed of env overrides
+ * for display, see resolveLocalDaemonState) and says nothing about which daemon this invocation
+ * was told to talk to.
+ */
+export function resolveDaemonProbeTarget(options: { host?: string }): string {
+  return getDaemonHost({ host: options.host }).trim();
+}
 
 export async function runStatusCommand(
   options: CommandOptions,
@@ -386,7 +493,7 @@ export async function runStatusCommand(
 ): Promise<StatusResult> {
   const home = typeof options.home === "string" ? options.home : undefined;
   const state = resolveLocalDaemonState({ home });
-  const daemonTarget = state.listen.trim();
+  const daemonTarget = resolveDaemonProbeTarget(options);
 
   const owner = resolveOwnerLabel(state.pidInfo?.uid, state.pidInfo?.hostname);
   let daemonNode = await resolveDaemonNodeLabel(state);
@@ -433,6 +540,13 @@ export async function runStatusCommand(
     note = appendNote(note, serverIdResult.error);
   }
 
+  const vitals = resolveVitalsRows({
+    home: state.home,
+    running: state.running,
+    daemonStartedAt: state.pidInfo?.startedAt ?? null,
+  });
+  note = appendNote(note, describeBlockedLoop(localDaemon, vitals));
+
   const providers = daemonProviders ?? (await checkProviderBinaries());
 
   const daemonStatus: DaemonStatus = {
@@ -452,6 +566,9 @@ export async function runStatusCommand(
     cliVersion,
     daemonVersion,
     desktopManaged: state.pidInfo?.desktopManaged === true,
+    eventLoop: vitals.eventLoop,
+    lastWedge: vitals.lastWedge,
+    lastShutdown: vitals.lastShutdown,
     providers,
     note,
   };

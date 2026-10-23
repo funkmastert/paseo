@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
-import { Heart } from "lucide-react-native";
+import { Bug, Heart } from "lucide-react-native";
 import { Button } from "@/components/ui/button";
 import { GitHubIcon } from "@/components/icons/github-icon";
 import { DiscordIcon } from "@/components/icons/discord-icon";
@@ -21,6 +21,10 @@ export function CommunityLinks() {
 
   const handleOpenDiscord = useCallback(() => {
     void openExternalUrl("https://discord.gg/jz8T2uahpH");
+  }, []);
+
+  const handleReportIssue = useCallback(() => {
+    void openExternalUrl("https://github.com/getpaseo/paseo/issues/new");
   }, []);
 
   return (
@@ -51,6 +55,15 @@ export function CommunityLinks() {
         testID="community-links-discord"
       >
         Community
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        leftIcon={Bug}
+        onPress={handleReportIssue}
+        testID="community-links-report-issue"
+      >
+        Report issue
       </Button>
     </View>
   );

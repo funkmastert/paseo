@@ -25,6 +25,7 @@ import { HostPicker } from "@/components/hosts/host-picker";
 import { SidebarDisplayPreferencesMenu } from "@/components/sidebar/display-preferences/menu";
 import { SidebarNavRows } from "@/components/sidebar/sidebar-nav-rows";
 import { SidebarHelpMenu } from "@/components/sidebar/sidebar-help-menu";
+import { useSidebarAgentRolesTarget } from "@/components/sidebar/use-sidebar-agent-roles-target";
 import { SidebarResizeHandle } from "@/components/sidebar-resize-handle";
 import { Shortcut } from "@/components/ui/shortcut";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -49,6 +50,11 @@ import { useCloseAgentListGesture } from "@/mobile-panels/gestures";
 import { MobilePanelOverlay } from "@/mobile-panels/presentation";
 import { buildSettingsAddHostRoute, buildSettingsRoute } from "@/utils/host-routes";
 import { openHostOverview } from "@/navigation/settings-navigation";
+import { McpStatusStrip } from "@/mcp-status/mcp-status-strip";
+import { DeviceStatusStrip } from "@/device-status/device-status-strip";
+import { RestartRecoveryStrip } from "@/restart-recovery/restart-recovery-strip";
+import { resolvePluginIcon } from "@/plugins/icons";
+import { buildPluginSettingsRoute } from "@/plugins/settings/routes";
 import { SidebarAgentListSkeleton } from "./sidebar-agent-list-skeleton";
 import { SidebarCalloutSlot } from "./sidebar-callout-slot";
 import { SidebarWorkspaceList } from "./sidebar-workspace-list";
@@ -449,6 +455,7 @@ function SidebarFooter({
   labels,
   handleAddHost,
   handleOpenHostSettings,
+  closeSidebar,
 }: {
   theme: SidebarTheme;
   handleOpenProject: () => void;
@@ -463,6 +470,8 @@ function SidebarFooter({
   };
   handleAddHost: () => void;
   handleOpenHostSettings: (serverId: string) => void;
+  /** Present only on the phone overlay: the two buttons below navigate and close it behind them. */
+  closeSidebar?: () => void;
 }) {
   const newAgentKeys = useShortcutKeys("new-agent");
   const settingsKeys = useShortcutKeys("toggle-settings");
@@ -489,7 +498,7 @@ function SidebarFooter({
           icon={Import}
           theme={theme}
         />
-        <SidebarHelpMenu />
+        <SidebarSupportSlot theme={theme} closeSidebar={closeSidebar} />
         <FooterIconButton
           onPress={handleSettings}
           testID="sidebar-settings"
@@ -500,6 +509,43 @@ function SidebarFooter({
         />
       </View>
     </View>
+  );
+}
+
+const AGENT_ROLES_LABEL = "Agent roles";
+
+/**
+ * The footer slot next to the settings gear: the active host's Agent Model
+ * Policy screen (claude-account-pool) when it's available, else the Help
+ * and Support menu. Keeps the footer from ever showing a dead button for a
+ * stock host, an older daemon, or a disconnected one.
+ */
+function SidebarSupportSlot({
+  theme,
+  closeSidebar,
+}: {
+  theme: SidebarTheme;
+  closeSidebar?: () => void;
+}) {
+  const rolesTarget = useSidebarAgentRolesTarget();
+  const openAgentRoles = useCallback(() => {
+    if (!rolesTarget) return;
+    closeSidebar?.();
+    router.push(
+      buildPluginSettingsRoute(rolesTarget.serverId, rolesTarget.pluginId, rolesTarget.screenId),
+    );
+  }, [rolesTarget, closeSidebar]);
+
+  if (!rolesTarget) return <SidebarHelpMenu />;
+
+  return (
+    <FooterIconButton
+      onPress={openAgentRoles}
+      testID="sidebar-agent-roles"
+      label={AGENT_ROLES_LABEL}
+      icon={resolvePluginIcon(rolesTarget.icon)}
+      theme={theme}
+    />
   );
 }
 
@@ -602,6 +648,10 @@ function MobileSidebar({
           />
         )}
 
+        <RestartRecoveryStrip />
+        <DeviceStatusStrip />
+        <McpStatusStrip />
+
         <SidebarFooter
           theme={theme}
           handleOpenProject={handleOpenProject}
@@ -610,6 +660,7 @@ function MobileSidebar({
           labels={labels}
           handleAddHost={handleAddHost}
           handleOpenHostSettings={handleOpenHostSettings}
+          closeSidebar={closeSidebar}
         />
       </View>
     </MobilePanelOverlay>
@@ -778,6 +829,9 @@ function DesktopSidebar({
         )}
 
         <SidebarCalloutSlot />
+        <RestartRecoveryStrip />
+        <DeviceStatusStrip />
+        <McpStatusStrip />
 
         <SidebarFooter
           theme={theme}

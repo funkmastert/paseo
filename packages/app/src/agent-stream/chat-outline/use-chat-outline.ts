@@ -3,6 +3,7 @@ import type { AgentTimelinePromptIndexPayload } from "@getpaseo/client/internal/
 import { isWeb } from "@/constants/platform";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
+import { isDraftId } from "@/stores/draft-keys";
 import { planTimelinePromptJump } from "@/timeline/timeline-sync-plan";
 import type { StreamItem } from "@/types/stream";
 import type { StreamViewportHandle } from "../strategy";
@@ -66,7 +67,8 @@ export function useChatOutline({
   const prompts = enabled ? (index?.prompts ?? NO_PROMPTS) : NO_PROMPTS;
 
   useEffect(() => {
-    if (!isWeb || !enabled) {
+    // A draft tab streams under its draft id until the agent exists; the daemon has no prompts for it.
+    if (!isWeb || !enabled || isDraftId(agentId)) {
       setIndex(null);
       return;
     }

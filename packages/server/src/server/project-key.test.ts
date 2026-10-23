@@ -90,6 +90,51 @@ describe("deriveProjectKey", () => {
     ).toBe("remote:github.com/getpaseo/paseo#subdir:packages/app");
   });
 
+  test("a worktree root with no mainRepoRoot and no remote keys by its own path, same as before this fix", () => {
+    const worktreeRoot = path.resolve("host-a", "worktrees", "unresolved-main-repo");
+
+    expect(
+      deriveProjectKey({
+        rootPath: worktreeRoot,
+        remoteUrl: null,
+        worktreeRoot,
+        mainRepoRoot: null,
+        serverId: "host-a",
+      }),
+    ).toBe(
+      deriveProjectKey({
+        rootPath: worktreeRoot,
+        remoteUrl: null,
+        worktreeRoot: null,
+        mainRepoRoot: null,
+        serverId: "host-a",
+      }),
+    );
+  });
+
+  test("groups a linked worktree opened at its own root under its main repo, for a local repo with no remote", () => {
+    const mainRepoRoot = path.resolve("host-a", "paseo");
+    const worktreeRoot = path.resolve("host-a", "worktrees", "fix-empty-project-noise");
+
+    expect(
+      deriveProjectKey({
+        rootPath: worktreeRoot,
+        remoteUrl: null,
+        worktreeRoot,
+        mainRepoRoot,
+        serverId: "host-a",
+      }),
+    ).toBe(
+      deriveProjectKey({
+        rootPath: mainRepoRoot,
+        remoteUrl: null,
+        worktreeRoot: mainRepoRoot,
+        mainRepoRoot: null,
+        serverId: "host-a",
+      }),
+    );
+  });
+
   test("groups the same subproject across different absolute checkout roots", () => {
     const remoteUrl = "git@github.com:getpaseo/paseo.git";
     const deriveSubproject = (worktreeRoot: string) =>
@@ -113,6 +158,7 @@ describe("deriveProjectGroupingDisplayName", () => {
         rootPath: path.resolve("repo"),
         remoteUrl: "git@github.com:getpaseo/paseo.git",
         worktreeRoot: path.resolve("repo"),
+        mainRepoRoot: null,
       }),
     ).toBe("getpaseo/paseo");
   });
@@ -123,6 +169,7 @@ describe("deriveProjectGroupingDisplayName", () => {
         rootPath: path.resolve("acme", "app"),
         remoteUrl: null,
         worktreeRoot: null,
+        mainRepoRoot: null,
       }),
     ).toBe("app");
   });
@@ -135,7 +182,29 @@ describe("deriveProjectGroupingDisplayName", () => {
         rootPath: path.join(worktreeRoot, "packages", "server"),
         remoteUrl: "git@github.com:acme/repo.git",
         worktreeRoot,
+        mainRepoRoot: null,
       }),
     ).toBe("server");
+  });
+
+  test("a linked worktree opened at its own root uses its main repo's display name", () => {
+    const mainRepoRoot = path.resolve("host-a", "paseo");
+    const worktreeRoot = path.resolve("host-a", "worktrees", "fix-empty-project-noise");
+
+    expect(
+      deriveProjectGroupingDisplayName({
+        rootPath: worktreeRoot,
+        remoteUrl: null,
+        worktreeRoot,
+        mainRepoRoot,
+      }),
+    ).toBe(
+      deriveProjectGroupingDisplayName({
+        rootPath: mainRepoRoot,
+        remoteUrl: null,
+        worktreeRoot: mainRepoRoot,
+        mainRepoRoot: null,
+      }),
+    );
   });
 });

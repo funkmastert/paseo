@@ -42,7 +42,12 @@ import { spawnProcess } from "./spawn.js";
 import { resolvePaseoHome } from "../server/paseo-home.js";
 import { createExternalProcessEnv } from "../server/paseo-env.js";
 import { parseGitRevParsePath, resolveGitRevParsePath } from "./git-rev-parse-path.js";
-import { expandTilde, getRealpathAwareRelativePath, isPathInsideRoot } from "./path.js";
+import {
+  canonicalizePath,
+  expandTilde,
+  getRealpathAwareRelativePath,
+  isPathInsideRoot,
+} from "./path.js";
 import { terminateWithTreeKill } from "./tree-kill.js";
 
 export { slugify, validateBranchSlug } from "@getpaseo/protocol/branch-slug";
@@ -828,6 +833,19 @@ export async function getGitCommonDir(cwd: string): Promise<string> {
   return commonDir;
 }
 
+/** The top of the specific worktree containing `cwd` (not the main checkout for a linked one). */
+export async function getGitWorktreeRoot(cwd: string): Promise<string> {
+  const { stdout } = await runGitCommand(["rev-parse", "--show-toplevel"], {
+    cwd,
+    envOverlay: READ_ONLY_GIT_ENV,
+  });
+  const root = resolveGitRevParsePath(cwd, stdout);
+  if (!root) {
+    throw new Error("Not in a git repository");
+  }
+  return root;
+}
+
 const WORKTREE_PROJECT_HASH_LENGTH = 8;
 
 function deriveShortAlphanumericHash(value: string): string {
@@ -1068,6 +1086,7 @@ export interface DeletePaseoWorktreeOptions {
   worktreesBaseRoot?: string;
 }
 
+/** Deletes a Paseo-owned worktree and returns the directory it removed, in canonical form. */
 export async function deletePaseoWorktree({
   cwd,
   worktreePath,
@@ -1076,7 +1095,7 @@ export async function deletePaseoWorktree({
   worktreesRoot,
   paseoHome,
   worktreesBaseRoot,
-}: DeletePaseoWorktreeOptions): Promise<void> {
+}: DeletePaseoWorktreeOptions): Promise<string> {
   if (!worktreePath && !worktreeSlug) {
     throw new Error("worktreePath or worktreeSlug is required");
   }
@@ -1099,8 +1118,11 @@ export async function deletePaseoWorktree({
     paseoHome,
     worktreesRoot: worktreesBaseRoot,
   });
-  const resolvedWorktree =
-    ownership.allowed && ownership.worktreePath ? ownership.worktreePath : resolvedRequested;
+  // Canonical, so the directory removed is the one its callers resolved and checked
+  // (canonicalizePath in utils/path.ts): the same string, not only the same directory.
+  const resolvedWorktree = canonicalizePath(
+    ownership.allowed && ownership.worktreePath ? ownership.worktreePath : resolvedRequested,
+  );
 
   const relativeWorktreePath = getRealpathAwareRelativePath(
     resolvedWorktreesRoot,
@@ -1142,6 +1164,7 @@ export async function deletePaseoWorktree({
       // not critical; git will prune lazily
     }
   }
+  return resolvedWorktree;
 }
 
 export async function rollbackCreatedPaseoWorktree(
