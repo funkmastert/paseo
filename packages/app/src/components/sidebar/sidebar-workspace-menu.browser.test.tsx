@@ -1,6 +1,7 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { page } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DropdownMenu } from "@/components/ui/dropdown-menu";
 import { ToastProvider } from "@/contexts/toast-context";
@@ -89,5 +90,17 @@ describe("SidebarWorkspaceMenuItems — Copy ID", () => {
       item.click();
     });
     expect(onCopyAgentId).toHaveBeenCalledTimes(1);
+  });
+
+  it("captures the menu with the Copy ID item visible", async () => {
+    const container = mount(
+      <DropdownMenu open>
+        <SidebarWorkspaceMenuItems surface="dropdown" workspaceKey="w1" onCopyAgentId={noop} />
+      </DropdownMenu>,
+    );
+    await page.screenshot({
+      element: container,
+      path: "../../../../.artifacts/sidebar-workspace-menu-copy-id.png",
+    });
   });
 });
