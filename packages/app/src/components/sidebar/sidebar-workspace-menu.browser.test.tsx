@@ -114,8 +114,13 @@ describe("SidebarWorkspaceMenuItems — Copy ID", () => {
     await vi.waitFor(() => {
       expect(document.body.textContent ?? "").toContain("Copy ID");
     });
+    const copyIdItem = document.querySelector(`[data-testid="${COPY_AGENT_ID_TESTID}"]`);
+    expect(copyIdItem).not.toBeNull();
+    const rect = (copyIdItem as HTMLElement).getBoundingClientRect();
+    expect(rect.width).toBeGreaterThan(0);
+    expect(rect.height).toBeGreaterThan(0);
     await page.screenshot({
-      path: "../../../../.artifacts/sidebar-workspace-menu-copy-id.png",
+      path: "../../../../../.artifacts/sidebar-workspace-menu-copy-id.png",
     });
   });
 });

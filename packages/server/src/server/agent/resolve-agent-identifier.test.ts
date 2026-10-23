@@ -42,7 +42,7 @@ function makeStoredAgentRecord(
   };
 }
 
-function makeManagedAgent(args: { id: string; cwd?: string }): ManagedAgent {
+function makeManagedAgent(args: { id: string; cwd?: string; internal?: boolean }): ManagedAgent {
   const provider = "claude";
   const cwd = args.cwd ?? "/tmp/project";
   const config: AgentSessionConfig = { provider, cwd };
@@ -72,7 +72,7 @@ function makeManagedAgent(args: { id: string; cwd?: string }): ManagedAgent {
     foregroundTurnWaiters: new Set(),
     finalizedForegroundTurnIds: new Set(),
     unsubscribeSession: null,
-    internal: false,
+    internal: args.internal ?? false,
     labels: {},
     lifecycle: "closed",
     session: null,
@@ -81,15 +81,19 @@ function makeManagedAgent(args: { id: string; cwd?: string }): ManagedAgent {
 }
 
 function makeDeps(args: { storedRecords?: StoredAgentRecord[]; liveAgents?: ManagedAgent[] }): {
-  agentStorage: Pick<AgentStorage, "list">;
-  agentManager: Pick<AgentManager, "listAgents">;
+  agentStorage: Pick<AgentStorage, "list" | "get">;
+  agentManager: Pick<AgentManager, "listAgents" | "getAgent">;
 } {
+  const storedRecords = args.storedRecords ?? [];
+  const liveAgents = args.liveAgents ?? [];
   return {
     agentStorage: {
-      list: async () => args.storedRecords ?? [],
+      list: async () => storedRecords,
+      get: async (id) => storedRecords.find((record) => record.id === id) ?? null,
     },
     agentManager: {
-      listAgents: () => args.liveAgents ?? [],
+      listAgents: () => liveAgents,
+      getAgent: (id) => liveAgents.find((agent) => agent.id === id) ?? null,
     },
   };
 }
@@ -130,11 +134,38 @@ test("reports ambiguous when a prefix matches multiple known ids", async () => {
     throw new Error("expected ambiguous result");
   }
   expect(result.error).toBe(
-    `Agent identifier "00000000-0000-4000-8000" is ambiguous (${first.id.slice(0, 8)}, ${second.id.slice(0, 8)})`,
+    `Agent identifier "00000000-0000-4000-8000" is ambiguous (${first.id}, ${second.id})`,
   );
 });
 
-test("truncates the ambiguous id list after 5 and appends an ellipsis", async () => {
+test("shows the shortest prefix that tells more than 5 candidates apart", async () => {
+  const records = [
+    makeStoredAgentRecord({ id: "00000000-0000-4000-8000-aaa000000000" }),
+    makeStoredAgentRecord({ id: "00000000-0000-4000-8000-bbb000000000" }),
+    makeStoredAgentRecord({ id: "00000000-0000-4000-8000-ccc000000000" }),
+    makeStoredAgentRecord({ id: "00000000-0000-4000-8000-ddd000000000" }),
+    makeStoredAgentRecord({ id: "00000000-0000-4000-8000-eee000000000" }),
+    makeStoredAgentRecord({ id: "00000000-0000-4000-8000-fff000000000" }),
+  ];
+  const result = await resolveAgentIdentifier(
+    "00000000-0000-4000-8000",
+    makeDeps({ storedRecords: records }),
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) {
+    throw new Error("expected ambiguous result");
+  }
+  // The shown 5 differ starting right after the shared 24-char prefix ("a" vs "b" vs …), so a
+  // 25-char prefix already tells them apart — shorter than the full 36-char id.
+  expect(result.error).toBe(
+    `Agent identifier "00000000-0000-4000-8000" is ambiguous (${records
+      .slice(0, 5)
+      .map((r) => r.id.slice(0, 25))
+      .join(", ")}, …)`,
+  );
+});
+
+test("truncates the ambiguous id list after 5 and shows full ids when only the last character differs", async () => {
   const records = Array.from({ length: 6 }, (_, i) =>
     makeStoredAgentRecord({ id: `00000000-0000-4000-8000-00000000001${i}` }),
   );
@@ -146,10 +177,12 @@ test("truncates the ambiguous id list after 5 and appends an ellipsis", async ()
   if (result.ok) {
     throw new Error("expected ambiguous result");
   }
+  // The shown 5 only differ in their last character, so no prefix shorter than the full id
+  // disambiguates them.
   expect(result.error).toBe(
     `Agent identifier "00000000-0000-4000-8000" is ambiguous (${records
       .slice(0, 5)
-      .map((r) => r.id.slice(0, 8))
+      .map((r) => r.id)
       .join(", ")}, …)`,
   );
 });
@@ -183,9 +216,7 @@ test("reports ambiguous when a title matches multiple stored records", async () 
   if (result.ok) {
     throw new Error("expected ambiguous result");
   }
-  expect(result.error).toBe(
-    `Agent title "shared title" is ambiguous (${first.id.slice(0, 8)}, ${second.id.slice(0, 8)})`,
-  );
+  expect(result.error).toBe(`Agent title "shared title" is ambiguous (${first.id}, ${second.id})`);
 });
 
 test("rejects an empty identifier", async () => {
@@ -228,4 +259,93 @@ test("excludes internal records from id, prefix, and title matching", async () =
     ok: false,
     error: "Agent not found: internal only",
   });
+});
+
+test("excludes an internal live agent from exact-id and prefix matching", async () => {
+  const internalLive = makeManagedAgent({
+    id: "00000000-0000-4000-8000-000000000098",
+    internal: true,
+  });
+  const deps = makeDeps({ liveAgents: [internalLive] });
+
+  const byExactId = await resolveAgentIdentifier(internalLive.id, deps);
+  expect(byExactId).toEqual({ ok: false, error: `Agent not found: ${internalLive.id}` });
+
+  const byPrefix = await resolveAgentIdentifier("00000000-0000-4000-8000", deps);
+  expect(byPrefix).toEqual({ ok: false, error: "Agent not found: 00000000-0000-4000-8000" });
+});
+
+test("rejects a prefix shorter than 4 characters, falling through to not found", async () => {
+  const record = makeStoredAgentRecord({ id: "abcdefg-live-agent" });
+  const result = await resolveAgentIdentifier("abc", makeDeps({ storedRecords: [record] }));
+  expect(result).toEqual({ ok: false, error: "Agent not found: abc" });
+});
+
+test("resolves a 7-character short id", async () => {
+  const record = makeStoredAgentRecord({ id: "abcdefg-live-agent" });
+  const result = await resolveAgentIdentifier("abcdefg", makeDeps({ storedRecords: [record] }));
+  expect(result).toEqual({ ok: true, agentId: record.id });
+});
+
+test("excludes archived records from prefix matching by default", async () => {
+  const record = makeStoredAgentRecord({
+    id: "00000000-0000-4000-8000-000000000031",
+    archivedAt: "2026-04-12T00:00:00.000Z",
+  });
+  const result = await resolveAgentIdentifier(
+    "00000000-0000-4000-8000",
+    makeDeps({ storedRecords: [record] }),
+  );
+  expect(result).toEqual({ ok: false, error: "Agent not found: 00000000-0000-4000-8000" });
+});
+
+test("includes archived records in prefix matching when includeArchived is true", async () => {
+  const record = makeStoredAgentRecord({
+    id: "00000000-0000-4000-8000-000000000032",
+    archivedAt: "2026-04-12T00:00:00.000Z",
+  });
+  const result = await resolveAgentIdentifier(
+    "00000000-0000-4000-8000",
+    makeDeps({ storedRecords: [record] }),
+    { includeArchived: true },
+  );
+  expect(result).toEqual({ ok: true, agentId: record.id });
+});
+
+test("excludes archived records from title matching by default", async () => {
+  const record = makeStoredAgentRecord({
+    id: "00000000-0000-4000-8000-000000000033",
+    title: "archived title",
+    archivedAt: "2026-04-12T00:00:00.000Z",
+  });
+  const result = await resolveAgentIdentifier(
+    "archived title",
+    makeDeps({ storedRecords: [record] }),
+  );
+  expect(result).toEqual({ ok: false, error: "Agent not found: archived title" });
+});
+
+test("includes archived records in title matching when includeArchived is true", async () => {
+  const record = makeStoredAgentRecord({
+    id: "00000000-0000-4000-8000-000000000034",
+    title: "archived title",
+    archivedAt: "2026-04-12T00:00:00.000Z",
+  });
+  const result = await resolveAgentIdentifier(
+    "archived title",
+    makeDeps({ storedRecords: [record] }),
+    { includeArchived: true },
+  );
+  expect(result).toEqual({ ok: true, agentId: record.id });
+});
+
+test("resolves an exact id for an archived record regardless of includeArchived", async () => {
+  const record = makeStoredAgentRecord({
+    id: "00000000-0000-4000-8000-000000000035",
+    archivedAt: "2026-04-12T00:00:00.000Z",
+  });
+  const result = await resolveAgentIdentifier(record.id, makeDeps({ storedRecords: [record] }), {
+    includeArchived: false,
+  });
+  expect(result).toEqual({ ok: true, agentId: record.id });
 });

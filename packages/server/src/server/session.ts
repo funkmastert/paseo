@@ -7840,10 +7840,14 @@ export class Session {
   }
 
   private async handleFetchAgent(agentIdOrIdentifier: string, requestId: string): Promise<void> {
-    const resolved = await resolveAgentIdentifier(agentIdOrIdentifier, {
-      agentStorage: this.agentStorage,
-      agentManager: this.agentManager,
-    });
+    const resolved = await resolveAgentIdentifier(
+      agentIdOrIdentifier,
+      {
+        agentStorage: this.agentStorage,
+        agentManager: this.agentManager,
+      },
+      { includeArchived: true },
+    );
     if (!resolved.ok) {
       this.emit({
         type: "fetch_agent_response",
@@ -8325,10 +8329,14 @@ export class Session {
   private async handleSendAgentMessageRequest(
     msg: Extract<SessionInboundMessage, { type: "send_agent_message_request" }>,
   ): Promise<void> {
-    const resolved = await resolveAgentIdentifier(msg.agentId, {
-      agentStorage: this.agentStorage,
-      agentManager: this.agentManager,
-    });
+    const resolved = await resolveAgentIdentifier(
+      msg.agentId,
+      {
+        agentStorage: this.agentStorage,
+        agentManager: this.agentManager,
+      },
+      { includeArchived: true },
+    );
     if (!resolved.ok) {
       this.emit({
         type: "send_agent_message_response",
@@ -8430,10 +8438,14 @@ export class Session {
     requestId: string,
     timeoutMs?: number,
   ): Promise<void> {
-    const resolved = await resolveAgentIdentifier(agentIdOrIdentifier, {
-      agentStorage: this.agentStorage,
-      agentManager: this.agentManager,
-    });
+    const resolved = await resolveAgentIdentifier(
+      agentIdOrIdentifier,
+      {
+        agentStorage: this.agentStorage,
+        agentManager: this.agentManager,
+      },
+      { includeArchived: true },
+    );
     if (!resolved.ok) {
       this.emit({
         type: "wait_for_finish_response",

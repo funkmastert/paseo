@@ -3507,10 +3507,21 @@ test("fetch_agent_request still resolves archived historical agents", async () =
   session.emit = (message) => {
     if (isSessionOutboundMessage(message)) emitted.push(message);
   };
-  session.resolveAgentIdentifier = async (identifier: string) =>
-    identifier === "Archived History Agent"
-      ? { ok: true, agentId: agent.id }
-      : { ok: false, error: `Agent not found: ${identifier}` };
+  // Exercises the real resolveAgentIdentifier (session.ts callers pass includeArchived: true), so
+  // a title match on an archived-only record must still resolve — not a stub standing in for it.
+  const archivedRecord = {
+    ...makeStoredAgent({
+      id: agent.id,
+      cwd: agent.cwd,
+      workspaceId: agent.workspaceId,
+      updatedAt: "2026-03-01T12:00:00.000Z",
+    }),
+    title: "Archived History Agent",
+    archivedAt: "2026-03-02T12:00:00.000Z",
+  };
+  session.agentStorage.list = async () => [archivedRecord];
+  session.agentStorage.get = async (agentId: string) =>
+    agentId === agent.id ? archivedRecord : null;
   session.getAgentPayloadById = async (agentId: string) => (agentId === agent.id ? agent : null);
   session.buildProjectPlacementForWorkspaceId = async () => ({
     projectKey: "proj-history-detail",

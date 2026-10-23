@@ -30,6 +30,9 @@ interface FakeAgentSpec {
   labels?: Record<string, string>;
   pendingPermissions?: number;
   workspaceId?: string;
+  title?: string;
+  /** Archived: present in storage but not in the live agent manager, like a real archived agent. */
+  archived?: boolean;
 }
 
 function liveAgent(spec: FakeAgentSpec): ManagedAgent {
@@ -58,7 +61,10 @@ function liveAgent(spec: FakeAgentSpec): ManagedAgent {
 }
 
 function createHarness(specs: FakeAgentSpec[], callerAgentId?: string) {
-  const live = new Map(specs.map((s) => [s.id, liveAgent(s)]));
+  // Archived specs never go live — a real archived agent is interrupted and removed from the
+  // active fleet, leaving only its storage record.
+  const archivedIds = new Set(specs.filter((s) => s.archived).map((s) => s.id));
+  const live = new Map(specs.filter((s) => !s.archived).map((s) => [s.id, liveAgent(s)]));
   const setLabels = vi.fn(async (id: string, patch: Record<string, string | null>) => {
     const agent = live.get(id);
     if (!agent) return;
@@ -69,31 +75,59 @@ function createHarness(specs: FakeAgentSpec[], callerAgentId?: string) {
     }
     live.set(id, { ...agent, labels: nextLabels });
   });
+  const toStoredRecord = (s: FakeAgentSpec) =>
+    ({
+      id: s.id,
+      internal: false,
+      title: s.title ?? null,
+      archivedAt: archivedIds.has(s.id) ? "2026-04-12T00:00:00.000Z" : null,
+      labels: s.labels ?? {},
+      provider: "claude",
+      cwd: "/work",
+      createdAt: "2026-04-12T00:00:00.000Z",
+      updatedAt: "2026-04-12T00:00:00.000Z",
+      lastUserMessageAt: null,
+    }) as unknown as StoredAgentRecord;
   // resolveAgentIdentifier (resolve-agent-identifier.ts) reads this to build its prefix/title
   // lookup table, so it has to list the same ids the fake agentManager knows about.
-  const agentStorageList = async () =>
-    specs.map(
-      (s) =>
-        ({
-          id: s.id,
-          internal: false,
-          title: null,
-          archivedAt: null,
-          labels: s.labels ?? {},
-        }) as unknown as StoredAgentRecord,
-    );
+  const agentStorageList = async () => specs.map(toStoredRecord);
   const hasInFlightRun = vi.fn((_id: string) => false);
   const cancelAgentRun = vi.fn(async (_id: string) => ({ status: "settled" as const }));
+  const closeAgent = vi.fn(async (_id: string) => undefined);
+  const clearAgentAttention = vi.fn(async (_id: string) => undefined);
+  const archiveAgent = vi.fn(async (id: string) => {
+    archivedIds.add(id);
+    live.delete(id);
+    return { archivedAt: "2026-04-12T00:00:00.000Z" };
+  });
+  const updateAgentMetadata = vi.fn(
+    async (_id: string, _updates: { title?: string; labels?: Record<string, string> }) => undefined,
+  );
+  const setAgentMode = vi.fn(async (_id: string, _modeId: string) => null);
+  const respondToPermission = vi.fn(
+    async (_id: string, _requestId: string, _response: unknown) => undefined,
+  );
+  const getTimeline = vi.fn((_id: string) => [] as unknown[]);
   const agentManager = {
     listAgents: () => [...live.values()],
     getAgent: (id: string) => live.get(id) ?? null,
     setLabels,
     hasInFlightRun,
     cancelAgentRun,
+    closeAgent,
+    clearAgentAttention,
+    archiveAgent,
+    updateAgentMetadata,
+    setAgentMode,
+    respondToPermission,
+    getTimeline,
   };
   const agentStorage = {
     list: agentStorageList,
-    get: async (_id: string) => null,
+    get: async (id: string) => {
+      const spec = specs.find((s) => s.id === id);
+      return spec ? toStoredRecord(spec) : null;
+    },
   };
   const catalog = createPaseoToolCatalog({
     agentManager: agentManager as unknown as AgentManager,
@@ -140,6 +174,36 @@ describe("set_completion_state", () => {
 
     expect(result).toMatchObject({ success: true, state: "done" });
     expect(harness.setLabels).toHaveBeenCalledWith("child-1", expect.anything());
+  });
+
+  test("an empty agentId targets the caller itself, same as omitting it", async () => {
+    const harness = createHarness([{ id: "self-1" }], "self-1");
+
+    const result = await call(harness, "set_completion_state", {
+      state: "ready-to-merge",
+      agentId: "",
+    });
+
+    expect(result).toMatchObject({ success: true, state: "ready-to-merge" });
+    expect(harness.setLabels).toHaveBeenCalledWith(
+      "self-1",
+      expect.objectContaining({ [COMPLETION_LABEL]: "ready-to-merge" }),
+    );
+  });
+
+  test("a whitespace-only agentId targets the caller itself, same as omitting it", async () => {
+    const harness = createHarness([{ id: "self-1" }], "self-1");
+
+    const result = await call(harness, "set_completion_state", {
+      state: "ready-to-merge",
+      agentId: "   ",
+    });
+
+    expect(result).toMatchObject({ success: true, state: "ready-to-merge" });
+    expect(harness.setLabels).toHaveBeenCalledWith(
+      "self-1",
+      expect.objectContaining({ [COMPLETION_LABEL]: "ready-to-merge" }),
+    );
   });
 
   test("refuses a caller with no agent session", async () => {
@@ -277,5 +341,98 @@ describe("agent id resolution (short id / prefix)", () => {
 
     expect(result.deliveredToAgentId).toBe("moved-to-agent");
     expect(result.guidance).toContain("abcdefg-target moved to moved-to-agent");
+  });
+
+  test("archive_agent called with a unique prefix archives the correct agent", async () => {
+    const harness = createHarness([{ id: "abcdefg-target", status: "idle" }]);
+
+    const result = await call(harness, "archive_agent", { agentId: "abcdefg" });
+
+    expect(result).toEqual({ success: true });
+    expect(harness.agentManager.archiveAgent).toHaveBeenCalledWith("abcdefg-target");
+  });
+
+  test("kill_agent called with a unique prefix kills the correct agent", async () => {
+    const harness = createHarness([{ id: "abcdefg-target", status: "idle" }]);
+
+    const result = await call(harness, "kill_agent", { agentId: "abcdefg" });
+
+    expect(result).toEqual({ success: true });
+    expect(harness.agentManager.closeAgent).toHaveBeenCalledWith("abcdefg-target");
+  });
+
+  test("update_agent called with a unique prefix updates the correct agent", async () => {
+    const harness = createHarness([{ id: "abcdefg-target", status: "idle" }]);
+
+    const result = await call(harness, "update_agent", { agentId: "abcdefg", name: "Renamed" });
+
+    expect(result).toEqual({ success: true });
+    expect(harness.agentManager.updateAgentMetadata).toHaveBeenCalledWith("abcdefg-target", {
+      title: "Renamed",
+    });
+  });
+
+  test("get_agent_activity called with a unique prefix reads the correct agent's timeline", async () => {
+    const harness = createHarness([{ id: "abcdefg-target", status: "idle" }]);
+
+    const result = await call(harness, "get_agent_activity", { agentId: "abcdefg" });
+
+    expect(result.agentId).toBe("abcdefg-target");
+    expect(harness.agentManager.getTimeline).toHaveBeenCalledWith("abcdefg-target");
+  });
+
+  test("set_agent_mode called with a unique prefix sets mode on the correct agent", async () => {
+    const harness = createHarness([{ id: "abcdefg-target", status: "idle" }]);
+
+    const result = await call(harness, "set_agent_mode", { agentId: "abcdefg", modeId: "auto" });
+
+    expect(result).toEqual({ success: true, newMode: "auto" });
+    expect(harness.agentManager.setAgentMode).toHaveBeenCalledWith("abcdefg-target", "auto");
+  });
+
+  test("respond_to_permission called with a unique prefix responds on the correct agent", async () => {
+    const harness = createHarness([{ id: "abcdefg-target", status: "idle" }]);
+
+    const result = await call(harness, "respond_to_permission", {
+      agentId: "abcdefg",
+      requestId: "perm-1",
+      response: { behavior: "allow" },
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(harness.agentManager.respondToPermission).toHaveBeenCalledWith(
+      "abcdefg-target",
+      "perm-1",
+      { behavior: "allow" },
+    );
+  });
+
+  test("a prefix shorter than 4 characters is rejected even when it uniquely matches", async () => {
+    const harness = createHarness([{ id: "abcdefg-target", status: "idle" }]);
+
+    await expect(call(harness, "get_agent_status", { agentId: "abc" })).rejects.toThrow(
+      /Agent not found: abc/,
+    );
+  });
+
+  test("get_agent_status does not resolve a unique archived title match by default", async () => {
+    // send_agent_prompt (and every other MCP tool) defaults to unarchiving its target, so a
+    // title match landing on an archived agent would silently revive it. The resolver's
+    // includeArchived:false wiring for MCP tools must keep this refused.
+    const harness = createHarness([
+      { id: "archived-1", archived: true, title: "old research spike" },
+    ]);
+
+    await expect(
+      call(harness, "get_agent_status", { agentId: "old research spike" }),
+    ).rejects.toThrow(/Agent not found: old research spike/);
+  });
+
+  test("get_agent_status resolves an archived agent by its exact full id", async () => {
+    const harness = createHarness([{ id: "archived-1", archived: true }]);
+
+    const result = await call(harness, "get_agent_status", { agentId: "archived-1" });
+
+    expect(result.snapshot).toMatchObject({ id: "archived-1", archivedAt: expect.any(String) });
   });
 });

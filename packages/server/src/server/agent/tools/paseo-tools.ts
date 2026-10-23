@@ -638,7 +638,14 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
   } = options;
 
   async function resolveToolAgentId(identifier: string): Promise<string> {
-    const resolved = await resolveAgentIdentifier(identifier, { agentStorage, agentManager });
+    // MCP tools never unarchive-by-side-effect: a unique archived title/prefix match is left out
+    // of resolution here (send_agent_prompt would otherwise silently revive it), while an exact
+    // id still resolves an archived agent (docs/completion-state.md callers rely on that).
+    const resolved = await resolveAgentIdentifier(
+      identifier,
+      { agentStorage, agentManager },
+      { includeArchived: false },
+    );
     if (!resolved.ok) {
       throw new Error(resolved.error);
     }
@@ -2500,7 +2507,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!callerAgentId) {
         throw new Error("set_completion_state requires a caller agent");
       }
-      const resolvedAgentId = agentId !== undefined ? await resolveToolAgentId(agentId) : undefined;
+      const resolvedAgentId = agentId?.trim() ? await resolveToolAgentId(agentId) : undefined;
       const toCompletionStateAgentView = (agent: ReturnType<AgentManager["getAgent"]>) =>
         agent && {
           id: agent.id,
