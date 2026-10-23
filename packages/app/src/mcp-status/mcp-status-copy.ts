@@ -56,7 +56,7 @@ export function secondLineText(t: TFunction, row: McpStatusRow): string {
 
 /** What a row that offers a setup form says it needs, or null when it offers none. */
 function setupHintText(t: TFunction, row: McpStatusRow): string | null {
-  if (row.action !== "setup" || !row.setupKind) {
+  if (row.action !== "setup") {
     return null;
   }
   return t(
@@ -81,8 +81,14 @@ export function actionLabelText(t: TFunction, row: McpStatusRow): string {
   }
 }
 
-/** The setup button's label: the provider's own wording when it has some, else the kind's. */
+/**
+ * The setup button's label: the provider's own wording when it has some, else the kind's. A
+ * connected server is already set up, so its token form is a replacement.
+ */
 function setupActionLabelText(t: TFunction, row: McpStatusRow): string {
+  if (row.setupKind === "local_token" && row.statusKey === "connected") {
+    return t("mcpStatus.setup.action.replaceToken");
+  }
   const providerKey = getSetupProvider(row.name)?.copyKey;
   if (providerKey === "slack") {
     return t("mcpStatus.setup.action.slack");

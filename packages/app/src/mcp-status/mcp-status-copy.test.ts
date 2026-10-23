@@ -17,6 +17,7 @@ import {
 import type {
   McpStatusActionFailure,
   McpStatusRow,
+  McpStatusRowActionFields,
   McpStatusRowAnnotation,
 } from "./mcp-status-strip-model";
 
@@ -43,10 +44,10 @@ function annotation(overrides: Partial<McpStatusRowAnnotation> = {}): McpStatusR
   };
 }
 
-function row(
-  lastFailure?: McpStatusActionFailure,
-  overrides: Partial<McpStatusRow> = {},
-): McpStatusRow {
+type RowOverrides = Partial<Omit<McpStatusRow, "action" | "setupKind">> &
+  Partial<McpStatusRowActionFields>;
+
+function row(lastFailure?: McpStatusActionFailure, overrides: RowOverrides = {}): McpStatusRow {
   return {
     key: "session:amplitude",
     name: "amplitude",
@@ -57,10 +58,10 @@ function row(
     ...(lastFailure ? { failure: lastFailure } : {}),
     sessionOnly: true,
     ...overrides,
-  };
+  } as McpStatusRow;
 }
 
-function brokeredRow(overrides: Partial<McpStatusRow> = {}): McpStatusRow {
+function brokeredRow(overrides: RowOverrides = {}): McpStatusRow {
   return row(undefined, {
     key: "server:github",
     name: "github",
@@ -418,6 +419,15 @@ describe("rows that offer a setup form", () => {
     expect(actionLabelText(t, setupRow("slack", "client_credentials"))).toBe("Create a Slack app");
     expect(actionLabelText(t, setupRow("other", "client_credentials"))).toBe("Create an app");
     expect(actionLabelText(t, setupRow("other", "local_token"))).toBe("Set up with a token");
+  });
+
+  it("calls the token form 'Replace token' once the server is connected", () => {
+    const connected = { ...setupRow("figma", "local_token"), tone: "ok", statusKey: "connected" };
+    expect(actionLabelText(t, connected as McpStatusRow)).toBe("Replace token");
+    // An unhealthy local server still says Set up: nothing has worked yet.
+    expect(actionLabelText(t, { ...connected, statusKey: "error" } as McpStatusRow)).toBe(
+      "Set up with a token",
+    );
   });
 
   it("points a never-tried row at the button instead of calling it just 'Needs sign-in'", () => {

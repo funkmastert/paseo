@@ -560,6 +560,34 @@ describe.each([
       expect(byTestId(container, "mcp-status-remedy-path-slack")).toBeNull();
     });
 
+    it("offers Replace token on a connected server, in the connected group, and hands the row to the caller", () => {
+      const connectedModel = buildMcpStatusStripModel({
+        servers: [
+          {
+            name: "figma",
+            status: "connected",
+            critical: false,
+            lastChangedAt: 1,
+            setup: "local_token",
+          },
+        ],
+        sessionReports: [],
+        canSetup: true,
+      });
+      const onAction = vi.fn();
+      const { container } = mountStrip({ model: connectedModel, onAction, expanded: true });
+      click(byTestId(container, "mcp-status-connected-toggle"));
+
+      expect(byTestId(container, "mcp-status-auth-figma")?.textContent).toBe("Replace token");
+      click(byTestId(container, "mcp-status-auth-figma"));
+      expect(onAction).toHaveBeenCalledTimes(1);
+      expect(onAction.mock.calls[0]?.[0]).toMatchObject({
+        name: "figma",
+        action: "setup",
+        setupKind: "local_token",
+      });
+    });
+
     it("a daemon without the setup flag keeps Hide on the dead ends", () => {
       const { container } = mountStrip();
       expect(byTestId(container, "mcp-status-hide-figma")).not.toBeNull();

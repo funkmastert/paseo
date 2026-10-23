@@ -759,18 +759,40 @@ describe("setup actions", () => {
     expect(model.groups.stuck).toEqual([]);
   });
 
-  it("goes away with the hint: a connected server, or one the daemon stopped hinting at", () => {
+  it("stays on a connected server the daemon hints at, so a token that started fine can be replaced", () => {
     const connected = buildMcpStatusStripModel({
       servers: [entry({ status: "connected", setup: "local_token" })],
       sessionReports: [],
       canSetup: true,
     });
+    expect(connected.rows[0]).toMatchObject({ action: "setup", setupKind: "local_token" });
+    // It is still a healthy row: no issue, no headline about it.
+    expect(connected.groups.connected.map((row) => row.name)).toEqual(["figma"]);
+    expect(connected.groups.actionable).toEqual([]);
+    expect(connected.collapsed.hasIssues).toBe(false);
+  });
+
+  it("is ignored on a connected server when the daemon lacks the feature flag", () => {
+    const connected = buildMcpStatusStripModel({
+      servers: [entry({ status: "connected", setup: "local_token" })],
+      sessionReports: [],
+      canSetup: false,
+    });
     expect(connected.rows[0]?.action).toBeUndefined();
+  });
+
+  it("goes away with the hint: one the daemon stopped hinting at falls back to Sign in", () => {
     const signInAgain = buildMcpStatusStripModel({
       servers: [entry({ name: "slack" })],
       sessionReports: [],
       canSetup: true,
     });
     expect(signInAgain.rows[0]?.action).toBe("authenticate");
+    const quiet = buildMcpStatusStripModel({
+      servers: [entry({ status: "connected" })],
+      sessionReports: [],
+      canSetup: true,
+    });
+    expect(quiet.rows[0]?.action).toBeUndefined();
   });
 });

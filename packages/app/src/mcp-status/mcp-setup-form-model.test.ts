@@ -6,6 +6,7 @@ const REDIRECT = "http://localhost:6767/mcp/gateway/oauth/callback";
 const described = (overrides: Partial<McpSetupDescribed> = {}): McpSetupDescribed => ({
   redirectUrl: REDIRECT,
   clientIdSet: false,
+  clientId: "",
   clientSecretSet: false,
   tokenSet: false,
   ...overrides,
@@ -151,6 +152,65 @@ describe("client credentials form", () => {
     const form = openMcpSetupForm({ kind: "client_credentials", serverName: "slack" });
     form.applyDescription(described({ clientIdSet: true, clientSecretSet: true }));
     expect(form.getState().canSignIn).toBe(true);
+  });
+
+  it("prefills the stored client ID, but not over one the person already typed", () => {
+    const fresh = openMcpSetupForm({ kind: "client_credentials", serverName: "slack" });
+    fresh.applyDescription(described({ clientIdSet: true, clientId: "123.456" }));
+    expect(fresh.getState().clientId).toBe("123.456");
+
+    const typed = openMcpSetupForm({ kind: "client_credentials", serverName: "slack" });
+    typed.setClientId("789.012");
+    typed.applyDescription(described({ clientIdSet: true, clientId: "123.456" }));
+    expect(typed.getState().clientId).toBe("789.012");
+  });
+
+  it("correcting a saved app: the prefilled ID with a blank secret sends no secret, which keeps the stored one", () => {
+    const form = openMcpSetupForm({ kind: "client_credentials", serverName: "slack" });
+    form.applyDescription(
+      described({ clientIdSet: true, clientId: "123.456", clientSecretSet: true }),
+    );
+    form.setScope("users:read");
+
+    const request = form.saveClientRequest();
+
+    expect(request).toEqual({
+      name: "slack",
+      clientId: "123.456",
+      redirectUrl: REDIRECT,
+      scope: "users:read",
+    });
+    expect(request).not.toHaveProperty("clientSecret");
+  });
+
+  it("a sign-in locks the form until it answers, and a second one cannot start meanwhile", () => {
+    const form = openMcpSetupForm({ kind: "client_credentials", serverName: "slack" });
+    form.applyDescription(described({ clientIdSet: true, clientId: "123.456" }));
+
+    expect(form.beginSignIn()).toBe(true);
+    expect(form.getState()).toMatchObject({
+      phase: "signingIn",
+      canSignIn: false,
+      canSubmit: false,
+    });
+    expect(form.beginSignIn()).toBe(false);
+
+    form.signInFailed("slack rejected the client secret");
+    expect(form.getState()).toMatchObject({
+      phase: "editing",
+      canSignIn: true,
+      submitError: "slack rejected the client secret",
+    });
+    expect(form.beginSignIn()).toBe(true);
+    form.signInStarted();
+    expect(form.getState().phase).toBe("editing");
+  });
+
+  it("cannot sign in before credentials exist", () => {
+    const form = openMcpSetupForm({ kind: "client_credentials", serverName: "slack" });
+    form.applyDescription(described());
+    expect(form.beginSignIn()).toBe(false);
+    expect(form.getState().phase).toBe("editing");
   });
 
   it("a failed description leaves the form unable to submit and says why", () => {

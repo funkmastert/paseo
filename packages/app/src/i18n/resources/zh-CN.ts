@@ -2149,6 +2149,7 @@ export const zhCN: TranslationResources = {
         localToken: "使用令牌设置",
         clientCredentials: "创建应用",
         slack: "创建 Slack 应用",
+        replaceToken: "替换令牌",
       },
       hint: {
         localToken:
@@ -2165,6 +2166,8 @@ export const zhCN: TranslationResources = {
         installFailed: "无法安装本地服务器：{{error}}",
         configWriteFailed: "无法将 {{name}} 切换到本地服务器：{{error}}",
         unknown: "无法设置 {{name}}。",
+        notConnected:
+          "令牌已保存，但 {{name}} 未能连接（状态：{{status}}）。请检查令牌后重新保存。",
       },
       localToken: {
         intro:
@@ -2189,6 +2192,7 @@ export const zhCN: TranslationResources = {
         scopeLabel: "权限范围（可选）",
         save: "保存凭据",
         saved: "凭据已保存",
+        secretKept: "已保存密钥。留空即保留原密钥。",
       },
       providers: {
         figma: {

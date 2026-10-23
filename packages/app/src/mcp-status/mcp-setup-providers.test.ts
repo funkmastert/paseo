@@ -23,7 +23,9 @@ describe("Slack app manifest", () => {
     const url = new URL(buildSlackAppUrl(REDIRECT));
     expect(`${url.origin}${url.pathname}`).toBe("https://api.slack.com/apps");
     expect(url.searchParams.get("new_app")).toBe("1");
-    expect(url.searchParams.get("manifest_json")).toBeTruthy();
+    expect(JSON.parse(url.searchParams.get("manifest_json") ?? "null")).toEqual(
+      buildSlackAppManifest(REDIRECT),
+    );
   });
 
   it("names the app Paseo MCP and sets the redirect it was given", () => {

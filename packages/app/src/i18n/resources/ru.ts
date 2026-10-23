@@ -2208,6 +2208,7 @@ export const ru: TranslationResources = {
         localToken: "Настроить с токеном",
         clientCredentials: "Создать приложение",
         slack: "Создать приложение Slack",
+        replaceToken: "Заменить токен",
       },
       hint: {
         localToken:
@@ -2225,6 +2226,8 @@ export const ru: TranslationResources = {
         installFailed: "Не удалось установить локальный сервер: {{error}}",
         configWriteFailed: "Не удалось переключить {{name}} на локальный сервер: {{error}}",
         unknown: "Не удалось настроить {{name}}.",
+        notConnected:
+          "Токен сохранён, но {{name}} не подключился (статус: {{status}}). Проверьте токен и сохраните ещё раз.",
       },
       localToken: {
         intro:
@@ -2251,6 +2254,7 @@ export const ru: TranslationResources = {
         scopeLabel: "Области доступа (необязательно)",
         save: "Сохранить учётные данные",
         saved: "Учётные данные сохранены",
+        secretKept: "Секрет уже сохранён. Оставьте поле пустым, чтобы сохранить его.",
       },
       providers: {
         figma: {

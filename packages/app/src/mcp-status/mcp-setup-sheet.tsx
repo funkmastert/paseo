@@ -12,12 +12,12 @@ import { openExternalUrl } from "@/utils/open-external-url";
 import type { Theme } from "@/styles/theme";
 import type {
   McpSetupFieldError,
+  McpSetupFormInput,
   McpSetupFormModel,
   McpSetupFormState,
 } from "./mcp-setup-form-model";
 import { getSetupProvider } from "./mcp-setup-providers";
-import { useMcpSetupForm } from "./use-mcp-setup-form";
-import type { McpStatusRow } from "./mcp-status-strip-model";
+import { useMcpSetupForm, type McpSetupSignInResult } from "./use-mcp-setup-form";
 
 const ThemedCheck = withUnistyles(Check);
 const successColorMapping = (theme: Theme) => ({ color: theme.colors.statusSuccess });
@@ -88,7 +88,7 @@ function LocalTokenFields({ state, model, controlSize }: FormPartProps) {
           secureTextEntry
           autoCapitalize="none"
           autoCorrect={false}
-          editable={state.phase !== "saving"}
+          editable={state.phase === "editing"}
         />
       </Field>
       <Text style={styles.muted}>{t("mcpStatus.setup.localToken.installNote")}</Text>
@@ -148,7 +148,7 @@ function CreateAppStep({ state, model, controlSize, providerKey, guided }: Creat
         onChangeText={model.setRedirectUrl}
         autoCapitalize="none"
         autoCorrect={false}
-        editable={state.phase !== "saving"}
+        editable={state.phase === "editing"}
       />
     </Field>
   );
@@ -160,6 +160,8 @@ function ClientCredentialsFields({ state, model, controlSize, onSubmit }: FormPa
   const guided = state.provider?.clientCredentials !== undefined;
   const clientIdErrorKey = fieldErrorKey(state.clientIdError);
   const saving = state.phase === "saving";
+  const editable = state.phase === "editing";
+  const secretKept = state.description.status === "ready" && state.description.clientSecretSet;
   return (
     <>
       <Text style={styles.body}>
@@ -195,10 +197,13 @@ function ClientCredentialsFields({ state, model, controlSize, onSubmit }: FormPa
             onChangeText={model.setClientId}
             autoCapitalize="none"
             autoCorrect={false}
-            editable={!saving}
+            editable={editable}
           />
         </Field>
-        <Field label={t("mcpStatus.setup.clientCredentials.clientSecretLabel")}>
+        <Field
+          label={t("mcpStatus.setup.clientCredentials.clientSecretLabel")}
+          hint={secretKept ? t("mcpStatus.setup.clientCredentials.secretKept") : undefined}
+        >
           <FormTextInput
             size={controlSize}
             testID="mcp-setup-client-secret-input"
@@ -208,7 +213,7 @@ function ClientCredentialsFields({ state, model, controlSize, onSubmit }: FormPa
             secureTextEntry
             autoCapitalize="none"
             autoCorrect={false}
-            editable={!saving}
+            editable={editable}
           />
         </Field>
         {guided ? null : (
@@ -221,7 +226,7 @@ function ClientCredentialsFields({ state, model, controlSize, onSubmit }: FormPa
               onChangeText={model.setScope}
               autoCapitalize="none"
               autoCorrect={false}
-              editable={!saving}
+              editable={editable}
             />
           </Field>
         )}
@@ -318,6 +323,7 @@ export function McpSetupFormFooter({
           variant="default"
           onPress={onSignIn}
           disabled={!state.canSignIn}
+          loading={state.phase === "signingIn"}
           testID="mcp-setup-sign-in"
         >
           {t("mcpStatus.authAction")}
@@ -329,28 +335,35 @@ export function McpSetupFormFooter({
 
 interface McpSetupSheetOpenProps {
   serverId: string;
-  row: McpStatusRow;
+  target: McpSetupFormInput;
   onClose: () => void;
-  onSignIn: (name: string) => Promise<unknown>;
+  onDone: () => void;
+  onSignIn: (name: string) => Promise<McpSetupSignInResult>;
 }
 
-function McpSetupSheetOpen({ serverId, row, onClose, onSignIn }: McpSetupSheetOpenProps) {
+function McpSetupSheetOpen({
+  serverId,
+  target,
+  onClose,
+  onDone,
+  onSignIn,
+}: McpSetupSheetOpenProps) {
   const { t } = useTranslation();
   const controlSize: FieldControlSize = useIsCompactFormFactor() ? "md" : "sm";
   const { model, state, submit, signIn } = useMcpSetupForm({
     serverId,
-    serverName: row.name,
-    kind: row.setupKind ?? "local_token",
-    onDone: onClose,
+    serverName: target.serverName,
+    kind: target.kind,
+    onDone,
     onSignIn,
   });
   const header = useMemo<SheetHeader>(
     () => ({
       title: t("mcpStatus.setup.title", {
-        name: getSetupProvider(row.name)?.displayName ?? row.name,
+        name: getSetupProvider(target.serverName)?.displayName ?? target.serverName,
       }),
     }),
-    [row.name, t],
+    [target.serverName, t],
   );
   const footer = useMemo(
     () => (
@@ -373,26 +386,30 @@ function McpSetupSheetOpen({ serverId, row, onClose, onSignIn }: McpSetupSheetOp
 
 export interface McpSetupSheetProps {
   serverId: string | null;
-  /** The row whose setup action was pressed; null while the sheet is closed. */
-  row: McpStatusRow | null;
+  /** The server and form a row's setup action opened; null while the sheet is closed. */
+  target: McpSetupFormInput | null;
+  /** The person dismissed the sheet; nothing about the server changed. */
   onClose: () => void;
-  onSignIn: (name: string) => Promise<unknown>;
+  /** The form finished its job (token connected, or the sign-in began). */
+  onDone: () => void;
+  onSignIn: (name: string) => Promise<McpSetupSignInResult>;
 }
 
 /**
  * The setup sheet for a row's `setup` action. Mounts a fresh form per open, keyed by the server,
  * and renders nothing while closed (docs/forms.md, lifecycle rule 1).
  */
-export function McpSetupSheet({ serverId, row, onClose, onSignIn }: McpSetupSheetProps) {
-  if (!serverId || !row) {
+export function McpSetupSheet({ serverId, target, onClose, onDone, onSignIn }: McpSetupSheetProps) {
+  if (!serverId || !target) {
     return null;
   }
   return (
     <McpSetupSheetOpen
-      key={`${serverId}:${row.name}`}
+      key={`${serverId}:${target.serverName}`}
       serverId={serverId}
-      row={row}
+      target={target}
       onClose={onClose}
+      onDone={onDone}
       onSignIn={onSignIn}
     />
   );
@@ -407,7 +424,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   stepTitle: {
     fontSize: theme.fontSize.sm,
-    fontWeight: "600",
+    fontWeight: theme.fontWeight.medium,
     color: theme.colors.foreground,
   },
   body: {

@@ -229,6 +229,7 @@ function describeReady(model: McpSetupFormModel, clientIdSet = false): void {
     model.applyDescription({
       redirectUrl: REDIRECT,
       clientIdSet,
+      clientId: clientIdSet ? "123.456" : "",
       clientSecretSet: clientIdSet,
       tokenSet: false,
     }),

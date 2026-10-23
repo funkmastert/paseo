@@ -11,7 +11,7 @@ export interface McpStatusServerEntry {
   critical: boolean;
   lastChangedAt: number;
   error?: string;
-  /** Set by a daemon with `mcpGatewaySetup` while a setup form could fix this server. */
+  /** Set by a daemon with `mcpGatewaySetup` while a setup form can fix or correct this server. */
   setup?: McpSetupKind;
 }
 
@@ -106,17 +106,20 @@ export function isTerminalActionFailure(failure: McpStatusActionFailure | undefi
   return failure?.reason ? TERMINAL_FAILURE_REASONS.has(failure.reason) : false;
 }
 
-/** One rendered row — a brokered server (`sessionOnly: false`) or a session-only report with
- * no matching global row (`sessionOnly: true`, KTD10's "no home" fallback for AE3). */
-export interface McpStatusRow {
+/**
+ * What a row's button does. `setup` carries the form it opens, so a row that offers setup cannot
+ * exist without saying which form; every other action stands alone.
+ */
+export type McpStatusRowActionFields =
+  | { action: "setup"; setupKind: McpSetupKind }
+  | { action?: Exclude<McpStatusRowAction, "setup">; setupKind?: undefined };
+
+interface McpStatusRowBase {
   key: string;
   name: string;
   tone: ProviderUsageTone;
   statusKey: McpStatusRowStatusKey;
   critical: boolean;
-  action?: McpStatusRowAction;
-  /** Which form `action: "setup"` opens. */
-  setupKind?: McpSetupKind;
   error?: string;
   /** Set when a session reported trouble with this server too — "reported by <agent>". */
   annotation?: McpStatusRowAnnotation;
@@ -124,6 +127,10 @@ export interface McpStatusRow {
   failure?: McpStatusActionFailure;
   sessionOnly: boolean;
 }
+
+/** One rendered row — a brokered server (`sessionOnly: false`) or a session-only report with
+ * no matching global row (`sessionOnly: true`, KTD10's "no home" fallback for AE3). */
+export type McpStatusRow = McpStatusRowBase & McpStatusRowActionFields;
 
 /**
  * What the strip's header says. One unhealthy row is named; several are counted, because a list
@@ -345,7 +352,7 @@ function sessionOnlyActionFor(input: {
   name: string;
   canAdopt: boolean;
   failure: McpStatusActionFailure | undefined;
-}): McpStatusRowAction | undefined {
+}): Exclude<McpStatusRowAction, "setup"> | undefined {
   if (isClaudeAiConnectorName(input.name)) return "openClaudeAi";
   if (!input.canAdopt) return undefined;
   // Until it has been tried, adopt is worth offering: nothing before the attempt knows whether
@@ -373,7 +380,7 @@ function serverRowAction(input: {
   unhealthy: boolean;
   setupKind: McpSetupKind | undefined;
   failure: McpStatusActionFailure | undefined;
-}): Pick<McpStatusRow, "action" | "setupKind"> {
+}): McpStatusRowActionFields {
   if (input.setupKind) {
     return { action: "setup", setupKind: input.setupKind };
   }
@@ -411,8 +418,9 @@ export function buildMcpStatusStripModel(input: {
     const annotation = annotationFor(unhealthyReportsByServer.get(server.name) ?? []);
     const unhealthy = isUnhealthy(server.status);
     // A setup form beats a sign-in the daemon has already said cannot work, and it stays on
-    // offer through a terminal failure: the failure is why the form exists.
-    const setupKind = unhealthy && input.canSetup ? server.setup : undefined;
+    // offer through a terminal failure: the failure is why the form exists. The daemon also
+    // offers one on a connected server, to replace a token that started fine and fails later.
+    const setupKind = input.canSetup ? server.setup : undefined;
     return {
       key: `server:${server.name}`,
       name: server.name,

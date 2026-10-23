@@ -2187,6 +2187,7 @@ export const ko: TranslationResources = {
         localToken: "토큰으로 설정",
         clientCredentials: "앱 만들기",
         slack: "Slack 앱 만들기",
+        replaceToken: "토큰 교체",
       },
       hint: {
         localToken:
@@ -2204,6 +2205,8 @@ export const ko: TranslationResources = {
         installFailed: "로컬 서버를 설치하지 못했습니다: {{error}}",
         configWriteFailed: "{{name}}을(를) 로컬 서버로 전환하지 못했습니다: {{error}}",
         unknown: "{{name}}을(를) 설정하지 못했습니다.",
+        notConnected:
+          "토큰은 저장되었지만 {{name}}에 연결되지 않았습니다(상태: {{status}}). 토큰을 확인한 뒤 다시 저장하세요.",
       },
       localToken: {
         intro:
@@ -2229,6 +2232,7 @@ export const ko: TranslationResources = {
         scopeLabel: "범위(선택 사항)",
         save: "자격 증명 저장",
         saved: "자격 증명을 저장했습니다",
+        secretKept: "저장된 시크릿이 있습니다. 비워 두면 그대로 유지됩니다.",
       },
       providers: {
         figma: {

@@ -2209,6 +2209,7 @@ export const ptBR: TranslationResources = {
         localToken: "Configurar com um token",
         clientCredentials: "Criar um app",
         slack: "Criar um app do Slack",
+        replaceToken: "Substituir token",
       },
       hint: {
         localToken:
@@ -2226,6 +2227,8 @@ export const ptBR: TranslationResources = {
         installFailed: "Não foi possível instalar o servidor local: {{error}}",
         configWriteFailed: "Não foi possível trocar {{name}} pelo servidor local: {{error}}",
         unknown: "Não foi possível configurar {{name}}.",
+        notConnected:
+          "O token foi salvo, mas {{name}} não se conectou (status: {{status}}). Confira o token e salve novamente.",
       },
       localToken: {
         intro:
@@ -2252,6 +2255,7 @@ export const ptBR: TranslationResources = {
         scopeLabel: "Escopos (opcional)",
         save: "Salvar credenciais",
         saved: "Credenciais salvas",
+        secretKept: "Há um segredo salvo. Deixe em branco para mantê-lo.",
       },
       providers: {
         figma: {

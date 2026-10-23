@@ -1,3 +1,8 @@
+import type {
+  McpGatewaySetupKind,
+  McpGatewaySetupLocalTokenRequest,
+  McpGatewaySetupSaveClientRequest,
+} from "@getpaseo/protocol/messages";
 import { getSetupProvider, type McpSetupProvider } from "./mcp-setup-providers";
 
 /**
@@ -6,7 +11,7 @@ import { getSetupProvider, type McpSetupProvider } from "./mcp-setup-providers";
  * `local_token` asks for the token a local server runs with, `client_credentials` collects a
  * hand-made OAuth app's id and secret.
  */
-export type McpSetupKind = "client_credentials" | "local_token";
+export type McpSetupKind = McpGatewaySetupKind;
 
 /** Which rule a field broke. The sheet owns the wording. */
 export type McpSetupFieldError = "required" | "whitespace" | "invalidUrl";
@@ -15,6 +20,8 @@ export type McpSetupFieldError = "required" | "whitespace" | "invalidUrl";
 export interface McpSetupDescribed {
   redirectUrl: string;
   clientIdSet: boolean;
+  /** The client ID already stored, which the form prefills; empty when none is. */
+  clientId: string;
   clientSecretSet: boolean;
   tokenSet: boolean;
 }
@@ -39,7 +46,7 @@ export interface McpSetupFormState {
   description: McpSetupDescription;
   /** The daemon holds credentials for this server that match what the fields say. */
   credentialsSaved: boolean;
-  phase: "editing" | "saving";
+  phase: "editing" | "saving" | "signingIn";
   submitError: string | null;
   /** Field errors stay quiet until a first submit attempt. */
   showErrors: boolean;
@@ -58,19 +65,12 @@ export interface McpSetupFormInput {
   serverName: string;
 }
 
-export interface SaveClientRequest {
-  name: string;
-  clientId: string;
-  clientSecret?: string;
-  redirectUrl?: string;
-  scope?: string;
-}
+type SetupRequestBody<Request> = Omit<Request, "type" | "requestId">;
 
-export interface LocalTokenRequest {
-  name: string;
-  preset: string;
-  token: string;
-}
+/** What `save_client` sends. A blank secret is left out, which keeps the one already stored. */
+export type SaveClientRequest = SetupRequestBody<McpGatewaySetupSaveClientRequest>;
+
+export type LocalTokenRequest = SetupRequestBody<McpGatewaySetupLocalTokenRequest>;
 
 export interface McpSetupFormModel {
   getState(): McpSetupFormState;
@@ -88,6 +88,11 @@ export interface McpSetupFormModel {
   beginSaving(): void;
   saveSucceeded(): void;
   saveFailed(message: string): void;
+  /** Starts a sign-in; false when one (or a save) is already running or none is available. */
+  beginSignIn(): boolean;
+  /** The sign-in began, so the browser has the person now. */
+  signInStarted(): void;
+  signInFailed(message: string): void;
   /** The request `local_token` sends, or null while the token is invalid. */
   localTokenRequest(): LocalTokenRequest | null;
   /** The request `save_client` sends, or null while the form is invalid. */
@@ -204,8 +209,9 @@ export function openMcpSetupForm(input: McpSetupFormInput): McpSetupFormModel {
     applyDescription(described) {
       publish({
         description: { status: "ready", ...described },
-        // A redirect the person already typed wins over the daemon's.
+        // What the person already typed wins over what the daemon holds.
         redirectUrl: raw.redirectUrl || described.redirectUrl,
+        clientId: raw.clientId || described.clientId,
         // Credentials already on the host mean Sign in is available straight away.
         credentialsSaved: raw.credentialsSaved || described.clientIdSet,
       });
@@ -219,6 +225,13 @@ export function openMcpSetupForm(input: McpSetupFormInput): McpSetupFormModel {
     saveSucceeded: () =>
       publish({ phase: "editing", credentialsSaved: raw.kind === "client_credentials" }),
     saveFailed: (message) => publish({ phase: "editing", submitError: message }),
+    beginSignIn() {
+      if (!state.canSignIn) return false;
+      publish({ phase: "signingIn", submitError: null });
+      return true;
+    },
+    signInStarted: () => publish({ phase: "editing" }),
+    signInFailed: (message) => publish({ phase: "editing", submitError: message }),
     localTokenRequest() {
       const preset = provider?.localToken?.preset;
       if (raw.kind !== "local_token" || !preset || validateToken(raw.token)) return null;

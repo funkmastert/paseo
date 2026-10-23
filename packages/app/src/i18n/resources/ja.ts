@@ -2197,6 +2197,7 @@ export const ja: TranslationResources = {
         localToken: "トークンでセットアップ",
         clientCredentials: "アプリを作成",
         slack: "Slack アプリを作成",
+        replaceToken: "トークンを置き換える",
       },
       hint: {
         localToken:
@@ -2214,6 +2215,8 @@ export const ja: TranslationResources = {
         installFailed: "ローカルサーバーをインストールできませんでした: {{error}}",
         configWriteFailed: "{{name}} をローカルサーバーに切り替えられませんでした: {{error}}",
         unknown: "{{name}} をセットアップできませんでした。",
+        notConnected:
+          "トークンは保存されましたが、{{name}} に接続できませんでした（状態: {{status}}）。トークンを確認して、もう一度保存してください。",
       },
       localToken: {
         intro:
@@ -2240,6 +2243,7 @@ export const ja: TranslationResources = {
         scopeLabel: "スコープ（任意）",
         save: "認証情報を保存",
         saved: "認証情報を保存しました",
+        secretKept: "シークレットは保存済みです。空欄のままにすると、そのまま使われます。",
       },
       providers: {
         figma: {

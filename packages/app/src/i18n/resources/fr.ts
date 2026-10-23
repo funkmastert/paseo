@@ -2230,6 +2230,7 @@ export const fr: TranslationResources = {
         localToken: "Configurer avec un jeton",
         clientCredentials: "Créer une application",
         slack: "Créer une application Slack",
+        replaceToken: "Remplacer le jeton",
       },
       hint: {
         localToken:
@@ -2247,6 +2248,8 @@ export const fr: TranslationResources = {
         installFailed: "Impossible d'installer le serveur local : {{error}}",
         configWriteFailed: "Impossible de basculer {{name}} vers le serveur local : {{error}}",
         unknown: "Impossible de configurer {{name}}.",
+        notConnected:
+          "Le jeton est enregistré, mais {{name}} ne s'est pas connecté (état : {{status}}). Vérifiez le jeton, puis enregistrez à nouveau.",
       },
       localToken: {
         intro:
@@ -2273,6 +2276,7 @@ export const fr: TranslationResources = {
         scopeLabel: "Portées (facultatif)",
         save: "Enregistrer les identifiants",
         saved: "Identifiants enregistrés",
+        secretKept: "Un secret est enregistré. Laissez ce champ vide pour le conserver.",
       },
       providers: {
         figma: {

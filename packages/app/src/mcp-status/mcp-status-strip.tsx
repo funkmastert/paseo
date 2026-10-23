@@ -4,6 +4,7 @@ import * as Clipboard from "expo-clipboard";
 import { useToast } from "@/contexts/toast-context";
 import { useMcpStatus } from "./use-mcp-status";
 import { failureClipboardText } from "./mcp-status-copy";
+import type { McpSetupFormInput } from "./mcp-setup-form-model";
 import type { McpStatusActionFailure, McpStatusRow } from "./mcp-status-strip-model";
 import { McpStatusStripView } from "./mcp-status-strip-view";
 import { McpSetupSheet } from "./mcp-setup-sheet";
@@ -32,13 +33,15 @@ export function McpStatusStrip() {
   } = useMcpStatus();
   // Always starts collapsed — this is UI chrome state, not persisted, per KTD10.
   const [expanded, setExpanded] = useState(false);
-  // The row whose setup form is open; the sheet mounts fresh for each one.
-  const [setupRow, setSetupRow] = useState<McpStatusRow | null>(null);
-  const handleCloseSetup = useCallback(() => {
-    // Whatever failure the row last showed was about the state the form just changed.
-    if (setupRow) clearFailure(setupRow.name);
-    setSetupRow(null);
-  }, [clearFailure, setupRow]);
+  // The server and form a setup action opened; the sheet mounts fresh for each one.
+  const [setupTarget, setSetupTarget] = useState<McpSetupFormInput | null>(null);
+  const handleCloseSetup = useCallback(() => setSetupTarget(null), []);
+  const handleSetupDone = useCallback(() => {
+    // Whatever failure the row last showed was about the state the form just changed. Dismissing
+    // the sheet changes nothing, so only a form that finished clears it.
+    if (setupTarget) clearFailure(setupTarget.serverName);
+    setSetupTarget(null);
+  }, [clearFailure, setupTarget]);
 
   const handleToggle = useCallback(() => setExpanded((prev) => !prev), []);
   const handleAction = useCallback(
@@ -50,7 +53,7 @@ export function McpStatusStrip() {
             return;
           }
           if (row.action === "setup") {
-            setSetupRow(row);
+            setSetupTarget({ serverName: row.name, kind: row.setupKind });
             return;
           }
           // Both resolve with the daemon's answer and record it onto the row themselves.
@@ -99,8 +102,9 @@ export function McpStatusStrip() {
       />
       <McpSetupSheet
         serverId={serverId}
-        row={setupRow}
+        target={setupTarget}
         onClose={handleCloseSetup}
+        onDone={handleSetupDone}
         onSignIn={startAuth}
       />
     </>

@@ -291,9 +291,20 @@ function IssueRow({
  * One line per connected, connecting or disabled server: dot and name, then the status only when
  * it says more than the green dot already does.
  */
-function CompactRow({ row }: { row: McpStatusRow }) {
+/**
+ * A connected row. It carries an action only when the daemon offers a setup form for a server
+ * that reports healthy (replacing a token that may be wrong), so the button is quiet.
+ */
+function CompactRow({
+  row,
+  onAction,
+}: {
+  row: McpStatusRow;
+  onAction: (row: McpStatusRow) => void;
+}) {
   const { t } = useTranslation();
   const status = compactStatusText(t, row);
+  const handleAction = useCallback(() => onAction(row), [onAction, row]);
   return (
     <View style={styles.compactRow} testID={`mcp-status-row-${row.name}`}>
       <StatusDot tone={row.tone} testID={`mcp-status-dot-${row.name}`} />
@@ -304,6 +315,17 @@ function CompactRow({ row }: { row: McpStatusRow }) {
         <Text style={styles.compactStatus} numberOfLines={1}>
           {status}
         </Text>
+      ) : null}
+      {row.action ? (
+        <Button
+          variant="ghost"
+          size="xs"
+          onPress={handleAction}
+          style={styles.ghostOnRail}
+          testID={`mcp-status-auth-${row.name}`}
+        >
+          {actionLabelText(t, row)}
+        </Button>
       ) : null}
     </View>
   );
@@ -451,7 +473,9 @@ export function McpStatusStripView({
             />
           ) : null}
           {connectedOpen
-            ? groups.connected.map((row) => <CompactRow key={row.key} row={row} />)
+            ? groups.connected.map((row) => (
+                <CompactRow key={row.key} row={row} onAction={onAction} />
+              ))
             : null}
           {groups.hidden.length > 0 ? (
             <GroupDisclosure

@@ -2185,6 +2185,7 @@ export const en = {
         localToken: "Set up with a token",
         clientCredentials: "Create an app",
         slack: "Create a Slack app",
+        replaceToken: "Replace token",
       },
       hint: {
         localToken:
@@ -2202,6 +2203,8 @@ export const en = {
         installFailed: "Couldn't install the local server: {{error}}",
         configWriteFailed: "Couldn't switch {{name}} to the local server: {{error}}",
         unknown: "Couldn't set up {{name}}.",
+        notConnected:
+          "The token is saved, but {{name}} didn't connect (status: {{status}}). Check the token, then save again.",
       },
       localToken: {
         intro:
@@ -2228,6 +2231,7 @@ export const en = {
         scopeLabel: "Scopes (optional)",
         save: "Save credentials",
         saved: "Credentials saved",
+        secretKept: "A secret is saved. Leave this blank to keep it.",
       },
       providers: {
         figma: {

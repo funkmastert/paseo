@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
+import type { McpGatewayAuthStartResponseMessage } from "@getpaseo/protocol/messages";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { setupFailureText } from "./mcp-status-copy";
 import {
@@ -13,11 +14,20 @@ export interface UseMcpSetupFormInput {
   serverId: string;
   serverName: string;
   kind: McpSetupKind;
-  /** The token is saved and the server switched: nothing left for the sheet to do. */
+  /** The token is saved and connected, or the sign-in began: nothing left for the sheet to do. */
   onDone: () => void;
-  /** Starts the sign-in flow the credentials form ends in (the strip's own `startAuth`). */
-  onSignIn: (name: string) => Promise<unknown>;
+  /**
+   * Starts the sign-in flow the credentials form ends in (the strip's own `startAuth`). It
+   * resolves with the daemon's answer, which carries `error` when the sign-in could not start,
+   * and records that failure on the row.
+   */
+  onSignIn: (name: string) => Promise<McpSetupSignInResult>;
 }
+
+export type McpSetupSignInResult = Pick<
+  McpGatewayAuthStartResponseMessage["payload"],
+  "authorizationUrl" | "error" | "reason"
+>;
 
 export interface UseMcpSetupFormResult {
   model: McpSetupFormModel;
@@ -65,6 +75,7 @@ export function useMcpSetupForm(input: UseMcpSetupFormInput): UseMcpSetupFormRes
         model.applyDescription({
           redirectUrl: payload.redirectUrl,
           clientIdSet: payload.clientIdSet === true,
+          clientId: payload.clientId ?? "",
           clientSecretSet: payload.clientSecretSet === true,
           tokenSet: payload.tokenSet === true,
         });
@@ -92,6 +103,16 @@ export function useMcpSetupForm(input: UseMcpSetupFormInput): UseMcpSetupFormRes
           model.beginSaving();
           const payload = await client.setMcpGatewayLocalToken(request);
           if (payload.error) return fail(payload.reason, payload.error);
+          // The token is stored either way; whether it works shows in the server's status. A
+          // sheet that closed on anything but `connected` would hide a wrong token.
+          if (payload.status !== "connected") {
+            return model.saveFailed(
+              t("mcpStatus.setup.failure.notConnected", {
+                name: serverName,
+                status: payload.status ?? "unknown",
+              }),
+            );
+          }
           model.saveSucceeded();
           onDone();
           return;
@@ -110,8 +131,27 @@ export function useMcpSetupForm(input: UseMcpSetupFormInput): UseMcpSetupFormRes
   }, [client, kind, model, onDone, serverName, t]);
 
   const signIn = useCallback(() => {
-    void onSignIn(serverName).then(onDone, onDone);
-  }, [onDone, onSignIn, serverName]);
+    if (!model.beginSignIn()) return;
+    const run = async (): Promise<void> => {
+      try {
+        const result = await onSignIn(serverName);
+        if (result.error || !result.authorizationUrl) {
+          return model.signInFailed(
+            setupFailureText(t, {
+              reason: result.reason ?? null,
+              error: result.error ?? "",
+              name: serverName,
+            }),
+          );
+        }
+        model.signInStarted();
+        onDone();
+      } catch (error) {
+        model.signInFailed(error instanceof Error ? error.message : String(error));
+      }
+    };
+    void run();
+  }, [model, onDone, onSignIn, serverName, t]);
 
   return { model, state, submit, signIn };
 }

@@ -2174,6 +2174,7 @@ export const ar: TranslationResources = {
         localToken: "الإعداد باستخدام رمز",
         clientCredentials: "إنشاء تطبيق",
         slack: "إنشاء تطبيق Slack",
+        replaceToken: "استبدال الرمز",
       },
       hint: {
         localToken:
@@ -2191,6 +2192,8 @@ export const ar: TranslationResources = {
         installFailed: "تعذّر تثبيت الخادم المحلي: {{error}}",
         configWriteFailed: "تعذّر تحويل {{name}} إلى الخادم المحلي: {{error}}",
         unknown: "تعذّر إعداد {{name}}.",
+        notConnected:
+          "تم حفظ الرمز، لكن {{name}} لم يتصل (الحالة: {{status}}). تحقق من الرمز ثم احفظه مرة أخرى.",
       },
       localToken: {
         intro:
@@ -2216,6 +2219,7 @@ export const ar: TranslationResources = {
         scopeLabel: "النطاقات (اختياري)",
         save: "حفظ بيانات الاعتماد",
         saved: "تم حفظ بيانات الاعتماد",
+        secretKept: "هناك سر محفوظ. اترك هذا الحقل فارغًا للاحتفاظ به.",
       },
       providers: {
         figma: {
