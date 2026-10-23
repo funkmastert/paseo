@@ -94,6 +94,7 @@ function createServer(
     setAgentAttentionCallback: vi.fn(),
     getAgent: vi.fn(() => ({ workspaceId: WORKSPACE_ID, pendingPermissions: new Map() })),
     getLastAssistantMessage: vi.fn(async () => null),
+    getFinishingTurnAssistantMessage: vi.fn(() => null),
     getMetricsSnapshot: vi.fn(() => ({
       total: 0,
       byLifecycle: {},
@@ -338,6 +339,114 @@ describe("VoiceAssistantWebSocketServer notification payloads", () => {
     }
 
     expect(pushNotifications.levels).toEqual(["notice", "notice"]);
+  });
+
+  it("raises a root agent's question-ending finish to an alert, titled as a question", async () => {
+    const getLastAssistantMessage = vi.fn(async () => "I've pushed the fix. Should I open a PR?");
+    const { server, pushNotifications } = createServer({
+      getAgent: vi.fn(() => ({
+        config: { title: null },
+        cwd: "/tmp/worktree",
+        workspaceId: WORKSPACE_ID,
+        labels: {},
+        pendingPermissions: new Map(),
+      })),
+      getLastAssistantMessage,
+      getFinishingTurnAssistantMessage: vi.fn(() => "I've pushed the fix. Should I open a PR?"),
+    });
+
+    await asInternals<WebSocketServerInternals>(server).broadcastAgentAttention({
+      agentId: "agent-root",
+      provider: "claude",
+      reason: "finished",
+    });
+
+    expect(pushNotifications.levels).toEqual(["alert"]);
+    expect(pushNotifications.sent).toEqual([
+      {
+        title: "Agent has a question",
+        body: "I've pushed the fix. Should I open a PR?",
+        data: {
+          serverId: "srv-test",
+          workspaceId: WORKSPACE_ID,
+          agentId: "agent-root",
+          reason: "finished",
+          isQuestion: true,
+        },
+      },
+    ]);
+  });
+
+  it("never raises a delegated child's question-ending finish past a notice", async () => {
+    const getLastAssistantMessage = vi.fn(async () => "I've pushed the fix. Should I open a PR?");
+    const { server, pushNotifications } = createServer({
+      getAgent: vi.fn(() => ({
+        config: { title: null },
+        cwd: "/tmp/worktree",
+        workspaceId: WORKSPACE_ID,
+        labels: { "paseo.parent-agent-id": "agent-root" },
+        pendingPermissions: new Map(),
+      })),
+      getLastAssistantMessage,
+    });
+
+    await asInternals<WebSocketServerInternals>(server).broadcastAgentAttention({
+      agentId: "agent-child",
+      provider: "claude",
+      reason: "finished",
+    });
+
+    expect(pushNotifications.levels).toEqual(["notice"]);
+  });
+
+  it("does not alert on a stale question the turn already answered and then ended with no text", async () => {
+    // The agent's last assistant text overall is from an earlier turn and ends in "?", but the
+    // turn that just finished answered it and closed with tool calls only — no trailing
+    // assistant text of its own.
+    const getLastAssistantMessage = vi.fn(async () => "Should I open a PR?");
+    const { server, pushNotifications } = createServer({
+      getAgent: vi.fn(() => ({
+        config: { title: null },
+        cwd: "/tmp/worktree",
+        workspaceId: WORKSPACE_ID,
+        labels: {},
+        pendingPermissions: new Map(),
+      })),
+      getLastAssistantMessage,
+      getFinishingTurnAssistantMessage: vi.fn(() => null),
+    });
+
+    await asInternals<WebSocketServerInternals>(server).broadcastAgentAttention({
+      agentId: "agent-root",
+      provider: "claude",
+      reason: "finished",
+    });
+
+    expect(pushNotifications.levels).toEqual(["notice"]);
+    expect(pushNotifications.sent[0]?.data).not.toHaveProperty("isQuestion");
+  });
+
+  it("does not alert a daemon-automation root agent's question-ending finish", async () => {
+    const getFinishingTurnAssistantMessage = vi.fn(() => "Should I open a PR?");
+    const { server, pushNotifications } = createServer({
+      getAgent: vi.fn(() => ({
+        config: { title: null },
+        cwd: "/tmp/worktree",
+        workspaceId: WORKSPACE_ID,
+        labels: { "paseo.remediation": "system-memory" },
+        pendingPermissions: new Map(),
+      })),
+      getFinishingTurnAssistantMessage,
+    });
+
+    await asInternals<WebSocketServerInternals>(server).broadcastAgentAttention({
+      agentId: "agent-remediation",
+      provider: "claude",
+      reason: "finished",
+    });
+
+    expect(pushNotifications.levels).toEqual(["notice"]);
+    expect(pushNotifications.sent[0]?.data).not.toHaveProperty("isQuestion");
   });
 
   it("routes a hidden stale focused browser tab's notification to the present Electron web client", async () => {

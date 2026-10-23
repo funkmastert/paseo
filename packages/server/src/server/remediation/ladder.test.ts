@@ -85,6 +85,32 @@ const ladders: RemediationLadder[] = [];
 /** A phone that gets every escalation now, unless a test says otherwise. */
 const REACHES_PHONE: NotifyDeliveryPreview = { outcome: "interrupt", devices: 1 };
 
+/**
+ * `orphan-build-daemons` is this file's stand-in kind for rung-3 mechanics that have nothing to
+ * do with notify defaults (most of the file). Production now defaults it (and other
+ * machine-health kinds) to `notify: false` (`defaultConditionNotify`, config.ts), so without
+ * this most of those tests would stop seeing a push. A test that overrides
+ * `conditions["orphan-build-daemons"].notify` itself still wins; the new default is covered
+ * directly in `config.test.ts` and, end to end, by the `system-memory` case below.
+ */
+function withOrphanBuildDaemonsNotifying(
+  remediation: RemediationConfig | undefined,
+): RemediationConfig | undefined {
+  if (remediation?.conditions?.["orphan-build-daemons"]?.notify !== undefined) {
+    return remediation;
+  }
+  return {
+    ...remediation,
+    conditions: {
+      ...remediation?.conditions,
+      "orphan-build-daemons": {
+        ...remediation?.conditions?.["orphan-build-daemons"],
+        notify: true,
+      },
+    },
+  };
+}
+
 function buildLadder(
   extra: {
     previewPush?: RemediationLadderOptions["previewPush"] | null;
@@ -108,7 +134,7 @@ function buildLadder(
       },
     }),
     serverId: "srv",
-    readDaemonConfig: () => ({ remediation: config }),
+    readDaemonConfig: () => ({ remediation: withOrphanBuildDaemonsNotifying(config) }),
     statePath,
     logger: pino({ level: "silent" }),
     now: () => nowMs,
@@ -462,6 +488,44 @@ describe("RemediationLadder rung 3 without an agent", () => {
     await ladder.observe(observation({ key: "b", remedy: "disabled" }));
     expect(alerts()).toHaveLength(0);
     expect(records().filter((reason) => reason === "remediation_escalated")).toHaveLength(2);
+  });
+
+  it("defaults a machine-health kind to the ledger with no config at all", async () => {
+    const ladder = buildLadder();
+    await ladder.observe(
+      observation({
+        key: "system-memory",
+        kind: "system-memory",
+        remedy: "disabled",
+      }),
+    );
+    expect(alerts()).toHaveLength(0);
+    expect(records()).toContain("remediation_escalated");
+  });
+
+  it("pushes a machine-health kind when its own config explicitly opts in", async () => {
+    config = { conditions: { "system-memory": { notify: true } } };
+    const ladder = buildLadder();
+    await ladder.observe(
+      observation({
+        key: "system-memory",
+        kind: "system-memory",
+        remedy: "disabled",
+      }),
+    );
+    expect(alerts()).toHaveLength(1);
+  });
+
+  it("still pushes a kind that needs a person's hands, with no config at all", async () => {
+    const ladder = buildLadder();
+    await ladder.observe(
+      observation({
+        key: "account-pool-exhausted",
+        kind: "account-pool-exhausted",
+        remedy: "disabled",
+      }),
+    );
+    expect(alerts()).toHaveLength(1);
   });
 });
 

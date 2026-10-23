@@ -71,6 +71,7 @@ import type { VoiceCallerContext, VoiceSpeakHandler } from "./voice-types.js";
 import {
   computeNotificationPlan,
   isPushEligibleAttentionReason,
+  isQuestionEndingMessage,
   type ClientPresenceState,
   attentionPushLevel,
 } from "./agent-attention-policy.js";
@@ -85,6 +86,7 @@ import {
   buildAgentAttentionNotificationPayload,
   findLatestPermissionRequest,
 } from "@getpaseo/protocol/agent-attention-notification";
+import { isDaemonAutomationAgent, isDelegatedAgent } from "@getpaseo/protocol/agent-labels";
 import { createGitHubService } from "../services/github-service.js";
 import type { ForgeService } from "../services/forge-service.js";
 import {
@@ -111,6 +113,7 @@ import {
 } from "./lifecycle-reasons.js";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 import type { EffectiveAvailability } from "./notify-policy/availability.js";
+import type { NotifyLevel } from "./notify-policy/levels.js";
 import type { BrowserAutomationExecuteResponse } from "@getpaseo/protocol/browser-automation/rpc-schemas";
 import {
   BrowserAutomationHostCapabilitySchema,
@@ -214,6 +217,11 @@ function resolveTerminalAttentionReason(input: {
 
 function terminalAttentionTitle(reason: TerminalAttentionReason): string {
   return reason === "needs_input" ? "Terminal needs input" : "Terminal finished";
+}
+
+/** A terminal has no parent to report a finish to, but a finish still needs nobody right now. */
+function terminalAttentionPushLevel(reason: TerminalAttentionReason): NotifyLevel {
+  return reason === "needs_input" ? "alert" : "notice";
 }
 
 function createFallbackWorkspaceGitSnapshot(cwd: string): WorkspaceGitRuntimeSnapshot {
@@ -2744,7 +2752,18 @@ export class VoiceAssistantWebSocketServer {
 
     const allStates = clientEntries.map((e) => e.state);
     const nowMs = Date.now();
+    // `assistantMessage` is the agent's last assistant text overall, possibly from an earlier
+    // turn; it drives the notification body and the push's own final text, where showing the
+    // most recent thing the agent said is correct even when this turn had none of its own.
+    // `finishingTurnMessage` is stricter: only the turn that just finished can be asking a
+    // question right now, so it is null when that turn answered an earlier "...?" and ended with
+    // no assistant text of its own -- the question check below must not re-surface that earlier
+    // question as if it were new.
     const assistantMessage = await this.agentManager.getLastAssistantMessage(params.agentId);
+    const finishingTurnMessage = this.agentManager.getFinishingTurnAssistantMessage(params.agentId);
+    const isRootAgent = !isDelegatedAgent(agent) && !isDaemonAutomationAgent(agent);
+    const finishAsksQuestion =
+      params.reason === "finished" && isRootAgent && isQuestionEndingMessage(finishingTurnMessage);
     const notification = buildAgentAttentionNotificationPayload({
       reason: params.reason,
       serverId: this.serverId,
@@ -2752,6 +2771,7 @@ export class VoiceAssistantWebSocketServer {
       agentId: params.agentId,
       assistantMessage,
       permissionRequest: findLatestPermissionRequest(agent.pendingPermissions),
+      isQuestion: finishAsksQuestion,
     });
 
     const plan = computeNotificationPlan({
@@ -2762,14 +2782,18 @@ export class VoiceAssistantWebSocketServer {
     });
 
     if (plan.shouldPush) {
-      // Every finish is already a notice (attentionPushLevel), so feature 3b's triage
-      // (docs/jev.md) never fires here now — it only ever lowered an alert. Detached, so the
-      // in-app messages below never wait on JEV. It never rejects; the catch stays because the
-      // daemon exits on an unhandled rejection.
+      // Most finishes are a notice (attentionPushLevel); a root agent's plain-text question is
+      // kept an alert instead. Either way feature 3b's triage (docs/jev.md) finds its own
+      // question-mark veto before it would ask JEV, so a question-ending finish is never
+      // delayed or re-judged. Detached, so the in-app messages below never wait on JEV. It never
+      // rejects; the catch stays because the daemon exits on an unhandled rejection.
       const jev = this.jev;
       void sendAttentionPush({
         reason: params.reason,
-        base: attentionPushLevel(params.reason),
+        base: attentionPushLevel(params.reason, {
+          isRootAgent,
+          finalMessage: finishingTurnMessage,
+        }),
         agentId: params.agentId,
         finalMessage: assistantMessage,
         jev,
@@ -2887,7 +2911,7 @@ export class VoiceAssistantWebSocketServer {
               ...(workspaceId ? { workspaceId } : {}),
             },
           },
-          { level: "alert" },
+          { level: terminalAttentionPushLevel(params.reason) },
         )
         .catch((err) => {
           this.logger.warn(

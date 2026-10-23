@@ -33,15 +33,17 @@ function rowFor(level: NotifyLevel): string[] {
 
 describe("decideDelivery", () => {
   test("with default dials", () => {
-    // columns: available, focus, away, off
+    // columns: available, focus, away, off. The default posts only what needs a person.
     expect(rowFor("record")).toEqual(["log", "log", "log", "log"]);
-    expect(rowFor("notice")).toEqual(["digest", "digest", "digest", "digest"]);
+    expect(rowFor("notice")).toEqual(["log", "log", "log", "log"]);
     expect(rowFor("alert")).toEqual(["interrupt", "notify", "interrupt", "notify"]);
     expect(rowFor("urgent")).toEqual(["interrupt", "interrupt", "interrupt", "notify"]);
   });
 
   test("the interrupt dial moves the line between digest and interrupt", () => {
-    expect(outcome("notice", "available", { minInterruptLevel: "notice" })).toBe("interrupt");
+    expect(
+      outcome("notice", "available", { minPostLevel: "notice", minInterruptLevel: "notice" }),
+    ).toBe("interrupt");
     expect(outcome("alert", "available", { minInterruptLevel: "urgent" })).toBe("digest");
   });
 

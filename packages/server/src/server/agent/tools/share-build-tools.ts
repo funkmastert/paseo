@@ -278,8 +278,8 @@ async function sendSharePush(input: {
       detail: "This daemon has no push sender. Give Tyler the link yourself.",
     };
   }
-  // Needs Tyler soon, and nothing is lost if he waits. One build pushed once an hour.
-  const meta = { level: "alert", dedupeKey: `shared-build:${input.sha256}` } as const;
+  // An install link, not a blocker: nothing is lost while it waits. One build pushed once an hour.
+  const meta = { level: "notice", dedupeKey: `shared-build:${input.sha256}` } as const;
   // Asked before sending: after, the policy would see this push as its own repeat.
   let preview: NotifyDeliveryPreview | null = null;
   try {

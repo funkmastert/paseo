@@ -7,7 +7,7 @@ An agent that built a mobile app hands it to Tyler's phone with the `share_build
 1. The agent calls `share_build` with a `.apk` or `.ipa` it built (`packages/server/src/server/agent/tools/share-build-tools.ts`).
 2. The daemon checks the path, copies the file into `$PASEO_HOME/public-web-shares/<token>/` with a `share.json` beside it (`packages/server/src/server/shared-builds/shared-build-store.ts`), and for an IPA writes `manifest.plist` and `index.html` (`shared-builds/ios-manifest.ts`).
 3. The public static site serves the share at `<app.baseUrl>/b/<token>/`.
-4. Tyler gets an `alert` push whose `data.externalUrl` is the APK, or the IPA's install page. The app opens that link in the browser on tap (`packages/app/src/utils/notification-routing.ts`).
+4. Tyler gets a `notice` push whose `data.externalUrl` is the APK, or the IPA's install page. The app opens that link in the browser on tap (`packages/app/src/utils/notification-routing.ts`).
 
 The tool returns the link, its expiry and the push text, so the agent can also give Tyler the link in chat.
 
@@ -66,6 +66,6 @@ An APK must be a zip with a root `AndroidManifest.xml`; its package and version 
 
 ## The push
 
-`alert`: it needs Tyler soon, and nothing is lost if he waits ([notification-policy.md](notification-policy.md)). The dedupe key is the build's SHA-256, so sharing the same bytes twice within an hour pushes once; the second share still gets its own link.
+`notice`: an install link, not a blocker, and nothing is lost if he waits ([notification-policy.md](notification-policy.md)). The dedupe key is the build's SHA-256, so sharing the same bytes twice within an hour pushes once; the second share still gets its own link.
 
 The tool asks the notify policy what it will do before sending and reports it as `push.outcome`: `sent`, `folded` (the same build was pushed within the hour), `digest`, `logged`, `no-device`, `no-sender`, `failed`, or `unconfirmed` when the policy can't be asked. Anything but `sent` tells the agent to give Tyler the link itself.

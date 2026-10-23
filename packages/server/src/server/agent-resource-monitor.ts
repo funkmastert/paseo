@@ -1365,7 +1365,7 @@ export class AgentResourceMonitor {
         "Memory pressure is critical",
       );
       await this.sendPush(buildMemoryPressureCriticalPayload(this.serverId, systemMemory), {
-        level: "alert",
+        level: "record",
         dedupeKey: MEMORY_PRESSURE_CRITICAL_DEDUPE_KEY,
       });
     }

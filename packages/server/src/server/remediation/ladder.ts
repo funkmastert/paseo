@@ -13,6 +13,7 @@ import { levelRank, type NotifyLevel } from "../notify-policy/levels.js";
 import type { NotifyDeliveryPreview } from "../notify-policy/notify-policy.js";
 import type { PushNotificationSender } from "../push/index.js";
 import {
+  defaultConditionNotify,
   isNotifyRungEnabled,
   resolveRemediationEscalationConfig,
   type RemediationConditionOverride,
@@ -329,7 +330,9 @@ export class RemediationLadder implements RemediationSink {
         cooldownMinutes: override?.cooldownMinutes ?? base.cooldownMinutes,
       },
       graceMs: resolveGraceMs(override, observation),
-      notify: isNotifyRungEnabled(config) && override?.notify !== false,
+      notify:
+        isNotifyRungEnabled(config) &&
+        (override?.notify ?? defaultConditionNotify(observation.kind)),
       escalate: base.enabled && override?.escalate !== false,
     };
   }

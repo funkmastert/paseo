@@ -24,7 +24,7 @@ describe("notification policy over an isolated daemon", () => {
     expect(client.getLastServerInfoMessage()?.features?.notificationPolicy).toBe(true);
     const policy = await client.getNotificationPolicy();
     expect(policy.settings).toEqual({
-      minPostLevel: "notice",
+      minPostLevel: "alert",
       minInterruptLevel: "alert",
       digestIntervalMinutes: 30,
       availability: { mode: "available", until: null },

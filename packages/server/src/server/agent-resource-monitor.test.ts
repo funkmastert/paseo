@@ -2249,12 +2249,12 @@ describe("AgentResourceMonitor memory brake", () => {
     expect(admission.held()).toEqual([true, false, true, false]);
   });
 
-  test("pressure 4 pushes an alert at once, once per critical spell", async () => {
+  test("pressure 4 records a critical spell once, with no push (machine health is never Tyler's to read about)", async () => {
     const { monitor, sampler, push, clock } = setup();
     setMemory(sampler, 4, 30);
     await sweep(monitor, 3, clock);
     expect(push.sent.map((payload) => payload.title)).toEqual(["Memory pressure is critical"]);
-    expect(push.levels).toEqual(["alert"]);
+    expect(push.levels).toEqual(["record"]);
     expect(push.sent[0]?.data).toMatchObject({
       serverId: "server-1",
       reason: "resource_system_memory",
@@ -2264,7 +2264,7 @@ describe("AgentResourceMonitor memory brake", () => {
     await sweep(monitor, 1, clock);
     setMemory(sampler, 4, 30);
     await sweep(monitor, 1, clock);
-    expect(push.levels).toEqual(["alert", "alert"]);
+    expect(push.levels).toEqual(["record", "record"]);
   });
 
   test("the brake never touches a running turn: no signal, no renice, no message", async () => {

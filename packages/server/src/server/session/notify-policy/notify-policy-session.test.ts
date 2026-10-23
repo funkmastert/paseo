@@ -61,7 +61,7 @@ describe("NotifyPolicySession", () => {
         payload: {
           requestId: "r1",
           settings: {
-            minPostLevel: "notice",
+            minPostLevel: "alert",
             minInterruptLevel: "alert",
             digestIntervalMinutes: 30,
             availability: { mode: "available", until: null },
@@ -90,7 +90,7 @@ describe("NotifyPolicySession", () => {
       type: "notifications.policy.set.response",
       payload: {
         settings: {
-          minPostLevel: "notice",
+          minPostLevel: "alert",
           minInterruptLevel: "urgent",
           availability: { mode: "focus" },
         },

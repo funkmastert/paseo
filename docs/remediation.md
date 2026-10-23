@@ -94,24 +94,26 @@ The ladder polls in-flight agents every 60 seconds on an unref'd timer and re-re
 
 `agents.remediation` in `config.json`, live via `paseo daemon reload`. The resolvers and their defaults are in `remediation/config.ts`.
 
-| Key                                                              | Default  | What it does                                                                  |
-| ---------------------------------------------------------------- | -------- | ----------------------------------------------------------------------------- |
-| `remedies.enabled`                                               | `true`   | Master switch for the self-heal sweeps (rung 1). Off, they report `disabled`. |
-| `escalation.enabled`                                             | `true`   | Rung 2. Off, every condition that would get an agent goes to rung 3.          |
-| `escalation.provider`                                            | `claude` | Provider the agent is created with. The classifier still picks the account.   |
-| `escalation.taskClass`                                           | standard | `paseo.task-class` when neither the observation nor the condition sets one.   |
-| `escalation.budgetTokens`                                        | 2000000  | `paseo.budget`, and the token count the ladder cancels at.                    |
-| `escalation.cooldownMinutes`                                     | 240      | Per key, how long after an agent starts before the key may start another.     |
-| `escalation.timeoutMinutes`                                      | 45       | An agent that has not reported by then is cancelled.                          |
-| `escalation.maxConcurrent`                                       | 2        | Agents in flight at once, across all keys.                                    |
-| `escalation.maxPerDay`                                           | 12       | Agents started per UTC day. Past it, rung 3.                                  |
-| `notify.enabled`                                                 | `true`   | Rung 3. Off, rung 3 goes to the ledger at `record` and nobody is pushed.      |
-| `conditions.<kind>.graceMinutes`                                 | —        | Overrides the monitor's grace window.                                         |
-| `conditions.<kind>.escalate`                                     | —        | `false` skips rung 2 for this kind.                                           |
-| `conditions.<kind>.notify`                                       | —        | `false` sends this kind's rung 3 to the ledger only.                          |
-| `conditions.<kind>.cooldownMinutes`, `budgetTokens`, `taskClass` | —        | Per-kind overrides of the escalation values.                                  |
+| Key                                                              | Default  | What it does                                                                                                   |
+| ---------------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------- |
+| `remedies.enabled`                                               | `true`   | Master switch for the self-heal sweeps (rung 1). Off, they report `disabled`.                                  |
+| `escalation.enabled`                                             | `true`   | Rung 2. Off, every condition that would get an agent goes to rung 3.                                           |
+| `escalation.provider`                                            | `claude` | Provider the agent is created with. The classifier still picks the account.                                    |
+| `escalation.taskClass`                                           | standard | `paseo.task-class` when neither the observation nor the condition sets one.                                    |
+| `escalation.budgetTokens`                                        | 2000000  | `paseo.budget`, and the token count the ladder cancels at.                                                     |
+| `escalation.cooldownMinutes`                                     | 240      | Per key, how long after an agent starts before the key may start another.                                      |
+| `escalation.timeoutMinutes`                                      | 45       | An agent that has not reported by then is cancelled.                                                           |
+| `escalation.maxConcurrent`                                       | 2        | Agents in flight at once, across all keys.                                                                     |
+| `escalation.maxPerDay`                                           | 12       | Agents started per UTC day. Past it, rung 3.                                                                   |
+| `notify.enabled`                                                 | `true`   | Rung 3. Off, rung 3 goes to the ledger at `record` and nobody is pushed.                                       |
+| `conditions.<kind>.graceMinutes`                                 | —        | Overrides the monitor's grace window.                                                                          |
+| `conditions.<kind>.escalate`                                     | —        | `false` skips rung 2 for this kind.                                                                            |
+| `conditions.<kind>.notify`                                       | per kind | `false` sends this kind's rung 3 to the ledger only; `true` pushes it. Overrides the kind's own default below. |
+| `conditions.<kind>.cooldownMinutes`, `budgetTokens`, `taskClass` | —        | Per-kind overrides of the escalation values.                                                                   |
 
 `stalledAgents`, `disk` and `workSnapshots` belong to their sweeps; see the condition table.
+
+`conditions.<kind>.notify`'s own default (`defaultConditionNotify`, `remediation/config.ts`) is `false` for machine health the daemon's own remedies already handle, and for automation-only episodes with nothing for a person to do: `orphan-build-daemons`, `system-memory`, `cpu-saturation`, `disk-critical`, `disk-low`, `disk-falling`, `stalled-agent`, `work-at-risk`. A fresh install or a lost config file never pushes those on its own. Every other kind — the ones that need a person's hands, `account-pool-exhausted`, `account-failover-stranded`, `account-signed-out:<providerId>` included — defaults to `true`.
 
 ## Plugging in a monitor
 

@@ -10,8 +10,10 @@ import {
   noticesPatch,
 } from "./host-notifications-state";
 
+// The daemon's real default (notify-policy/settings.ts: DEFAULT_NOTIFY_POLICY_SETTINGS) posts
+// only what needs Tyler's direct action; notices are ledger-only until he lowers the dial.
 const defaults: NotifyPolicySettings = {
-  minPostLevel: "notice",
+  minPostLevel: "alert",
   minInterruptLevel: "alert",
   digestIntervalMinutes: 30,
   availability: { mode: "available", until: null },
@@ -23,8 +25,8 @@ describe("host notifications state", () => {
     expect(interruptChoice(defaults)).toBe("alert");
     expect(interruptChoice({ ...defaults, minInterruptLevel: "urgent" })).toBe("urgent");
     expect(interruptChoice({ ...defaults, minInterruptLevel: "notice" })).toBe("notice");
-    expect(noticesChoice(defaults)).toBe("digest");
-    expect(noticesChoice({ ...defaults, minPostLevel: "alert" })).toBe("off");
+    expect(noticesChoice(defaults)).toBe("off");
+    expect(noticesChoice({ ...defaults, minPostLevel: "notice" })).toBe("digest");
   });
 
   it("turning notices off raises the post dial above them and on lowers it back", () => {

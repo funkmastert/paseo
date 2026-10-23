@@ -27,6 +27,8 @@ import {
   isOpenAgentTabLabel,
   JEV_TOOLS_LABEL,
   PARENT_AGENT_ID_LABEL,
+  REMEDIATION_LABELS,
+  SCHEDULE_LABELS,
   type AgentCreateOrigin,
 } from "@getpaseo/protocol/agent-labels";
 import type { Logger } from "pino";
@@ -1252,8 +1254,19 @@ function validateAgentId(agentId: string, source: string): string {
  * `paseo.codex-guarded` is the Codex child guard's own marker (codex-guard-predicate.ts):
  * unprotected, `update_agent` could clear it the same way a relabel or detach already clears
  * `paseo.parent-agent-id`, undoing the one thing that makes the marker durable.
+ *
+ * `REMEDIATION_LABELS`/`SCHEDULE_LABELS` (`isDaemonAutomationAgent`, `agent-labels.ts`) decide
+ * whether a root agent's plain-text question reaches Tyler as an alert: unprotected, any agent
+ * with `update_agent` could set one on itself and suppress its own question. The daemon's own
+ * create paths (`remediation/ladder.ts`, `schedule/service.ts`) set these directly on the new
+ * record, never through this patch, so protecting them from patches does not block that.
  */
-const PROTECTED_LABEL_KEYS: ReadonlySet<string> = new Set([JEV_TOOLS_LABEL, CODEX_GUARDED_LABEL]);
+const PROTECTED_LABEL_KEYS: ReadonlySet<string> = new Set([
+  JEV_TOOLS_LABEL,
+  CODEX_GUARDED_LABEL,
+  ...REMEDIATION_LABELS,
+  ...SCHEDULE_LABELS,
+]);
 
 function applyLabelPatch(
   labels: Record<string, string>,
@@ -5482,6 +5495,21 @@ export class AgentManager {
     return await this.getLastAssistantMessageFromStores(agentId);
   }
 
+  /**
+   * The assistant's trailing text from the turn that just finished, or null when that turn ended
+   * with no assistant text of its own. Unlike `getLastAssistantMessage`, this never walks past the
+   * most recent user message to return an earlier turn's text: a turn that only answered a
+   * permission, ran tools, or otherwise produced no final text is not a question just because an
+   * older turn's assistant message happened to end in one.
+   */
+  getFinishingTurnAssistantMessage(agentId: string): string | null {
+    if (!this.timelineStore.has(agentId)) {
+      return null;
+    }
+    const liveTimeline = this.timelineStore.getItems(agentId);
+    return collectTrailingAssistantMessage(liveTimeline, { stopAtUserMessage: true })?.text ?? null;
+  }
+
   private getLastAssistantMessageFromTimeline(
     timeline: readonly AgentTimelineItem[],
   ): string | null {
@@ -5491,29 +5519,7 @@ export class AgentManager {
   private getLastAssistantMessageSegmentFromTimeline(
     timeline: readonly AgentTimelineItem[],
   ): { text: string; startsAtBeginning: boolean } | null {
-    // Collect the last contiguous assistant messages (Claude streams chunks)
-    const chunks: string[] = [];
-    let startsAtBeginning = false;
-    for (let i = timeline.length - 1; i >= 0; i--) {
-      const item = timeline[i];
-      if (item.type !== "assistant_message") {
-        if (chunks.length) {
-          break;
-        }
-        continue;
-      }
-      chunks.push(item.text);
-      startsAtBeginning = i === 0;
-    }
-
-    if (!chunks.length) {
-      return null;
-    }
-
-    return {
-      text: chunks.toReversed().join(""),
-      startsAtBeginning,
-    };
+    return collectTrailingAssistantMessage(timeline);
   }
 
   private async getLastAssistantMessageFromStores(agentId: string): Promise<string | null> {
@@ -8029,6 +8035,35 @@ function matchesImportableSessionQuery(
   return [session.title, session.firstPromptPreview, session.lastPromptPreview, cwdBasename].some(
     (value) => value?.toLowerCase().includes(query),
   );
+}
+
+/**
+ * Walks a timeline backward collecting the last contiguous assistant-message chunks (providers
+ * stream a turn's text in pieces). With `stopAtUserMessage`, returns null the instant a
+ * `user_message` is reached before any assistant chunk was found: the turn that just finished
+ * produced no trailing text of its own, so an earlier turn's assistant text must not be returned
+ * in its place. Without it, a `user_message` is just another non-assistant item to walk past —
+ * `getLastAssistantMessage`'s job is the most recent assistant text anywhere in the timeline,
+ * whichever turn it came from.
+ */
+export function collectTrailingAssistantMessage(
+  timeline: readonly AgentTimelineItem[],
+  options: { stopAtUserMessage: boolean } = { stopAtUserMessage: false },
+): { text: string; startsAtBeginning: boolean } | null {
+  const chunks: string[] = [];
+  let startsAtBeginning = false;
+  for (let i = timeline.length - 1; i >= 0; i -= 1) {
+    const item = timeline[i]!;
+    if (item.type !== "assistant_message") {
+      if (chunks.length) break;
+      if (options.stopAtUserMessage && item.type === "user_message") return null;
+      continue;
+    }
+    chunks.push(item.text);
+    startsAtBeginning = i === 0;
+  }
+  if (!chunks.length) return null;
+  return { text: chunks.toReversed().join(""), startsAtBeginning };
 }
 
 export function commandMayHaveChangedExternalState(command: string): boolean {

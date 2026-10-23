@@ -9,6 +9,7 @@ import { createTestLogger } from "../../test-utils/test-logger.js";
 import {
   AgentManager,
   AgentManagerShuttingDownError,
+  collectTrailingAssistantMessage,
   commandMayHaveChangedExternalState,
   type AgentManagerEvent,
   type AgentOperatorSignal,
@@ -7967,6 +7968,42 @@ test("setLabels cannot grant the JEV tools label to a live agent", async () => {
   expect(persisted?.labels["surface"]).toBe("mobile");
 });
 
+test("setLabels cannot grant an agent the remediation or schedule automation markers", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-automation-label-live-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: {
+      codex: new TestAgentClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000135",
+  });
+
+  const snapshot = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  // An ordinary root agent must not be able to self-label as daemon automation and suppress its
+  // own question-ending finish (isDaemonAutomationAgent, websocket-server.ts).
+  await manager.setLabels(snapshot.id, {
+    "paseo.remediation": "system-memory",
+    "paseo.schedule-id": "sched-1",
+    surface: "mobile",
+  });
+
+  const live = manager.getAgent(snapshot.id);
+  expect(live?.labels["paseo.remediation"]).toBeUndefined();
+  expect(live?.labels["paseo.schedule-id"]).toBeUndefined();
+  expect(live?.labels["surface"]).toBe("mobile");
+});
+
 test("updateAgentMetadata cannot grant the JEV tools label to a stored agent", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-jev-label-stored-"));
   const storagePath = join(workdir, "agents");
@@ -14501,6 +14538,74 @@ test("commandMayHaveChangedExternalState ignores local or read-only commands", (
   expect(commandMayHaveChangedExternalState("cat file.txt")).toBe(false);
   expect(commandMayHaveChangedExternalState("npm install")).toBe(false);
   expect(commandMayHaveChangedExternalState("npm publish")).toBe(false);
+});
+
+const toolCall: AgentTimelineItem = {
+  type: "tool_call",
+  callId: "call-1",
+  name: "read_file",
+  status: "completed",
+  error: null,
+  detail: { type: "read", filePath: "src/index.ts", content: "x" },
+};
+
+test("collectTrailingAssistantMessage joins contiguous trailing assistant chunks", () => {
+  const timeline: AgentTimelineItem[] = [
+    { type: "user_message", text: "build it" },
+    { type: "assistant_message", text: "Sure, " },
+    { type: "assistant_message", text: "building now." },
+  ];
+  expect(collectTrailingAssistantMessage(timeline)?.text).toBe("Sure, building now.");
+});
+
+test("collectTrailingAssistantMessage walks past non-assistant items with no chunks yet", () => {
+  const timeline: AgentTimelineItem[] = [
+    { type: "assistant_message", text: "Should I proceed?" },
+    { type: "user_message", text: "yes" },
+    toolCall,
+    toolCall,
+  ];
+  // No chunks collected yet when the tool calls are hit, so the walk continues past them and
+  // past the user_message to the earlier assistant text -- the default (non-stopAtUserMessage)
+  // behavior `getLastAssistantMessage` relies on.
+  expect(collectTrailingAssistantMessage(timeline)?.text).toBe("Should I proceed?");
+});
+
+test("collectTrailingAssistantMessage with stopAtUserMessage returns null for a turn that answered and then ran tools only", () => {
+  const timeline: AgentTimelineItem[] = [
+    { type: "assistant_message", text: "Should I proceed?" },
+    { type: "user_message", text: "yes" },
+    toolCall,
+    toolCall,
+  ];
+  expect(collectTrailingAssistantMessage(timeline, { stopAtUserMessage: true })).toBeNull();
+});
+
+test("collectTrailingAssistantMessage with stopAtUserMessage still returns the finishing turn's own text", () => {
+  const timeline: AgentTimelineItem[] = [
+    { type: "assistant_message", text: "Should I proceed?" },
+    { type: "user_message", text: "yes" },
+    toolCall,
+    { type: "assistant_message", text: "Done. " },
+    { type: "assistant_message", text: "All set." },
+  ];
+  expect(collectTrailingAssistantMessage(timeline, { stopAtUserMessage: true })?.text).toBe(
+    "Done. All set.",
+  );
+});
+
+test("collectTrailingAssistantMessage returns null for an empty timeline or no assistant text anywhere", () => {
+  expect(collectTrailingAssistantMessage([])).toBeNull();
+  expect(
+    collectTrailingAssistantMessage([{ type: "user_message", text: "hi" }, toolCall], {
+      stopAtUserMessage: true,
+    }),
+  ).toBeNull();
+});
+
+test("getFinishingTurnAssistantMessage returns null instead of throwing for an agent with no timeline state", () => {
+  const manager = new AgentManager({ clients: { codex: new TestAgentClient() }, logger });
+  expect(manager.getFinishingTurnAssistantMessage("no-such-agent")).toBeNull();
 });
 
 test("onWorkspaceStateMayHaveChanged is called when a completed shell tool call may have changed external state", async () => {
