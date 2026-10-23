@@ -11,6 +11,7 @@ import {
   getParentAgentIdFromLabels,
   getOpenAgentTabLabel,
   hasOpenAgentTab,
+  isDaemonAutomationAgent,
   isDelegatedAgent,
   isOpenAgentTabLabel,
   PARENT_AGENT_ID_LABEL,
@@ -28,6 +29,22 @@ describe("agent label policy", () => {
     expect(isDelegatedAgent({ labels: {} })).toBe(false);
     expect(isDelegatedAgent({ labels: { [PARENT_AGENT_ID_LABEL]: "   " } })).toBe(false);
     expect(isDelegatedAgent({ labels: { [PARENT_AGENT_ID_LABEL]: 42 } })).toBe(false);
+  });
+
+  test("recognizes a remediation agent or a schedule run as daemon automation", () => {
+    expect(isDaemonAutomationAgent({ labels: { "paseo.remediation": "system-memory" } })).toBe(
+      true,
+    );
+    expect(isDaemonAutomationAgent({ labels: { "paseo.remediation-key": "system-memory" } })).toBe(
+      true,
+    );
+    expect(isDaemonAutomationAgent({ labels: { "paseo.schedule-id": "sched-1" } })).toBe(true);
+    expect(isDaemonAutomationAgent({ labels: { "paseo.schedule-run": "run-1" } })).toBe(true);
+  });
+
+  test("does not treat an ordinary root agent as daemon automation", () => {
+    expect(isDaemonAutomationAgent({ labels: {} })).toBe(false);
+    expect(isDaemonAutomationAgent({ labels: undefined })).toBe(false);
   });
 
   test("treats any true client-scoped open-tab label as open", () => {

@@ -1,4 +1,8 @@
-import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
+import {
+  getParentAgentIdFromLabels,
+  REMEDIATION_LABELS,
+  SCHEDULE_LABELS,
+} from "@getpaseo/protocol/agent-labels";
 
 import { ACCOUNT_FAILOVER_MIGRATED_TO_LABEL } from "../agent/account-failover-detector.js";
 import type { AgentLifecycleStatus } from "../agent/agent-manager.js";
@@ -19,9 +23,6 @@ export const AWAY_REPLY_OPT_OUT_LABEL = "paseo.away-reply";
 
 /** Every auto-reply starts with this, so the agent reading it knows Tyler did not write it. */
 export const AWAY_REPLY_MARKER_PREFIX = "[Auto-reply on Tyler's behalf";
-
-const REMEDIATION_LABELS = ["paseo.remediation", "paseo.remediation-key"];
-const SCHEDULE_LABELS = ["paseo.schedule-id", "paseo.schedule-run"];
 
 /** One live agent as the job sees it. Built in `job.ts` from the agent manager. */
 export interface AwayReplyAgentView {

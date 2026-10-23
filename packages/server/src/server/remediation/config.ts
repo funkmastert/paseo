@@ -61,10 +61,11 @@ export function isNotifyRungEnabled(config: RemediationConfig | undefined): bool
 
 /**
  * Kinds whose rung 3 defaults to the ledger (`record`), not a push: machine health the daemon's
- * own remedies already handle, and automation-only episodes with nothing for Tyler to do. A
- * fresh install or a lost config must never push these on its own; `conditions.<kind>.notify:
- * true` opts a kind back in. Everything else (an account that needs a person's hands,
- * `work-at-risk`'s judge call) keeps the `true` default.
+ * own remedies already handle, and automation-only episodes with nothing for Tyler to do,
+ * including `work-at-risk`'s judge call — its `NOT_FIXED` is recorded and shown in-app, never
+ * pushed, under the default (docs/work-snapshots.md). A fresh install or a lost config must never
+ * push these on its own; `conditions.<kind>.notify: true` opts a kind back in. Everything else
+ * (an account that needs a person's hands) keeps the `true` default.
  */
 const NOTIFY_DEFAULT_FALSE_KINDS: ReadonlySet<RemediationConditionKind> = new Set([
   "orphan-build-daemons",

@@ -301,4 +301,82 @@ describe("isQuestionEndingMessage", () => {
     );
     expect(isQuestionEndingMessage(message)).toBe(false);
   });
+
+  it("matches a question followed by a short numbered option list", () => {
+    expect(isQuestionEndingMessage("Which do you prefer?\n1. A\n2. B")).toBe(true);
+  });
+
+  it("matches a question followed by a bulleted option list", () => {
+    expect(isQuestionEndingMessage("Which do you prefer?\n- Option A\n- Option B")).toBe(true);
+  });
+
+  it("matches a trailing short parenthetical after the question mark", () => {
+    expect(isQuestionEndingMessage("Proceed? (y/n)")).toBe(true);
+  });
+
+  it("matches a trailing short sign-off sentence after the question mark", () => {
+    expect(isQuestionEndingMessage("Want me to continue? Let me know.")).toBe(true);
+    expect(isQuestionEndingMessage("Should I merge it? Thanks.")).toBe(true);
+  });
+
+  it("matches a sign-off on its own trailing line, after a question on the line before it", () => {
+    expect(isQuestionEndingMessage("Deploy the fix?\nLet me know.")).toBe(true);
+  });
+
+  it("matches two chained sign-off clauses after the question mark", () => {
+    expect(isQuestionEndingMessage("Should we ship it? Thanks. Let me know.")).toBe(true);
+  });
+
+  it("matches a trailing list item that itself ends in a question mark", () => {
+    expect(isQuestionEndingMessage("Pick a size:\n1. small\n2. large?")).toBe(true);
+  });
+
+  it("does not match a sign-off phrase that is only a prefix of the trailing word", () => {
+    expect(isQuestionEndingMessage("Should we reschedule? Happy Thanksgiving")).toBe(false);
+  });
+
+  it("ignores a question mark inside a URL's query string", () => {
+    expect(
+      isQuestionEndingMessage("Pushed. Build log at https://ci.example.com/run/12?tab=log"),
+    ).toBe(false);
+  });
+
+  it("does not match a trailing list with no question behind it", () => {
+    expect(isQuestionEndingMessage("Options:\n1. A\n2. B")).toBe(false);
+  });
+
+  it("matches a question followed by exactly 6 list lines but not 7", () => {
+    const sixItems = Array.from({ length: 6 }, (_, i) => `${i + 1}. Option ${i + 1}`);
+    expect(isQuestionEndingMessage(["Which do you prefer?", ...sixItems].join("\n"))).toBe(true);
+
+    const sevenItems = Array.from({ length: 7 }, (_, i) => `${i + 1}. Option ${i + 1}`);
+    expect(isQuestionEndingMessage(["Which do you prefer?", ...sevenItems].join("\n"))).toBe(false);
+  });
+
+  it("matches a trailing emoji after the question mark", () => {
+    expect(isQuestionEndingMessage("Merge it? 🙂")).toBe(true);
+  });
+
+  it("ignores a question mark ten lines from the end of a long report", () => {
+    const lines = ["Should we ship this? Nobody answered it yet."];
+    for (let i = 0; i < 9; i += 1) {
+      lines.push(`Status line ${i}: all checks passed.`);
+    }
+    expect(isQuestionEndingMessage(lines.join("\n"))).toBe(false);
+  });
+
+  it("does not match a status update ending in a period", () => {
+    expect(isQuestionEndingMessage("Deployed the fix to production.")).toBe(false);
+  });
+
+  it("strips a leading blockquote marker before reading the line", () => {
+    expect(isQuestionEndingMessage("> Should I proceed with the deploy?")).toBe(true);
+  });
+
+  it("strips a 60,000-character run of trailing wrapper chars in one fast pass", () => {
+    const message = `Should I proceed?${"'".repeat(60_000)}`;
+    const start = performance.now();
+    expect(isQuestionEndingMessage(message)).toBe(true);
+    expect(performance.now() - start).toBeLessThan(200);
+  });
 });

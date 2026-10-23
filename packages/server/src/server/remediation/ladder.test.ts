@@ -503,6 +503,19 @@ describe("RemediationLadder rung 3 without an agent", () => {
     expect(records()).toContain("remediation_escalated");
   });
 
+  it("pushes a machine-health kind when its own config explicitly opts in", async () => {
+    config = { conditions: { "system-memory": { notify: true } } };
+    const ladder = buildLadder();
+    await ladder.observe(
+      observation({
+        key: "system-memory",
+        kind: "system-memory",
+        remedy: "disabled",
+      }),
+    );
+    expect(alerts()).toHaveLength(1);
+  });
+
   it("still pushes a kind that needs a person's hands, with no config at all", async () => {
     const ladder = buildLadder();
     await ladder.observe(

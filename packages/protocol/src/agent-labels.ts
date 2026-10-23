@@ -63,6 +63,29 @@ export function isDelegatedAgent(agent: AgentLabelSource): boolean {
 }
 
 /**
+ * A remediation agent (`remediation/ladder.ts`) or a schedule/heartbeat run (`schedule/service.ts`).
+ * The same two label pairs `away-reply/detect.ts`'s `leaderSkipReason` checks, shared here so the
+ * two places that need "is this root agent actually daemon automation, not a Tyler-started
+ * session" agree on what counts.
+ */
+export const REMEDIATION_LABELS = ["paseo.remediation", "paseo.remediation-key"] as const;
+export const SCHEDULE_LABELS = ["paseo.schedule-id", "paseo.schedule-run"] as const;
+
+/**
+ * A remediation agent or a schedule/heartbeat run carries no `paseo.parent-agent-id` on purpose
+ * (docs/remediation.md, docs/jev.md "role resolution") — it is a root agent by `isDelegatedAgent`,
+ * but it is daemon-made, not a session Tyler started. A caller deciding whether a root agent's
+ * finish is a question Tyler himself is being asked needs this distinction too.
+ */
+export function isDaemonAutomationAgent(agent: AgentLabelSource): boolean {
+  const labels = agent.labels ?? {};
+  return (
+    REMEDIATION_LABELS.some((label) => label in labels) ||
+    SCHEDULE_LABELS.some((label) => label in labels)
+  );
+}
+
+/**
  * Completion state (docs/completion-state.md): an agent's own claim that it is ready to merge or
  * fully done, written by `set_completion_state`. Absent means no claim. `COMPLETION_NOTE_LABEL`
  * is an optional human summary of at most `COMPLETION_NOTE_MAX_LENGTH` characters;

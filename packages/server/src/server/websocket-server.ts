@@ -86,7 +86,7 @@ import {
   buildAgentAttentionNotificationPayload,
   findLatestPermissionRequest,
 } from "@getpaseo/protocol/agent-attention-notification";
-import { isDelegatedAgent } from "@getpaseo/protocol/agent-labels";
+import { isDaemonAutomationAgent, isDelegatedAgent } from "@getpaseo/protocol/agent-labels";
 import { createGitHubService } from "../services/github-service.js";
 import type { ForgeService } from "../services/forge-service.js";
 import {
@@ -2752,10 +2752,18 @@ export class VoiceAssistantWebSocketServer {
 
     const allStates = clientEntries.map((e) => e.state);
     const nowMs = Date.now();
+    // `assistantMessage` is the agent's last assistant text overall, possibly from an earlier
+    // turn; it drives the notification body and the push's own final text, where showing the
+    // most recent thing the agent said is correct even when this turn had none of its own.
+    // `finishingTurnMessage` is stricter: only the turn that just finished can be asking a
+    // question right now, so it is null when that turn answered an earlier "...?" and ended with
+    // no assistant text of its own -- the question check below must not re-surface that earlier
+    // question as if it were new.
     const assistantMessage = await this.agentManager.getLastAssistantMessage(params.agentId);
-    const isRootAgent = !isDelegatedAgent(agent);
+    const finishingTurnMessage = this.agentManager.getFinishingTurnAssistantMessage(params.agentId);
+    const isRootAgent = !isDelegatedAgent(agent) && !isDaemonAutomationAgent(agent);
     const finishAsksQuestion =
-      params.reason === "finished" && isRootAgent && isQuestionEndingMessage(assistantMessage);
+      params.reason === "finished" && isRootAgent && isQuestionEndingMessage(finishingTurnMessage);
     const notification = buildAgentAttentionNotificationPayload({
       reason: params.reason,
       serverId: this.serverId,
@@ -2784,7 +2792,7 @@ export class VoiceAssistantWebSocketServer {
         reason: params.reason,
         base: attentionPushLevel(params.reason, {
           isRootAgent,
-          finalMessage: assistantMessage,
+          finalMessage: finishingTurnMessage,
         }),
         agentId: params.agentId,
         finalMessage: assistantMessage,

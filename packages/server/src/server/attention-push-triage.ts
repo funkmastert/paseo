@@ -2,6 +2,7 @@ import type { NotifyAvailabilityMode } from "@getpaseo/protocol/notify-policy/ty
 import type { Logger } from "pino";
 
 import type { AgentManager, AgentOperatorSignal } from "./agent/agent-manager.js";
+import { stripCodeAndUrls } from "./agent-attention-policy.js";
 import { confidentChoice, rawChoice } from "./jev/answers.js";
 import type {
   JevDecisionNote,
@@ -16,16 +17,17 @@ import { recordFinishSavings, validateFinishFollowup } from "./jev/savings-hooks
 import { levelAtLeast, type NotifyLevel } from "./notify-policy/levels.js";
 
 /**
- * Feature 3b, finish triage (docs/jev.md). Dormant since `attentionPushLevel` made every finish a
- * `notice`: `triageAndSend` only ever runs past its `base !== "alert"` guard when a caller passes
- * an `alert` finish directly, which nothing in production does any more. Kept, not deleted, for
- * that guard and for its tests: a future caller that needs an `alert` finish triaged again, a root
- * agent's push someone widens back out, gets this for free. When it does run: JEV reads the final
- * message and can move a routine one to a `notice`, which the notify policy holds for the digest.
- * It only ever lowers an `alert` to a `notice`, never drops or raises a push, and never sees a
- * permission, an error or a delegated child's finish. In shadow it changes nothing and the push is
- * not delayed. While Tyler is away or off it asks nothing: a notice would be held for
- * hours, long enough for the away auto-reply (feature 14) to answer the finish first.
+ * Feature 3b, finish triage (docs/jev.md). An ordinary finish is a `notice` from `attentionPushLevel`
+ * and never reaches `triageAndSend`'s `base !== "alert"` guard. A root agent's plain-text question
+ * finish does reach it, kept an `alert` by `attentionPushLevel`'s own question check — but
+ * `findFinishVeto`'s question-mark veto below catches it first, so it still never asks JEV. Kept,
+ * not deleted, for that guard and for its tests: a future caller that needs an `alert` finish
+ * triaged where the final message has no trailing `?` gets this for free. When it does run: JEV
+ * reads the final message and can move a routine one to a `notice`, which the notify policy holds
+ * for the digest. It only ever lowers an `alert` to a `notice`, never drops or raises a push, and
+ * never sees a permission, an error or a delegated child's finish. In shadow it changes nothing
+ * and the push is not delayed. While Tyler is away or off it asks nothing: a notice would be held
+ * for hours, long enough for the away auto-reply (feature 14) to answer the finish first.
  */
 
 export const FINISH_TRIAGE_CALL_SITE = "attention.finish-triage";
@@ -147,7 +149,6 @@ const PULL_REQUEST_OR_ISSUE_URL = /https?:\/\/\S+\/(?:pulls?|issues|merge_reques
 /** A pull request or issue named without a URL: `PR #4712`, `PR 4712`, `#4712`. */
 const PULL_REQUEST_OR_ISSUE_REF = /\bPR\s*#?\d+\b|(?:^|[^\w&])#\d{3,}\b/i;
 const URL = /https?:\/\/\S+/gi;
-const CODE = /```[\s\S]*?```|`[^`\n]*`/g;
 const WORD_CHAR = /[a-z0-9]/;
 
 /**
@@ -188,8 +189,12 @@ export function findFinishVeto(finalMessage: string | null, facts: FinishFacts):
   if (facts.pendingPermissionCount > 0) return "pending-permission";
   if (facts.lastToolCallFailed) return "last-tool-call-failed";
   if (facts.owesChildReport) return "child-report-owed";
-  // A question anywhere counts; a `?` in a URL's query or in code is not one.
-  if (text.replace(CODE, " ").replace(URL, " ").includes("?")) return "question-mark";
+  // A question anywhere counts; a `?` in a URL's query or in code (an unclosed fence's content
+  // included) is not one — `isQuestionEndingMessage` (`agent-attention-policy.ts`) agrees via the
+  // shared `stripCodeAndUrls`. A leading blockquote marker has no `?`-detection effect of its own
+  // to agree on: stripping characters from the string's start can never change whether `?` occurs
+  // later in it.
+  if (stripCodeAndUrls(text).includes("?")) return "question-mark";
   const tail = text.slice(-VETO_TAIL_CHARS);
   if (PULL_REQUEST_OR_ISSUE_URL.test(tail)) return "pull-request-or-issue-url";
   if (PULL_REQUEST_OR_ISSUE_REF.test(tail.replace(URL, " "))) return "pull-request-or-issue-ref";
