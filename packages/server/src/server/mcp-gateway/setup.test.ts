@@ -184,7 +184,7 @@ describe("setLocalToken", () => {
       command: process.execPath,
       auth: "static",
     });
-    expect(persisted.mcpGateway?.servers?.slack).toBeDefined();
+    expect(persisted.mcpGateway?.servers?.slack).toEqual(hostedConfig.servers?.slack);
     expect(JSON.stringify(persisted)).not.toContain(FIGMA_TOKEN);
     expect(JSON.stringify(harness.configStore.get())).not.toContain(FIGMA_TOKEN);
     // And the child really got it.
@@ -194,9 +194,87 @@ describe("setLocalToken", () => {
       content: Array<{ text: string }>;
     };
     expect(JSON.parse(reply.content[0]?.text ?? "null")).toEqual({ FIGMA_API_KEY: FIGMA_TOKEN });
+    // A bad token starts fine and fails on tool calls, so the form stays on offer to replace it.
     expect(harness.gateway.getSnapshot().find((entry) => entry.name === "figma")?.setup).toBe(
-      undefined,
+      "local_token",
     );
+  });
+
+  test("resolves the gateway's status when the swapped server did not start, with the token and config already written", async () => {
+    const harness = await createHarness({
+      install: async () => ({
+        command: process.execPath,
+        args: ["-e", "process.exit(3)"],
+        env: {},
+      }),
+    });
+
+    const result = await harness.service.setLocalToken({
+      name: "figma",
+      preset: "figma",
+      token: FIGMA_TOKEN,
+    });
+
+    expect(result).toEqual({ status: "error" });
+    expect(harness.gateway.getServerState("figma")?.status).toBe("error");
+    expect(harness.tokenStore.getStaticEnv("figma")).toMatchObject({ FIGMA_API_KEY: FIGMA_TOKEN });
+    expect(loadPersistedConfig(harness.paseoHome).mcpGateway?.localServers?.figma).toMatchObject({
+      auth: "static",
+    });
+  });
+
+  test("a second call for a server that is still installing is refused, and the first completes", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const harness = await createHarness({
+      install: async () => {
+        await gate;
+        return writeEnvFixtureServer();
+      },
+    });
+
+    const first = harness.service.setLocalToken({
+      name: "figma",
+      preset: "figma",
+      token: FIGMA_TOKEN,
+    });
+    const refused = await failureOf(
+      harness.service.setLocalToken({ name: "figma", preset: "figma", token: "figd_second" }),
+    );
+
+    expect(refused.reason).toBe("setup_in_progress");
+    expect(harness.install).toHaveBeenCalledTimes(1);
+    release();
+    expect(await first).toEqual({ status: "connected" });
+    // The refused call stored nothing of its own.
+    expect(harness.tokenStore.getStaticEnv("figma")).toMatchObject({ FIGMA_API_KEY: FIGMA_TOKEN });
+    // Once the first is done the name is free again.
+    expect(
+      await harness.service.setLocalToken({ name: "figma", preset: "figma", token: "figd_second" }),
+    ).toEqual({ status: "connected" });
+    expect(harness.tokenStore.getStaticEnv("figma")).toMatchObject({
+      FIGMA_API_KEY: "figd_second",
+    });
+  });
+
+  test("a failed call frees the name for a retry", async () => {
+    let attempts = 0;
+    const harness = await createHarness({
+      install: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new McpGatewayActionError("install_failed", "offline");
+        return writeEnvFixtureServer();
+      },
+    });
+    const failure = await failureOf(
+      harness.service.setLocalToken({ name: "figma", preset: "figma", token: FIGMA_TOKEN }),
+    );
+    expect(failure.reason).toBe("install_failed");
+    expect(
+      await harness.service.setLocalToken({ name: "figma", preset: "figma", token: FIGMA_TOKEN }),
+    ).toEqual({ status: "connected" });
   });
 
   test("keeps the launch spec's own env next to the token", async () => {
@@ -223,7 +301,9 @@ describe("setLocalToken", () => {
 
     expect(failure.reason).toBe("install_failed");
     expect(harness.tokenStore.getStaticEnv("figma")).toBeUndefined();
-    expect(loadPersistedConfig(harness.paseoHome).mcpGateway?.servers?.figma).toBeDefined();
+    expect(loadPersistedConfig(harness.paseoHome).mcpGateway?.servers?.figma).toEqual(
+      hostedConfig.servers?.figma,
+    );
     expect(loadPersistedConfig(harness.paseoHome).mcpGateway?.localServers).toBeUndefined();
     expect(harness.gateway.getServerState("figma")?.status).toBe("needs-auth");
   });
@@ -305,9 +385,54 @@ describe("saveClient", () => {
         },
       },
     });
-    // With credentials stored the row's ordinary Sign in is what is left.
-    expect(harness.gateway.getSnapshot().find((e) => e.name === "slack")?.setup).toBeUndefined();
+    // Saved credentials can still be wrong, so the form stays on offer until a sign-in succeeds.
+    expect(harness.gateway.getSnapshot().find((e) => e.name === "slack")?.setup).toBe(
+      "client_credentials",
+    );
     expect(JSON.stringify(loadPersistedConfig(harness.paseoHome))).not.toContain(SLACK_SECRET);
+  });
+
+  test("leaving the secret blank keeps the stored secret of the same app", async () => {
+    const harness = await createHarness();
+    harness.service.saveClient({
+      name: "slack",
+      clientId: "123.456",
+      clientSecret: SLACK_SECRET,
+      scope: "users:read",
+    });
+
+    harness.service.saveClient({ name: "slack", clientId: " 123.456 ", scope: "search:read" });
+
+    expect(harness.tokenStore.getClientCredentials("slack")).toEqual({
+      clientId: "123.456",
+      clientSecret: SLACK_SECRET,
+      scope: "search:read",
+    });
+    expect(harness.service.describe("slack").clientSecretSet).toBe(true);
+  });
+
+  test("a new secret replaces the stored one", async () => {
+    const harness = await createHarness();
+    harness.service.saveClient({ name: "slack", clientId: "123.456", clientSecret: SLACK_SECRET });
+    harness.service.saveClient({
+      name: "slack",
+      clientId: "123.456",
+      clientSecret: "slack-corrected",
+    });
+    expect(harness.tokenStore.getClientCredentials("slack")).toEqual({
+      clientId: "123.456",
+      clientSecret: "slack-corrected",
+    });
+  });
+
+  test("a different client ID is a different app, so the old secret does not carry over", async () => {
+    const harness = await createHarness();
+    harness.service.saveClient({ name: "slack", clientId: "123.456", clientSecret: SLACK_SECRET });
+
+    harness.service.saveClient({ name: "slack", clientId: "789.012" });
+
+    expect(harness.tokenStore.getClientCredentials("slack")).toEqual({ clientId: "789.012" });
+    expect(harness.service.describe("slack").clientSecretSet).toBe(false);
   });
 
   test("a public client needs no secret", async () => {
@@ -353,11 +478,12 @@ describe("saveClient", () => {
 });
 
 describe("describe", () => {
-  test("gives the localhost callback and reports stored credentials as booleans, never values", async () => {
+  test("gives the localhost callback and the public client ID, and reports the secret and token as booleans only", async () => {
     const harness = await createHarness();
     expect(harness.service.describe("slack")).toEqual({
       redirectUrl: "http://localhost:6767/mcp/gateway/oauth/callback",
       clientIdSet: false,
+      clientId: null,
       clientSecretSet: false,
       scope: null,
       tokenSet: false,
@@ -373,11 +499,11 @@ describe("describe", () => {
 
     expect(described).toMatchObject({
       clientIdSet: true,
+      clientId: "123.456",
       clientSecretSet: true,
       scope: "users:read",
     });
     expect(JSON.stringify(described)).not.toContain(SLACK_SECRET);
-    expect(JSON.stringify(described)).not.toContain("123.456");
   });
 
   test("reports a stored token as a boolean", async () => {

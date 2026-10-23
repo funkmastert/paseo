@@ -1,15 +1,20 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { findExecutable } from "../../executable-resolution/executable-resolution.js";
-import { execCommand } from "../../utils/spawn.js";
+import { spawnProcess } from "../../utils/spawn.js";
+import { terminateWithTreeKill, type ProcessTerminator } from "../../utils/tree-kill.js";
 import { McpGatewayActionError } from "./action-failure.js";
 import type { LocalServerPreset } from "./local-server-presets.js";
 
 /** Under the client's wait for the setup RPC, so the form hears the failure rather than a timeout. */
 const NPM_INSTALL_TIMEOUT_MS = 150_000;
-const NPM_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const STDERR_TAIL_CHARS = 600;
+/** How long a timed-out npm gets to stop on SIGTERM, and then on SIGKILL, before the directory is cleared. */
+const TERMINATE_GRACE_MS = 2_000;
+const TERMINATE_FORCE_MS = 5_000;
+/** Written last, after npm exits 0 and the entry exists: the only proof an install finished. */
+const INSTALL_COMPLETE_MARKER = ".paseo-install-complete";
 
 export interface LocalServerLaunchSpec {
   /** Absolute path of the runtime that starts the server. */
@@ -38,6 +43,56 @@ function installDirectory(paseoHome: string, preset: LocalServerPreset): string 
   return path.join(paseoHome, "mcp-gateway", "local-servers", `${preset.id}-${preset.version}`);
 }
 
+export interface RunWithDeadlineInput extends InstallCommand {
+  executable: string;
+  /** Replaceable in tests; defaults to killing the whole process tree. */
+  terminate?: ProcessTerminator;
+}
+
+/**
+ * Runs a command and settles once it has fully stopped. A non-zero exit rejects with the stderr
+ * tail. On timeout the whole process tree is killed first: on Windows `npm.cmd` is a shell around
+ * npm, and killing only the shell leaves npm writing into a directory the caller is about to clear.
+ */
+export function runWithDeadline(input: RunWithDeadlineInput): Promise<void> {
+  const child = spawnProcess(input.executable, input.args, {
+    cwd: input.cwd,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr?.on("data", (chunk: Buffer | string) => {
+    stderr = `${stderr}${chunk}`.slice(-STDERR_TAIL_CHARS);
+  });
+  const terminate = input.terminate ?? terminateWithTreeKill;
+  return new Promise<void>((resolve, reject) => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      const detail = `did not finish within ${input.timeout / 1000} s`;
+      const rejectTimedOut = () =>
+        reject(Object.assign(new Error(detail), { stderr: stderr.trim() || detail }));
+      terminate(child, {
+        gracefulTimeoutMs: TERMINATE_GRACE_MS,
+        forceTimeoutMs: TERMINATE_FORCE_MS,
+      }).then(rejectTimedOut, rejectTimedOut);
+    }, input.timeout);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code, signal) => {
+      clearTimeout(timer);
+      // The timeout path rejects only after the tree is dead.
+      if (timedOut) return;
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(Object.assign(new Error(`exited with ${code ?? signal}`), { stderr }));
+    });
+  });
+}
+
 async function runNpmFromPath(command: InstallCommand): Promise<void> {
   const npm = await findExecutable("npm");
   if (!npm) {
@@ -46,11 +101,7 @@ async function runNpmFromPath(command: InstallCommand): Promise<void> {
       "npm was not found on this host, so the local server could not be installed",
     );
   }
-  await execCommand(npm, command.args, {
-    cwd: command.cwd,
-    timeout: command.timeout,
-    maxBuffer: NPM_MAX_BUFFER_BYTES,
-  });
+  await runWithDeadline({ ...command, executable: npm });
 }
 
 function stderrTail(error: unknown): string {
@@ -68,33 +119,37 @@ function nodeIsSupported(preset: LocalServerPreset, version: string): boolean {
   return major > minMajor || (major === minMajor && minor >= (minMinor ?? 0));
 }
 
-/**
- * Installs a preset's package at its exact version into a directory of the daemon's own and
- * returns how to start it. Lifecycle scripts are skipped, and a present entry file means the
- * install already happened. Throws `install_failed` with npm's stderr tail; the token is never
- * on the command line, so nothing secret can reach the message.
- */
-export async function installLocalServer(
-  input: InstallLocalServerInput,
-): Promise<LocalServerLaunchSpec> {
-  const { paseoHome, preset } = input;
-  if (!nodeIsSupported(preset, process.versions.node)) {
-    throw new McpGatewayActionError(
-      "install_failed",
-      `${preset.package} needs Node ${preset.minNode.join(".")} or newer; this host runs ${process.versions.node}`,
-    );
+function isInstalled(directory: string, entry: string): boolean {
+  return existsSync(path.join(directory, INSTALL_COMPLETE_MARKER)) && existsSync(entry);
+}
+
+/** Best effort: a leftover directory has no marker, so the next attempt clears it anyway. */
+function discardInstall(directory: string): void {
+  try {
+    rmSync(directory, { recursive: true, force: true, maxRetries: 3 });
+  } catch {
+    // Reported failure is the install's own; this only keeps the disk tidy.
   }
-  const directory = installDirectory(paseoHome, preset);
-  const entry = path.join(directory, ...preset.entry);
-  if (!existsSync(entry)) {
-    mkdirSync(directory, { recursive: true });
+}
+
+async function installFresh(input: {
+  directory: string;
+  entry: string;
+  preset: LocalServerPreset;
+  runNpm: NpmRunner;
+}): Promise<void> {
+  const { directory, entry, preset, runNpm } = input;
+  // Whatever is here is a half-finished earlier attempt or an unmarked tree: start clean.
+  rmSync(directory, { recursive: true, force: true });
+  mkdirSync(directory, { recursive: true });
+  try {
     // A package.json of its own keeps npm from adopting one further up the tree as the prefix.
     writeFileSync(
       path.join(directory, "package.json"),
       `${JSON.stringify({ name: `paseo-local-server-${preset.id}`, private: true }, null, 2)}\n`,
     );
     try {
-      await (input.runNpm ?? runNpmFromPath)({
+      await runNpm({
         args: [
           "install",
           "--save-exact",
@@ -120,6 +175,51 @@ export async function installLocalServer(
         `${preset.package}@${preset.version} installed without ${preset.entry.join("/")}`,
       );
     }
+    writeFileSync(
+      path.join(directory, INSTALL_COMPLETE_MARKER),
+      `${JSON.stringify({ package: preset.package, version: preset.version })}\n`,
+    );
+  } catch (error) {
+    discardInstall(directory);
+    throw error;
+  }
+}
+
+/** Installs in flight, by directory: two names on one preset share a tree and must share its install. */
+const installsInFlight = new Map<string, Promise<void>>();
+
+/**
+ * Installs a preset's package at its exact version into a directory of the daemon's own and
+ * returns how to start it. Lifecycle scripts are skipped. "Installed" means the completion marker
+ * exists and so does the entry file; the marker is written only after npm exits 0, so an install
+ * that was interrupted, timed out or raced is never mistaken for a finished one. Any failure
+ * removes the directory. Throws `install_failed` with npm's stderr tail; the token is never on the
+ * command line, so nothing secret can reach the message.
+ */
+export async function installLocalServer(
+  input: InstallLocalServerInput,
+): Promise<LocalServerLaunchSpec> {
+  const { paseoHome, preset } = input;
+  if (!nodeIsSupported(preset, process.versions.node)) {
+    throw new McpGatewayActionError(
+      "install_failed",
+      `${preset.package} needs Node ${preset.minNode.join(".")} or newer; this host runs ${process.versions.node}`,
+    );
+  }
+  const directory = installDirectory(paseoHome, preset);
+  const entry = path.join(directory, ...preset.entry);
+  if (!isInstalled(directory, entry)) {
+    let pending = installsInFlight.get(directory);
+    if (!pending) {
+      pending = installFresh({ directory, entry, preset, runNpm: input.runNpm ?? runNpmFromPath });
+      installsInFlight.set(directory, pending);
+      const started = pending;
+      const clear = () => {
+        if (installsInFlight.get(directory) === started) installsInFlight.delete(directory);
+      };
+      started.then(clear, clear);
+    }
+    await pending;
   }
   return {
     // Under the desktop app the daemon is Electron running as node, and so is its child.

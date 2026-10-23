@@ -21,6 +21,7 @@ import {
 } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type {
   McpGatewaySessionMode,
+  McpGatewaySetupKind,
   MutableMcpGatewayConfig,
   MutableMcpGatewayLocalServerConfig,
   MutableMcpGatewayServerConfig,
@@ -44,6 +45,7 @@ import {
   describeOAuthFailure,
   exchangeMcpGatewayAuthorizationCode,
   McpGatewayOAuthStateStore,
+  MCP_GATEWAY_CALLBACK_ROUTE,
   MissingOAuthClientError,
   registrationExcludesScope,
   resolveOfflineAccessScope,
@@ -52,7 +54,7 @@ import {
 } from "./oauth.js";
 import { McpGatewayTokenStore } from "./token-store.js";
 import { McpGatewayActionError } from "./action-failure.js";
-import { deriveSetupHint, type McpGatewaySetupKind } from "./setup-hint.js";
+import { deriveSetupHint } from "./setup-hint.js";
 import type { PushNotificationSender } from "../push/index.js";
 
 interface LoggerLike {
@@ -290,6 +292,8 @@ export class McpGateway {
   private readonly oauthStateStore = new McpGatewayOAuthStateStore();
   private oauthRedirectBaseUrl: string | undefined;
   private readonly servers = new Map<string, McpGatewayServerRuntime>();
+  /** The last queued adopt or replace per server name; see `runServerMutation`. */
+  private readonly serverMutationTails = new Map<string, Promise<void>>();
   private readonly events = new EventEmitter();
   private lastEmittedSnapshot: McpGatewaySnapshotEntry[] = [];
   private notifier: McpGatewayNotifier | undefined;
@@ -368,6 +372,12 @@ export class McpGateway {
     if (!this.enabled) {
       throw new Error("MCP gateway is disabled");
     }
+    return this.runServerMutation(input.name, () => this.adoptServerUnlocked(input));
+  }
+
+  private async adoptServerUnlocked(
+    input: AdoptMcpGatewayServerInput,
+  ): Promise<AdoptMcpGatewayServerResult> {
     const existing = this.servers.get(input.name);
     if (existing) {
       return {
@@ -423,6 +433,13 @@ export class McpGateway {
     if (!this.enabled) {
       throw new McpGatewayActionError("gateway_disabled", "MCP gateway is not enabled");
     }
+    return this.runServerMutation(name, () => this.replaceServerUnlocked(name, config));
+  }
+
+  private async replaceServerUnlocked(
+    name: string,
+    config: McpGatewayServerConfig | McpGatewayLocalServerConfig,
+  ): Promise<McpGatewayServerState["status"]> {
     const previous = this.servers.get(name);
     if (previous) {
       clearTimeout(previous.restartTimer);
@@ -444,6 +461,27 @@ export class McpGateway {
     await this.connectServer(name);
     await this.flushPendingNotifications();
     return this.servers.get(name)?.state.status ?? "disabled";
+  }
+
+  /**
+   * Runs adopt and replace for one name one at a time. Both read `this.servers.get(name)`, then
+   * await a close or a connect, then write it back, so two interleaved calls would each see the
+   * other's runtime as "previous" and leave the first one's child process running unowned.
+   */
+  private async runServerMutation<T>(name: string, mutation: () => Promise<T>): Promise<T> {
+    const previous = this.serverMutationTails.get(name) ?? Promise.resolve();
+    const result = previous.then(mutation);
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.serverMutationTails.set(name, tail);
+    void tail.finally(() => {
+      if (this.serverMutationTails.get(name) === tail) {
+        this.serverMutationTails.delete(name);
+      }
+    });
+    return result;
   }
 
   /** The base URL OAuth redirects are built from, once the daemon is listening. */
@@ -475,7 +513,6 @@ export class McpGateway {
     runtime: McpGatewayServerRuntime,
   ): McpGatewaySetupKind | undefined {
     const unhealthy = runtime.state.status === "needs-auth" || runtime.state.status === "error";
-    if (!unhealthy) return undefined;
     const { config } = runtime;
     const url = isLocalServerConfig(config) ? undefined : config.url;
     return deriveSetupHint({
@@ -720,7 +757,7 @@ export class McpGateway {
         `MCP gateway server "${name}" needs OAuth but no reachable redirect base URL is configured`,
       );
     }
-    return `${this.oauthRedirectBaseUrl}/mcp/gateway/oauth/callback`;
+    return `${this.oauthRedirectBaseUrl}${MCP_GATEWAY_CALLBACK_ROUTE}`;
   }
 
   buildOAuthProvider(name: string): OAuthClientProvider {
@@ -762,7 +799,7 @@ export class McpGateway {
         `MCP gateway server "${name}" needs OAuth but no reachable redirect base URL is configured`,
       );
     }
-    return `${this.oauthRedirectBaseUrl}/mcp/gateway/oauth/callback`;
+    return `${this.oauthRedirectBaseUrl}${MCP_GATEWAY_CALLBACK_ROUTE}`;
   }
 
   private buildTransport(params: {

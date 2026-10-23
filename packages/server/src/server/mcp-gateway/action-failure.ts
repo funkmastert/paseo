@@ -43,7 +43,9 @@ export type McpGatewayFailureReason =
   /** Installing the local server's package failed; the hosted entry is left as it was. */
   | "install_failed"
   /** The credential was stored but the config could not be written; nothing was switched. */
-  | "config_write_failed";
+  | "config_write_failed"
+  /** Another setup for the same server is still running; this one was not started. */
+  | "setup_in_progress";
 
 /**
  * How the caller can clear a failure, in parts a client composes its own sentence from. Host

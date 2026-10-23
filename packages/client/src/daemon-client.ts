@@ -113,6 +113,8 @@ import type {
   TerminalInput,
   SessionInboundMessage,
   SessionOutboundMessage,
+  McpGatewaySetupLocalTokenRequest,
+  McpGatewaySetupSaveClientRequest,
   SendAgentMessageRequest,
   PaseoConfigRaw,
   PaseoConfigRevision,
@@ -823,6 +825,14 @@ export type McpGatewaySetupLocalTokenPayload = Extract<
   SessionOutboundMessage,
   { type: "mcp_gateway.setup.set_local_token.response" }
 >["payload"];
+export type McpGatewaySetupSaveClientInput = Omit<
+  McpGatewaySetupSaveClientRequest,
+  "type" | "requestId"
+>;
+export type McpGatewaySetupLocalTokenInput = Omit<
+  McpGatewaySetupLocalTokenRequest,
+  "type" | "requestId"
+>;
 export type ProjectListPayload = Extract<
   SessionOutboundMessage,
   { type: "project.list.response" }
@@ -5358,7 +5368,8 @@ export class DaemonClient {
 
   /**
    * What the setup form for one brokered server needs: the redirect URL an OAuth app must allow,
-   * and whether a client id, secret or token is already stored (booleans, never the values).
+   * the client id already stored (it is public), and whether a secret or token is stored
+   * (booleans, never the values).
    * Gate on `server_info.features.mcpGatewaySetup`.
    */
   async describeMcpGatewaySetup(
@@ -5373,16 +5384,11 @@ export class DaemonClient {
 
   /**
    * Stores a hand-made OAuth app's credentials for a server whose upstream has no dynamic client
-   * registration. The secret travels in the request and never comes back.
+   * registration. The secret travels in the request and never comes back; leaving it out keeps
+   * the secret already stored for the same client ID.
    */
   async saveMcpGatewayClient(
-    input: {
-      name: string;
-      clientId: string;
-      clientSecret?: string;
-      redirectUrl?: string;
-      scope?: string;
-    },
+    input: McpGatewaySetupSaveClientInput,
     options?: { requestId?: string },
   ): Promise<McpGatewaySetupSaveClientPayload> {
     return this.sendNamespacedCorrelatedSessionRequest({
@@ -5394,10 +5400,11 @@ export class DaemonClient {
   /**
    * Installs the daemon's pinned local server for `preset`, stores `token` for it, and switches
    * the named entry to that local server. The install can take a while, so the wait is longer
-   * than a plain RPC's.
+   * than a plain RPC's. The payload's `status` is the swapped server's: anything but `connected`
+   * means the token is stored and the local server did not start.
    */
   async setMcpGatewayLocalToken(
-    input: { name: string; preset: string; token: string },
+    input: McpGatewaySetupLocalTokenInput,
     options?: { requestId?: string; timeout?: number },
   ): Promise<McpGatewaySetupLocalTokenPayload> {
     return this.sendNamespacedCorrelatedSessionRequest({

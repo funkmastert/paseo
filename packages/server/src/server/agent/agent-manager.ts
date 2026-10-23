@@ -1680,7 +1680,9 @@ export class AgentManager {
     this.requireMcpGatewaySetup().saveClient(input);
   }
 
-  setMcpGatewayLocalToken(input: SetLocalTokenInput): Promise<{ status: string }> {
+  setMcpGatewayLocalToken(
+    input: SetLocalTokenInput,
+  ): ReturnType<McpGatewaySetupService["setLocalToken"]> {
     return this.requireMcpGatewaySetup().setLocalToken(input);
   }
 

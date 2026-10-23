@@ -1,7 +1,6 @@
-import { getLocalServerPreset } from "./local-server-presets.js";
+import type { McpGatewaySetupKind } from "@getpaseo/protocol/messages";
 
-/** The two things the in-app setup form can fix, as the status snapshot names them. */
-export type McpGatewaySetupKind = "client_credentials" | "local_token";
+import { getLocalServerPreset } from "./local-server-presets.js";
 
 /**
  * Hosts whose authorization server offers no dynamic client registration, so signing in can
@@ -33,17 +32,27 @@ function hostOf(url: string | undefined): string | undefined {
 }
 
 /**
- * Whether a setup form can fix this server right now. A server a local-server preset replaces
- * offers the token form for as long as it is unhealthy; an OAuth server with no app registered
- * and no way to register one offers the credentials form until credentials exist, after which
- * the row's ordinary Sign in is what is left to do.
+ * Whether a setup form can fix this server right now.
+ *
+ * A server a local-server preset replaces always offers the token form once it runs locally,
+ * healthy or not: a wrong token starts fine and only fails on tool calls, so "connected" does not
+ * mean the token is right. Still hosted, it offers the form while unhealthy.
+ *
+ * An OAuth server with no way to register an app offers the credentials form until a sign-in has
+ * stored tokens, saved credentials or not: a mistyped secret saves fine and only fails at sign-in.
  */
 export function deriveSetupHint(input: SetupHintInput): McpGatewaySetupKind | undefined {
+  if (getLocalServerPreset(input.name)) {
+    return input.unhealthy || input.url === undefined ? "local_token" : undefined;
+  }
   if (!input.unhealthy) return undefined;
-  if (getLocalServerPreset(input.name)) return "local_token";
-  if (input.isStatic || input.hasStoredTokens || input.hasClientCredentials) return undefined;
+  if (input.isStatic || input.hasStoredTokens) return undefined;
   const host = hostOf(input.url);
-  if (input.registrationUnsupported || (host !== undefined && NON_DCR_HOSTS.has(host))) {
+  if (
+    input.hasClientCredentials ||
+    input.registrationUnsupported ||
+    (host !== undefined && NON_DCR_HOSTS.has(host))
+  ) {
     return "client_credentials";
   }
   return undefined;

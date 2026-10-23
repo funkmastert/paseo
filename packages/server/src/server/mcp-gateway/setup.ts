@@ -1,4 +1,9 @@
 import { getErrorMessage } from "@getpaseo/protocol/error-utils";
+import type {
+  McpGatewayServerStatus,
+  McpGatewaySetupLocalTokenRequest,
+  McpGatewaySetupSaveClientRequest,
+} from "@getpaseo/protocol/messages";
 
 import { McpGatewayActionError } from "./action-failure.js";
 import type { McpGateway, McpGatewayLocalServerConfig } from "./gateway.js";
@@ -8,10 +13,8 @@ import {
   type LocalServerLaunchSpec,
 } from "./local-server-installer.js";
 import { getLocalServerPreset } from "./local-server-presets.js";
+import { MCP_GATEWAY_CALLBACK_ROUTE } from "./oauth.js";
 import type { McpGatewayTokenStore } from "./token-store.js";
-
-/** The path every upstream OAuth app must send the browser back to. */
-export const OAUTH_CALLBACK_PATH = "/mcp/gateway/oauth/callback";
 
 /** Names end up in a route path and a config key, so they stay plain. */
 const SERVER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -19,24 +22,16 @@ const SERVER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 export interface McpGatewaySetupDescription {
   redirectUrl: string;
   clientIdSet: boolean;
+  /** Public by nature (it rides in the authorization URL), so the form can prefill it. */
+  clientId: string | null;
   clientSecretSet: boolean;
   scope: string | null;
   tokenSet: boolean;
 }
 
-export interface SaveClientInput {
-  name: string;
-  clientId: string;
-  clientSecret?: string;
-  redirectUrl?: string;
-  scope?: string;
-}
+export type SaveClientInput = Omit<McpGatewaySetupSaveClientRequest, "type" | "requestId">;
 
-export interface SetLocalTokenInput {
-  name: string;
-  preset: string;
-  token: string;
-}
+export type SetLocalTokenInput = Omit<McpGatewaySetupLocalTokenRequest, "type" | "requestId">;
 
 /** Writes the local entry to config, dropping any hosted entry of the same name in that write. */
 export type LocalServerConfigWriter = (name: string, config: McpGatewayLocalServerConfig) => void;
@@ -63,7 +58,7 @@ export function deriveCallbackUrl(baseUrl: string): string {
   if (url.hostname === "127.0.0.1" || url.hostname === "[::1]") {
     url.hostname = "localhost";
   }
-  return `${url.origin}${OAUTH_CALLBACK_PATH}`;
+  return `${url.origin}${MCP_GATEWAY_CALLBACK_ROUTE}`;
 }
 
 function normalizeScope(scope: string | undefined): string | undefined {
@@ -83,8 +78,10 @@ function normalizeRedirectUrl(redirectUrl: string | undefined): string | undefin
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw invalid("The redirect URL must be an http or https URL");
   }
-  if (parsed.pathname !== OAUTH_CALLBACK_PATH || parsed.search || parsed.hash) {
-    throw invalid(`The redirect URL must end in ${OAUTH_CALLBACK_PATH}, this daemon's callback`);
+  if (parsed.pathname !== MCP_GATEWAY_CALLBACK_ROUTE || parsed.search || parsed.hash) {
+    throw invalid(
+      `The redirect URL must end in ${MCP_GATEWAY_CALLBACK_ROUTE}, this daemon's callback`,
+    );
   }
   return parsed.toString();
 }
@@ -96,6 +93,8 @@ function normalizeRedirectUrl(redirectUrl: string | undefined): string | undefin
  */
 export class McpGatewaySetupService {
   private readonly install: NonNullable<McpGatewaySetupServiceOptions["install"]>;
+  /** Server names with a `setLocalToken` running: a second one for the name is refused. */
+  private readonly localTokenInFlight = new Set<string>();
 
   constructor(private readonly options: McpGatewaySetupServiceOptions) {
     this.install = options.install ?? installLocalServer;
@@ -124,6 +123,7 @@ export class McpGatewaySetupService {
     return {
       redirectUrl: deriveCallbackUrl(baseUrl),
       clientIdSet: credentials !== undefined,
+      clientId: credentials?.clientId ?? null,
       clientSecretSet: credentials?.clientSecret !== undefined,
       scope: credentials?.scope ?? null,
       tokenSet: env !== undefined && Object.keys(env).length > 0,
@@ -149,7 +149,12 @@ export class McpGatewaySetupService {
     if (!clientId) {
       throw invalid("The client ID is required");
     }
-    const clientSecret = input.clientSecret?.trim() || undefined;
+    // A secret is never sent back to the form, so a blank field means "keep what is stored" for
+    // the same app. A different client ID is a different app, and its secret does not carry over.
+    const stored = tokenStore.getClientCredentials(input.name);
+    const clientSecret =
+      input.clientSecret?.trim() ||
+      (stored?.clientId === clientId ? stored.clientSecret : undefined);
     const redirectUrl = normalizeRedirectUrl(input.redirectUrl);
     const scope = normalizeScope(input.scope);
     tokenStore.saveClientCredentials(input.name, {
@@ -166,8 +171,14 @@ export class McpGatewaySetupService {
    * Installs the preset, stores the token for it, switches the named entry to the local server
    * in config, and replaces the live runtime. The install runs first so a failure leaves the
    * hosted entry, the token file and the config exactly as they were.
+   *
+   * Resolves with the gateway's status for the swapped server. Anything but `connected` means
+   * the token and config are written and the local server did not start (a wrong token usually
+   * shows up here or on the first tool call); callers treat that as a failure and offer the token
+   * again. Rejects with `setup_in_progress` while another call for the same name is running, so
+   * two clients cannot race two installs and two token writes.
    */
-  async setLocalToken(input: SetLocalTokenInput): Promise<{ status: string }> {
+  async setLocalToken(input: SetLocalTokenInput): Promise<{ status: McpGatewayServerStatus }> {
     this.requireEnabled();
     const { gateway, tokenStore, paseoHome } = this.options;
     if (!SERVER_NAME_PATTERN.test(input.name)) {
@@ -188,21 +199,32 @@ export class McpGatewaySetupService {
       throw invalid("The token must not contain spaces or line breaks");
     }
 
-    const spec = await this.install({ paseoHome, preset });
-    const config: McpGatewayLocalServerConfig = {
-      command: spec.command,
-      args: spec.args,
-      auth: "static",
-    };
-    tokenStore.saveStaticEnv(input.name, { ...spec.env, [preset.tokenEnv]: token });
-    try {
-      this.options.writeLocalServer(input.name, config);
-    } catch (error) {
+    if (this.localTokenInFlight.has(input.name)) {
       throw new McpGatewayActionError(
-        "config_write_failed",
-        `The token was stored but the config could not be written: ${getErrorMessage(error)}`,
+        "setup_in_progress",
+        `Setting up ${input.name} is already running; wait for it to finish`,
       );
     }
-    return { status: await gateway.replaceServer(input.name, config) };
+    this.localTokenInFlight.add(input.name);
+    try {
+      const spec = await this.install({ paseoHome, preset });
+      const config: McpGatewayLocalServerConfig = {
+        command: spec.command,
+        args: spec.args,
+        auth: "static",
+      };
+      tokenStore.saveStaticEnv(input.name, { ...spec.env, [preset.tokenEnv]: token });
+      try {
+        this.options.writeLocalServer(input.name, config);
+      } catch (error) {
+        throw new McpGatewayActionError(
+          "config_write_failed",
+          `The token was stored but the config could not be written: ${getErrorMessage(error)}`,
+        );
+      }
+      return { status: await gateway.replaceServer(input.name, config) };
+    } finally {
+      this.localTokenInFlight.delete(input.name);
+    }
   }
 }

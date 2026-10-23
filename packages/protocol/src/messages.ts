@@ -3897,8 +3897,11 @@ export type McpGatewayServerAdoptRequest = z.infer<typeof McpGatewayServerAdoptR
 // In-app setup for servers that cannot sign in on their own (docs/mcp-gateway.md "Setting up a
 // server that cannot sign in"). `describe` reads what the form needs and says what is already
 // stored, as booleans only. `save_client` stores a hand-made OAuth app's credentials; the secret
-// travels in the request and never comes back. `local_token` installs a daemon-known local server
-// preset and switches the named entry to it. The client names a preset; it never sends a command.
+// travels in the request and never comes back; omitting it keeps the secret already stored for the
+// same client ID, so a form that cannot show the secret can still correct the rest. `set_local_token`
+// installs a daemon-known local server preset and switches the named entry to it. The client names
+// a preset; it never sends a command. Credential strings are bounded: a token or secret is far
+// under 4096 characters and a client ID under 256.
 // COMPAT(mcpGatewaySetup): added in v0.9.x, remove gating after 2027-10-22.
 export const McpGatewaySetupDescribeRequestSchema = z.object({
   type: z.literal("mcp_gateway.setup.describe.request"),
@@ -3911,8 +3914,9 @@ export const McpGatewaySetupSaveClientRequestSchema = z.object({
   type: z.literal("mcp_gateway.setup.save_client.request"),
   requestId: z.string(),
   name: z.string().min(1),
-  clientId: z.string(),
-  clientSecret: z.string().optional(),
+  clientId: z.string().max(256),
+  // Omitted means keep the stored secret of the same client ID.
+  clientSecret: z.string().max(4096).optional(),
   redirectUrl: z.string().optional(),
   scope: z.string().optional(),
 });
@@ -3925,7 +3929,7 @@ export const McpGatewaySetupLocalTokenRequestSchema = z.object({
   requestId: z.string(),
   name: z.string().min(1),
   preset: z.string().min(1),
-  token: z.string(),
+  token: z.string().max(4096),
 });
 export type McpGatewaySetupLocalTokenRequest = z.infer<
   typeof McpGatewaySetupLocalTokenRequestSchema
@@ -6866,16 +6870,29 @@ export const RefreshProvidersSnapshotResponseMessageSchema = z.object({
 // packages/server/src/server/mcp-gateway/state.ts). `status` mirrors
 // `McpGatewayServerStatus` there — duplicated rather than imported because the
 // protocol package can't depend on the server package.
+export const McpGatewayServerStatusSchema = z.enum([
+  "disabled",
+  "connecting",
+  "connected",
+  "needs-auth",
+  "error",
+]);
+export type McpGatewayServerStatus = z.infer<typeof McpGatewayServerStatusSchema>;
+
+export const McpGatewaySetupKindSchema = z.enum(["client_credentials", "local_token"]);
+export type McpGatewaySetupKind = z.infer<typeof McpGatewaySetupKindSchema>;
+
 export const McpGatewayStatusEntrySchema = z.object({
   name: z.string(),
-  status: z.enum(["disabled", "connecting", "connected", "needs-auth", "error"]),
+  status: McpGatewayServerStatusSchema,
   critical: z.boolean(),
   lastChangedAt: z.number(),
   error: z.string().optional(),
   // COMPAT(mcpGatewaySetup): added in v0.9.x, remove optional parsing after 2027-10-22. Set while
-  // the server is unhealthy and the app can fix it with a setup form: `client_credentials` for an
-  // upstream that needs a hand-made OAuth app, `local_token` for one a local server replaces.
-  setup: z.enum(["client_credentials", "local_token"]).optional(),
+  // the app can fix the server with a setup form: `client_credentials` for an upstream that needs
+  // a hand-made OAuth app and has not signed in yet, `local_token` for one a local server
+  // replaces (offered even while connected, because a wrong token starts fine).
+  setup: McpGatewaySetupKindSchema.optional(),
 });
 
 // COMPAT(mcpStatus): added in v0.8.1, remove gating when all clients use mcp status.
@@ -7109,6 +7126,8 @@ export const McpGatewaySetupDescribeResponseMessageSchema = z.object({
     // IP rewritten to `localhost`, which is the only form Slack accepts for a desktop redirect).
     redirectUrl: z.string().nullable().optional(),
     clientIdSet: z.boolean().optional(),
+    // The client ID is public (it appears in the authorization URL), so the form prefills it.
+    clientId: z.string().nullable().optional(),
     clientSecretSet: z.boolean().optional(),
     scope: z.string().nullable().optional(),
     tokenSet: z.boolean().optional(),
@@ -7130,8 +7149,10 @@ export const McpGatewaySetupLocalTokenResponseMessageSchema = z.object({
     requestId: z.string(),
     error: z.string().nullable(),
     reason: z.string().nullable().optional(),
-    // The gateway's view of the server once the switch has run: usually `connected`.
-    status: z.string().nullable().optional(),
+    // The gateway's view of the server once the switch has run. Anything but `connected` means
+    // the local server did not start: the token and config are written, and the client keeps the
+    // form open (an unreachable error is reported through `error` instead).
+    status: McpGatewayServerStatusSchema.nullable().optional(),
   }),
 });
 

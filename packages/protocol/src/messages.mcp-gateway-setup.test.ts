@@ -46,6 +46,43 @@ describe("mcp_gateway.setup requests", () => {
     ).toBe(false);
   });
 
+  test("credential strings are bounded: 4096 for a token or secret, 256 for a client ID", () => {
+    const save = { type: "mcp_gateway.setup.save_client.request", requestId: "r", name: "slack" };
+    expect(
+      McpGatewaySetupSaveClientRequestSchema.safeParse({
+        ...save,
+        clientId: "c".repeat(256),
+        clientSecret: "s".repeat(4096),
+      }).success,
+    ).toBe(true);
+    expect(
+      McpGatewaySetupSaveClientRequestSchema.safeParse({ ...save, clientId: "c".repeat(257) })
+        .success,
+    ).toBe(false);
+    expect(
+      McpGatewaySetupSaveClientRequestSchema.safeParse({
+        ...save,
+        clientId: "id",
+        clientSecret: "s".repeat(4097),
+      }).success,
+    ).toBe(false);
+
+    const token = {
+      type: "mcp_gateway.setup.set_local_token.request",
+      requestId: "r",
+      name: "figma",
+      preset: "figma",
+    };
+    expect(
+      McpGatewaySetupLocalTokenRequestSchema.safeParse({ ...token, token: "t".repeat(4096) })
+        .success,
+    ).toBe(true);
+    expect(
+      McpGatewaySetupLocalTokenRequestSchema.safeParse({ ...token, token: "t".repeat(4097) })
+        .success,
+    ).toBe(false);
+  });
+
   test("all three are part of the inbound session union", () => {
     for (const message of [
       { type: "mcp_gateway.setup.describe.request", requestId: "r", name: "slack" },
@@ -79,6 +116,7 @@ describe("mcp_gateway.setup responses", () => {
           error: null,
           redirectUrl: "http://localhost:6767/mcp/gateway/oauth/callback",
           clientIdSet: true,
+          clientId: "123.456",
           clientSecretSet: true,
           scope: "users:read",
           tokenSet: false,
@@ -92,10 +130,30 @@ describe("mcp_gateway.setup responses", () => {
         type: "mcp_gateway.setup.set_local_token.response",
         payload: { requestId: "r3", error: "boom", reason: "install_failed", status: null },
       },
+      {
+        type: "mcp_gateway.setup.set_local_token.response",
+        payload: { requestId: "r4", error: null, status: "connected" },
+      },
     ];
     for (const message of messages) {
       expect(validateWSOutboundMessage({ type: "session", message }).success).toBe(true);
     }
+  });
+});
+
+describe("set_local_token response status", () => {
+  test("is one of the gateway's known statuses, not any string", async () => {
+    const { validateWSOutboundMessage } = await import("./validation/ws-outbound.js");
+    const response = (status: string) => ({
+      type: "session",
+      message: {
+        type: "mcp_gateway.setup.set_local_token.response",
+        payload: { requestId: "r", error: null, status },
+      },
+    });
+    expect(validateWSOutboundMessage(response("error")).success).toBe(true);
+    expect(validateWSOutboundMessage(response("needs-auth")).success).toBe(true);
+    expect(validateWSOutboundMessage(response("started")).success).toBe(false);
   });
 });
 
