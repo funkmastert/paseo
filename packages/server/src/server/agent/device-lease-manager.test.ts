@@ -1455,6 +1455,66 @@ describe("DeviceLeaseManager agent-held simulator shutdown", () => {
 
     expect(harness.shutdownExec).toHaveBeenCalledWith("xcrun", ["simctl", "shutdown", UDID_B]);
   });
+
+  // Gradle and Kotlin daemons run on Android Studio's bundled JBR, so any agent's Android build
+  // puts "Android Studio" in some command line; and an Xcode install with a space in its name
+  // gives xcodebuild the basename "Xcode". Neither is a person driving a GUI.
+  test.each([
+    [
+      "a Gradle daemon on Android Studio's bundled JBR",
+      "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java -Xmx4g -cp /x/gradle-daemon-main.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.1",
+    ],
+    [
+      "xcodebuild inside an Xcode install whose name has a space",
+      "/Applications/Xcode 26.app/Contents/Developer/usr/bin/xcodebuild test -scheme App",
+    ],
+  ])("%s does not count as a GUI device manager being open", async (_label, command) => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    const result = await harness.manager.checkout({ agentId: "agent-1", platform: "ios" });
+    expect(result.status).toBe("granted");
+
+    harness.state.nowMs += 10_000;
+    harness.state.rows = [
+      agentRootRow(500, "agent-1"),
+      simulatorRow(2, UDID_B, "00:05"),
+      childRow(700, 1, command),
+    ];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).toHaveBeenCalledWith("xcrun", ["simctl", "shutdown", UDID_B]);
+  });
+
+  test.each([
+    [
+      "Simulator.app",
+      "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator",
+    ],
+    [
+      "an Android Studio Preview install",
+      "/Applications/Android Studio Preview.app/Contents/MacOS/studio",
+    ],
+    ["Android Studio on Windows", "C:\\Program Files\\Android\\Android Studio\\bin\\studio64.exe"],
+  ])("%s open keeps a blind-bound simulator unattributed", async (_label, command) => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    const result = await harness.manager.checkout({ agentId: "agent-1", platform: "ios" });
+    expect(result.status).toBe("granted");
+
+    harness.state.nowMs += 10_000;
+    harness.state.rows = [
+      agentRootRow(500, "agent-1"),
+      simulatorRow(2, UDID_B, "00:05"),
+      childRow(700, 1, command),
+    ];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
 });
 
 describe("DeviceLeaseManager agent-held emulator shutdown", () => {
@@ -1817,6 +1877,36 @@ describe("DeviceLeaseManager unleased device shutdown", () => {
     await sweepRows(harness);
 
     expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("an emulator under an agent's Gradle daemon is the agent's, though the daemon runs on Android Studio's JBR", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+      androidSerials: { pixel_gmd: "emulator-5593" },
+    });
+    harness.state.rows = [
+      agentRootRow(500, "agent-1"),
+      childRow(
+        560,
+        500,
+        "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java -cp /x/gradle-daemon-main.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.1",
+      ),
+      emulatorRow(501, 560, "pixel_gmd"),
+    ];
+    await sweepRows(harness);
+    harness.state.agents = [];
+    harness.state.rows = [emulatorRow(501, 999, "pixel_gmd")];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).toHaveBeenCalledWith("adb", [
+      "-s",
+      "emulator-5593",
+      "emu",
+      "kill",
+    ]);
   });
 
   test("unleasedIdleMinutes: 0 turns it off even for an agent-booted, orphaned emulator", async () => {

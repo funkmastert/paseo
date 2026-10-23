@@ -721,9 +721,21 @@ function keepAlivePlatformsForCommand(command: string): readonly DevicePlatform[
 /** The basename an Android Studio launcher process is known by — `studio`/`studio64` on macOS
  * and Linux, `studio64.exe` on Windows (matched via `commandBasename`'s extension strip). */
 const ANDROID_STUDIO_PROCESS = /^studio(64)?$/i;
+/** The launcher by its install path, for installs whose path has a space in it — which defeats
+ * `commandBasename` — on macOS (`Android Studio.app/Contents/MacOS/studio`) and Windows
+ * (`Android Studio\bin\studio64.exe`). Anchored on the launcher itself: Gradle and Kotlin daemons
+ * run on Studio's bundled `jbr/bin/java`, so a bare "Android Studio" substring would read every
+ * agent's Android build as Studio being open. */
+const ANDROID_STUDIO_LAUNCHER_PATH =
+  /Android Studio[^\\/]*(?:\.app[\\/]Contents[\\/]MacOS[\\/]studio|[\\/]bin[\\/]studio(?:64)?(?:\.exe)?)(?:\s|$)/i;
 /** How far up an emulator's `ppid` chain to look for Android Studio before giving up — a
  * pathologically deep or cyclic `ps` tree must not loop forever. */
 const MAX_PROCESS_ANCESTRY_DEPTH = 64;
+
+function isAndroidStudioProcess(command: string): boolean {
+  const name = commandBasename(command).replace(/\.exe$/i, "");
+  return ANDROID_STUDIO_PROCESS.test(name) || ANDROID_STUDIO_LAUNCHER_PATH.test(command);
+}
 
 /**
  * Item (d), docs/device-leases.md#shutdown: Android Studio's own "Run" and its AVD manager boot
@@ -738,22 +750,19 @@ function isLaunchedByAndroidStudio(pid: number, rows: readonly ProcessSampleRow[
   for (let depth = 0; current && depth < MAX_PROCESS_ANCESTRY_DEPTH; depth += 1) {
     if (seen.has(current.pid)) break;
     seen.add(current.pid);
-    const name = commandBasename(current.command).replace(/\.exe$/i, "");
-    if (ANDROID_STUDIO_PROCESS.test(name) || current.command.includes("Android Studio")) {
-      return true;
-    }
+    if (isAndroidStudioProcess(current.command)) return true;
     current = byPid.get(current.ppid);
   }
   return false;
 }
 
-/** Xcode's own GUI process — `.../Xcode.app/Contents/MacOS/Xcode` — launched by Finder or the
- * Dock, never by `xcodebuild`, which has its own executable. */
-const XCODE_GUI_PROCESS = /^Xcode$/i;
-/** Simulator.app's GUI process — `.../Simulator.app/Contents/MacOS/Simulator` — standalone or
- * opened by Xcode's "Run". Never `launchd_sim`, which is the simulator itself, not someone
- * driving it. */
-const SIMULATOR_APP_PROCESS = /^Simulator$/i;
+/** Xcode's and Simulator.app's own GUI processes, by path —
+ * `.../Xcode.app/Contents/MacOS/Xcode` and `.../Simulator.app/Contents/MacOS/Simulator`. Matched on
+ * the path rather than the basename because an Xcode install with a space in its name
+ * (`Xcode 26.app`) gives every tool inside it, `xcodebuild` included, the basename `Xcode`. Never
+ * `launchd_sim`, which is the simulator itself, not someone driving it. */
+const XCODE_GUI_PATH = /\.app[\\/]Contents[\\/]MacOS[\\/]Xcode(?:\s|$)/;
+const SIMULATOR_APP_PATH = /Simulator\.app[\\/]Contents[\\/]MacOS[\\/]Simulator(?:\s|$)/;
 
 /**
  * Whether Xcode, Simulator.app, or Android Studio is open anywhere in this sweep's rows —
@@ -762,12 +771,10 @@ const SIMULATOR_APP_PROCESS = /^Simulator$/i;
  * (docs/device-leases.md#shutdown), so there is no narrower scope to check.
  */
 function isGuiDeviceManagerProcess(row: ProcessSampleRow): boolean {
-  const name = commandBasename(row.command);
   return (
-    XCODE_GUI_PROCESS.test(name) ||
-    SIMULATOR_APP_PROCESS.test(name) ||
-    ANDROID_STUDIO_PROCESS.test(name) ||
-    row.command.includes("Android Studio")
+    XCODE_GUI_PATH.test(row.command) ||
+    SIMULATOR_APP_PATH.test(row.command) ||
+    isAndroidStudioProcess(row.command)
   );
 }
 
