@@ -158,7 +158,10 @@ describe("reconcileDeviceLeases", () => {
     expect(result.unleasedDevices.map((entry) => entry.deviceId)).toEqual(["UDID-1"]);
   });
 
-  test("binds to the device that booted after the lease", () => {
+  test("binds to the device that booted after the lease, but leaves it unmarked with no evidence the agent itself booted it", () => {
+    // Nothing ties this device to agent `a1` specifically — it is simply the first unclaimed
+    // device of its platform. That is also true of a simulator Tyler just booted from Xcode in
+    // the same window, so this blind match alone must never earn the `booted` mark.
     const result = reconcileDeviceLeases({
       ...base,
       leases: [lease({ id: "fresh", agentId: "a1", acquiredAtMs: 10 * MINUTE - 60_000 })],
@@ -166,8 +169,100 @@ describe("reconcileDeviceLeases", () => {
     });
 
     expect(result.leases[0].deviceId).toBe("UDID-1");
-    // The simulator teardown reads this: the daemon saw the device boot for this lease.
-    expect(result.leases[0].booted).toBe(true);
+    expect(result.leases[0].booted).toBeUndefined();
+  });
+
+  test("marks a blind bind booted once the agent's own process is seen naming the device", () => {
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [lease({ id: "fresh", agentId: "a1", acquiredAtMs: 10 * MINUTE - 60_000 })],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 30 })],
+      deviceNamedByAgent: new Map([["UDID-1", new Set(["a1"])]]),
+    });
+
+    expect(result.leases[0]).toMatchObject({ deviceId: "UDID-1", booted: true });
+  });
+
+  test("a blind bind named by a different agent's process still earns no mark", () => {
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [lease({ id: "fresh", agentId: "a1", acquiredAtMs: 10 * MINUTE - 60_000 })],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 30 })],
+      deviceNamedByAgent: new Map([["UDID-1", new Set(["a2"])]]),
+    });
+
+    expect(result.leases[0]).toMatchObject({ deviceId: "UDID-1" });
+    expect(result.leases[0].booted).toBeUndefined();
+  });
+
+  test("marks a blind bind booted when it is the only pending lease of its platform and no GUI device manager is open", () => {
+    // A short `xcrun simctl boot <udid>` that exits before any sweep's `ps` catches it: no
+    // `deviceNamedByAgent` evidence ever arrives, but nothing else could have produced this
+    // device either.
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [lease({ id: "fresh", agentId: "a1", acquiredAtMs: 10 * MINUTE - 60_000 })],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 30 })],
+      guiDeviceManagerPresent: false,
+    });
+
+    expect(result.leases[0]).toMatchObject({ deviceId: "UDID-1", booted: true });
+  });
+
+  test("a single-candidate blind bind earns no mark while a GUI device manager is open", () => {
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [lease({ id: "fresh", agentId: "a1", acquiredAtMs: 10 * MINUTE - 60_000 })],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 30 })],
+      guiDeviceManagerPresent: true,
+    });
+
+    expect(result.leases[0]).toMatchObject({ deviceId: "UDID-1" });
+    expect(result.leases[0].booted).toBeUndefined();
+  });
+
+  test("a single-candidate blind bind earns no mark with no GUI evidence either way", () => {
+    // No process sample this sweep (guiDeviceManagerPresent omitted) must read the same as a GUI
+    // device manager being open: staying conservative is cheaper than wrongly crediting an agent.
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [lease({ id: "fresh", agentId: "a1", acquiredAtMs: 10 * MINUTE - 60_000 })],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 30 })],
+    });
+
+    expect(result.leases[0].booted).toBeUndefined();
+  });
+
+  test("a blind bind earns no mark when another pending lease of the same platform could also claim the device", () => {
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [
+        lease({ id: "fresh", agentId: "a1", acquiredAtMs: 10 * MINUTE - 60_000 }),
+        lease({ id: "also-waiting", agentId: "a2", acquiredAtMs: 10 * MINUTE - 30_000 }),
+      ],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 30 })],
+      guiDeviceManagerPresent: false,
+    });
+
+    const bound = result.leases.find((entry) => entry.id === "fresh");
+    expect(bound).toMatchObject({ deviceId: "UDID-1" });
+    expect(bound?.booted).toBeUndefined();
+    expect(result.leases.find((entry) => entry.id === "also-waiting")?.deviceId).toBeUndefined();
+  });
+
+  test("a device that started before the lease is never a single-candidate attribution target", () => {
+    // Same setup as "never binds to a device that was already running when the lease was
+    // taken" above, but with guiDeviceManagerPresent: false — the single-candidate leg must not
+    // override the "started after the lease" gate just because nothing else is competing for it.
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [lease({ id: "fresh", agentId: "a1", acquiredAtMs: 10 * MINUTE - 1_000 })],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 8040 })],
+      guiDeviceManagerPresent: false,
+    });
+
+    expect(result.leases[0].deviceId).toBeUndefined();
+    expect(result.leases[0].booted).toBeUndefined();
   });
 
   test("a lease already bound to a running device is carried through without a booted mark", () => {
@@ -180,6 +275,34 @@ describe("reconcileDeviceLeases", () => {
     });
 
     expect(result.leases[0]).toMatchObject({ id: "reuse", deviceId: "UDID-1" });
+    expect(result.leases[0].booted).toBeUndefined();
+  });
+
+  test("upgrades a bound lease to booted once deviceNamedByAgent catches up on a later sweep", () => {
+    // The short `xcrun simctl boot <udid>` that bound this lease had already exited by the sweep
+    // that saw the device, so it never earned `booted` then. A later sweep catching the same
+    // naming evidence (replayed here as if `simctl boot` were still visible) still proves the
+    // same thing: this agent, not Tyler, booted it.
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [
+        lease({ id: "l1", agentId: "a1", deviceId: "UDID-1", acquiredAtMs: 10 * MINUTE - 60_000 }),
+      ],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 30 })],
+      deviceNamedByAgent: new Map([["UDID-1", new Set(["a1"])]]),
+    });
+
+    expect(result.leases[0]).toMatchObject({ id: "l1", deviceId: "UDID-1", booted: true });
+  });
+
+  test("does not upgrade a bound lease when its device started before the lease, even with naming evidence", () => {
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [lease({ id: "reuse", agentId: "a1", deviceId: "UDID-1" })],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 8040 })],
+      deviceNamedByAgent: new Map([["UDID-1", new Set(["a1"])]]),
+    });
+
     expect(result.leases[0].booted).toBeUndefined();
   });
 

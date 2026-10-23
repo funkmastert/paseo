@@ -404,6 +404,10 @@ const AgentDeviceLeasesSchema = z
       })
       .strict()
       .optional(),
+    // How long a booted device with NO lease at all may sit unused before the sweep shuts it
+    // down — the one case an unleased device is shut down at all. 0 disables it. See
+    // docs/device-leases.md#shutdown.
+    unleasedIdleMinutes: z.number().nonnegative().optional(),
   })
   .strict();
 

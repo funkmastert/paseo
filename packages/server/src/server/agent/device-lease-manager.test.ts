@@ -75,6 +75,8 @@ function createManager(
     physicalTargets?: string[];
     /** Makes every identity lookup take a turn of the event loop, like the real adb call. */
     slowIdentityLookup?: boolean;
+    /** Makes a fresh `androidSerial` lookup never settle — a wedged `adb`. */
+    wedgedAndroidSerial?: boolean;
     /** Replaces the fake shutdown command, e.g. with one that never settles (a wedged simctl). */
     shutdownExec?: () => Promise<void>;
     /** How many physical Android devices (phones) the physical gate currently sees connected. */
@@ -93,12 +95,20 @@ function createManager(
         isRunning: true,
       })),
     nowMs: 1_000_000,
+    /** The `nowMs` of the last `sweepRows` call — undefined before the first one. */
+    lastSweepNowMs: undefined as number | undefined,
   };
   let leaseCounter = 0;
   const logger = { info: vi.fn(), warn: vi.fn() };
   const sendSystemMessageToAgent = vi.fn(async () => undefined);
   const shutdownExec = vi.fn(options.shutdownExec ?? (async () => undefined));
-  const androidSerial = vi.fn(async (avd: string, _options?: { fresh?: boolean }) => {
+  const androidSerial = vi.fn(async (avd: string, lookupOptions?: { fresh?: boolean }) => {
+    // Only the `fresh` lookup wedges — that is the one a shutdown makes, and the one item 6's
+    // fix bounds with a timeout. The plain lookup `buildUseEvidence` makes every sweep must keep
+    // resolving normally, or every test using this harness would hang regardless of the scenario
+    // it is actually exercising.
+    if (options.wedgedAndroidSerial && lookupOptions?.fresh)
+      await new Promise<never>(() => undefined);
     if (options.slowIdentityLookup) await new Promise((resolve) => setTimeout(resolve, 5));
     return options.androidSerials?.[avd];
   });
@@ -1098,7 +1108,7 @@ function childRow(pid: number, ppid: number, command: string): ProcessSampleRow 
 }
 
 /** One resource-monitor sweep over the harness's `ps` rows, handed over the way the monitor does. */
-async function sweepRows(harness: ReturnType<typeof createManager>): Promise<void> {
+async function runOneSweep(harness: ReturnType<typeof createManager>): Promise<void> {
   const { manager, state } = harness;
   const { agentTrees } = attributeProcessTrees(
     state.rows,
@@ -1113,8 +1123,44 @@ async function sweepRows(harness: ReturnType<typeof createManager>): Promise<voi
 }
 
 /**
+ * Under three minutes, so a test's `nowMs` jump never reads as the sleep/wake detector's gap
+ * (`SWEEP_GAP_WAKE_THRESHOLD_MS`) — close enough to the real resource monitor's ~1-minute cadence
+ * that simulating it one step at a time is a faithful stand-in for "time passed with the monitor
+ * running the whole while," which is what every `sweepRows` caller in this file means.
+ */
+const TEST_SWEEP_STEP_MS = 170_000;
+
+/**
+ * A resource-monitor sweep over the harness's `ps` rows. Tests advance `state.nowMs` by whatever
+ * they like and call this once; internally it replays that gap as a run of real sweeps no more
+ * than `TEST_SWEEP_STEP_MS` apart, so a big single jump here never looks like the machine slept —
+ * that is `state.nowMs` moving each test actually asserts.
+ */
+async function sweepRows(harness: ReturnType<typeof createManager>): Promise<void> {
+  const { state } = harness;
+  const targetNowMs = state.nowMs;
+  const lastSweptAtMs = state.lastSweepNowMs ?? targetNowMs;
+  for (
+    let stepNowMs = lastSweptAtMs + TEST_SWEEP_STEP_MS;
+    stepNowMs < targetNowMs;
+    stepNowMs += TEST_SWEEP_STEP_MS
+  ) {
+    state.nowMs = stepNowMs;
+    await runOneSweep(harness);
+  }
+  state.nowMs = targetNowMs;
+  await runOneSweep(harness);
+  state.lastSweepNowMs = targetNowMs;
+}
+
+/**
  * A simulator the daemon saw the agent boot: a checkout with nothing running, then the device
- * appears a minute later (up 30 s, so after the lease) and the sweep binds the lease to it.
+ * appears a minute later (up 30 s, so after the lease) and the sweep binds the lease to it. Also
+ * puts the agent's own boot command (`xcrun simctl boot <udid>`) in its tree for that one sweep —
+ * the process evidence `reconcileDeviceLeases`'s `deviceNamedByAgent` needs to mark the bind
+ * `booted`, in place of the real `simctl boot`/`xcodebuild` invocation that named this UDID while
+ * it ran. Stripped right after: a real boot command does not stay running once the simulator is
+ * up, and the `booted` mark it earns is sticky regardless (device-lease-registry.ts).
  */
 async function checkOutAndBoot(
   harness: ReturnType<typeof createManager>,
@@ -1124,8 +1170,16 @@ async function checkOutAndBoot(
   const result = await manager.checkout({ agentId: input.agentId, platform: "ios" });
   expect(result.status).toBe("granted");
   state.nowMs += 60_000;
-  state.rows = [...state.rows, simulatorRow(input.pid, input.udid, "00:30")];
+  const bootRootPid = input.pid + 100_000;
+  const bootCommandPid = input.pid + 100_001;
+  state.rows = [
+    ...state.rows,
+    simulatorRow(input.pid, input.udid, "00:30"),
+    agentRootRow(bootRootPid, input.agentId),
+    childRow(bootCommandPid, bootRootPid, `xcrun simctl boot ${input.udid}`),
+  ];
   await sweepRows(harness);
+  state.rows = state.rows.filter((row) => row.pid !== bootRootPid && row.pid !== bootCommandPid);
 }
 
 const IDLE_HOLDER: DeviceLeaseAgentSummary = {
@@ -1345,6 +1399,643 @@ describe("DeviceLeaseManager agent-held simulator shutdown", () => {
     await sweepRows(harness);
 
     expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("an Xcode-booted simulator bound by a pending lease survives too", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    const result = await harness.manager.checkout({ agentId: "agent-1", platform: "ios" });
+    expect(result.status).toBe("granted");
+
+    // Tyler boots a simulator from Xcode a few seconds later — the only "first unclaimed device"
+    // the registry's blind bind has to go on, and nothing in agent-1's own tree ever names it.
+    // Xcode itself is open the whole time, which is what keeps the single-candidate leg from
+    // crediting agent-1 even though its lease is the only one waiting.
+    harness.state.nowMs += 10_000;
+    harness.state.rows = [
+      simulatorRow(2, UDID_B, "00:05"),
+      childRow(3, 1, "/Applications/Xcode.app/Contents/MacOS/Xcode"),
+    ];
+    await sweepRows(harness);
+    expect((await harness.manager.getSnapshot()).devices[0]).toMatchObject({
+      deviceId: UDID_B,
+      attribution: "lease",
+    });
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+
+    await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("a blind-bound simulator with no GUI device manager open and only one waiting lease is torn down like any agent-booted one", async () => {
+    // The bug this fix closes: a short `xcrun simctl boot <udid>` that exits before the sweep
+    // that first sees the device never leaves `deviceNamedByAgent` evidence behind, so without
+    // the single-candidate leg this lease would bind with no `booted` mark and the simulator
+    // would never be torn down, however long it sat idle.
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    const result = await harness.manager.checkout({ agentId: "agent-1", platform: "ios" });
+    expect(result.status).toBe("granted");
+
+    harness.state.nowMs += 10_000;
+    // agent-1's own root process, so the idle sweep can find its (empty) tree and tell "nothing
+    // uses this" apart from "no evidence at all" — the Xcode-booted test above never needs this
+    // because it expects the opposite (never torn down) either way.
+    harness.state.rows = [agentRootRow(500, "agent-1"), simulatorRow(2, UDID_B, "00:05")];
+    await sweepRows(harness);
+    expect((await harness.manager.getSnapshot()).devices[0]).toMatchObject({
+      deviceId: UDID_B,
+      agentId: "agent-1",
+      attribution: "lease",
+    });
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).toHaveBeenCalledWith("xcrun", ["simctl", "shutdown", UDID_B]);
+  });
+
+  // Gradle and Kotlin daemons run on Android Studio's bundled JBR, so any agent's Android build
+  // puts "Android Studio" in some command line; and an Xcode install with a space in its name
+  // gives xcodebuild the basename "Xcode". Neither is a person driving a GUI.
+  test.each([
+    [
+      "a Gradle daemon on Android Studio's bundled JBR",
+      "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java -Xmx4g -cp /x/gradle-daemon-main.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.1",
+    ],
+    [
+      "xcodebuild inside an Xcode install whose name has a space",
+      "/Applications/Xcode 26.app/Contents/Developer/usr/bin/xcodebuild test -scheme App",
+    ],
+  ])("%s does not count as a GUI device manager being open", async (_label, command) => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    const result = await harness.manager.checkout({ agentId: "agent-1", platform: "ios" });
+    expect(result.status).toBe("granted");
+
+    harness.state.nowMs += 10_000;
+    harness.state.rows = [
+      agentRootRow(500, "agent-1"),
+      simulatorRow(2, UDID_B, "00:05"),
+      childRow(700, 1, command),
+    ];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).toHaveBeenCalledWith("xcrun", ["simctl", "shutdown", UDID_B]);
+  });
+
+  test.each([
+    [
+      "Simulator.app",
+      "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator",
+    ],
+    [
+      "an Android Studio Preview install",
+      "/Applications/Android Studio Preview.app/Contents/MacOS/studio",
+    ],
+    ["Android Studio on Windows", "C:\\Program Files\\Android\\Android Studio\\bin\\studio64.exe"],
+  ])("%s open keeps a blind-bound simulator unattributed", async (_label, command) => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    const result = await harness.manager.checkout({ agentId: "agent-1", platform: "ios" });
+    expect(result.status).toBe("granted");
+
+    harness.state.nowMs += 10_000;
+    harness.state.rows = [
+      agentRootRow(500, "agent-1"),
+      simulatorRow(2, UDID_B, "00:05"),
+      childRow(700, 1, command),
+    ];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+});
+
+describe("DeviceLeaseManager agent-held emulator shutdown", () => {
+  test("an idle agent's android emulator cycles idle-release but is shut down by the teardown at 30 minutes", async () => {
+    const harness = createManager({
+      agents: [IDLE_HOLDER],
+      androidSerials: { pixel_cycle: "emulator-5599" },
+    });
+    harness.state.rows = [agentRootRow(500, "agent-1"), emulatorRow(501, 500, "pixel_cycle")];
+    await sweepRows(harness);
+
+    // idleReleaseMinutes (15) fires first and releases the lease, but the emulator process is
+    // still in agent-1's tree, so adoptAttributedDevices re-leases it on the very next sweep —
+    // the lease churns, but nothing shuts the process down yet.
+    harness.state.nowMs += 16 * 60_000;
+    await sweepRows(harness);
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: "pixel_cycle", reason: "idle" }),
+      "Device slot released",
+    );
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+
+    // Past the teardown's own 30-minute clock, which keeps running underneath the churn
+    // (keyed by device id, not lease id) — the emulator itself is finally shut down.
+    harness.state.nowMs += 15 * 60_000;
+    await sweepRows(harness);
+    expect(harness.shutdownExec).toHaveBeenCalledWith("adb", [
+      "-s",
+      "emulator-5599",
+      "emu",
+      "kill",
+    ]);
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: "pixel_cycle" }),
+      "Shut down an agent-held emulator",
+    );
+  });
+
+  test("a Studio-launched emulator bound to a pending lease survives the idle sweep and daemon shutdown", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    // The emulator genuinely sits inside agent-1's process tree — same as the cycling test above
+    // — but Android Studio is its ancestor, so it is Tyler's, not something to tear down just
+    // because attribution legitimately bound the lease with `booted: true`.
+    harness.state.rows = [
+      agentRootRow(500, "agent-1"),
+      childRow(550, 500, "/Applications/Android Studio.app/Contents/MacOS/studio"),
+      emulatorRow(501, 550, "pixel_studio_race"),
+    ];
+    await sweepRows(harness);
+    expect((await harness.manager.getSnapshot()).devices[0]).toMatchObject({
+      deviceId: "pixel_studio_race",
+      agentId: "agent-1",
+      attribution: "lease",
+    });
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+
+    await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("daemon shutdown never touches an emulator an agent booted — only the idle sweep does", async () => {
+    // Killing an Android emulator on every daemon stop or deploy restart, with no in-use check,
+    // would cut off a mid-flight Maestro run or instrumented test. Only iOS simulators are in
+    // scope for the daemon-shutdown trigger (the CoreSimulator crash it exists for).
+    const harness = createManager({ androidSerials: { pixel_shutdown: "emulator-5598" } });
+    harness.state.rows = [agentRootRow(500, "agent-1"), emulatorRow(501, 500, "pixel_shutdown")];
+    await sweepRows(harness);
+
+    await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * An Android emulator an agent booted (it appears inside the agent's process tree, so
+ * `adoptAttributedDevices` leases it with `booted: true`), then orphaned by archiving the agent
+ * while the emulator keeps running untouched — the realistic path to an agent-booted, genuinely
+ * unleased emulator (items 2–3, docs/device-leases.md#shutdown).
+ */
+async function bootEmulatorThenOrphanAgent(
+  harness: ReturnType<typeof createManager>,
+  input: { agentId: string; avd: string; pid: number },
+): Promise<void> {
+  const { state } = harness;
+  state.rows = [agentRootRow(500, input.agentId), emulatorRow(input.pid, 500, input.avd)];
+  await sweepRows(harness);
+  state.agents = state.agents.filter((agent) => agent.agentId !== input.agentId);
+  state.rows = [emulatorRow(input.pid, 999, input.avd)];
+  await sweepRows(harness);
+}
+
+describe("DeviceLeaseManager unleased device shutdown", () => {
+  test("a Tyler-booted simulator with no agent provenance is never shut down, however long it sits idle", async () => {
+    const harness = createManager({ rows: [simulatorRow(1, UDID_A)] });
+    await sweepRows(harness);
+    expect((await harness.manager.getSnapshot()).devices[0]).toMatchObject({
+      deviceId: UDID_A,
+      attribution: "none",
+    });
+
+    harness.state.nowMs += 90 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("a Tyler-booted simulator an agent briefly reused is never shut down once unleased again", async () => {
+    const harness = createManager({
+      rows: [simulatorRow(1, UDID_A), agentRootRow(500, "agent-1")],
+      agents: [IDLE_HOLDER],
+    });
+    const result = await harness.manager.checkout({
+      agentId: "agent-1",
+      platform: "ios",
+      device: UDID_A,
+    });
+    expect(result.status === "granted" && result.device?.deviceId).toBe(UDID_A);
+    await sweepRows(harness);
+
+    // idleReleaseMinutes (15) releases the reused lease — it was never booted, so the teardown
+    // above does not own it.
+    harness.state.nowMs += 16 * 60_000;
+    await sweepRows(harness);
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: UDID_A, reason: "idle" }),
+      "Device slot released",
+    );
+
+    // Unleased again, and well past unleasedIdleMinutes — still never swept: it was Tyler's
+    // from the start, and an agent reusing it never earns it agent provenance.
+    harness.state.nowMs += 60 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("an agent-booted simulator, orphaned when its agent is archived, is shut down once unleased for 20 minutes", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+    });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    expect((await harness.manager.getSnapshot()).devices[0]).toMatchObject({
+      deviceId: UDID_A,
+      agentId: "agent-1",
+      attribution: "lease",
+    });
+
+    harness.state.agents = [];
+    await sweepRows(harness);
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: UDID_A, reason: "agent-gone" }),
+      "Device slot released",
+    );
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).toHaveBeenCalledWith("xcrun", ["simctl", "shutdown", UDID_A]);
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: UDID_A, platform: "ios" }),
+      "Shut down an unleased simulator",
+    );
+  });
+
+  test("a relaunch under a new pid resets agent provenance even when the reported uptime does not dip", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+    });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    harness.state.agents = [];
+    await sweepRows(harness);
+
+    // Tyler quits and relaunches the same simulator under a new OS process — a coincidence in
+    // `ps`'s elapsed-time rounding could report the same apparent uptime either side of that, but
+    // the pid can never lie about it.
+    harness.state.nowMs += 60_000;
+    harness.state.rows = harness.state.rows.filter((row) => row.pid !== 900);
+    harness.state.rows.push(simulatorRow(901, UDID_A, "00:30"));
+    await sweepRows(harness);
+
+    // Well past unleasedIdleMinutes (20) — still never swept: the relaunch reset agent
+    // provenance, so this reads as Tyler's own device from here on, same as item 2's reboot rule.
+    harness.state.nowMs += 60 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("an agent-booted emulator, orphaned when its agent is archived, is shut down once unleased for 20 minutes", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+      androidSerials: { pixel_orphan: "emulator-5590" },
+    });
+    await bootEmulatorThenOrphanAgent(harness, {
+      agentId: "agent-1",
+      avd: "pixel_orphan",
+      pid: 501,
+    });
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).toHaveBeenCalledWith("adb", [
+      "-s",
+      "emulator-5590",
+      "emu",
+      "kill",
+    ]);
+  });
+
+  test("a reserved, agent-booted, orphaned emulator is never shut down", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+      androidSerials: { pixel_reserved: "emulator-5591" },
+    });
+    await bootEmulatorThenOrphanAgent(harness, {
+      agentId: "agent-1",
+      avd: "pixel_reserved",
+      pid: 501,
+    });
+    harness.manager.reserveDevice("pixel_reserved");
+
+    harness.state.nowMs += 60 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("an orphaned, agent-booted simulator in use by an xcodebuild naming its UDID is kept", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+    });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    harness.state.agents = [];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 20 * 60_000;
+    harness.state.rows.push(
+      childRow(600, 999, `xcodebuild test -destination 'platform=iOS Simulator,id=${UDID_A}'`),
+    );
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("a non-agent gradle process keeps every orphaned, agent-booted Android emulator alive, even one it never names", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+      androidSerials: { pixel_gradle: "emulator-5592" },
+    });
+    await bootEmulatorThenOrphanAgent(harness, {
+      agentId: "agent-1",
+      avd: "pixel_gradle",
+      pid: 501,
+    });
+
+    harness.state.nowMs += 20 * 60_000;
+    // Tyler, not any agent, running a connected test from a terminal — names no device at all.
+    harness.state.rows.push(childRow(700, 1, "./gradlew connectedDebugAndroidTest"));
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("an `adb -s <serial>` command by its resolved serial keeps an orphaned, agent-booted emulator alive", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+      androidSerials: { pixel_serial: "emulator-5593" },
+    });
+    await bootEmulatorThenOrphanAgent(harness, {
+      agentId: "agent-1",
+      avd: "pixel_serial",
+      pid: 501,
+    });
+
+    harness.state.nowMs += 20 * 60_000;
+    // Maestro or a plain adb command naming the serial, never the AVD name.
+    harness.state.rows.push(childRow(700, 1, "adb -s emulator-5593 shell input tap 100 100"));
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("the daemon's own adb track-devices poll and the adb server never count as use", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+      androidSerials: { pixel_trackonly: "emulator-5594" },
+    });
+    await bootEmulatorThenOrphanAgent(harness, {
+      agentId: "agent-1",
+      avd: "pixel_trackonly",
+      pid: 501,
+    });
+    harness.state.rows.push(
+      childRow(800, 1, "adb track-devices -l"),
+      childRow(801, 1, "adb -L unix:@...:5037 fork-server server --reply-fd 5"),
+    );
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).toHaveBeenCalledWith("adb", [
+      "-s",
+      "emulator-5594",
+      "emu",
+      "kill",
+    ]);
+  });
+
+  test("an adb install naming a file with 'server' in it still counts as use, not the host server", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+      androidSerials: { pixel_filename: "emulator-5597" },
+    });
+    await bootEmulatorThenOrphanAgent(harness, {
+      agentId: "agent-1",
+      avd: "pixel_filename",
+      pid: 501,
+    });
+    // The subcommand is `install`, not a host-server one — the filename merely contains the
+    // substring "server", which a whole-command regex scan would wrongly match as the adb host
+    // server and exclude from use evidence, letting the sweep kill a device mid-install
+    // (device-lease-manager.ts's `adbSubcommand`).
+    harness.state.rows.push(childRow(800, 1, "adb install app-server-debug.apk"));
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("an Android Studio ancestor means the device is Tyler's, even inside what looks like an agent's process tree", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+    });
+    harness.state.rows = [
+      agentRootRow(500, "agent-1"),
+      childRow(550, 500, "/Applications/Android Studio.app/Contents/MacOS/studio"),
+      emulatorRow(501, 550, "pixel_studio"),
+    ];
+    await sweepRows(harness);
+    // Without the Android Studio override this would adopt a `booted: true` lease, same as any
+    // other device genuinely inside agent-1's tree.
+    expect((await harness.manager.getSnapshot()).devices[0].attribution).toBe("lease");
+
+    harness.state.agents = [];
+    harness.state.rows = [
+      childRow(550, 1, "/Applications/Android Studio.app/Contents/MacOS/studio"),
+      emulatorRow(501, 550, "pixel_studio"),
+    ];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("an emulator under an agent's Gradle daemon is the agent's, though the daemon runs on Android Studio's JBR", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+      androidSerials: { pixel_gmd: "emulator-5593" },
+    });
+    harness.state.rows = [
+      agentRootRow(500, "agent-1"),
+      childRow(
+        560,
+        500,
+        "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java -cp /x/gradle-daemon-main.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.1",
+      ),
+      emulatorRow(501, 560, "pixel_gmd"),
+    ];
+    await sweepRows(harness);
+    harness.state.agents = [];
+    harness.state.rows = [emulatorRow(501, 999, "pixel_gmd")];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).toHaveBeenCalledWith("adb", [
+      "-s",
+      "emulator-5593",
+      "emu",
+      "kill",
+    ]);
+  });
+
+  test("unleasedIdleMinutes: 0 turns it off even for an agent-booted, orphaned emulator", async () => {
+    const harness = createManager({
+      config: { enabled: true, unleasedIdleMinutes: 0 },
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+      androidSerials: { pixel_off: "emulator-5595" },
+    });
+    await bootEmulatorThenOrphanAgent(harness, { agentId: "agent-1", avd: "pixel_off", pid: 501 });
+
+    harness.state.nowMs += 60 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("the cap being off never shuts down an unleased device (item 1)", async () => {
+    // A default daemon: `enabled` is off, but `unleasedIdleMinutes` still defaults to 20 — the
+    // bug this gate fixes is the sweep running anyway because only the minutes were checked.
+    const harness = createManager({
+      config: { enabled: false },
+      rows: [emulatorRow(501, 999, "pixel_capoff")],
+    });
+    await sweepRows(harness);
+
+    harness.state.nowMs += 60 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("dry run logs and keeps an agent-booted, orphaned device up", async () => {
+    const harness = createManager({
+      config: { enabled: true, dryRun: true },
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+    });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    harness.state.agents = [];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ dryRun: true, deviceId: UDID_A }),
+      "Would shut down an unleased simulator",
+    );
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("a wedged adb serial lookup during a shutdown does not block the sweep past its own timeout", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+      wedgedAndroidSerial: true,
+    });
+    await bootEmulatorThenOrphanAgent(harness, {
+      agentId: "agent-1",
+      avd: "pixel_wedged",
+      pid: 501,
+    });
+
+    harness.state.nowMs += 20 * 60_000;
+    vi.useFakeTimers();
+    try {
+      const sweep = sweepRows(harness);
+      // device-lease-manager.ts's SIMULATOR_SHUTDOWN_TIMEOUT_MS — the serial lookup now runs
+      // inside the same timeout as the shutdown command (item 6), so it must not outlive it.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await sweep;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(harness.logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: "pixel_wedged", platform: "android" }),
+      "Failed to shut down an unleased emulator; leaving it for the OS to tear down",
+    );
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("a device a live agent's process tree owns gets a lease instead of being swept as unleased", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    harness.state.rows = [agentRootRow(500, "agent-1"), emulatorRow(501, 500, "pixel_owned")];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 60 * 60_000;
+    await sweepRows(harness);
+
+    // Idle-release (15 min) touches it, not the unleased sweep (20 min) — it was never
+    // actually unleased for long enough to qualify.
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: "pixel_owned", reason: "idle" }),
+      "Device slot released",
+    );
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+});
+
+describe("DeviceLeaseManager sleep and wake", () => {
+  test("a gap over three minutes between sweeps resets idle clocks instead of shutting everything down at once", async () => {
+    const harness = createManager({
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: true }],
+    });
+    await checkOutAndBoot(harness, { agentId: "agent-1", udid: UDID_A, pid: 900 });
+    harness.state.agents = [];
+    await sweepRows(harness);
+
+    // A genuine single jump — `runOneSweep` bypasses `sweepRows`'s own in-range stepping —
+    // stands in for the laptop sleeping for 25 minutes straight through what would otherwise be
+    // several sweeps. `lastSweepNowMs` is reset to match so the next `sweepRows` call resumes
+    // stepping from here, instead of replaying the skipped 25 minutes as if they had been swept
+    // normally all along.
+    harness.state.nowMs += 25 * 60_000;
+    await runOneSweep(harness);
+    harness.state.lastSweepNowMs = harness.state.nowMs;
+
+    // Woken, not already 25 minutes idle: the clock restarted on wake, so this is not yet
+    // unleasedIdleMinutes (20) past that reset.
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+
+    // Normal operation resumes; `sweepRows` keeps every step under the wake threshold, so this
+    // accumulates as ordinary idle time rather than triggering another reset.
+    harness.state.nowMs += 19 * 60_000;
+    await sweepRows(harness);
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+
+    harness.state.nowMs += 2 * 60_000;
+    await sweepRows(harness);
+    expect(harness.shutdownExec).toHaveBeenCalledWith("xcrun", ["simctl", "shutdown", UDID_A]);
   });
 });
 
@@ -1689,6 +2380,222 @@ describe("gateInstall", () => {
     expect(decision.decision).toBe("deny");
     const message = decision.decision === "deny" ? decision.message : "";
     expect(message).toContain("agent-2");
+  });
+});
+
+describe("DeviceLeaseManager family sharing", () => {
+  test("a child uses its parent's emulator lease without being refused, and the lease stays the parent's", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-1", provider: "claude", isRunning: true },
+        { agentId: "child-1", provider: "claude", isRunning: true, parentAgentId: "parent-1" },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5570")],
+    });
+    await manager.checkout({ agentId: "parent-1", platform: "android", device: "emulator-5570" });
+
+    expect(
+      await manager.gateInstall({
+        agentId: "child-1",
+        command: "adb -s emulator-5570 install app.apk",
+      }),
+    ).toEqual({ decision: "allow" });
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.devices).toEqual([
+      expect.objectContaining({ deviceId: "emulator-5570", agentId: "parent-1" }),
+    ]);
+  });
+
+  test("a parent uses its child's emulator lease without being refused", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-2", provider: "claude", isRunning: true },
+        { agentId: "child-2", provider: "claude", isRunning: true, parentAgentId: "parent-2" },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5571")],
+    });
+    await manager.checkout({ agentId: "child-2", platform: "android", device: "emulator-5571" });
+
+    expect(
+      await manager.gateInstall({
+        agentId: "parent-2",
+        command: "adb -s emulator-5571 install app.apk",
+      }),
+    ).toEqual({ decision: "allow" });
+  });
+
+  test("siblings under the same parent do not share a device — neither is the other's ancestor", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-3", provider: "claude", isRunning: true },
+        { agentId: "sibling-a", provider: "claude", isRunning: true, parentAgentId: "parent-3" },
+        { agentId: "sibling-b", provider: "claude", isRunning: true, parentAgentId: "parent-3" },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5572")],
+    });
+    await manager.checkout({ agentId: "sibling-a", platform: "android", device: "emulator-5572" });
+
+    const decision = await manager.gateInstall({
+      agentId: "sibling-b",
+      command: "adb -s emulator-5572 install app.apk",
+    });
+    expect(decision.decision).toBe("deny");
+  });
+
+  test("a grandchild is family through its parent, even though its grandparent's other child is not", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-3b", provider: "claude", isRunning: true },
+        { agentId: "child-3b", provider: "claude", isRunning: true, parentAgentId: "parent-3b" },
+        {
+          agentId: "grandchild-3b",
+          provider: "claude",
+          isRunning: true,
+          parentAgentId: "child-3b",
+        },
+        {
+          agentId: "aunt-3b",
+          provider: "claude",
+          isRunning: true,
+          parentAgentId: "parent-3b",
+        },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5577")],
+    });
+    await manager.checkout({ agentId: "child-3b", platform: "android", device: "emulator-5577" });
+
+    expect(
+      await manager.gateInstall({
+        agentId: "grandchild-3b",
+        command: "adb -s emulator-5577 install app.apk",
+      }),
+    ).toEqual({ decision: "allow" });
+
+    const decision = await manager.gateInstall({
+      agentId: "aunt-3b",
+      command: "adb -s emulator-5577 install app.apk",
+    });
+    expect(decision.decision).toBe("deny");
+  });
+
+  test("an unrelated agent is still refused on a family-held device", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-4", provider: "claude", isRunning: true },
+        { agentId: "child-4", provider: "claude", isRunning: true, parentAgentId: "parent-4" },
+        { agentId: "stranger", provider: "claude", isRunning: true },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5573")],
+    });
+    await manager.checkout({ agentId: "parent-4", platform: "android", device: "emulator-5573" });
+
+    const decision = await manager.gateInstall({
+      agentId: "stranger",
+      command: "adb -s emulator-5573 install app.apk",
+    });
+    expect(decision.decision).toBe("deny");
+  });
+
+  test("a device another agent's process tree owns without a lease is still shared with its family, never checked out either way", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-5", provider: "claude", isRunning: true },
+        { agentId: "child-5", provider: "claude", isRunning: true, parentAgentId: "parent-5" },
+      ],
+      rows: [agentRootRow(500, "parent-5"), emulatorRow(501, 500, "emulator-5579")],
+    });
+
+    expect(
+      await manager.gateInstall({
+        agentId: "child-5",
+        command: "adb -s emulator-5579 install app.apk",
+      }),
+    ).toEqual({ decision: "allow" });
+  });
+
+  test("checkout naming a family member's device returns it instead of refusing, charged to the holder", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-6", provider: "claude", isRunning: true },
+        { agentId: "child-6", provider: "claude", isRunning: true, parentAgentId: "parent-6" },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5574")],
+    });
+    await manager.checkout({ agentId: "parent-6", platform: "android", device: "emulator-5574" });
+
+    const result = await manager.checkout({
+      agentId: "child-6",
+      platform: "android",
+      device: "emulator-5574",
+    });
+    expect(result.status).toBe("granted");
+    expect(result.status === "granted" ? result.note : "").toContain("parent-6");
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.devices).toEqual([
+      expect.objectContaining({ deviceId: "emulator-5574", agentId: "parent-6" }),
+    ]);
+  });
+
+  test("an unnamed checkout reuses a family member's running device instead of taking a new slot", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-7", provider: "claude", isRunning: true },
+        { agentId: "child-7", provider: "claude", isRunning: true, parentAgentId: "parent-7" },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5575")],
+    });
+    await manager.checkout({ agentId: "parent-7", platform: "android", device: "emulator-5575" });
+
+    const result = await manager.checkout({ agentId: "child-7", platform: "android" });
+    expect(result.status).toBe("granted");
+    expect(result.status === "granted" ? result.device?.deviceId : undefined).toBe("emulator-5575");
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.used).toBe(1);
+    expect(snapshot.devices).toEqual([
+      expect.objectContaining({ deviceId: "emulator-5575", agentId: "parent-7" }),
+    ]);
+  });
+
+  test("an unnamed checkout does not reuse an unrelated agent's device — it waits for a slot instead", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "holder-8", provider: "claude", isRunning: true },
+        { agentId: "stranger-8", provider: "claude", isRunning: true },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5576")],
+    });
+    await manager.checkout({ agentId: "holder-8", platform: "android", device: "emulator-5576" });
+
+    const result = await manager.checkout({
+      agentId: "stranger-8",
+      platform: "android",
+      wait: false,
+    });
+    // Slots: 2 per platform on the test harness's derived hardware — a second android slot is
+    // free, so this takes a NEW slot rather than reusing the unrelated agent's device.
+    expect(result.status).toBe("granted");
+    expect(result.status === "granted" ? result.device : undefined).toBeUndefined();
+  });
+
+  test("an unnamed checkout reuses the caller's own device instead of a family member's", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-9", provider: "claude", isRunning: true },
+        { agentId: "child-9", provider: "claude", isRunning: true, parentAgentId: "parent-9" },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5578"), emulatorRow(502, 999, "emulator-5579")],
+    });
+    await manager.checkout({ agentId: "parent-9", platform: "android", device: "emulator-5578" });
+    await manager.checkout({ agentId: "child-9", platform: "android", device: "emulator-5579" });
+
+    // child-9 already holds emulator-5579; an unnamed checkout must keep it, not switch to
+    // parent-9's family-held emulator-5578.
+    const result = await manager.checkout({ agentId: "child-9", platform: "android" });
+    expect(result.status).toBe("granted");
+    expect(result.status === "granted" ? result.device?.deviceId : undefined).toBe("emulator-5579");
   });
 });
 
