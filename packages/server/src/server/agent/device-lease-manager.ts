@@ -112,6 +112,13 @@ const DEFAULT_SIMULATOR_IDLE_MINUTES = 30;
  */
 const DEFAULT_IDLE_RELEASE_MINUTES = 15;
 /**
+ * How long a booted device with no lease at all — nobody to charge, nobody to tell — may sit
+ * unused before the sweep shuts it down on its own. Shorter than the simulator teardown's 30
+ * minutes: an agent-held device has a holder who might come back to it, an unleased one has
+ * nobody. `unleasedIdleMinutes`; 0 turns it off.
+ */
+const DEFAULT_UNLEASED_IDLE_MINUTES = 20;
+/**
  * A per-device budget for the shutdown command itself, independent of `DeviceShutdownRunner`'s
  * own (longer) exec timeout, so a wedged `simctl` cannot hold up the resource monitor's sweep.
  * The command may still be running when this gives up on it; nothing here waits on it further.
@@ -142,6 +149,13 @@ export interface DeviceLeaseConfig {
    * true` iOS simulator lease — the teardown valve above owns those.
    */
   idleReleaseMinutes?: number;
+  /**
+   * How long a booted simulator or emulator with NO lease at all may sit unused before the
+   * sweep shuts it down (docs/device-leases.md#shutdown) — Tyler's own device, or one whose
+   * agent came and went without the gate ever adopting it. 0 turns it off. Reserved and
+   * physical devices are never touched.
+   */
+  unleasedIdleMinutes?: number;
 }
 
 export type DeviceStatusAttribution = "lease" | "process" | "none";
@@ -379,6 +393,7 @@ interface ResolvedDeviceLeaseConfig {
   queueTimeoutMs: number;
   simulatorTeardown: { enabled: boolean; idleMs: number };
   idleReleaseMs: number;
+  unleasedIdleMs: number;
 }
 
 /** The sweep's `ps` rows and agent trees, which the teardown reads to see a simulator in use. */
@@ -432,7 +447,16 @@ export interface DeviceCheckoutInput {
 
 /** What a checkout decided, before any response text is written. */
 type CheckoutDecision =
-  | { kind: "bound"; lease: DeviceLease; device: RunningDevice; alreadyHeld?: boolean }
+  | {
+      kind: "bound";
+      lease: DeviceLease;
+      device: RunningDevice;
+      alreadyHeld?: boolean;
+      /** Set when the lease belongs to a different agent in the caller's family — an ancestor,
+       * descendant, or sibling. The lease is shared, not reassigned (docs/device-leases.md,
+       * Family sharing). */
+      familyHolderAgentId?: string;
+    }
   | { kind: "granted"; leaseId: string }
   | { kind: "dry-run"; leaseId: string; message: string }
   | { kind: "reserved"; message: string }
@@ -501,6 +525,45 @@ function sameLeases(before: readonly DeviceLease[], after: readonly DeviceLease[
  * `DeviceStatusEntry.source`'s comment for why the wire enum can't grow a third value. */
 function toWireLeaseSource(source: DeviceLease["source"]): "checkout" | "launch" {
   return source === "checkout" ? "checkout" : "launch";
+}
+
+/** How deep a `parentAgentId` chain is walked before giving up — a cycle or a pathologically
+ * deep chain must not loop forever. Mirrors `resolveRootLeaderId`'s cap in
+ * physical-device-lease-manager.ts. */
+const MAX_FAMILY_DEPTH = 32;
+
+/** Walks `parentAgentId` from `agentId` to the root of its tree — the top-level session, or
+ * `agentId` itself when it has no parent. Unlike `resolveRootLeaderId` (which names a leader
+ * other than the holder, for display), this always resolves to *something*, so two agents can
+ * be compared by root. */
+function resolveFamilyRootId(
+  agentId: string,
+  agentsById: ReadonlyMap<string, DeviceLeaseAgentSummary>,
+): string {
+  let currentId = agentId;
+  const seen = new Set<string>([agentId]);
+  for (let depth = 0; depth < MAX_FAMILY_DEPTH; depth += 1) {
+    const parentId = agentsById.get(currentId)?.parentAgentId;
+    if (!parentId || seen.has(parentId)) break;
+    seen.add(parentId);
+    currentId = parentId;
+  }
+  return currentId;
+}
+
+/**
+ * Whether `a` and `b` trace back to the same root agent via `paseo.parent-agent-id` — an
+ * ancestor, a descendant, or a sibling, with no limit on depth (docs/device-leases.md, Family
+ * sharing). `a === b` is always its own family.
+ */
+function isSameAgentFamily(
+  agents: readonly DeviceLeaseAgentSummary[],
+  a: string,
+  b: string,
+): boolean {
+  if (a === b) return true;
+  const agentsById = new Map(agents.map((agent) => [agent.agentId, agent] as const));
+  return resolveFamilyRootId(a, agentsById) === resolveFamilyRootId(b, agentsById);
 }
 
 /** The exact command shape that targets this running device, for a refusal to paste — the
@@ -631,6 +694,28 @@ function isLeaseInUse(input: {
   return namingPids.some((pid) => !ownPids.has(pid));
 }
 
+/**
+ * `isLeaseInUse`'s definition with no lease and no holder to ask about: a device nobody leased
+ * has nobody mid-turn and no shell of its own, so "used" is only whatever names its id from
+ * outside its own process tree — a build pointed at it, a one-off `adb`/`simctl` command, Tyler
+ * at a terminal. No evidence at all fails safe, same as the leased check.
+ */
+function isUnleasedDeviceInUse(
+  device: RunningDevice,
+  evidence: DeviceUseEvidence | undefined,
+): boolean {
+  if (!evidence) return true;
+  const ownPids = new Set(device.pids);
+  const namingPids = evidence.references.get(device.deviceId)?.pids ?? [];
+  return namingPids.some((pid) => !ownPids.has(pid));
+}
+
+/** `(minutes ?? defaultMinutes) * 60_000`, pulled out so `resolveConfig` doesn't carry the `??`
+ * for every one of these fields itself. */
+function minutesToMs(minutes: number | undefined, defaultMinutes: number): number {
+  return (minutes ?? defaultMinutes) * 60_000;
+}
+
 function resolveCaps(
   config: DeviceLeaseConfig | undefined,
   defaults: DeviceSlotCaps,
@@ -713,6 +798,13 @@ export class DeviceLeaseManager {
    * the next sweep.
    */
   private readonly simulatorIdleSince = new Map<string, number>();
+  /**
+   * deviceId → when a device with NO lease at all was last seen in use (or first observed, if
+   * never). Same shape as `simulatorIdleSince`, for devices nobody holds — Tyler's own, or one
+   * whose agent came and went before the gate ever adopted it. Dropped once the device gets a
+   * lease (it moves to `simulatorIdleSince`'s bookkeeping instead) or stops running.
+   */
+  private readonly unleasedIdleSince = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
   private readonly modeLog: MonitorModeLog;
 
@@ -797,20 +889,24 @@ export class DeviceLeaseManager {
     );
     await this.sweepIdleSimulators(config, evidence);
     this.releaseIdleLeases(config, evidence);
+    await this.sweepUnleasedDevices(config, evidence);
     await this.drainWaiters();
   }
 
   /**
-   * Built once per sweep and shared by the simulator teardown and the idle-release sweep, so a
-   * device id is only scanned for once: the known ids are every current lease's device id, which
-   * covers an emulator's AVD name and a reused simulator's UDID (already covered by the blind
-   * regex scan too, harmlessly).
+   * Built once per sweep and shared by the simulator teardown, the idle-release sweep, and the
+   * unleased-device sweep, so a device id is only scanned for once: the known ids are every
+   * current lease's device id plus every currently running device's own id, which covers an
+   * emulator's AVD name and a reused simulator's UDID (already covered by the blind regex scan
+   * too, harmlessly) whether or not anything holds a lease on it yet.
    */
   private buildUseEvidence(processes: SweepProcesses | undefined): DeviceUseEvidence | undefined {
     if (!processes) return undefined;
-    const knownDeviceIds = this.leases
-      .map((lease) => lease.deviceId)
-      .filter((deviceId): deviceId is string => deviceId !== undefined);
+    const knownDeviceIds = new Set<string>();
+    for (const lease of this.leases) {
+      if (lease.deviceId !== undefined) knownDeviceIds.add(lease.deviceId);
+    }
+    for (const device of this.sample?.devices ?? []) knownDeviceIds.add(device.deviceId);
     return {
       ...processes,
       references: collectDeviceIdReferences(processes.rows, knownDeviceIds),
@@ -998,9 +1094,7 @@ export class DeviceLeaseManager {
           status: "granted",
           leaseId: decision.lease.id,
           platform: input.platform,
-          note: decision.alreadyHeld
-            ? `You already hold the ${input.platform} device ${device.name ?? device.deviceId}.`
-            : `Using the already-running ${input.platform} device ${device.name ?? device.deviceId} instead of booting a new one.`,
+          note: this.describeBoundCheckoutNote(input.platform, device, decision),
           device,
         };
       }
@@ -1041,80 +1135,10 @@ export class DeviceLeaseManager {
     namedDeviceId: string | undefined,
     config: ResolvedDeviceLeaseConfig,
   ): CheckoutDecision {
-    if (input.device) {
-      const named = namedDeviceId
-        ? (this.sample?.devices ?? []).find(
-            (device) => device.deviceId === namedDeviceId && device.platform === input.platform,
-          )
-        : undefined;
-      if (named) {
-        const lease = this.leases.find((entry) => entry.deviceId === named.deviceId);
-        if (lease?.agentId === input.agentId) {
-          lease.lastUsedAtMs = this.now();
-          return { kind: "bound", lease, device: named, alreadyHeld: true };
-        }
-        const label =
-          named.deviceId === input.device ? input.device : `${input.device} (${named.deviceId})`;
-        if (this.reservations.isReserved(named.deviceId) && !lease) {
-          return {
-            kind: "reserved",
-            message:
-              `${label} is reserved for Tyler, so it is never handed to an agent. Call ` +
-              `device_checkout without \`device\` to get a free ${input.platform} device instead.`,
-          };
-        }
-        const holder =
-          lease?.agentId ?? (named.agentId !== input.agentId ? named.agentId : undefined);
-        if (holder) {
-          if (config.dryRun) {
-            const pending = this.createLease({
-              agentId: input.agentId,
-              platform: input.platform,
-              source: "checkout",
-              reason: input.reason,
-              counted: false,
-            });
-            return {
-              kind: "dry-run",
-              leaseId: pending.id,
-              message: `${label} is held by ${this.describeAgent(holder)}`,
-            };
-          }
-          return {
-            kind: "busy",
-            deviceId: named.deviceId,
-            message:
-              `${label} is held by ${this.describeAgent(holder)}. Call device_checkout with ` +
-              `this \`device\` and \`wait: true\` to get it as soon as it is checked in, or ` +
-              `without \`device\` to get a free ${input.platform} device instead`,
-          };
-        }
-        const bound = this.bindLease({
-          agentId: input.agentId,
-          platform: input.platform,
-          device: named,
-          source: "checkout",
-          reason: input.reason,
-        });
-        return { kind: "bound", lease: bound, device: named };
-      }
-    } else {
-      const reusable = this.findReusableDevice({
-        platform: input.platform,
-        reason: input.reason,
-        requesterAgentId: input.agentId,
-      });
-      if (reusable) {
-        const lease = this.bindLease({
-          agentId: input.agentId,
-          platform: input.platform,
-          device: reusable,
-          source: "checkout",
-          reason: input.reason,
-        });
-        return { kind: "bound", lease, device: reusable };
-      }
-    }
+    const bound = input.device
+      ? this.decideNamedCheckout(input, input.device, namedDeviceId, config)
+      : this.decideUnnamedCheckout(input);
+    if (bound) return bound;
 
     const verdict = this.tryGrant(input.agentId, input.platform, "checkout", input.reason, config);
     if (verdict.granted) return { kind: "granted", leaseId: verdict.leaseId };
@@ -1134,6 +1158,131 @@ export class DeviceLeaseManager {
       return { kind: "dry-run", leaseId: lease.id, message: verdict.message };
     }
     return { kind: "refused", message: verdict.message };
+  }
+
+  /** `decideCheckout` when the caller named a device: bind to it if it's running, sharing it with
+   * the holder's own agent family when it's already held (docs/device-leases.md, Family
+   * sharing). `undefined` when the named device isn't running — the caller wants THAT one
+   * booted, not a substitute, so `decideCheckout` falls through to `tryGrant`. */
+  private decideNamedCheckout(
+    input: DeviceCheckoutInput,
+    device: string,
+    namedDeviceId: string | undefined,
+    config: ResolvedDeviceLeaseConfig,
+  ): CheckoutDecision | undefined {
+    const named = namedDeviceId
+      ? (this.sample?.devices ?? []).find(
+          (entry) => entry.deviceId === namedDeviceId && entry.platform === input.platform,
+        )
+      : undefined;
+    if (!named) return undefined;
+
+    const lease = this.leases.find((entry) => entry.deviceId === named.deviceId);
+    if (lease && (lease.agentId === input.agentId || this.isFamily(lease.agentId, input.agentId))) {
+      lease.lastUsedAtMs = this.now();
+      return {
+        kind: "bound",
+        lease,
+        device: named,
+        alreadyHeld: lease.agentId === input.agentId,
+        ...(lease.agentId !== input.agentId ? { familyHolderAgentId: lease.agentId } : {}),
+      };
+    }
+    const label = named.deviceId === device ? device : `${device} (${named.deviceId})`;
+    if (this.reservations.isReserved(named.deviceId) && !lease) {
+      return {
+        kind: "reserved",
+        message:
+          `${label} is reserved for Tyler, so it is never handed to an agent. Call ` +
+          `device_checkout without \`device\` to get a free ${input.platform} device instead.`,
+      };
+    }
+    const holder = lease?.agentId ?? (named.agentId !== input.agentId ? named.agentId : undefined);
+    if (!holder) {
+      const bound = this.bindLease({
+        agentId: input.agentId,
+        platform: input.platform,
+        device: named,
+        source: "checkout",
+        reason: input.reason,
+      });
+      return { kind: "bound", lease: bound, device: named };
+    }
+    // No lease yet, but the device sits in a family member's process tree — share it like the
+    // holder's own, and bind the lease to the actual holder, not the caller.
+    if (this.isFamily(holder, input.agentId)) {
+      const bound = this.bindLease({
+        agentId: holder,
+        platform: input.platform,
+        device: named,
+        source: "checkout",
+        reason: input.reason,
+      });
+      return { kind: "bound", lease: bound, device: named, familyHolderAgentId: holder };
+    }
+    if (config.dryRun) {
+      const pending = this.createLease({
+        agentId: input.agentId,
+        platform: input.platform,
+        source: "checkout",
+        reason: input.reason,
+        counted: false,
+      });
+      return {
+        kind: "dry-run",
+        leaseId: pending.id,
+        message: `${label} is held by ${this.describeAgent(holder)}`,
+      };
+    }
+    return {
+      kind: "busy",
+      deviceId: named.deviceId,
+      message:
+        `${label} is held by ${this.describeAgent(holder)}. Call device_checkout with this ` +
+        `\`device\` and \`wait: true\` to get it as soon as it is checked in, or without ` +
+        `\`device\` to get a free ${input.platform} device instead`,
+    };
+  }
+
+  /** `decideCheckout` when the caller named no device: reuse what's already running, preferring
+   * a family member's device over allocating a new slot (docs/device-leases.md, Family
+   * sharing). `undefined` when nothing is reusable, so `decideCheckout` falls through to
+   * `tryGrant`. */
+  private decideUnnamedCheckout(input: DeviceCheckoutInput): CheckoutDecision | undefined {
+    const familyLease = this.leases.find(
+      (entry) =>
+        entry.platform === input.platform &&
+        entry.deviceId !== undefined &&
+        entry.agentId !== input.agentId &&
+        this.isFamily(entry.agentId, input.agentId),
+    );
+    const familyDevice = familyLease
+      ? (this.sample?.devices ?? []).find((device) => device.deviceId === familyLease.deviceId)
+      : undefined;
+    if (familyLease && familyDevice) {
+      familyLease.lastUsedAtMs = this.now();
+      return {
+        kind: "bound",
+        lease: familyLease,
+        device: familyDevice,
+        familyHolderAgentId: familyLease.agentId,
+      };
+    }
+
+    const reusable = this.findReusableDevice({
+      platform: input.platform,
+      reason: input.reason,
+      requesterAgentId: input.agentId,
+    });
+    if (!reusable) return undefined;
+    const lease = this.bindLease({
+      agentId: input.agentId,
+      platform: input.platform,
+      device: reusable,
+      source: "checkout",
+      reason: input.reason,
+    });
+    return { kind: "bound", lease, device: reusable };
   }
 
   /**
@@ -1257,31 +1406,30 @@ export class DeviceLeaseManager {
   }
 
   /**
-   * Shuts down every iOS simulator an agent booted and still holds, as the daemon stops — so
-   * CoreSimulatorService is never left tearing one down live during OS shutdown
+   * Shuts down every simulator or emulator an agent booted and still holds, as the daemon stops
+   * — so CoreSimulatorService is never left tearing an iOS one down live during OS shutdown
    * (docs/device-leases.md#shutdown; the 2026-10-08 crash this guards against). Reserved and
-   * reused simulators are untouched, same as the idle sweep below. Never throws: a wedged
-   * `simctl` is logged and skipped. The caller bounds how long it waits (bootstrap.ts's stop()).
+   * reused devices are untouched, same as the idle sweep below. Never throws: a wedged `simctl`
+   * or `adb` is logged and skipped. The caller bounds how long it waits (bootstrap.ts's stop()).
    */
   async shutdownAgentHeldSimulatorsForDaemonShutdown(): Promise<void> {
     const config = this.resolveConfig(await this.resolveCaps());
     if (!isSimulatorTeardownOn(config)) return;
     await Promise.allSettled(
-      this.leasedSimulators().map((lease) =>
+      this.leasedTeardownDevices().map((lease) =>
         this.shutdownLeasedSimulator(lease, "daemon-shutdown", config.dryRun),
       ),
     );
   }
 
   /**
-   * Leases on iOS simulators the daemon saw their agent boot, minus any Tyler has reserved since.
-   * A lease bound to a simulator that was already running is left out: it may be one Tyler booted
-   * by hand that an agent then reused (`DeviceLease.booted`).
+   * Leases on simulators and emulators the daemon saw their agent boot, minus any Tyler has
+   * reserved since. A lease bound to a device that was already running is left out: it may be
+   * one Tyler booted by hand that an agent then reused (`DeviceLease.booted`).
    */
-  private leasedSimulators(): Array<DeviceLease & { deviceId: string }> {
+  private leasedTeardownDevices(): Array<DeviceLease & { deviceId: string }> {
     return this.leases.filter(
       (lease): lease is DeviceLease & { deviceId: string } =>
-        lease.platform === "ios" &&
         lease.booted === true &&
         lease.deviceId !== undefined &&
         !this.reservations.isReserved(lease.deviceId),
@@ -1289,10 +1437,10 @@ export class DeviceLeaseManager {
   }
 
   /**
-   * The sweep half of KTD-4: an agent-booted simulator nothing has used for
+   * The sweep half of KTD-4: an agent-booted simulator or emulator nothing has used for
    * `simulatorTeardown.idleMinutes` is shut down on its own, rather than waiting for a daemon
-   * restart or OS shutdown to find it still booted. A simulator in use (`isLeaseInUse`), or
-   * one never observed before, resets the clock; it does not start pre-expired.
+   * restart or OS shutdown to find it still booted. A device in use (`isLeaseInUse`), or one
+   * never observed before, resets the clock; it does not start pre-expired.
    */
   private async sweepIdleSimulators(
     config: ResolvedDeviceLeaseConfig,
@@ -1308,7 +1456,7 @@ export class DeviceLeaseManager {
     );
     const seenDeviceIds = new Set<string>();
     const idle: Array<DeviceLease & { deviceId: string }> = [];
-    for (const lease of this.leasedSimulators()) {
+    for (const lease of this.leasedTeardownDevices()) {
       seenDeviceIds.add(lease.deviceId);
       const since = this.simulatorIdleSince.get(lease.deviceId);
       const inUse = isLeaseInUse({
@@ -1343,8 +1491,12 @@ export class DeviceLeaseManager {
    * used for `idleReleaseMinutes` is released, reason `idle`, so a device an agent finished with
    * and went idle without checking in comes back on its own. Releasing never shuts anything
    * down — the device keeps its slot as an unattributed running device (R4). A `booted: true`
-   * iOS simulator lease is skipped: the teardown sweep above owns those (R3), and an unleased
-   * simulator is never shut down.
+   * iOS simulator lease is skipped: the simulator teardown above owns those (R3). An Android
+   * emulator lease still idle-releases here on its own, shorter clock — `adoptAttributedDevices`
+   * re-leases it to the same agent next sweep as long as it is still in that agent's process
+   * tree, so the teardown's own idle-since clock (keyed by device id, not lease id) keeps
+   * running underneath the churn and still shuts the emulator down at
+   * `simulatorTeardown.idleMinutes` if it is genuinely unused that whole time.
    */
   private releaseIdleLeases(
     config: ResolvedDeviceLeaseConfig,
@@ -1394,36 +1546,128 @@ export class DeviceLeaseManager {
     this.notify();
   }
 
-  /** Runs the shutdown command for one leased simulator and releases its lease on success. */
+  /**
+   * A booted simulator or emulator nobody holds a lease on — Tyler's own, or one whose agent
+   * came and went before the gate ever adopted it — is shut down once nothing has used it for
+   * `unleasedIdleMinutes`. Docs: "An unleased device is never shut down" used to be absolute;
+   * this is the one exception, and it exists because the alternative is exactly what motivated
+   * this feature — a device nobody is accountable for staying booted indefinitely. Reserved and
+   * physical devices are never candidates: reservations are checked before a device is even
+   * tracked here, and physical devices never appear in `this.sample.devices` at all. Runs after
+   * `adoptAttributedDevices`, so a device still in a live agent's own process tree already has a
+   * lease by the time this looks, and is never a candidate either.
+   */
+  private async sweepUnleasedDevices(
+    config: ResolvedDeviceLeaseConfig,
+    evidence: DeviceUseEvidence | undefined,
+  ): Promise<void> {
+    if (config.unleasedIdleMs <= 0) {
+      this.unleasedIdleSince.clear();
+      return;
+    }
+    const leasedDeviceIds = new Set(
+      this.leases.map((lease) => lease.deviceId).filter((id): id is string => id !== undefined),
+    );
+    const seenDeviceIds = new Set<string>();
+    const idle: RunningDevice[] = [];
+    for (const device of this.sample?.devices ?? []) {
+      if (leasedDeviceIds.has(device.deviceId)) continue;
+      if (this.reservations.isReserved(device.deviceId)) continue;
+      seenDeviceIds.add(device.deviceId);
+      const since = this.unleasedIdleSince.get(device.deviceId);
+      const inUse = isUnleasedDeviceInUse(device, evidence);
+      if (inUse || since === undefined) {
+        this.unleasedIdleSince.set(device.deviceId, this.now());
+        continue;
+      }
+      if (this.now() - since >= config.unleasedIdleMs) idle.push(device);
+    }
+    for (const deviceId of this.unleasedIdleSince.keys()) {
+      if (!seenDeviceIds.has(deviceId)) this.unleasedIdleSince.delete(deviceId);
+    }
+    await Promise.allSettled(
+      idle.map((device) => {
+        // In dry run the device stays up, so this restarts its clock — same discipline as the
+        // other idle sweeps' dry run.
+        this.unleasedIdleSince.delete(device.deviceId);
+        return this.shutdownUnleasedDevice(device, config.dryRun);
+      }),
+    );
+  }
+
+  /** Runs the shutdown command for one unleased device. No lease to release on success —
+   * there never was one. */
+  private async shutdownUnleasedDevice(device: RunningDevice, dryRun: boolean): Promise<void> {
+    const { deviceId, platform } = device;
+    const noun = platform === "ios" ? "simulator" : "emulator";
+    if (dryRun) {
+      this.logger.info({ dryRun: true, deviceId, platform }, `Would shut down an unleased ${noun}`);
+      return;
+    }
+    try {
+      const serial =
+        platform === "android"
+          ? await this.identityLookup.androidSerial(deviceId, { fresh: true })
+          : undefined;
+      await withTimeout(
+        runDeviceShutdown(
+          { platform, deviceId, ...(serial ? { serial } : {}) },
+          this.shutdownRunner,
+        ),
+        SIMULATOR_SHUTDOWN_TIMEOUT_MS,
+        `Timed out shutting down ${noun} ${deviceId}`,
+      );
+    } catch (error) {
+      this.logger.warn(
+        { err: error, deviceId, platform },
+        `Failed to shut down an unleased ${noun}; leaving it for the OS to tear down`,
+      );
+      return;
+    }
+    this.logger.info({ deviceId, platform }, `Shut down an unleased ${noun}`);
+    this.notify();
+  }
+
+  /** Runs the shutdown command for one leased simulator or emulator and releases its lease on
+   * success. An Android serial is re-resolved fresh every time, same as `shutdownDevice` — a
+   * cached one can point at whichever emulator took the old console port after a restart. */
   private async shutdownLeasedSimulator(
     lease: DeviceLease & { deviceId: string },
     trigger: "daemon-shutdown" | "idle-sweep",
     dryRun: boolean,
   ): Promise<void> {
-    const { deviceId } = lease;
+    const { deviceId, platform } = lease;
+    const noun = platform === "ios" ? "simulator" : "emulator";
     if (dryRun) {
       this.logger.info(
         { dryRun: true, deviceId, agentId: lease.agentId, trigger },
-        "Would shut down an agent-held simulator",
+        `Would shut down an agent-held ${noun}`,
       );
       return;
     }
     try {
+      const serial =
+        platform === "android"
+          ? await this.identityLookup.androidSerial(deviceId, { fresh: true })
+          : undefined;
       await withTimeout(
-        runDeviceShutdown({ platform: "ios", deviceId }, this.shutdownRunner),
+        runDeviceShutdown(
+          { platform, deviceId, ...(serial ? { serial } : {}) },
+          this.shutdownRunner,
+        ),
         SIMULATOR_SHUTDOWN_TIMEOUT_MS,
-        `Timed out shutting down simulator ${deviceId}`,
+        `Timed out shutting down ${noun} ${deviceId}`,
       );
     } catch (error) {
       this.logger.warn(
         { err: error, deviceId, agentId: lease.agentId, trigger },
-        "Failed to shut down an agent-held simulator; leaving it for the OS to tear down",
+        `Failed to shut down an agent-held ${noun}; leaving it for the OS to tear down`,
       );
       return;
     }
     this.logger.info(
       { deviceId, agentId: lease.agentId, trigger },
-      "Shut down an agent-held simulator",
+      `Shut down an agent-held ${noun}`,
     );
     this.leases = this.leases.filter((entry) => entry.id !== lease.id);
     this.logRelease([{ lease, reason: "released" }]);
@@ -1685,7 +1929,10 @@ export class DeviceLeaseManager {
     intent: InstallCommandIntent,
   ): InstallIntentDenial | undefined {
     const lease = this.leases.find((entry) => entry.deviceId === device.deviceId);
-    if (lease?.agentId === agentId) {
+    // The same agent family — an ancestor, a descendant, or a sibling of the holder — uses a
+    // device exactly like the holder itself, with no refusal and no reassignment: the lease
+    // stays charged to the holder (docs/device-leases.md, Family sharing).
+    if (lease && (lease.agentId === agentId || this.isFamily(lease.agentId, agentId))) {
       lease.lastUsedAtMs = this.now();
       return undefined;
     }
@@ -1702,8 +1949,10 @@ export class DeviceLeaseManager {
     }
     // No lease, but the device sits in another live agent's process tree — it booted or used
     // this device without ever checking out. Still theirs: the boot gate (adoptAttributedDevices)
-    // treats process-tree attribution as ownership, and so does this gate.
+    // treats process-tree attribution as ownership, and so does this gate — unless the caller is
+    // that agent's family, which uses it exactly like its own.
     if (device.agentId && device.agentId !== agentId) {
+      if (this.isFamily(device.agentId, agentId)) return undefined;
       return {
         message:
           `${device.deviceId} is held by ${this.describeAgent(device.agentId)} (never checked ` +
@@ -2138,6 +2387,33 @@ export class DeviceLeaseManager {
     return title ? `"${title}" (${agentId})` : agentId;
   }
 
+  /** Same root agent tree via `parentAgentId` — an ancestor, a descendant, or a sibling
+   * (docs/device-leases.md, Family sharing). */
+  private isFamily(a: string, b: string): boolean {
+    return isSameAgentFamily(this.listAgents(), a, b);
+  }
+
+  /** The checkout response's note for a `"bound"` decision — three cases, kept out of
+   * `checkout()`'s switch to avoid a nested ternary. */
+  private describeBoundCheckoutNote(
+    platform: DevicePlatform,
+    device: DeviceCheckoutDeviceInfo,
+    decision: { alreadyHeld?: boolean; familyHolderAgentId?: string },
+  ): string {
+    const name = device.name ?? device.deviceId;
+    if (decision.familyHolderAgentId) {
+      return (
+        `${this.describeAgent(decision.familyHolderAgentId)} — in your agent family — already ` +
+        `holds the ${platform} device ${name}. Sharing it instead of booting a new one; it ` +
+        `stays charged to them.`
+      );
+    }
+    if (decision.alreadyHeld) {
+      return `You already hold the ${platform} device ${name}.`;
+    }
+    return `Using the already-running ${platform} device ${name} instead of booting a new one.`;
+  }
+
   /** Exactly which device a grant is, in a form ready to paste into a shell command. */
   private async describeDevice(device: RunningDevice): Promise<DeviceCheckoutDeviceInfo> {
     if (device.platform === "ios") {
@@ -2430,11 +2706,12 @@ export class DeviceLeaseManager {
       requireHeadroom: config?.requireHeadroom ?? true,
       minAvailableBytes: config?.minAvailableBytes ?? DEFAULT_MIN_AVAILABLE_BYTES,
       maxSwapUsedRatio: config?.maxSwapUsedRatio ?? DEFAULT_MAX_SWAP_USED_RATIO,
-      pendingTtlMs: (config?.pendingTtlMinutes ?? DEFAULT_PENDING_TTL_MINUTES) * 60_000,
+      pendingTtlMs: minutesToMs(config?.pendingTtlMinutes, DEFAULT_PENDING_TTL_MINUTES),
       maxLeaseMs: (config?.maxLeaseHours ?? DEFAULT_MAX_LEASE_HOURS) * 3_600_000,
-      queueTimeoutMs: (config?.queueTimeoutMinutes ?? DEFAULT_QUEUE_TIMEOUT_MINUTES) * 60_000,
+      queueTimeoutMs: minutesToMs(config?.queueTimeoutMinutes, DEFAULT_QUEUE_TIMEOUT_MINUTES),
       simulatorTeardown: resolveSimulatorTeardown(config?.simulatorTeardown),
-      idleReleaseMs: (config?.idleReleaseMinutes ?? DEFAULT_IDLE_RELEASE_MINUTES) * 60_000,
+      idleReleaseMs: minutesToMs(config?.idleReleaseMinutes, DEFAULT_IDLE_RELEASE_MINUTES),
+      unleasedIdleMs: minutesToMs(config?.unleasedIdleMinutes, DEFAULT_UNLEASED_IDLE_MINUTES),
     };
   }
 

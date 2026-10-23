@@ -1348,6 +1348,167 @@ describe("DeviceLeaseManager agent-held simulator shutdown", () => {
   });
 });
 
+describe("DeviceLeaseManager agent-held emulator shutdown", () => {
+  test("an idle agent's android emulator cycles idle-release but is shut down by the teardown at 30 minutes", async () => {
+    const harness = createManager({
+      agents: [IDLE_HOLDER],
+      androidSerials: { pixel_cycle: "emulator-5599" },
+    });
+    harness.state.rows = [agentRootRow(500, "agent-1"), emulatorRow(501, 500, "pixel_cycle")];
+    await sweepRows(harness);
+
+    // idleReleaseMinutes (15) fires first and releases the lease, but the emulator process is
+    // still in agent-1's tree, so adoptAttributedDevices re-leases it on the very next sweep —
+    // the lease churns, but nothing shuts the process down yet.
+    harness.state.nowMs += 16 * 60_000;
+    await sweepRows(harness);
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: "pixel_cycle", reason: "idle" }),
+      "Device slot released",
+    );
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+
+    // Past the teardown's own 30-minute clock, which keeps running underneath the churn
+    // (keyed by device id, not lease id) — the emulator itself is finally shut down.
+    harness.state.nowMs += 15 * 60_000;
+    await sweepRows(harness);
+    expect(harness.shutdownExec).toHaveBeenCalledWith("adb", [
+      "-s",
+      "emulator-5599",
+      "emu",
+      "kill",
+    ]);
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: "pixel_cycle" }),
+      "Shut down an agent-held emulator",
+    );
+  });
+
+  test("daemon shutdown shuts down an emulator an agent booted, via its resolved serial", async () => {
+    const harness = createManager({ androidSerials: { pixel_shutdown: "emulator-5598" } });
+    harness.state.rows = [agentRootRow(500, "agent-1"), emulatorRow(501, 500, "pixel_shutdown")];
+    await sweepRows(harness);
+
+    await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
+
+    expect(harness.shutdownExec).toHaveBeenCalledWith("adb", [
+      "-s",
+      "emulator-5598",
+      "emu",
+      "kill",
+    ]);
+  });
+});
+
+describe("DeviceLeaseManager unleased device shutdown", () => {
+  test("an unleased simulator nothing has used for 20 minutes is shut down", async () => {
+    const harness = createManager({ rows: [simulatorRow(1, UDID_A)] });
+    await sweepRows(harness);
+    expect((await harness.manager.getSnapshot()).devices[0]).toMatchObject({
+      deviceId: UDID_A,
+      attribution: "none",
+    });
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).toHaveBeenCalledWith("xcrun", ["simctl", "shutdown", UDID_A]);
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: UDID_A, platform: "ios" }),
+      "Shut down an unleased simulator",
+    );
+  });
+
+  test("an unleased Android emulator nothing has used for 20 minutes is shut down via its resolved serial", async () => {
+    const harness = createManager({
+      rows: [emulatorRow(1, 999, "pixel_unleased")],
+      androidSerials: { pixel_unleased: "emulator-5590" },
+    });
+    await sweepRows(harness);
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).toHaveBeenCalledWith("adb", [
+      "-s",
+      "emulator-5590",
+      "emu",
+      "kill",
+    ]);
+  });
+
+  test("a reserved unleased simulator is never shut down", async () => {
+    const harness = createManager({ rows: [simulatorRow(1, UDID_A)] });
+    harness.manager.reserveDevice(UDID_A);
+    await sweepRows(harness);
+
+    harness.state.nowMs += 60 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("an unleased simulator in use by an xcodebuild naming its UDID is kept", async () => {
+    const harness = createManager({ rows: [simulatorRow(1, UDID_A)] });
+    await sweepRows(harness);
+
+    harness.state.nowMs += 20 * 60_000;
+    harness.state.rows.push(
+      childRow(600, 999, `xcodebuild test -destination 'platform=iOS Simulator,id=${UDID_A}'`),
+    );
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("unleasedIdleMinutes: 0 turns it off", async () => {
+    const harness = createManager({
+      config: { enabled: true, unleasedIdleMinutes: 0 },
+      rows: [simulatorRow(1, UDID_A)],
+    });
+    await sweepRows(harness);
+
+    harness.state.nowMs += 60 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("dry run logs and keeps the device up", async () => {
+    const harness = createManager({
+      config: { enabled: true, dryRun: true },
+      rows: [simulatorRow(1, UDID_A)],
+    });
+    await sweepRows(harness);
+
+    harness.state.nowMs += 20 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ dryRun: true, deviceId: UDID_A }),
+      "Would shut down an unleased simulator",
+    );
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("a device a live agent's process tree owns gets a lease instead of being swept as unleased", async () => {
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    harness.state.rows = [agentRootRow(500, "agent-1"), emulatorRow(501, 500, "pixel_owned")];
+    await sweepRows(harness);
+
+    harness.state.nowMs += 60 * 60_000;
+    await sweepRows(harness);
+
+    // Idle-release (15 min) touches it, not the unleased sweep (20 min) — it was never
+    // actually unleased for long enough to qualify.
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: "pixel_owned", reason: "idle" }),
+      "Device slot released",
+    );
+    expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+});
+
 describe("DeviceLeaseManager simulator teardown config", () => {
   test("simulatorTeardown.enabled false leaves agent-booted simulators up at shutdown and idle", async () => {
     const harness = createManager({
@@ -1689,6 +1850,169 @@ describe("gateInstall", () => {
     expect(decision.decision).toBe("deny");
     const message = decision.decision === "deny" ? decision.message : "";
     expect(message).toContain("agent-2");
+  });
+});
+
+describe("DeviceLeaseManager family sharing", () => {
+  test("a child uses its parent's emulator lease without being refused, and the lease stays the parent's", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-1", provider: "claude", isRunning: true },
+        { agentId: "child-1", provider: "claude", isRunning: true, parentAgentId: "parent-1" },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5570")],
+    });
+    await manager.checkout({ agentId: "parent-1", platform: "android", device: "emulator-5570" });
+
+    expect(
+      await manager.gateInstall({
+        agentId: "child-1",
+        command: "adb -s emulator-5570 install app.apk",
+      }),
+    ).toEqual({ decision: "allow" });
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.devices).toEqual([
+      expect.objectContaining({ deviceId: "emulator-5570", agentId: "parent-1" }),
+    ]);
+  });
+
+  test("a parent uses its child's emulator lease without being refused", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-2", provider: "claude", isRunning: true },
+        { agentId: "child-2", provider: "claude", isRunning: true, parentAgentId: "parent-2" },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5571")],
+    });
+    await manager.checkout({ agentId: "child-2", platform: "android", device: "emulator-5571" });
+
+    expect(
+      await manager.gateInstall({
+        agentId: "parent-2",
+        command: "adb -s emulator-5571 install app.apk",
+      }),
+    ).toEqual({ decision: "allow" });
+  });
+
+  test("siblings under the same parent share an emulator lease without being refused", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-3", provider: "claude", isRunning: true },
+        { agentId: "sibling-a", provider: "claude", isRunning: true, parentAgentId: "parent-3" },
+        { agentId: "sibling-b", provider: "claude", isRunning: true, parentAgentId: "parent-3" },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5572")],
+    });
+    await manager.checkout({ agentId: "sibling-a", platform: "android", device: "emulator-5572" });
+
+    expect(
+      await manager.gateInstall({
+        agentId: "sibling-b",
+        command: "adb -s emulator-5572 install app.apk",
+      }),
+    ).toEqual({ decision: "allow" });
+  });
+
+  test("an unrelated agent is still refused on a family-held device", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-4", provider: "claude", isRunning: true },
+        { agentId: "child-4", provider: "claude", isRunning: true, parentAgentId: "parent-4" },
+        { agentId: "stranger", provider: "claude", isRunning: true },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5573")],
+    });
+    await manager.checkout({ agentId: "parent-4", platform: "android", device: "emulator-5573" });
+
+    const decision = await manager.gateInstall({
+      agentId: "stranger",
+      command: "adb -s emulator-5573 install app.apk",
+    });
+    expect(decision.decision).toBe("deny");
+  });
+
+  test("a device another agent's process tree owns without a lease is still shared with its family, never checked out either way", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-5", provider: "claude", isRunning: true },
+        { agentId: "child-5", provider: "claude", isRunning: true, parentAgentId: "parent-5" },
+      ],
+      rows: [agentRootRow(500, "parent-5"), emulatorRow(501, 500, "emulator-5579")],
+    });
+
+    expect(
+      await manager.gateInstall({
+        agentId: "child-5",
+        command: "adb -s emulator-5579 install app.apk",
+      }),
+    ).toEqual({ decision: "allow" });
+  });
+
+  test("checkout naming a family member's device returns it instead of refusing, charged to the holder", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-6", provider: "claude", isRunning: true },
+        { agentId: "child-6", provider: "claude", isRunning: true, parentAgentId: "parent-6" },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5574")],
+    });
+    await manager.checkout({ agentId: "parent-6", platform: "android", device: "emulator-5574" });
+
+    const result = await manager.checkout({
+      agentId: "child-6",
+      platform: "android",
+      device: "emulator-5574",
+    });
+    expect(result.status).toBe("granted");
+    expect(result.status === "granted" ? result.note : "").toContain("parent-6");
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.devices).toEqual([
+      expect.objectContaining({ deviceId: "emulator-5574", agentId: "parent-6" }),
+    ]);
+  });
+
+  test("an unnamed checkout reuses a family member's running device instead of taking a new slot", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "parent-7", provider: "claude", isRunning: true },
+        { agentId: "child-7", provider: "claude", isRunning: true, parentAgentId: "parent-7" },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5575")],
+    });
+    await manager.checkout({ agentId: "parent-7", platform: "android", device: "emulator-5575" });
+
+    const result = await manager.checkout({ agentId: "child-7", platform: "android" });
+    expect(result.status).toBe("granted");
+    expect(result.status === "granted" ? result.device?.deviceId : undefined).toBe("emulator-5575");
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.used).toBe(1);
+    expect(snapshot.devices).toEqual([
+      expect.objectContaining({ deviceId: "emulator-5575", agentId: "parent-7" }),
+    ]);
+  });
+
+  test("an unnamed checkout does not reuse an unrelated agent's device — it waits for a slot instead", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "holder-8", provider: "claude", isRunning: true },
+        { agentId: "stranger-8", provider: "claude", isRunning: true },
+      ],
+      rows: [emulatorRow(501, 999, "emulator-5576")],
+    });
+    await manager.checkout({ agentId: "holder-8", platform: "android", device: "emulator-5576" });
+
+    const result = await manager.checkout({
+      agentId: "stranger-8",
+      platform: "android",
+      wait: false,
+    });
+    // Slots: 2 per platform on the test harness's derived hardware — a second android slot is
+    // free, so this takes a NEW slot rather than reusing the unrelated agent's device.
+    expect(result.status).toBe("granted");
+    expect(result.status === "granted" ? result.device : undefined).toBeUndefined();
   });
 });
 

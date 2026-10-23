@@ -912,6 +912,25 @@ describe("PhysicalDeviceLeaseManager idle release", () => {
       harness.logger.info.mock.calls.some(([, msg]) => msg === "Physical device lease released"),
     ).toBe(false);
   });
+
+  test("once an idle holder's lease releases, the next agent that asks gets the device", async () => {
+    const harness = createManager({
+      devices: [USB_PIXEL],
+      agents: [IDLE_HOLDER, { agentId: "agent-2", provider: "claude", isRunning: true }],
+    });
+    await harness.manager.gateInstall({
+      agentId: "agent-1",
+      command: `adb -s ${USB_PIXEL.id} install app.apk`,
+    });
+    harness.state.rows = [agentRootRow(500, "agent-1")];
+    sweepRows(harness);
+
+    harness.state.nowMs += 15 * MINUTE;
+    sweepRows(harness);
+
+    const result = await harness.manager.checkout({ agentId: "agent-2", platform: "android" });
+    expect(result).toMatchObject({ status: "granted", device: { id: USB_PIXEL.id } });
+  });
 });
 
 describe("PhysicalDeviceLeaseManager reconciling a gone agent", () => {
