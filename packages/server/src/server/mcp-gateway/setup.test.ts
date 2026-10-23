@@ -97,6 +97,7 @@ async function createHarness(
       autoArchiveAfterMerge: false,
       enableTerminalAgentHooks: false,
       appendSystemPrompt: "",
+      metadataGeneration: { providers: [] },
       mcpGateway: config,
     },
     undefined,
