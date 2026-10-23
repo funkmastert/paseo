@@ -125,6 +125,18 @@ const DEFAULT_UNLEASED_IDLE_MINUTES = 20;
  * The daemon's stop() waits less still (shutdown-budget.ts's SIMULATOR_SHUTDOWN_WAIT_MS).
  */
 const SIMULATOR_SHUTDOWN_TIMEOUT_MS = 5_000;
+/**
+ * A gap between sweeps longer than this means the machine slept, not that every idle device sat
+ * untouched the whole gap — item 4, docs/device-leases.md#shutdown. The resource monitor sweeps
+ * about once a minute, so three missed sweeps in a row never happens while the machine is awake.
+ */
+const SWEEP_GAP_WAKE_THRESHOLD_MS = 3 * 60_000;
+/**
+ * How far `uptimeSeconds` may dip below its last-seen value before it counts as a reboot rather
+ * than `ps`'s elapsed-time column rounding down a second — the signal `deviceProvenance` resets
+ * on (item 2, docs/device-leases.md#shutdown).
+ */
+const UPTIME_REBOOT_TOLERANCE_SECONDS = 5;
 
 export interface DeviceLeaseConfig {
   enabled?: boolean;
@@ -532,29 +544,31 @@ function toWireLeaseSource(source: DeviceLease["source"]): "checkout" | "launch"
  * physical-device-lease-manager.ts. */
 const MAX_FAMILY_DEPTH = 32;
 
-/** Walks `parentAgentId` from `agentId` to the root of its tree — the top-level session, or
- * `agentId` itself when it has no parent. Unlike `resolveRootLeaderId` (which names a leader
- * other than the holder, for display), this always resolves to *something*, so two agents can
- * be compared by root. */
-function resolveFamilyRootId(
-  agentId: string,
+/** Whether `descendant` traces back to `ancestor` via `paseo.parent-agent-id` — `ancestor` itself
+ * counts, so `isAncestorOf(x, x)` is true. */
+function isAncestorOf(
   agentsById: ReadonlyMap<string, DeviceLeaseAgentSummary>,
-): string {
-  let currentId = agentId;
-  const seen = new Set<string>([agentId]);
+  ancestor: string,
+  descendant: string,
+): boolean {
+  let currentId = descendant;
+  const seen = new Set<string>([descendant]);
   for (let depth = 0; depth < MAX_FAMILY_DEPTH; depth += 1) {
+    if (currentId === ancestor) return true;
     const parentId = agentsById.get(currentId)?.parentAgentId;
-    if (!parentId || seen.has(parentId)) break;
+    if (!parentId || seen.has(parentId)) return false;
     seen.add(parentId);
     currentId = parentId;
   }
-  return currentId;
+  return currentId === ancestor;
 }
 
 /**
- * Whether `a` and `b` trace back to the same root agent via `paseo.parent-agent-id` — an
- * ancestor, a descendant, or a sibling, with no limit on depth (docs/device-leases.md, Family
- * sharing). `a === b` is always its own family.
+ * Whether `a` and `b` share a device: `a` is an ancestor of `b`, or `b` is an ancestor of `a`,
+ * via `paseo.parent-agent-id` (docs/device-leases.md, Family sharing). Siblings and cousins —
+ * two agents that merely share a root further up — are not family: two workers under the same
+ * leader must not end up running UI tests on one emulator at the same time. `a === b` is always
+ * its own family.
  */
 function isSameAgentFamily(
   agents: readonly DeviceLeaseAgentSummary[],
@@ -563,7 +577,7 @@ function isSameAgentFamily(
 ): boolean {
   if (a === b) return true;
   const agentsById = new Map(agents.map((agent) => [agent.agentId, agent] as const));
-  return resolveFamilyRootId(a, agentsById) === resolveFamilyRootId(b, agentsById);
+  return isAncestorOf(agentsById, a, b) || isAncestorOf(agentsById, b, a);
 }
 
 /** The exact command shape that targets this running device, for a refusal to paste — the
@@ -640,6 +654,69 @@ function resolveSimulatorTeardown(
 /** The teardown acts on leases, and only the cap binds them, so it needs both switches on. */
 function isSimulatorTeardownOn(config: ResolvedDeviceLeaseConfig): boolean {
   return config.enabled && config.simulatorTeardown.enabled;
+}
+
+/** argv[0]'s basename, case-preserved, for matching a tool binary regardless of the path it was
+ * invoked through. */
+function commandBasename(command: string): string {
+  const token = command.split(/\s+/)[0] ?? "";
+  return token.split(/[\\/]/).pop() ?? token;
+}
+
+/**
+ * Item (c), docs/device-leases.md#shutdown: a build or test tool running anywhere on the
+ * machine — not necessarily naming a device — proves something outside any agent is mid-build
+ * or mid-test against a platform, so every unleased device of that platform stays alive this
+ * sweep regardless of per-device reference evidence. `maestro` and `detox` drive either
+ * platform's simulators and emulators, so they are not scoped to one. `adb` excludes the
+ * daemon's own always-running `adb track-devices` poll and the adb host server it depends on —
+ * both run continuously whether or not anything is actually being tested.
+ */
+function keepAlivePlatformsForCommand(command: string): readonly DevicePlatform[] {
+  const name = commandBasename(command).replace(/\.(exe|bat|sh)$/i, "");
+  switch (name.toLowerCase()) {
+    case "xcodebuild":
+      return ["ios"];
+    case "gradle":
+    case "gradlew":
+      return ["android"];
+    case "maestro":
+    case "detox":
+      return ["ios", "android"];
+    case "adb":
+      return /\btrack-devices\b/.test(command) || /\bserver\b/.test(command) ? [] : ["android"];
+    default:
+      return [];
+  }
+}
+
+/** The basename an Android Studio launcher process is known by — `studio`/`studio64` on macOS
+ * and Linux, `studio64.exe` on Windows (matched via `commandBasename`'s extension strip). */
+const ANDROID_STUDIO_PROCESS = /^studio(64)?$/i;
+/** How far up an emulator's `ppid` chain to look for Android Studio before giving up — a
+ * pathologically deep or cyclic `ps` tree must not loop forever. */
+const MAX_PROCESS_ANCESTRY_DEPTH = 64;
+
+/**
+ * Item (d), docs/device-leases.md#shutdown: Android Studio's own "Run" and its AVD manager boot
+ * emulators the same way an agent's shell could, so process-tree attribution alone cannot tell
+ * them apart. An Android Studio ancestor overrides any agent attribution — the device is
+ * Tyler's regardless of what tree the emulator process otherwise lands in.
+ */
+function isLaunchedByAndroidStudio(pid: number, rows: readonly ProcessSampleRow[]): boolean {
+  const byPid = new Map(rows.map((row) => [row.pid, row] as const));
+  let current = byPid.get(pid);
+  const seen = new Set<number>();
+  for (let depth = 0; current && depth < MAX_PROCESS_ANCESTRY_DEPTH; depth += 1) {
+    if (seen.has(current.pid)) break;
+    seen.add(current.pid);
+    const name = commandBasename(current.command).replace(/\.exe$/i, "");
+    if (ANDROID_STUDIO_PROCESS.test(name) || current.command.includes("Android Studio")) {
+      return true;
+    }
+    current = byPid.get(current.ppid);
+  }
+  return false;
 }
 
 /**
@@ -805,6 +882,21 @@ export class DeviceLeaseManager {
    * lease (it moves to `simulatorIdleSince`'s bookkeeping instead) or stops running.
    */
   private readonly unleasedIdleSince = new Map<string, number>();
+  /**
+   * deviceId → whether an agent booted this device (a lease with `booted: true`, or the device
+   * first seen inside a live agent's process tree), remembered independently of any lease so a
+   * device an agent only reused keeps reading as Tyler's own once it goes unleased again, and a
+   * device an agent genuinely booted keeps reading as the agent's once its lease is gone (items
+   * 2, 3, docs/device-leases.md#shutdown). `lastUptimeSeconds` is how a reboot — Tyler quitting
+   * and relaunching the same AVD or simulator — is noticed: `uptimeSeconds` dropping back near
+   * zero starts the record over, the same device id or not.
+   */
+  private readonly deviceProvenance = new Map<
+    string,
+    { lastUptimeSeconds: number | undefined; agentBooted: boolean }
+  >();
+  /** When the last sweep ran — item 4's sleep/wake detector, docs/device-leases.md#shutdown. */
+  private previousSweepAtMs: number | undefined;
   private readonly listeners = new Set<() => void>();
   private readonly modeLog: MonitorModeLog;
 
@@ -877,16 +969,18 @@ export class DeviceLeaseManager {
       systemMemory: input.systemMemory,
       takenAtMs: this.now(),
     };
+    this.resetIdleClocksIfWoken();
     this.reportMode();
     const config = this.resolveConfig(await this.resolveCaps());
     this.reconcile(config);
     await this.chargeUnleasedDevices(config);
     if (config.enabled) this.adoptAttributedDevices();
-    const evidence = this.buildUseEvidence(
+    const evidence = await this.buildUseEvidence(
       input.rows && input.agentTrees
         ? { rows: input.rows, agentTrees: input.agentTrees }
         : undefined,
     );
+    this.updateDeviceProvenance(evidence);
     await this.sweepIdleSimulators(config, evidence);
     this.releaseIdleLeases(config, evidence);
     await this.sweepUnleasedDevices(config, evidence);
@@ -894,23 +988,117 @@ export class DeviceLeaseManager {
   }
 
   /**
+   * A gap since the last sweep longer than `SWEEP_GAP_WAKE_THRESHOLD_MS` means the machine was
+   * asleep, not that every idle device genuinely sat untouched for the whole gap — so every idle
+   * clock restarts from now instead of counting the sleep itself as idle time (item 4,
+   * docs/device-leases.md#shutdown).
+   */
+  private resetIdleClocksIfWoken(): void {
+    const nowMs = this.now();
+    const gapMs = this.previousSweepAtMs === undefined ? 0 : nowMs - this.previousSweepAtMs;
+    this.previousSweepAtMs = nowMs;
+    if (gapMs <= SWEEP_GAP_WAKE_THRESHOLD_MS) return;
+    for (const deviceId of this.simulatorIdleSince.keys()) {
+      this.simulatorIdleSince.set(deviceId, nowMs);
+    }
+    for (const deviceId of this.unleasedIdleSince.keys()) {
+      this.unleasedIdleSince.set(deviceId, nowMs);
+    }
+  }
+
+  /**
    * Built once per sweep and shared by the simulator teardown, the idle-release sweep, and the
    * unleased-device sweep, so a device id is only scanned for once: the known ids are every
    * current lease's device id plus every currently running device's own id, which covers an
    * emulator's AVD name and a reused simulator's UDID (already covered by the blind regex scan
-   * too, harmlessly) whether or not anything holds a lease on it yet.
+   * too, harmlessly) whether or not anything holds a lease on it yet. An Android device's adb
+   * serial (`emulator-5554`) is resolved too and merged back onto its AVD name's entry — `adb -s`,
+   * Maestro `--device`, and similar name the serial, which shares no characters with the AVD name
+   * the known-id scan above would otherwise need to match (item (b), docs/device-leases.md).
    */
-  private buildUseEvidence(processes: SweepProcesses | undefined): DeviceUseEvidence | undefined {
+  private async buildUseEvidence(
+    processes: SweepProcesses | undefined,
+  ): Promise<DeviceUseEvidence | undefined> {
     if (!processes) return undefined;
     const knownDeviceIds = new Set<string>();
     for (const lease of this.leases) {
       if (lease.deviceId !== undefined) knownDeviceIds.add(lease.deviceId);
     }
     for (const device of this.sample?.devices ?? []) knownDeviceIds.add(device.deviceId);
-    return {
-      ...processes,
-      references: collectDeviceIdReferences(processes.rows, knownDeviceIds),
-    };
+
+    const serialsByDeviceId = await this.resolveAndroidSerials(this.sample?.devices ?? []);
+    for (const serial of serialsByDeviceId.values()) knownDeviceIds.add(serial);
+
+    const references = collectDeviceIdReferences(processes.rows, knownDeviceIds);
+    for (const [deviceId, serial] of serialsByDeviceId) {
+      const serialReference = references.get(serial);
+      if (!serialReference) continue;
+      const existing = references.get(deviceId) ?? { pids: [] };
+      const mergedPids = new Set([...existing.pids, ...serialReference.pids]);
+      references.set(deviceId, { ...existing, pids: [...mergedPids] });
+    }
+
+    return { ...processes, references };
+  }
+
+  /**
+   * Refreshes `deviceProvenance` for everything currently running, before the unleased sweep
+   * reads it — items 2 and 3's rule that the sweep may only ever shut down a device an agent
+   * booted, remembered independently of any lease so the answer survives a lease coming and going
+   * (docs/device-leases.md#shutdown). An Android Studio ancestor overrides every other signal:
+   * item (d).
+   */
+  private updateDeviceProvenance(evidence: DeviceUseEvidence | undefined): void {
+    const bootedLeaseDeviceIds = new Set(
+      this.leases
+        .filter((lease) => lease.booted === true && lease.deviceId !== undefined)
+        .map((lease) => lease.deviceId as string),
+    );
+    const seenDeviceIds = new Set<string>();
+    for (const device of this.sample?.devices ?? []) {
+      seenDeviceIds.add(device.deviceId);
+      const previous = this.deviceProvenance.get(device.deviceId);
+      const rebooted =
+        previous?.lastUptimeSeconds !== undefined &&
+        device.uptimeSeconds !== undefined &&
+        device.uptimeSeconds < previous.lastUptimeSeconds - UPTIME_REBOOT_TOLERANCE_SECONDS;
+      const studioLaunched =
+        device.platform === "android" &&
+        evidence !== undefined &&
+        isLaunchedByAndroidStudio(device.pid, evidence.rows);
+      const agentBooted =
+        !studioLaunched &&
+        ((!rebooted && (previous?.agentBooted ?? false)) ||
+          device.agentId !== undefined ||
+          bootedLeaseDeviceIds.has(device.deviceId));
+      this.deviceProvenance.set(device.deviceId, {
+        lastUptimeSeconds: device.uptimeSeconds,
+        agentBooted,
+      });
+    }
+    for (const deviceId of this.deviceProvenance.keys()) {
+      if (!seenDeviceIds.has(deviceId)) this.deviceProvenance.delete(deviceId);
+    }
+  }
+
+  /**
+   * Item (c), docs/device-leases.md#shutdown: every platform a non-agent build or test tool
+   * process proves is in use right now, regardless of whether it names a device.
+   */
+  private computeToolKeepAlivePlatforms(
+    evidence: DeviceUseEvidence | undefined,
+  ): ReadonlySet<DevicePlatform> {
+    const platforms = new Set<DevicePlatform>();
+    if (!evidence) return platforms;
+    const agentPids = new Set<number>();
+    for (const tree of evidence.agentTrees) {
+      for (const pid of tree.pids) agentPids.add(pid);
+    }
+    for (const row of evidence.rows) {
+      if (agentPids.has(row.pid)) continue;
+      for (const platform of keepAlivePlatformsForCommand(row.command)) platforms.add(platform);
+    }
+    return platforms;
   }
 
   /**
@@ -1245,10 +1433,23 @@ export class DeviceLeaseManager {
   }
 
   /** `decideCheckout` when the caller named no device: reuse what's already running, preferring
-   * a family member's device over allocating a new slot (docs/device-leases.md, Family
-   * sharing). `undefined` when nothing is reusable, so `decideCheckout` falls through to
-   * `tryGrant`. */
+   * the caller's own existing lease of this platform over anything else — a family member's
+   * device is a fallback for an agent with nothing of its own, never a reason to abandon a
+   * device the caller already holds — then a family member's device over allocating a new slot
+   * (docs/device-leases.md, Family sharing). `undefined` when nothing is reusable, so
+   * `decideCheckout` falls through to `tryGrant`. */
   private decideUnnamedCheckout(input: DeviceCheckoutInput): CheckoutDecision | undefined {
+    const ownLease = this.leases.find(
+      (entry) => entry.platform === input.platform && entry.agentId === input.agentId,
+    );
+    const ownDevice = ownLease
+      ? (this.sample?.devices ?? []).find((device) => device.deviceId === ownLease.deviceId)
+      : undefined;
+    if (ownLease && ownDevice) {
+      ownLease.lastUsedAtMs = this.now();
+      return { kind: "bound", lease: ownLease, device: ownDevice, alreadyHeld: true };
+    }
+
     const familyLease = this.leases.find(
       (entry) =>
         entry.platform === input.platform &&
@@ -1547,35 +1748,45 @@ export class DeviceLeaseManager {
   }
 
   /**
-   * A booted simulator or emulator nobody holds a lease on — Tyler's own, or one whose agent
-   * came and went before the gate ever adopted it — is shut down once nothing has used it for
-   * `unleasedIdleMinutes`. Docs: "An unleased device is never shut down" used to be absolute;
-   * this is the one exception, and it exists because the alternative is exactly what motivated
-   * this feature — a device nobody is accountable for staying booted indefinitely. Reserved and
-   * physical devices are never candidates: reservations are checked before a device is even
-   * tracked here, and physical devices never appear in `this.sample.devices` at all. Runs after
-   * `adoptAttributedDevices`, so a device still in a live agent's own process tree already has a
-   * lease by the time this looks, and is never a candidate either.
+   * A booted simulator or emulator nobody holds a lease on, that an agent booted — never one Tyler
+   * booted himself, or one an agent only reused — is shut down once nothing has used it for
+   * `unleasedIdleMinutes`. Docs: "An unleased device is never shut down" used to be absolute; this
+   * is the one exception, and it exists because the alternative is exactly what motivated this
+   * feature — a device nobody is accountable for staying booted indefinitely. It is also the one
+   * exception with no "never one Tyler uses by hand" carve-out otherwise: a device with no agent
+   * provenance at all (`deviceProvenance`, items 2–3) never becomes a candidate in the first
+   * place, whatever its idle clock says. Reserved and physical devices are never candidates:
+   * reservations are checked before a device is even tracked here, and physical devices never
+   * appear in `this.sample.devices` at all. Runs after `adoptAttributedDevices`, so a device still
+   * in a live agent's own process tree already has a lease by the time this looks, and is never a
+   * candidate either.
    */
   private async sweepUnleasedDevices(
     config: ResolvedDeviceLeaseConfig,
     evidence: DeviceUseEvidence | undefined,
   ): Promise<void> {
-    if (config.unleasedIdleMs <= 0) {
+    // The cap being off means nothing is tracked, counted or acted on anywhere else — the sweep
+    // must not be the one place that still runs (item 1, docs/device-leases.md#config).
+    if (!config.enabled || config.unleasedIdleMs <= 0) {
       this.unleasedIdleSince.clear();
       return;
     }
     const leasedDeviceIds = new Set(
       this.leases.map((lease) => lease.deviceId).filter((id): id is string => id !== undefined),
     );
+    const toolKeepAlive = this.computeToolKeepAlivePlatforms(evidence);
     const seenDeviceIds = new Set<string>();
     const idle: RunningDevice[] = [];
     for (const device of this.sample?.devices ?? []) {
       if (leasedDeviceIds.has(device.deviceId)) continue;
       if (this.reservations.isReserved(device.deviceId)) continue;
+      if (!this.deviceProvenance.get(device.deviceId)?.agentBooted) {
+        this.unleasedIdleSince.delete(device.deviceId);
+        continue;
+      }
       seenDeviceIds.add(device.deviceId);
       const since = this.unleasedIdleSince.get(device.deviceId);
-      const inUse = isUnleasedDeviceInUse(device, evidence);
+      const inUse = isUnleasedDeviceInUse(device, evidence) || toolKeepAlive.has(device.platform);
       if (inUse || since === undefined) {
         this.unleasedIdleSince.set(device.deviceId, this.now());
         continue;
@@ -1596,7 +1807,9 @@ export class DeviceLeaseManager {
   }
 
   /** Runs the shutdown command for one unleased device. No lease to release on success —
-   * there never was one. */
+   * there never was one. The Android serial lookup runs inside the timeout, same as the
+   * shutdown command itself (item 6) — a wedged `adb` resolving it must not hold up the sweep
+   * any longer than a wedged `simctl`/`emu kill` would. */
   private async shutdownUnleasedDevice(device: RunningDevice, dryRun: boolean): Promise<void> {
     const { deviceId, platform } = device;
     const noun = platform === "ios" ? "simulator" : "emulator";
@@ -1605,15 +1818,17 @@ export class DeviceLeaseManager {
       return;
     }
     try {
-      const serial =
-        platform === "android"
-          ? await this.identityLookup.androidSerial(deviceId, { fresh: true })
-          : undefined;
       await withTimeout(
-        runDeviceShutdown(
-          { platform, deviceId, ...(serial ? { serial } : {}) },
-          this.shutdownRunner,
-        ),
+        (async () => {
+          const serial =
+            platform === "android"
+              ? await this.identityLookup.androidSerial(deviceId, { fresh: true })
+              : undefined;
+          await runDeviceShutdown(
+            { platform, deviceId, ...(serial ? { serial } : {}) },
+            this.shutdownRunner,
+          );
+        })(),
         SIMULATOR_SHUTDOWN_TIMEOUT_MS,
         `Timed out shutting down ${noun} ${deviceId}`,
       );
@@ -1646,15 +1861,19 @@ export class DeviceLeaseManager {
       return;
     }
     try {
-      const serial =
-        platform === "android"
-          ? await this.identityLookup.androidSerial(deviceId, { fresh: true })
-          : undefined;
+      // Same ordering as `shutdownUnleasedDevice` (item 6): the serial lookup runs inside the
+      // timeout, so a wedged `adb` resolving it cannot hold up the sweep past its own budget.
       await withTimeout(
-        runDeviceShutdown(
-          { platform, deviceId, ...(serial ? { serial } : {}) },
-          this.shutdownRunner,
-        ),
+        (async () => {
+          const serial =
+            platform === "android"
+              ? await this.identityLookup.androidSerial(deviceId, { fresh: true })
+              : undefined;
+          await runDeviceShutdown(
+            { platform, deviceId, ...(serial ? { serial } : {}) },
+            this.shutdownRunner,
+          );
+        })(),
         SIMULATOR_SHUTDOWN_TIMEOUT_MS,
         `Timed out shutting down ${noun} ${deviceId}`,
       );
