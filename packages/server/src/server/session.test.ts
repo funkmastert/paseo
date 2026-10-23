@@ -5647,6 +5647,131 @@ test("mcp_gateway.auth.start.request happy path returns the authorization URL (U
   ]);
 });
 
+test("mcp_gateway.setup.local_token.request hands the token to the daemon and never echoes it", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const setMcpGatewayLocalToken = vi.fn().mockResolvedValue({ status: "connected" });
+  const session = createSessionForTest({ messages, agentManager: { setMcpGatewayLocalToken } });
+
+  await session.handleMessage({
+    type: "mcp_gateway.setup.local_token.request",
+    requestId: "setup-1",
+    name: "figma",
+    preset: "figma",
+    token: "figd_fake-token-value",
+  });
+
+  expect(setMcpGatewayLocalToken).toHaveBeenCalledWith({
+    name: "figma",
+    preset: "figma",
+    token: "figd_fake-token-value",
+  });
+  expect(messages).toEqual([
+    {
+      type: "mcp_gateway.setup.local_token.response",
+      payload: { requestId: "setup-1", error: null, reason: null, status: "connected" },
+    },
+  ]);
+  expect(JSON.stringify(messages)).not.toContain("figd_fake-token-value");
+});
+
+test("mcp_gateway.setup.local_token.request failure carries the reason and no secret", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      setMcpGatewayLocalToken: vi
+        .fn()
+        .mockRejectedValue(new McpGatewayActionError("install_failed", "npm was not found")),
+    },
+  });
+
+  await session.handleMessage({
+    type: "mcp_gateway.setup.local_token.request",
+    requestId: "setup-2",
+    name: "figma",
+    preset: "figma",
+    token: "figd_fake-token-value",
+  });
+
+  expect(messages).toEqual([
+    {
+      type: "mcp_gateway.setup.local_token.response",
+      payload: {
+        requestId: "setup-2",
+        error: "npm was not found",
+        reason: "install_failed",
+        status: null,
+      },
+    },
+  ]);
+});
+
+test("mcp_gateway.setup.save_client.request stores the secret and answers without it", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const saveMcpGatewayClient = vi.fn();
+  const session = createSessionForTest({ messages, agentManager: { saveMcpGatewayClient } });
+
+  await session.handleMessage({
+    type: "mcp_gateway.setup.save_client.request",
+    requestId: "setup-3",
+    name: "slack",
+    clientId: "123.456",
+    clientSecret: "shh-secret-value",
+    scope: "users:read",
+  });
+
+  expect(saveMcpGatewayClient).toHaveBeenCalledWith({
+    name: "slack",
+    clientId: "123.456",
+    clientSecret: "shh-secret-value",
+    scope: "users:read",
+  });
+  expect(messages).toEqual([
+    {
+      type: "mcp_gateway.setup.save_client.response",
+      payload: { requestId: "setup-3", error: null, reason: null },
+    },
+  ]);
+});
+
+test("mcp_gateway.setup.describe.request answers with the stored booleans only", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      describeMcpGatewaySetup: vi.fn().mockReturnValue({
+        redirectUrl: "http://localhost:6767/mcp/gateway/oauth/callback",
+        clientIdSet: true,
+        clientSecretSet: true,
+        scope: "users:read",
+        tokenSet: false,
+      }),
+    },
+  });
+
+  await session.handleMessage({
+    type: "mcp_gateway.setup.describe.request",
+    requestId: "setup-4",
+    name: "slack",
+  });
+
+  expect(messages).toEqual([
+    {
+      type: "mcp_gateway.setup.describe.response",
+      payload: {
+        requestId: "setup-4",
+        error: null,
+        reason: null,
+        redirectUrl: "http://localhost:6767/mcp/gateway/oauth/callback",
+        clientIdSet: true,
+        clientSecretSet: true,
+        scope: "users:read",
+        tokenSet: false,
+      },
+    },
+  ]);
+});
+
 test("project.list returns every active project descriptor", async () => {
   const messages: SessionOutboundMessage[] = [];
   const active = createPersistedProjectRecord({

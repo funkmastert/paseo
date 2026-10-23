@@ -25,6 +25,9 @@ import {
   type WorkspaceScriptStopRequest,
   type McpGatewayAuthStartRequest,
   type McpGatewayServerAdoptRequest,
+  type McpGatewaySetupDescribeRequest,
+  type McpGatewaySetupSaveClientRequest,
+  type McpGatewaySetupLocalTokenRequest,
   type CloseItemsRequest,
   type DirectorySuggestionsRequest,
   type ProjectPlacementPayload,
@@ -3208,6 +3211,15 @@ export class Session {
       case "mcp_gateway.server.adopt.request":
         await this.handleMcpGatewayServerAdoptRequest(msg);
         return;
+      case "mcp_gateway.setup.describe.request":
+        this.handleMcpGatewaySetupDescribeRequest(msg);
+        return;
+      case "mcp_gateway.setup.save_client.request":
+        this.handleMcpGatewaySetupSaveClientRequest(msg);
+        return;
+      case "mcp_gateway.setup.local_token.request":
+        await this.handleMcpGatewaySetupLocalTokenRequest(msg);
+        return;
       case "register_push_token":
         this.handleRegisterPushToken(msg.token);
         return;
@@ -5086,6 +5098,96 @@ export class Session {
           error: getErrorMessageOr(error, "Failed to broker the MCP server"),
           reason: failure?.reason ?? null,
           ...gatewayRemedyPayload(failure),
+        },
+      });
+    }
+  }
+
+  /**
+   * The setup forms' three requests (docs/mcp-gateway.md "Setting up a server that cannot sign
+   * in"). Failures land in the response's `error` and `reason` like the sign-in actions above.
+   * Requests carry secrets, so nothing here logs the message: only the server name and reason.
+   */
+  private handleMcpGatewaySetupDescribeRequest(request: McpGatewaySetupDescribeRequest): void {
+    try {
+      const description = this.agentManager.describeMcpGatewaySetup(request.name);
+      this.emit({
+        type: "mcp_gateway.setup.describe.response",
+        payload: { requestId: request.requestId, error: null, reason: null, ...description },
+      });
+    } catch (error) {
+      const failure = error instanceof McpGatewayActionError ? error : null;
+      this.sessionLogger.warn(
+        { err: error, name: request.name, reason: failure?.reason },
+        "Failed to describe MCP gateway setup",
+      );
+      this.emit({
+        type: "mcp_gateway.setup.describe.response",
+        payload: {
+          requestId: request.requestId,
+          error: getErrorMessageOr(error, "Failed to read the setup state"),
+          reason: failure?.reason ?? null,
+        },
+      });
+    }
+  }
+
+  private handleMcpGatewaySetupSaveClientRequest(request: McpGatewaySetupSaveClientRequest): void {
+    try {
+      this.agentManager.saveMcpGatewayClient({
+        name: request.name,
+        clientId: request.clientId,
+        ...(request.clientSecret === undefined ? {} : { clientSecret: request.clientSecret }),
+        ...(request.redirectUrl === undefined ? {} : { redirectUrl: request.redirectUrl }),
+        ...(request.scope === undefined ? {} : { scope: request.scope }),
+      });
+      this.emit({
+        type: "mcp_gateway.setup.save_client.response",
+        payload: { requestId: request.requestId, error: null, reason: null },
+      });
+    } catch (error) {
+      const failure = error instanceof McpGatewayActionError ? error : null;
+      this.sessionLogger.warn(
+        { name: request.name, reason: failure?.reason },
+        "Failed to save MCP gateway client credentials",
+      );
+      this.emit({
+        type: "mcp_gateway.setup.save_client.response",
+        payload: {
+          requestId: request.requestId,
+          error: failure?.message ?? "Failed to save the credentials",
+          reason: failure?.reason ?? null,
+        },
+      });
+    }
+  }
+
+  private async handleMcpGatewaySetupLocalTokenRequest(
+    request: McpGatewaySetupLocalTokenRequest,
+  ): Promise<void> {
+    try {
+      const { status } = await this.agentManager.setMcpGatewayLocalToken({
+        name: request.name,
+        preset: request.preset,
+        token: request.token,
+      });
+      this.emit({
+        type: "mcp_gateway.setup.local_token.response",
+        payload: { requestId: request.requestId, error: null, reason: null, status },
+      });
+    } catch (error) {
+      const failure = error instanceof McpGatewayActionError ? error : null;
+      this.sessionLogger.warn(
+        { name: request.name, preset: request.preset, reason: failure?.reason },
+        "Failed to set up the MCP gateway local server",
+      );
+      this.emit({
+        type: "mcp_gateway.setup.local_token.response",
+        payload: {
+          requestId: request.requestId,
+          error: failure?.message ?? "Failed to set up the local server",
+          reason: failure?.reason ?? null,
+          status: null,
         },
       });
     }

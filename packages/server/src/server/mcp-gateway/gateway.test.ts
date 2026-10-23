@@ -1443,3 +1443,139 @@ describe("local (stdio) servers", () => {
     expect(gateway.getServerState("figma")?.error ?? "").not.toContain("figd_must_not_leak");
   });
 });
+
+describe("replaceServer and the setup hint", () => {
+  const gateways: McpGateway[] = [];
+  afterEach(async () => {
+    while (gateways.length > 0) await gateways.pop()?.stop();
+  });
+
+  function create(
+    paseoHome: string,
+    config: ConstructorParameters<typeof McpGateway>[0]["config"],
+  ): McpGateway {
+    const gateway = new McpGateway({
+      paseoHome,
+      config,
+      oauthRedirectBaseUrl: "http://127.0.0.1:6767",
+    });
+    gateways.push(gateway);
+    return gateway;
+  }
+
+  const hostedFigma = { url: "https://mcp.figma.com/mcp", transport: "http" as const };
+
+  test("swaps a hosted entry for a local one and connects it with the env stored for it", async () => {
+    const paseoHome = createTempHome();
+    const gateway = create(paseoHome, { enabled: true, servers: { figma: hostedFigma } });
+    await gateway.start();
+    expect(gateway.getServerState("figma")?.status).toBe("needs-auth");
+    new McpGatewayTokenStore(paseoHome).saveStaticEnv("figma", { FIGMA_API_KEY: "figd_stored" });
+
+    const status = await gateway.replaceServer("figma", {
+      ...writeStdioFixtureServer(),
+      auth: "static",
+    });
+
+    expect(status).toBe("connected");
+    expect(gateway.getServerNames()).toEqual(["figma"]);
+    expect(await callEnvTool(gateway, "figma", ["FIGMA_API_KEY"])).toEqual({
+      FIGMA_API_KEY: "figd_stored",
+    });
+  });
+
+  test("replacing a connected local server closes the old process and starts a new one", async () => {
+    const paseoHome = createTempHome();
+    new McpGatewayTokenStore(paseoHome).saveStaticEnv("figma", { FIGMA_API_KEY: "figd_stored" });
+    const local = { ...writeStdioFixtureServer(), auth: "static" as const };
+    const gateway = create(paseoHome, { enabled: true, localServers: { figma: local } });
+    await gateway.start();
+    const first = gateway.getClient("figma");
+    if (!first) throw new Error("expected a connected local server");
+    const close = vi.spyOn(first, "close");
+
+    await gateway.replaceServer("figma", local);
+
+    expect(close).toHaveBeenCalledTimes(1);
+    const second = gateway.getClient("figma");
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
+    expect(gateway.getServerState("figma")?.status).toBe("connected");
+    // The old process's exit must not drag the new one into a restart loop.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(gateway.getClient("figma")).toBe(second);
+  });
+
+  test("a local entry with nothing stored lands in needs-auth without being spawned", async () => {
+    const gateway = create(createTempHome(), { enabled: true, servers: { figma: hostedFigma } });
+    await gateway.start();
+
+    const status = await gateway.replaceServer("figma", {
+      command: "/nonexistent/should-never-run",
+      auth: "static",
+    });
+
+    expect(status).toBe("needs-auth");
+  });
+
+  test("a disabled gateway refuses to replace", async () => {
+    const gateway = create(createTempHome(), { enabled: false });
+    const failure = await gateway
+      .replaceServer("figma", { command: "x", auth: "static" })
+      .catch((error: unknown) => error);
+    expect((failure as McpGatewayActionError).reason).toBe("gateway_disabled");
+  });
+
+  test("an unhealthy server with a local preset offers the token form, until it connects", async () => {
+    const paseoHome = createTempHome();
+    const gateway = create(paseoHome, { enabled: true, servers: { figma: hostedFigma } });
+    await gateway.start();
+    expect(gateway.getSnapshot().find((entry) => entry.name === "figma")?.setup).toBe(
+      "local_token",
+    );
+
+    new McpGatewayTokenStore(paseoHome).saveStaticEnv("figma", { FIGMA_API_KEY: "figd_stored" });
+    await gateway.replaceServer("figma", { ...writeStdioFixtureServer(), auth: "static" });
+
+    expect(
+      gateway.getSnapshot().find((entry) => entry.name === "figma" && "setup" in entry),
+    ).toBeUndefined();
+  });
+
+  test("a server on a host with no dynamic registration offers the credentials form until credentials exist", async () => {
+    const paseoHome = createTempHome();
+    const gateway = create(paseoHome, {
+      enabled: true,
+      servers: { slack: { url: "https://mcp.slack.com/mcp", transport: "http" } },
+    });
+    await gateway.start();
+    expect(gateway.getSnapshot()[0]?.setup).toBe("client_credentials");
+
+    new McpGatewayTokenStore(paseoHome).saveClientCredentials("slack", { clientId: "123.456" });
+    gateway.refreshStatus();
+
+    expect(gateway.getSnapshot()[0]?.setup).toBeUndefined();
+  });
+
+  test("an unlisted OAuth server offers the credentials form once its sign-in is refused for lack of an app, and drops it when credentials are saved", async () => {
+    const authServer = await startOAuthAuthorizationServer({ supportsRegistration: false });
+    const paseoHome = createTempHome();
+    const gateway = create(paseoHome, {
+      enabled: true,
+      servers: { other: { url: authServer.url, transport: "http", auth: "oauth" } },
+    });
+    await gateway.start();
+    expect(gateway.getSnapshot()[0]?.setup).toBeUndefined();
+
+    const broadcasts: Array<string | undefined> = [];
+    gateway.on("change", (snapshot) => broadcasts.push(snapshot[0]?.setup));
+    await actionFailureOf(gateway.startAuthorization("other"));
+
+    expect(gateway.getSnapshot()[0]?.setup).toBe("client_credentials");
+    expect(broadcasts).toContain("client_credentials");
+
+    new McpGatewayTokenStore(paseoHome).saveClientCredentials("other", { clientId: "123.456" });
+    gateway.clearRegistrationUnsupported("other");
+    expect(gateway.getSnapshot()[0]?.setup).toBeUndefined();
+  });
+});

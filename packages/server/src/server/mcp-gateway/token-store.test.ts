@@ -374,3 +374,69 @@ describe("McpGatewayTokenStore", () => {
     expect(store.listSecretValues()).toEqual([]);
   });
 });
+
+describe("McpGatewayTokenStore setup writes", () => {
+  test("saveClientCredentials stores the app with its redirect and scope, and drops a dynamic registration", () => {
+    const store = new McpGatewayTokenStore(createTempHome());
+    store.saveClientInformation("slack", {
+      client_id: "dynamic-id",
+      redirect_uris: ["http://127.0.0.1:6767/mcp/gateway/oauth/callback"],
+    });
+
+    store.saveClientCredentials("slack", {
+      clientId: "123.456",
+      clientSecret: "client-secret-value",
+      redirectUrl: "http://localhost:6767/mcp/gateway/oauth/callback",
+      scope: "users:read search:read.public",
+    });
+
+    expect(store.getClientCredentials("slack")).toEqual({
+      clientId: "123.456",
+      clientSecret: "client-secret-value",
+      redirectUrl: "http://localhost:6767/mcp/gateway/oauth/callback",
+      scope: "users:read search:read.public",
+    });
+    expect(store.getClientInformation("slack")).toBeUndefined();
+  });
+
+  test("saveClientCredentials keeps stored tokens so a re-save does not sign anyone out", () => {
+    const store = new McpGatewayTokenStore(createTempHome());
+    store.saveOAuthTokens("slack", { access_token: "at-1", token_type: "Bearer" });
+
+    store.saveClientCredentials("slack", { clientId: "123.456" });
+
+    expect(store.getOAuthTokens("slack")?.access_token).toBe("at-1");
+    expect(store.getClientCredentials("slack")).toEqual({ clientId: "123.456" });
+  });
+
+  test("saveStaticEnv replaces an OAuth record with a static one that keeps headers as {}", () => {
+    const paseoHome = createTempHome();
+    const store = new McpGatewayTokenStore(paseoHome);
+    store.saveOAuthTokens("figma", { access_token: "at-1", token_type: "Bearer" });
+
+    store.saveStaticEnv("figma", { FIGMA_API_KEY: "figd_fake-token-value" });
+
+    expect(store.getStaticEnv("figma")).toEqual({ FIGMA_API_KEY: "figd_fake-token-value" });
+    expect(store.getStaticHeaders("figma")).toEqual({});
+    expect(store.getOAuthTokens("figma")).toBeUndefined();
+    const onDisk = JSON.parse(readFileSync(path.join(paseoHome, TOKENS_RELATIVE_PATH), "utf8"));
+    expect(onDisk.servers.figma).toEqual({
+      auth: "static",
+      headers: {},
+      env: { FIGMA_API_KEY: "figd_fake-token-value" },
+    });
+  });
+
+  test("the stored secrets reach listSecretValues so the redactor sees them", () => {
+    const store = new McpGatewayTokenStore(createTempHome());
+    store.saveClientCredentials("slack", {
+      clientId: "123.456.789",
+      clientSecret: "client-secret-value",
+    });
+    store.saveStaticEnv("figma", { FIGMA_API_KEY: "figd_fake-token-value" });
+
+    const values = store.listSecretValues();
+    expect(values).toContain("client-secret-value");
+    expect(values).toContain("figd_fake-token-value");
+  });
+});

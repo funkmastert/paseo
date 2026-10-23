@@ -6467,6 +6467,119 @@ test("resolves mcp_gateway.auth.start.response with an error for an unknown serv
   });
 });
 
+async function connectedGatewayClient() {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+  return { client, mock };
+}
+
+test("sends the three mcp_gateway.setup requests and resolves each by requestId", async () => {
+  const { client, mock } = await connectedGatewayClient();
+
+  const describePromise = client.describeMcpGatewaySetup("slack", { requestId: "setup-1" });
+  expect(JSON.parse(assertStr(mock.sent[0]))).toEqual({
+    type: "session",
+    message: { type: "mcp_gateway.setup.describe.request", requestId: "setup-1", name: "slack" },
+  });
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "mcp_gateway.setup.describe.response",
+      payload: {
+        requestId: "setup-1",
+        error: null,
+        redirectUrl: "http://localhost:6767/mcp/gateway/oauth/callback",
+        clientIdSet: false,
+        clientSecretSet: false,
+      },
+    }),
+  );
+  await expect(describePromise).resolves.toMatchObject({
+    redirectUrl: "http://localhost:6767/mcp/gateway/oauth/callback",
+    clientIdSet: false,
+  });
+
+  const savePromise = client.saveMcpGatewayClient(
+    { name: "slack", clientId: "123.456", clientSecret: "shh-secret-value", scope: "users:read" },
+    { requestId: "setup-2" },
+  );
+  expect(JSON.parse(assertStr(mock.sent[1]))).toEqual({
+    type: "session",
+    message: {
+      type: "mcp_gateway.setup.save_client.request",
+      requestId: "setup-2",
+      name: "slack",
+      clientId: "123.456",
+      clientSecret: "shh-secret-value",
+      scope: "users:read",
+    },
+  });
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "mcp_gateway.setup.save_client.response",
+      payload: { requestId: "setup-2", error: null },
+    }),
+  );
+  await expect(savePromise).resolves.toEqual({ requestId: "setup-2", error: null });
+
+  const tokenPromise = client.setMcpGatewayLocalToken(
+    { name: "figma", preset: "figma", token: "figd_fake-token-value" },
+    { requestId: "setup-3" },
+  );
+  expect(JSON.parse(assertStr(mock.sent[2]))).toEqual({
+    type: "session",
+    message: {
+      type: "mcp_gateway.setup.local_token.request",
+      requestId: "setup-3",
+      name: "figma",
+      preset: "figma",
+      token: "figd_fake-token-value",
+    },
+  });
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "mcp_gateway.setup.local_token.response",
+      payload: { requestId: "setup-3", error: null, status: "connected" },
+    }),
+  );
+  await expect(tokenPromise).resolves.toEqual({
+    requestId: "setup-3",
+    error: null,
+    status: "connected",
+  });
+});
+
+test("a setup response carries the failure reason and no secret fields", async () => {
+  const { client, mock } = await connectedGatewayClient();
+  const tokenPromise = client.setMcpGatewayLocalToken(
+    { name: "figma", preset: "nope", token: "figd_fake-token-value" },
+    { requestId: "setup-4" },
+  );
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "mcp_gateway.setup.local_token.response",
+      payload: {
+        requestId: "setup-4",
+        error: "No local server is known for preset nope",
+        reason: "no_local_preset",
+      },
+    }),
+  );
+  const payload = await tokenPromise;
+  expect(payload.reason).toBe("no_local_preset");
+  expect(JSON.stringify(payload)).not.toContain("figd_fake-token-value");
+});
+
 test("sends close_items_request and resolves close_items_response", async () => {
   const logger = createMockLogger();
   const mock = createMockTransport();

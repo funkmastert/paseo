@@ -1719,6 +1719,94 @@ describe("DaemonConfigStore", () => {
     });
   });
 
+  test("patch switches a hosted gateway server to a local one: removeMcpGatewayServers drops the hosted entry in the same write", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const mcpGateway = {
+      enabled: true,
+      servers: {
+        figma: {
+          url: "https://mcp.figma.com/mcp",
+          transport: "http" as const,
+          auth: "oauth" as const,
+        },
+        zeeq: { url: "https://zeeq.example.test/mcp", transport: "http" as const },
+      },
+    };
+    writeFileSync(
+      path.join(paseoHome, "config.json"),
+      `${JSON.stringify({ version: 1, mcpGateway }, null, 2)}\n`,
+    );
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        mcpGateway,
+      },
+      undefined,
+    );
+    const local = {
+      command: "/usr/bin/node",
+      args: ["/x/bin.js", "--stdio"],
+      auth: "static" as const,
+    };
+
+    const next = store.patch({
+      mcpGateway: { localServers: { figma: local } },
+      removeMcpGatewayServers: ["figma"],
+    });
+
+    expect(next.mcpGateway?.servers).toEqual({
+      zeeq: { url: "https://zeeq.example.test/mcp", transport: "http" },
+    });
+    expect(next.mcpGateway?.localServers).toEqual({ figma: local });
+    expect("removeMcpGatewayServers" in next).toBe(false);
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.mcpGateway?.servers).toEqual({
+      zeeq: { url: "https://zeeq.example.test/mcp", transport: "http" },
+    });
+    expect(persisted.mcpGateway?.localServers).toEqual({ figma: local });
+    expect(persisted.mcpGateway?.enabled).toBe(true);
+  });
+
+  test("removeMcpGatewayServers naming an absent server changes nothing", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+    const mcpGateway = {
+      enabled: true,
+      servers: { zeeq: { url: "https://zeeq.example.test/mcp", transport: "http" as const } },
+    };
+    writeFileSync(
+      path.join(paseoHome, "config.json"),
+      `${JSON.stringify({ version: 1, mcpGateway }, null, 2)}\n`,
+    );
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        mcpGateway,
+      },
+      undefined,
+    );
+
+    const before = store.get();
+    const next = store.patch({ removeMcpGatewayServers: ["figma"] });
+
+    expect(next).toBe(before);
+    expect(loadPersistedConfig(paseoHome).mcpGateway?.servers).toEqual(mcpGateway.servers);
+  });
+
   test("patch persists metadata generation providers without disturbing tokenBurnMonitor", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);

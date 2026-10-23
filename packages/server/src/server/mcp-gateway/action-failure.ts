@@ -35,7 +35,15 @@ export type McpGatewayFailureReason =
   /** The upstream could not be reached at all. */
   | "server_unreachable"
   /** Sign-in itself failed, which is the only failure that is authentication. */
-  | "authorization_failed";
+  | "authorization_failed"
+  /** A setup form sent something the daemon will not store: an empty token, a bad redirect URL. */
+  | "invalid_input"
+  /** The daemon has no local server preset by this name, so a token cannot switch anything. */
+  | "no_local_preset"
+  /** Installing the local server's package failed; the hosted entry is left as it was. */
+  | "install_failed"
+  /** The credential was stored but the config could not be written; nothing was switched. */
+  | "config_write_failed";
 
 /**
  * How the caller can clear a failure, in parts a client composes its own sentence from. Host

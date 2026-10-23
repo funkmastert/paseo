@@ -116,6 +116,12 @@ import {
 import type { McpGateway, McpGatewaySnapshotEntry } from "../mcp-gateway/gateway.js";
 import { findPerDirMcpServer, type PerDirMcpServerLookup } from "../mcp-gateway/per-dir-stdio.js";
 import { McpGatewayActionError } from "../mcp-gateway/action-failure.js";
+import type {
+  McpGatewaySetupDescription,
+  McpGatewaySetupService,
+  SaveClientInput,
+  SetLocalTokenInput,
+} from "../mcp-gateway/setup.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
 import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
@@ -1428,6 +1434,7 @@ export class AgentManager {
   > | null = null;
   private mcpGatewayAuthToken: string | null = null;
   private mcpGatewayBaseUrl: string | null = null;
+  private mcpGatewaySetup: McpGatewaySetupService | null = null;
   private deviceLeaseStatusSource: DeviceLeaseStatusSource | null = null;
   private physicalDeviceLeaseStatusSource: PhysicalDeviceLeaseStatusSource | null = null;
   private finishObligations: FinishObligationService | null = null;
@@ -1651,6 +1658,30 @@ export class AgentManager {
   ): void {
     this.mcpGateway = gateway;
     this.mcpGatewayAuthToken = authToken;
+  }
+
+  /** The in-app setup write path (docs/mcp-gateway.md), wired by bootstrap beside the gateway. */
+  setMcpGatewaySetup(setup: McpGatewaySetupService | null): void {
+    this.mcpGatewaySetup = setup;
+  }
+
+  private requireMcpGatewaySetup(): McpGatewaySetupService {
+    if (!this.mcpGatewaySetup) {
+      throw new McpGatewayActionError("gateway_disabled", "MCP gateway is not enabled");
+    }
+    return this.mcpGatewaySetup;
+  }
+
+  describeMcpGatewaySetup(name: string): McpGatewaySetupDescription {
+    return this.requireMcpGatewaySetup().describe(name);
+  }
+
+  saveMcpGatewayClient(input: SaveClientInput): void {
+    this.requireMcpGatewaySetup().saveClient(input);
+  }
+
+  setMcpGatewayLocalToken(input: SetLocalTokenInput): Promise<{ status: string }> {
+    return this.requireMcpGatewaySetup().setLocalToken(input);
   }
 
   /**
