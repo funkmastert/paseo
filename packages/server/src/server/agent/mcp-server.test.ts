@@ -4121,6 +4121,7 @@ describe("update_agent MCP tool", () => {
 
   it("updates runtime settings before metadata", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue(createManagedAgent({ id: "agent-1" }));
     const server = await createAgentMcpServer({
       agentManager,
       agentStorage,
@@ -4158,6 +4159,7 @@ describe("update_agent MCP tool", () => {
 
   it("reports success for a no-op update with neither metadata nor settings", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue(createManagedAgent({ id: "agent-1" }));
     const server = await createAgentMcpServer({
       agentManager,
       agentStorage,
@@ -4178,6 +4180,7 @@ describe("update_agent MCP tool", () => {
 
   it("does not update metadata when runtime settings fail", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue(createManagedAgent({ id: "agent-1" }));
     spies.agentManager.setAgentFeature.mockRejectedValue(new Error("unsupported feature"));
     const server = await createAgentMcpServer({
       agentManager,
@@ -5816,13 +5819,15 @@ describe("agent snapshot MCP serialization", () => {
 
   it("does not expose internal stored agents from get_agent_status", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
+    const internalRecord = createStoredRecord({
+      id: "internal-agent",
+      internal: true,
+    });
     spies.agentManager.getAgent.mockReturnValue(null);
-    spies.agentStorage.get.mockResolvedValue(
-      createStoredRecord({
-        id: "internal-agent",
-        internal: true,
-      }),
-    );
+    spies.agentStorage.get.mockResolvedValue(internalRecord);
+    // Also exercises the slow (list-building) path's internal filter, not just the fast
+    // exact-id lookup above — a prefix on this id must stay excluded too.
+    spies.agentStorage.list.mockResolvedValue([internalRecord]);
 
     const server = await createAgentMcpServer({
       agentManager,
@@ -5833,7 +5838,10 @@ describe("agent snapshot MCP serialization", () => {
     const tool = registeredTool(server, "get_agent_status");
 
     await expect(tool.handler({ agentId: "internal-agent" })).rejects.toThrow(
-      "Agent internal-agent not found",
+      "Agent not found: internal-agent",
+    );
+    await expect(tool.handler({ agentId: "internal-ag" })).rejects.toThrow(
+      "Agent not found: internal-ag",
     );
   });
 
@@ -6192,8 +6200,10 @@ describe("agent snapshot MCP serialization", () => {
       currentModeId: "default",
     } as ManagedAgent;
     spies.agentManager.getAgent
+      // One miss for resolveAgentIdentifier's own exact-id fast path, one for
+      // ensureAgentLoaded's "is it already live" check; every call after that is post-load.
       .mockReturnValueOnce(null)
-      .mockReturnValue(snapshot)
+      .mockReturnValueOnce(null)
       .mockReturnValue(snapshot);
     spies.agentStorage.get.mockResolvedValue(record);
     spies.agentManager.resumeAgentFromPersistence.mockResolvedValue(snapshot);

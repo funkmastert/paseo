@@ -36,6 +36,7 @@ function ws(
     diskUsage: input.diskUsage ?? null,
     completionState: input.completionState ?? null,
     completionNote: input.completionNote ?? null,
+    agentId: input.agentId ?? null,
     workspaceKey: input.workspaceKey,
   };
 }

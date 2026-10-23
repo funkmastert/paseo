@@ -55,6 +55,7 @@ function makeWorkspace(
     diskUsage: null,
     completionState: null,
     completionNote: null,
+    agentId: null,
     labels,
     createdBy,
   };

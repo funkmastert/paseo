@@ -31,6 +31,7 @@ function workspace(workspaceId: string, projectViewKey: string): SidebarWorkspac
     diskUsage: null,
     completionState: null,
     completionNote: null,
+    agentId: null,
   };
 }
 

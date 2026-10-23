@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { Agent, WorkspaceDescriptor } from "@/stores/session-store";
 import type { WorkspaceStructureProject } from "@/projects/workspace-structure";
-import { buildWorkspaceAgentActivityIndex } from "@/utils/workspace-agent-activity";
+import {
+  buildWorkspaceAgentActivityIndex,
+  type WorkspaceAgentActivity,
+} from "@/utils/workspace-agent-activity";
 import {
   appendMissingOrderKeys,
   applyStoredOrdering,
@@ -86,6 +89,47 @@ describe("createSidebarWorkspaceEntry workspace directory label", () => {
     const entry = createSidebarWorkspaceEntry({ serverId: "srv", workspace: descriptor });
 
     expect(entry.workspaceDirectoryLabel).toBe("~/external/feature");
+  });
+});
+
+describe("createSidebarWorkspaceEntry agent id", () => {
+  it("takes the agent id from the workspace's activity entry", () => {
+    const descriptor = workspaceWithForge(undefined, "https://github.com/acme/repo/pull/42");
+    const activity: WorkspaceAgentActivity = {
+      agentId: "agent-123",
+      status: "running",
+      enteredAt: null,
+      completionState: null,
+      completionNote: null,
+    };
+
+    const entry = createSidebarWorkspaceEntry({
+      serverId: "srv",
+      workspace: descriptor,
+      workspaceAgentActivity: new Map([[descriptor.id, activity]]),
+    });
+
+    expect(entry.agentId).toBe("agent-123");
+  });
+
+  it("is null when the workspace has no matching activity entry", () => {
+    const descriptor = workspaceWithForge(undefined, "https://github.com/acme/repo/pull/42");
+
+    const entry = createSidebarWorkspaceEntry({
+      serverId: "srv",
+      workspace: descriptor,
+      workspaceAgentActivity: new Map(),
+    });
+
+    expect(entry.agentId).toBeNull();
+  });
+
+  it("is null when no activity map is provided", () => {
+    const descriptor = workspaceWithForge(undefined, "https://github.com/acme/repo/pull/42");
+
+    const entry = createSidebarWorkspaceEntry({ serverId: "srv", workspace: descriptor });
+
+    expect(entry.agentId).toBeNull();
   });
 });
 

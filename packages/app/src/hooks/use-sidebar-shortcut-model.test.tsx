@@ -39,6 +39,7 @@ function workspace(projectKey: string, workspaceId: string): SidebarWorkspaceEnt
     diskUsage: null,
     completionState: null,
     completionNote: null,
+    agentId: null,
   };
 }
 

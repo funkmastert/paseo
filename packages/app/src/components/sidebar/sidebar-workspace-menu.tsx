@@ -86,6 +86,7 @@ export interface SidebarWorkspaceMenuProps {
   workspaceLabels?: readonly string[];
   onCopyPath?: () => void;
   onCopyBranchName?: () => void;
+  onCopyAgentId?: () => void;
   onRename?: () => void;
   onMarkAsRead?: () => void;
   onMarkAsUnread?: () => void;
@@ -127,13 +128,14 @@ function WorkspaceMenuItem({
   return <DropdownMenuItem {...props}>{children}</DropdownMenuItem>;
 }
 
-function SidebarWorkspaceMenuItems({
+export function SidebarWorkspaceMenuItems({
   surface,
   workspaceKey,
   serverId,
   workspaceId,
   onCopyPath,
   onCopyBranchName,
+  onCopyAgentId,
   onRename,
   onMarkAsRead,
   onMarkAsUnread,
@@ -176,6 +178,16 @@ function SidebarWorkspaceMenuItems({
           onSelect={onCopyBranchName}
         >
           {t("sidebar.workspace.actions.copyBranchName")}
+        </WorkspaceMenuItem>
+      ) : null}
+      {onCopyAgentId ? (
+        <WorkspaceMenuItem
+          surface={surface}
+          testID={`sidebar-workspace-menu-copy-agent-id-${workspaceKey}`}
+          leading={copyLeadingIcon}
+          onSelect={onCopyAgentId}
+        >
+          {t("sidebar.workspace.actions.copyAgentId")}
         </WorkspaceMenuItem>
       ) : null}
       {onRename ? (
@@ -256,6 +268,7 @@ export function SidebarWorkspaceMenu({
   workspaceLabels,
   onCopyPath,
   onCopyBranchName,
+  onCopyAgentId,
   onRename,
   onMarkAsRead,
   onMarkAsUnread,
@@ -302,6 +315,7 @@ export function SidebarWorkspaceMenu({
           workspaceLabels={workspaceLabels}
           onCopyPath={onCopyPath}
           onCopyBranchName={onCopyBranchName}
+          onCopyAgentId={onCopyAgentId}
           onRename={onRename}
           onMarkAsRead={onMarkAsRead}
           onMarkAsUnread={onMarkAsUnread}
@@ -335,6 +349,7 @@ export function SidebarWorkspaceContextMenu({
   workspaceKey,
   onCopyPath,
   onCopyBranchName,
+  onCopyAgentId,
   onRename,
   onMarkAsRead,
   onMarkAsUnread,
@@ -415,6 +430,7 @@ export function SidebarWorkspaceContextMenu({
           workspaceLabels={workspaceTarget.labels}
           onCopyPath={onCopyPath}
           onCopyBranchName={onCopyBranchName}
+          onCopyAgentId={onCopyAgentId}
           onRename={onRename}
           onMarkAsRead={onMarkAsRead}
           onMarkAsUnread={onMarkAsUnread}

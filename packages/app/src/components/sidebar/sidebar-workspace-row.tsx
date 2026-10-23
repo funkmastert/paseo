@@ -114,6 +114,10 @@ export function SidebarWorkspaceRow({
     clipboard.copyBranchName(workspace);
   }, [clipboard, workspace]);
 
+  const handleCopyAgentId = useCallback(() => {
+    clipboard.copyAgentId(workspace);
+  }, [clipboard, workspace]);
+
   const handleOpenRename = useCallback(() => {
     setIsRenameOpen(true);
   }, []);
@@ -170,6 +174,7 @@ export function SidebarWorkspaceRow({
         onArchive={handleArchive}
         onCopyBranchName={canCopyBranchName ? handleCopyBranchName : undefined}
         onCopyPath={handleCopyPath}
+        onCopyAgentId={workspace.agentId ? handleCopyAgentId : undefined}
         onRename={handleOpenRename}
         onMarkAsRead={hasClearableAttention ? handleMarkAsRead : undefined}
         onMarkAsUnread={canMarkUnread ? handleMarkAsUnread : undefined}
@@ -203,6 +208,7 @@ interface WorkspaceRowBodyProps {
   onArchive?: () => void;
   onCopyBranchName?: () => void;
   onCopyPath?: () => void;
+  onCopyAgentId?: () => void;
   onRename?: () => void;
   onMarkAsRead?: () => void;
   onMarkAsUnread?: () => void;
@@ -227,6 +233,7 @@ function WorkspaceRowBody({
   onArchive,
   onCopyBranchName,
   onCopyPath,
+  onCopyAgentId,
   onRename,
   onMarkAsRead,
   onMarkAsUnread,
@@ -300,6 +307,7 @@ function WorkspaceRowBody({
               workspaceKey={workspace.workspaceKey}
               onCopyPath={onCopyPath}
               onCopyBranchName={onCopyBranchName}
+              onCopyAgentId={onCopyAgentId}
               onRename={onRename}
               onMarkAsRead={onMarkAsRead}
               onMarkAsUnread={onMarkAsUnread}
@@ -348,6 +356,7 @@ function WorkspaceRowBody({
                   onArchive={onArchive}
                   onCopyBranchName={onCopyBranchName}
                   onCopyPath={onCopyPath}
+                  onCopyAgentId={onCopyAgentId}
                   onRename={onRename}
                   onMarkAsRead={onMarkAsRead}
                   onMarkAsUnread={onMarkAsUnread}
@@ -379,6 +388,7 @@ function WorkspaceRowTrailingActions({
   onMarkAsUnread,
   onCopyBranchName,
   onCopyPath,
+  onCopyAgentId,
   onRename,
 }: {
   workspace: SidebarWorkspaceEntry;
@@ -398,6 +408,7 @@ function WorkspaceRowTrailingActions({
   onMarkAsUnread?: () => void;
   onCopyBranchName?: () => void;
   onCopyPath?: () => void;
+  onCopyAgentId?: () => void;
   onRename?: () => void;
 }) {
   const { t } = useTranslation();
@@ -441,6 +452,7 @@ function WorkspaceRowTrailingActions({
                 workspaceLabels={workspace.labels}
                 onCopyPath={onCopyPath}
                 onCopyBranchName={onCopyBranchName}
+                onCopyAgentId={onCopyAgentId}
                 onRename={onRename}
                 onMarkAsRead={onMarkAsRead}
                 onMarkAsUnread={onMarkAsUnread}

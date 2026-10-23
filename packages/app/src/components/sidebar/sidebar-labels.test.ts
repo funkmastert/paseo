@@ -40,6 +40,7 @@ function workspace(
     diskUsage: null,
     completionState: null,
     completionNote: null,
+    agentId: null,
   };
 }
 

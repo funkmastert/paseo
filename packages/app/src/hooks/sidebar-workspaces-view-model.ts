@@ -60,6 +60,7 @@ export interface SidebarWorkspaceEntry extends SidebarStatusWorkspacePlacement {
   diskUsage: WorkspaceDiskUsage | null;
   completionState: CompletionState | null;
   completionNote: string | null;
+  agentId: string | null;
 }
 
 export interface SidebarProjectEntry {
@@ -195,6 +196,7 @@ export function createSidebarWorkspaceEntry(input: {
     diskUsage: input.workspace.diskUsage ?? null,
     completionState: effectiveStatus.completionState,
     completionNote: effectiveStatus.completionNote,
+    agentId: input.workspaceAgentActivity?.get(input.workspace.id)?.agentId ?? null,
   };
 }
 
