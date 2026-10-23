@@ -204,18 +204,50 @@ function matchAdb(tokens: readonly string[]): InstallCommandIntent | undefined {
  * `:motion-mobile-core:testDebugUnitTest` backtracked exponentially and froze the daemon. */
 const GRADLE_DEVICE_TASK = /^:?(?:[\w-]+:)*(?:(?:un)?install\w*|connected\w*AndroidTest)$/i;
 
-/** `./gradlew install*` / `gradlew.bat install*` / `gradle install*` — installs on every
- * connected device unless `ANDROID_SERIAL` is set. */
+/** Shell interpreters an agent might use to run a `.sh` wrapper explicitly — `bash
+ * android-gradle-parallel.sh installDebug` installs exactly like running the script directly, and
+ * a wrapper that isn't marked executable practically forces this form. Mirrors
+ * native-build-commands.ts's `SHELLS`/`shellScript` split: a shell running `-c '...'` runs an
+ * inline command, not a script file, and is left unresolved here rather than guessed at. */
+const SHELL_INTERPRETERS = new Set(["sh", "bash", "zsh", "dash"]);
+
+/** Strips a leading `sh`/`bash`/`zsh`/`dash` (and its flags) when it runs a script file rather
+ * than `-c '...'`, so `bash scripts/android-gradle-parallel.sh installDebug` resolves to the same
+ * program name as running the script directly. Returns the input unchanged when the first token
+ * isn't a recognized shell, or when it runs `-c` (an inline command this gate doesn't parse). */
+function stripShellInterpreter(tokens: readonly string[]): readonly string[] {
+  if (!SHELL_INTERPRETERS.has(basename(tokens[0] ?? ""))) return tokens;
+  let index = 1;
+  while (tokens[index]?.startsWith("-")) {
+    if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(tokens[index] as string)) return tokens;
+    index += 1;
+  }
+  return tokens.slice(index);
+}
+
+/** Programs whose argv is exactly a gradle task list, run as-is against the project's
+ * `gradlew` — `gradlew`/`gradle` themselves, plus the mobile repo's
+ * `android-gradle-parallel.sh`, which only adds `--max-workers`/`--priority` flags in front of
+ * `"$@"` before forwarding to `./gradlew`. A task an agent passes to the wrapper installs exactly
+ * as it would passed to `gradlew` directly, `ANDROID_SERIAL` included. */
+const GRADLE_TASK_FORWARDING_PROGRAMS = new Set([
+  "gradlew",
+  "gradle",
+  "android-gradle-parallel.sh",
+]);
+
+/** `./gradlew install*` / `gradlew.bat install*` / `gradle install*` / `android-gradle-parallel.sh
+ * install*` — installs on every connected device unless `ANDROID_SERIAL` is set. */
 function matchGradleInstall(tokens: readonly string[]): InstallCommandIntent | undefined {
   const envSerial = readAndroidSerialEnv(tokens);
-  const stripped = stripCommandPrefixes(tokens);
+  const stripped = stripShellInterpreter(stripCommandPrefixes(tokens));
   const program = basename(stripped[0] ?? "");
-  if (program !== "gradlew" && program !== "gradle") return undefined;
+  if (!GRADLE_TASK_FORWARDING_PROGRAMS.has(program)) return undefined;
   const task = stripped.slice(1).find((token) => GRADLE_DEVICE_TASK.test(token));
   if (!task) return undefined;
   return intent({
     platform: "android",
-    command: `gradlew ${task}`,
+    command: `${program} ${task}`,
     target: envSerial,
     installsOnAllIfUntargeted: true,
   });
@@ -256,6 +288,45 @@ function matchReactNativeRun(tokens: readonly string[]): InstallCommandIntent | 
       : undefined;
   }
   return undefined;
+}
+
+/**
+ * Repo wrapper scripts that take a device flag and install straight onto it — not a recognized
+ * CLI like `expo`/`react-native`, so they need their own table entry rather than falling out of
+ * an existing matcher. The mobile repo's `ios-fast-iterate.sh --device <UDID>` builds and then
+ * runs `xcrun devicectl device install app --device <UDID>` itself; the hook only ever sees the
+ * wrapper's own argv, never the command it shells out to. `--device` is required by the script
+ * (it exits before installing without one), so there is no untargeted case to catch here, unlike
+ * `matchGradleInstall`.
+ */
+const DEVICE_FLAG_WRAPPER_SCRIPTS: ReadonlyArray<{
+  readonly scriptBasename: string;
+  readonly platform: InstallCommandPlatform;
+  readonly deviceFlags: readonly string[];
+  /** When every one of these flags is present together, the invocation changes nothing on the
+   * device — `ios-fast-iterate.sh --skip-install --skip-launch` only builds. */
+  readonly noopFlags?: readonly string[];
+}> = [
+  {
+    scriptBasename: "ios-fast-iterate.sh",
+    platform: "ios",
+    deviceFlags: ["--device"],
+    noopFlags: ["--skip-install", "--skip-launch"],
+  },
+];
+
+/** `ios-fast-iterate.sh --device <UDID>` and any other entry in `DEVICE_FLAG_WRAPPER_SCRIPTS`. */
+function matchDeviceFlagWrapperScript(tokens: readonly string[]): InstallCommandIntent | undefined {
+  const stripped = stripShellInterpreter(stripCommandPrefixes(tokens));
+  const program = basename(stripped[0] ?? "");
+  const script = DEVICE_FLAG_WRAPPER_SCRIPTS.find((entry) => entry.scriptBasename === program);
+  if (!script) return undefined;
+  if (script.noopFlags?.every((flag) => stripped.includes(flag))) return undefined;
+  const deviceFlag = script.deviceFlags.find((flag) => stripped.includes(flag));
+  if (!deviceFlag) return undefined;
+  const target = readFlagValue(stripped, deviceFlag);
+  if (!target) return undefined;
+  return intent({ platform: script.platform, command: `${program} ${deviceFlag}`, target });
 }
 
 /** `xcrun devicectl device install app|uninstall app|process launch … --device <id>`. */
@@ -388,6 +459,7 @@ const MATCHERS = [
   matchGradleInstall,
   matchExpoRun,
   matchReactNativeRun,
+  matchDeviceFlagWrapperScript,
   matchDevicectl,
   matchXcodebuildPhysical,
   matchXcodebuildSimulator,

@@ -578,6 +578,31 @@ describe("PhysicalDeviceLeaseManager gateInstall", () => {
     }
   });
 
+  test("android-gradle-parallel.sh installDebug with no target and two devices refuses like gradlew", async () => {
+    const other: PhysicalDevice = { ...USB_PIXEL, id: "FAKESERIAL0002" };
+    const { manager } = createManager({ devices: [USB_PIXEL, other] });
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: "scripts/android-gradle-parallel.sh :app:installDebug",
+    });
+    expect(decision.decision).toBe("deny");
+    expect(decision.decision === "deny" && decision.message).toContain(
+      `ANDROID_SERIAL=${USB_PIXEL.id} android-gradle-parallel.sh :app:installDebug`,
+    );
+  });
+
+  test("ios-fast-iterate.sh --device is refused against another agent's iPhone", async () => {
+    const { manager } = createManager({ devices: [NETWORK_IPHONE] });
+    await manager.checkout({ agentId: "agent-2", platform: "ios", device: NETWORK_IPHONE.id });
+
+    const decision = await manager.gateInstall({
+      agentId: "agent-1",
+      command: `./apps/mobile/scripts/ios-fast-iterate.sh --device ${NETWORK_IPHONE.id} --configuration Debug-Development`,
+    });
+    expect(decision.decision).toBe("deny");
+    expect(decision.decision === "deny" && decision.message).toContain("agent-2");
+  });
+
   test("read-only commands pass untouched", async () => {
     const { manager } = createManager({ devices: [USB_PIXEL] });
     expect(await manager.gateInstall({ agentId: "agent-1", command: "adb devices -l" })).toEqual({
