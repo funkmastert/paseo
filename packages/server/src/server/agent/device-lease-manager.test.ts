@@ -1408,8 +1408,13 @@ describe("DeviceLeaseManager agent-held simulator shutdown", () => {
 
     // Tyler boots a simulator from Xcode a few seconds later — the only "first unclaimed device"
     // the registry's blind bind has to go on, and nothing in agent-1's own tree ever names it.
+    // Xcode itself is open the whole time, which is what keeps the single-candidate leg from
+    // crediting agent-1 even though its lease is the only one waiting.
     harness.state.nowMs += 10_000;
-    harness.state.rows = [simulatorRow(2, UDID_B, "00:05")];
+    harness.state.rows = [
+      simulatorRow(2, UDID_B, "00:05"),
+      childRow(3, 1, "/Applications/Xcode.app/Contents/MacOS/Xcode"),
+    ];
     await sweepRows(harness);
     expect((await harness.manager.getSnapshot()).devices[0]).toMatchObject({
       deviceId: UDID_B,
@@ -1422,6 +1427,33 @@ describe("DeviceLeaseManager agent-held simulator shutdown", () => {
 
     await harness.manager.shutdownAgentHeldSimulatorsForDaemonShutdown();
     expect(harness.shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("a blind-bound simulator with no GUI device manager open and only one waiting lease is torn down like any agent-booted one", async () => {
+    // The bug this fix closes: a short `xcrun simctl boot <udid>` that exits before the sweep
+    // that first sees the device never leaves `deviceNamedByAgent` evidence behind, so without
+    // the single-candidate leg this lease would bind with no `booted` mark and the simulator
+    // would never be torn down, however long it sat idle.
+    const harness = createManager({ agents: [IDLE_HOLDER] });
+    const result = await harness.manager.checkout({ agentId: "agent-1", platform: "ios" });
+    expect(result.status).toBe("granted");
+
+    harness.state.nowMs += 10_000;
+    // agent-1's own root process, so the idle sweep can find its (empty) tree and tell "nothing
+    // uses this" apart from "no evidence at all" — the Xcode-booted test above never needs this
+    // because it expects the opposite (never torn down) either way.
+    harness.state.rows = [agentRootRow(500, "agent-1"), simulatorRow(2, UDID_B, "00:05")];
+    await sweepRows(harness);
+    expect((await harness.manager.getSnapshot()).devices[0]).toMatchObject({
+      deviceId: UDID_B,
+      agentId: "agent-1",
+      attribution: "lease",
+    });
+
+    harness.state.nowMs += 31 * 60_000;
+    await sweepRows(harness);
+
+    expect(harness.shutdownExec).toHaveBeenCalledWith("xcrun", ["simctl", "shutdown", UDID_B]);
   });
 });
 

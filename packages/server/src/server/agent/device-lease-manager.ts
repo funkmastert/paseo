@@ -747,6 +747,30 @@ function isLaunchedByAndroidStudio(pid: number, rows: readonly ProcessSampleRow[
   return false;
 }
 
+/** Xcode's own GUI process — `.../Xcode.app/Contents/MacOS/Xcode` — launched by Finder or the
+ * Dock, never by `xcodebuild`, which has its own executable. */
+const XCODE_GUI_PROCESS = /^Xcode$/i;
+/** Simulator.app's GUI process — `.../Simulator.app/Contents/MacOS/Simulator` — standalone or
+ * opened by Xcode's "Run". Never `launchd_sim`, which is the simulator itself, not someone
+ * driving it. */
+const SIMULATOR_APP_PROCESS = /^Simulator$/i;
+
+/**
+ * Whether Xcode, Simulator.app, or Android Studio is open anywhere in this sweep's rows —
+ * `reconcileDeviceLeases`'s single-candidate leg needs this across every row, not just a
+ * device's own tree: none of the three ever appears inside the booted device's process tree
+ * (docs/device-leases.md#shutdown), so there is no narrower scope to check.
+ */
+function isGuiDeviceManagerProcess(row: ProcessSampleRow): boolean {
+  const name = commandBasename(row.command);
+  return (
+    XCODE_GUI_PROCESS.test(name) ||
+    SIMULATOR_APP_PROCESS.test(name) ||
+    ANDROID_STUDIO_PROCESS.test(name) ||
+    row.command.includes("Android Studio")
+  );
+}
+
 /**
  * Whether the holder still has a command running: a live shell under one of its root processes.
  * A command runs inside a shell that lives until it ends (background-wait.ts's
@@ -2889,6 +2913,7 @@ export class DeviceLeaseManager {
       pendingTtlMs: config.pendingTtlMs,
       maxLeaseMs: config.maxLeaseMs,
       deviceNamedByAgent: this.computeDeviceNamedByAgent(processes),
+      guiDeviceManagerPresent: this.computeGuiDeviceManagerPresent(processes),
     });
     this.leases = result.leases;
     if (result.released.length > 0) {
@@ -2930,6 +2955,19 @@ export class DeviceLeaseManager {
       }
     }
     return result;
+  }
+
+  /**
+   * `reconcileDeviceLeases`'s single-candidate leg reads this as `true` (present, or as good as)
+   * when there is no process sample to check — the manager has nothing to report, and
+   * `guiDeviceManagerPresent`'s own `?? true` fallback is what actually enforces the conservative
+   * default.
+   */
+  private computeGuiDeviceManagerPresent(
+    processes: SweepProcesses | undefined,
+  ): boolean | undefined {
+    if (!processes) return undefined;
+    return processes.rows.some((row) => isGuiDeviceManagerProcess(row));
   }
 
   private logRelease(released: readonly DeviceLeaseRelease[]): void {
